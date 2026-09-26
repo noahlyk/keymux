@@ -1,6 +1,6 @@
 [Unit]
 Description=Keyboard Middleware Bspwm Window Watcher
-Documentation=https://github.com/fibsussy/keymux
+Documentation=https://github.com/noahlyk/keymux
 After=graphical-session.target
 Requires=graphical-session.target
 

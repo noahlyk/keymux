@@ -1,10 +1,10 @@
-# Maintainer: fibsussy <fibsussy@tuta.io>
+# Maintainer: noahlyk <noahlykins@gmail.com>
 pkgname=keymux
 pkgver=1.3.2
 pkgrel=1
 pkgdesc="Keyboard middleware for gaming with low-level input interception"
 arch=('x86_64' 'aarch64')
-url="https://github.com/fibsussy/keymux"
+url="https://github.com/noahlyk/keymux"
 license=('MIT')
 depends=('udev' 'libevdev')
 makedepends=('rust' 'cargo')

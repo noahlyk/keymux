@@ -1,6 +1,6 @@
 [Unit]
 Description=Keyboard Middleware Async Root Daemon
-Documentation=https://github.com/fibsussy/keymux
+Documentation=https://github.com/noahlyk/keymux
 After=local-fs.target
 
 [Service]
