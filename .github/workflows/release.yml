@@ -13,8 +13,15 @@ jobs:
     steps:
       - name: Check if this is a version bump commit
         id: check
+        env:
+          # Passed via env (not interpolated directly into the script) so
+          # arbitrary commit-message content - quotes, backticks, `$(...)`,
+          # newlines - can never be parsed as shell syntax. Interpolating
+          # `${{ }}` expressions straight into a run: body is a well-known
+          # GitHub Actions script-injection footgun; this is the standard
+          # fix for it.
+          MSG: ${{ github.event.head_commit.message }}
         run: |
-          MSG="${{ github.event.head_commit.message }}"
           if echo "$MSG" | grep -q "^chore: bump version"; then
             echo "skip=true" >> $GITHUB_OUTPUT
           else
