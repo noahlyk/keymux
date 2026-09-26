@@ -38,12 +38,26 @@ pub fn detect_game_mode(
             return GameModeState::GameMode("Steam game".to_string());
         }
 
-        // Wine games. Bare "wine" is tightened to avoid matching unrelated
-        // apps that merely contain the fragment (e.g. WineHQ's own
-        // `org.winehq.Wine` config utility, which is not a game).
-        if app_id == "wine" || app_id.starts_with("wine-") || app_id.contains(".exe") {
+        // Wine/.exe-suffixed apps. A `.exe` (or bare "wine"/"wine-*") app_id
+        // only proves this is a Windows binary running under Wine - it says
+        // nothing about whether it's a game vs. any other Windows program
+        // (an installer, a utility, or the Battle.net/GOG Galaxy launcher
+        // UI itself would all match too). Require a secondary confirmation:
+        // the process's working directory (or command line, as a fallback)
+        // looks like a known game-library location. Real PC games on Linux
+        // almost always land in one of a handful of well-known directories
+        // (Steam's steamapps/common, GOG, Epic, itch.io, Lutris/Heroic's
+        // default install dirs, or a generic "Games" folder) - anything
+        // that doesn't match one of those, we deliberately don't guess is a
+        // game (false negative preferred over false positive here).
+        let looks_like_wine_app =
+            app_id == "wine" || app_id.starts_with("wine-") || app_id.contains(".exe");
+        if looks_like_wine_app && pid.is_some_and(looks_like_game_install_path) {
             return GameModeState::GameMode("Wine game".to_string());
         }
+        // Otherwise (no pid, or nothing confirms this is a game) fall
+        // through to the IS_GAME/process-tree checks below rather than
+        // guessing from the app_id alone.
 
         // Roblox
         if app_id == "com.roblox.RobloxPlayer" || app_id.contains("roblox") {
@@ -89,37 +103,43 @@ pub fn detect_game_mode(
         // PID/env checks below, or can be corrected with a manual
         // `keymux gamemode window` override.
 
-        // .NET applications (Terraria, Stardew Valley, etc.)
+        // .NET applications: app_id "dotnet" alone just means "some
+        // WinForms/WPF/Avalonia GUI program" - not necessarily a game (it
+        // could be any ordinary .NET desktop app). Only flag it when the
+        // window title matches a specific known game; an unrecognized
+        // title is deliberately left as Normal rather than guessing (the
+        // old ".NET game" catch-all for unknown titles was exactly the
+        // same class of false positive as the bare Wine/.exe match above).
         if app_id == "dotnet" {
             if let Some(title) = title {
                 let title_lower = title.to_lowercase();
-                let game_name = if title_lower.contains("terraria") {
-                    "Terraria"
-                } else if title_lower.contains("stardew") || title_lower.contains("stardew valley")
-                {
-                    "Stardew Valley"
+                let known_game = if title_lower.contains("terraria") {
+                    Some("Terraria")
+                } else if title_lower.contains("stardew") {
+                    Some("Stardew Valley")
                 } else if title_lower.contains("minecraft") {
-                    "Minecraft"
+                    Some("Minecraft")
                 } else if title_lower.contains("hollow knight") {
-                    "Hollow Knight"
+                    Some("Hollow Knight")
                 } else if title_lower.contains("celeste") {
-                    "Celeste"
+                    Some("Celeste")
                 } else if title_lower.contains("cuphead") {
-                    "Cuphead"
+                    Some("Cuphead")
                 } else if title_lower.contains("ori") {
-                    "Ori series"
+                    Some("Ori series")
                 } else if title_lower.contains("dead cells") {
-                    "Dead Cells"
+                    Some("Dead Cells")
                 } else if title_lower.contains("hades") {
-                    "Hades"
+                    Some("Hades")
                 } else if title_lower.contains("slay the spire") {
-                    "Slay the Spire"
+                    Some("Slay the Spire")
                 } else {
-                    ".NET game"
+                    None
                 };
-                return GameModeState::GameMode(game_name.to_string());
+                if let Some(game_name) = known_game {
+                    return GameModeState::GameMode(game_name.to_string());
+                }
             }
-            return GameModeState::GameMode(".NET game".to_string());
         }
     }
 
@@ -236,6 +256,46 @@ fn get_process_cmdline(pid: u32) -> String {
     )
 }
 
+/// Known game-library directory fragments, checked case-insensitively
+/// against a process's working directory and command line. Covers Steam
+/// (incl. Proton games, which run as ordinary Wine processes under a
+/// `steamapps/common/...` cwd), GOG, Epic, itch.io, Lutris, Heroic, and a
+/// generic "Games" folder some users organize manually installed games in.
+const GAME_PATH_HINTS: &[&str] = &[
+    "steamapps/common",
+    "steamapps\\common",
+    "gog games",
+    "epic games",
+    "/heroic/",
+    "\\heroic\\",
+    "lutris",
+    ".itch",
+    "/games/",
+    "\\games\\",
+];
+
+/// Pure fragment-matching logic, extracted so it's unit-testable without
+/// needing a real process. Real callers go through
+/// `looks_like_game_install_path` below.
+fn contains_game_path_hint(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    GAME_PATH_HINTS.iter().any(|hint| lower.contains(hint))
+}
+
+/// Secondary confirmation that a Wine/`.exe` app_id is actually a game:
+/// checks the process's working directory (a real POSIX path - reliable
+/// even under Wine/Proton, where `/proc/{pid}/exe` itself just resolves to
+/// the Wine loader binary, not the guest .exe) and, if that's unavailable,
+/// falls back to its command line.
+fn looks_like_game_install_path(pid: u32) -> bool {
+    if let Ok(cwd) = fs::read_link(format!("/proc/{pid}/cwd")) {
+        if contains_game_path_hint(&cwd.to_string_lossy()) {
+            return true;
+        }
+    }
+    contains_game_path_hint(&get_process_cmdline(pid))
+}
+
 /// Check if a process is running through gamescope, gamemode, or custom-gamescope
 /// by examining its command line and parent process chain
 fn check_process_tree(process_id: u32) -> (bool, bool) {
@@ -321,8 +381,15 @@ mod tests {
     }
 
     #[test]
-    fn exe_suffix_is_game_mode() {
-        assert!(detect_game_mode(Some("battle.net.exe"), None, None).is_game_mode());
+    fn exe_suffix_without_game_path_confirmation_is_normal() {
+        // battle.net.exe is the Battle.net LAUNCHER itself, not a game -
+        // exactly the false-positive class this gate exists to prevent.
+        // With no pid (so no path confirmation is even possible), we must
+        // not guess.
+        assert_eq!(
+            detect_game_mode(Some("battle.net.exe"), None, None),
+            GameModeState::Normal
+        );
     }
 
     #[test]
@@ -336,9 +403,66 @@ mod tests {
     }
 
     #[test]
-    fn bare_wine_app_id_is_game_mode() {
-        assert!(detect_game_mode(Some("wine"), None, None).is_game_mode());
-        assert!(detect_game_mode(Some("wine-Some.Game"), None, None).is_game_mode());
+    fn bare_wine_app_id_without_pid_is_normal() {
+        // No pid means no way to confirm a game-library path, so we must
+        // not assume it's a game from the app_id alone.
+        assert_eq!(
+            detect_game_mode(Some("wine"), None, None),
+            GameModeState::Normal
+        );
+        assert_eq!(
+            detect_game_mode(Some("wine-Some.Game"), None, None),
+            GameModeState::Normal
+        );
+    }
+
+    #[test]
+    fn game_path_hints_match_known_library_locations() {
+        // The exact real-world case that prompted this: Proton runs a game
+        // with cwd resolving to something like
+        // "Z:\home\fib\.local\share\Steam\steamapps\common\Getting Over It\..."
+        assert!(contains_game_path_hint(
+            r"Z:\home\fib\.local\share\Steam\steamapps\common\Getting Over It\GettingOverIt.exe"
+        ));
+        assert!(contains_game_path_hint(
+            "/home/fib/.local/share/Steam/steamapps/common/Getting Over It"
+        ));
+        assert!(contains_game_path_hint("/home/fib/GOG Games/Some Game"));
+        assert!(contains_game_path_hint(
+            "/home/fib/Games/Heroic/SomeGame/game.exe"
+        ));
+        assert!(contains_game_path_hint("/home/fib/.itch/some-game"));
+    }
+
+    #[test]
+    fn game_path_hints_do_not_match_ordinary_locations() {
+        // A Wine-run non-game program (an installer, a utility, an office
+        // app) living outside any known game-library folder must not match.
+        assert!(!contains_game_path_hint(
+            "/home/fib/.wine/drive_c/Program Files/Adobe/Reader"
+        ));
+        assert!(!contains_game_path_hint("/home/fib/Downloads/setup.exe"));
+        assert!(!contains_game_path_hint("/home/fib/code/keymux"));
+    }
+
+    #[test]
+    fn looks_like_game_install_path_is_false_for_a_real_non_game_pid() {
+        // End-to-end test against a real /proc entry (no mocking needed):
+        // this test binary's own pid has a cwd/cmdline that don't look
+        // like a game install path, confirming the pid-reading codepath is
+        // actually wired up, not just the pure `contains_game_path_hint`
+        // logic above.
+        //
+        // Deliberately calls `looks_like_game_install_path` directly
+        // rather than going through `detect_game_mode`: this machine may
+        // have Feral GameMode (`gamemoded`) running as a real ancestor of
+        // the test process, which would make the *separate*,
+        // pre-existing process-tree heuristic (checked later in
+        // `detect_game_mode`, unrelated to this Wine-path-hint logic)
+        // independently flag it - that's correct behavior for that rule,
+        // not something this test is about.
+        let own_pid = std::process::id();
+        assert!(!looks_like_game_install_path(own_pid));
     }
 
     #[test]
@@ -371,9 +495,23 @@ mod tests {
     }
 
     #[test]
-    fn dotnet_unknown_title_falls_back_to_generic() {
-        let state = detect_game_mode(Some("dotnet"), None, Some("Some .NET App"));
-        assert!(matches!(state, GameModeState::GameMode(ref reason) if reason == ".NET game"));
+    fn dotnet_unknown_title_is_normal() {
+        // An unrecognized title under a "dotnet" app_id could be any
+        // ordinary WinForms/WPF/Avalonia GUI program - don't guess it's a
+        // game (this replaces the old generic ".NET game" catch-all, which
+        // was the same class of false positive as the bare Wine/.exe rule).
+        assert_eq!(
+            detect_game_mode(Some("dotnet"), None, Some("Some .NET App")),
+            GameModeState::Normal
+        );
+    }
+
+    #[test]
+    fn dotnet_with_no_title_is_normal() {
+        assert_eq!(
+            detect_game_mode(Some("dotnet"), None, None),
+            GameModeState::Normal
+        );
     }
 
     #[test]

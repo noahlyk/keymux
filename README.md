@@ -402,13 +402,25 @@ Clear statistics: `keymux clear-stats`
 Game mode activates automatically when the focused window matches one of:
 1. **Gamescope**: app_id is `gamescope`
 2. **Steam games**: app_id starts with `steam_app_`
-3. **Wine games**: app_id is `wine`/`wine-*`, or ends in `.exe`
+3. **Wine games**: app_id is `wine`/`wine-*` or ends in `.exe`, **and** the
+   process's working directory or command line looks like a known
+   game-library location (Steam's `steamapps/common`, GOG, Epic, itch.io,
+   Lutris/Heroic's default install dirs, or a generic `Games` folder). This
+   second check exists on purpose: an app_id alone only proves "this is a
+   Windows binary running under Wine," not "this is a game" - a Wine-run
+   installer, utility, or launcher UI (e.g. Battle.net's own window) would
+   match the app_id half just as easily. Detection here is intentionally
+   biased toward false negatives over false positives - if it can't
+   confirm a game-library path, it leaves the window alone rather than
+   guessing (use `keymux gamemode window on` to force it when that happens).
 4. **Roblox**: app_id is/contains `roblox`
 5. **Epic Games**: app_id contains `epicgames`
 6. **Lutris / Heroic**: app_id contains `lutris`/`heroic`
 7. **Sober**: app_id is `org.vinegarhq.Sober`
-8. **.NET games**: app_id is `dotnet` and the window title matches a known
-   game (Terraria, Stardew Valley, Minecraft, and others)
+8. **.NET games**: app_id is `dotnet` **and** the window title matches a
+   known game (Terraria, Stardew Valley, Minecraft, and others) - same
+   false-negative bias as Wine above: an unrecognized title under a
+   `dotnet` app_id is left as Normal rather than assumed to be a game.
 9. **IS_GAME env var**: the process has `IS_GAME=1` in its environment
 10. **Process tree**: a parent process is `gamescope` or `gamemode`(d)
 

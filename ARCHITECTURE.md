@@ -313,9 +313,20 @@ remaps: {
 checked in order, first match wins):
 1. **Gamescope App ID**: app_id is exactly `gamescope`
 2. **Steam App Prefix**: app_id starts with `steam_app_`
-3. **Wine games**: app_id is `wine`/`wine-*`, or ends in `.exe`
+3. **Wine games**: app_id is `wine`/`wine-*`/ends in `.exe`, **plus** a
+   secondary confirmation (`looks_like_game_install_path`) that the
+   process's cwd or cmdline contains a known game-library fragment
+   (`steamapps/common`, GOG, Epic, itch.io, Lutris/Heroic, `Games/`).
+   `/proc/{pid}/exe` itself is useless here - under Wine/Proton it just
+   resolves to the wine loader binary, not the guest .exe, which is why
+   cwd/cmdline are checked instead. Without this second signal, a bare
+   `.exe` app_id only proves "Windows binary," not "game" (a Wine-run
+   installer or utility would match too) - deliberately biased toward a
+   false negative (leave it alone) over a false positive.
 4. **Roblox / Epic Games / Lutris / Heroic / Sober**: known app_id patterns
-5. **.NET games**: app_id is `dotnet`, matched against known game titles
+5. **.NET games**: app_id is `dotnet`, **and** matched against known game
+   titles - an unrecognized title is left as Normal, not assumed (same
+   false-negative bias as #3).
 6. **IS_GAME env var**: process has `IS_GAME=1` in its environment
 7. **Process tree walk**: walks 10 levels up to find `gamescope`/`gamemode`(d)
 
