@@ -17,6 +17,7 @@ optdepends=('systemd: for systemd service files (or use OpenRC/runit scripts)'
             'i3-wm: automatic game mode detection in i3 window manager'
             'bspwm: automatic game mode detection in bspwm window manager')
 options=('!debug')
+install=keymux.install
 
 _arch="$CARCH"
 if [ "$_arch" = "x86_64" ]; then

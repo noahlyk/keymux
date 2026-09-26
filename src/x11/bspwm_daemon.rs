@@ -1,4 +1,3 @@
-use crate::config::GameMode;
 use crate::ipc::{send_request, IpcRequest, IpcResponse};
 use crate::window_manager::WindowManagerEvent::WindowFocusChanged;
 use crate::x11;
@@ -17,12 +16,6 @@ pub fn run_bspwm_daemon() -> Result<()> {
 
     info!("Starting keymux-bspwm watcher");
 
-    if !GameMode::auto_detect_enabled() {
-        error!("Automatic game mode detection is disabled in config");
-        error!("Set game_mode.detection_method = \"Auto\" to enable");
-        return Ok(());
-    }
-
     if !x11::is_bspwm_available() {
         error!("bspwm not available - is bspwm running?");
         error!("This daemon requires bspwm window manager");
@@ -34,31 +27,23 @@ pub fn run_bspwm_daemon() -> Result<()> {
     let (bspwm_tx, bspwm_rx) = mpsc::channel();
     x11::start_bspwm_monitor_sync(bspwm_tx);
 
-    let mut current_game_mode = false;
-
     loop {
         match bspwm_rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(WindowFocusChanged(_window_info)) => {
-                let should_enable = x11::should_enable_gamemode(&_window_info);
-
-                if should_enable != current_game_mode {
-                    current_game_mode = should_enable;
-                    info!(
-                        "Game mode state changed: {}",
-                        if should_enable { "ENABLED" } else { "DISABLED" }
-                    );
-
-                    match send_request(&IpcRequest::SetGameMode(should_enable)) {
-                        Ok(IpcResponse::Ok) => {
-                            info!("Successfully sent game mode update to daemon");
-                        }
-                        Ok(other) => {
-                            warn!("Unexpected response from daemon: {:?}", other);
-                        }
-                        Err(e) => {
-                            error!("Failed to send game mode update to daemon: {}", e);
-                            error!("Is keymux daemon running?");
-                        }
+            Ok(WindowFocusChanged(window_info)) => {
+                // The root daemon resolves game mode itself (heuristics +
+                // overrides) - this watcher just reports the raw focus event.
+                match send_request(&IpcRequest::WindowFocusChanged {
+                    app_id: window_info.app_id,
+                    pid: window_info.pid,
+                    title: window_info.title,
+                }) {
+                    Ok(IpcResponse::Ok) => {}
+                    Ok(other) => {
+                        warn!("Unexpected response from daemon: {:?}", other);
+                    }
+                    Err(e) => {
+                        error!("Failed to send window focus update to daemon: {}", e);
+                        error!("Is keymux daemon running?");
                     }
                 }
             }

@@ -247,15 +247,6 @@ impl KeyAction {
     }
 }
 
-/// Game mode detection methods
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DetectionMethod {
-    GamescopeAppId,
-    SteamAppPrefix,
-    IsGameEnvVar,
-    ProcessTreeWalk,
-}
-
 /// Layer configuration
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayerConfig {
@@ -267,28 +258,6 @@ pub struct LayerConfig {
 pub struct GameMode {
     #[serde(default)]
     pub remaps: HashMap<KeyCode, KeyAction>,
-}
-
-impl GameMode {
-    #[must_use]
-    pub const fn auto_detect_enabled() -> bool {
-        true
-    }
-
-    #[must_use]
-    pub fn detection_methods() -> Vec<DetectionMethod> {
-        vec![
-            DetectionMethod::GamescopeAppId,
-            DetectionMethod::SteamAppPrefix,
-            DetectionMethod::IsGameEnvVar,
-            DetectionMethod::ProcessTreeWalk,
-        ]
-    }
-
-    #[must_use]
-    pub const fn process_tree_depth() -> u32 {
-        10
-    }
 }
 
 /// Per-keyboard override configuration
@@ -691,6 +660,21 @@ impl Config {
         let content = ron::ser::to_string_pretty(self, pretty)?;
         std::fs::write(path, content)?;
         Ok(())
+    }
+
+    /// Load config from RON file, but with an actionable error message
+    /// (mentioning the exact path and `keymux init`) when the file simply
+    /// doesn't exist yet, instead of a bare OS error. Prefer this over
+    /// `load` in CLI commands the user runs directly.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn load_or_hint(path: &std::path::Path) -> anyhow::Result<Self> {
+        if !path.exists() {
+            anyhow::bail!(
+                "No config found at {}\n\n  Run `keymux init` to create a starter config, or copy one from config.example.ron.",
+                path.display()
+            );
+        }
+        Self::load(path)
     }
 
     /// Get default config path

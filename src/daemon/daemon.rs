@@ -4,9 +4,12 @@
 /// while maintaining synchronous event processors for zero-latency key processing.
 use crate::config::ConfigManager;
 use crate::event_processor;
+use crate::gamemode_state::{GlobalOverride, WindowOverride};
 use crate::ipc::{get_root_socket_path, IpcRequest, IpcResponse};
 use crate::keyboard_id::{find_all_keyboards, KeyboardId};
+use crate::niri::gamemode_detection::resolve_effective_game_mode;
 use crate::session_manager::SessionManager;
+use crate::window_manager::WindowInfo;
 use anyhow::{Context, Result};
 
 use evdev::Device;
@@ -55,6 +58,22 @@ pub struct AsyncDaemon {
     processor_dead_rx: tokio_mpsc::UnboundedReceiver<PathBuf>,
     /// Sender side kept on the daemon to clone into each new ProcessorHandle
     processor_dead_tx: tokio_mpsc::UnboundedSender<PathBuf>,
+
+    /// System-wide game mode override (`keymux gamemode global`). Ignores
+    /// per-window heuristics/overrides entirely when not `Auto`. Session-only
+    /// - resets to `Auto` on every daemon restart.
+    global_override: GlobalOverride,
+    /// Temporary per-app_id game mode overrides (`keymux gamemode window`).
+    /// Session-only - resets to empty on every daemon restart.
+    window_overrides: HashMap<String, WindowOverride>,
+    /// The most recent window focus event seen from any watcher, used to
+    /// resolve "the currently focused window" for CLI commands and to
+    /// recompute game mode immediately when an override changes.
+    last_focused_window: Option<WindowInfo>,
+    /// UIDs we've already warned about having no config file, so the
+    /// warning is logged once per session rather than every 5-second
+    /// session-refresh tick.
+    warned_missing_config: HashSet<u32>,
 }
 
 impl AsyncDaemon {
@@ -70,6 +89,19 @@ impl AsyncDaemon {
             ));
         }
 
+        // /dev/uinput is required to create the virtual output device for
+        // every keyboard processor. Fail fast with an actionable message
+        // here, instead of a raw per-keyboard OS-error log line the first
+        // time a keyboard is plugged in and enabled.
+        if let Err(e) = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/uinput")
+        {
+            return Err(anyhow::anyhow!(
+                "/dev/uinput not accessible ({e}). The uinput kernel module is required for key remapping. Try: sudo modprobe uinput"
+            ));
+        }
+
         let session_manager = SessionManager::new();
         let (processor_dead_tx, processor_dead_rx) = tokio_mpsc::unbounded_channel();
 
@@ -82,6 +114,10 @@ impl AsyncDaemon {
             game_mode_active: false,
             processor_dead_rx,
             processor_dead_tx,
+            global_override: GlobalOverride::default(),
+            window_overrides: HashMap::new(),
+            last_focused_window: None,
+            warned_missing_config: HashSet::new(),
         })
     }
 
@@ -435,15 +471,27 @@ impl AsyncDaemon {
                 Ok(config_mgr) => {
                     info!("Loaded config for user {} from {:?}", uid, config_path);
                     self.user_configs.insert(uid, config_mgr);
+                    self.warned_missing_config.remove(&uid);
                 }
                 Err(e) => {
-                    debug!("No config for user {} at {:?}: {}", uid, config_path, e);
+                    // Warned once per session (not every 5s refresh tick) so
+                    // this is actually visible in `journalctl -u keymux`
+                    // under the default log level, instead of the daemon
+                    // silently doing nothing for this user forever.
+                    if self.warned_missing_config.insert(uid) {
+                        warn!(
+                            "No config for user {} at {:?}: {} - run `keymux init` as that user",
+                            uid, config_path, e
+                        );
+                    }
                 }
             }
         }
 
         // Remove configs for inactive users
         self.user_configs.retain(|uid, _| active_uids.contains(uid));
+        self.warned_missing_config
+            .retain(|uid| active_uids.contains(uid));
     }
 
     /// Get list of active user UIDs
@@ -1174,15 +1222,157 @@ impl AsyncDaemon {
         Ok(())
     }
 
+    /// Resolve the effective game mode for a window, applying the global
+    /// override, then the per-app_id window override, then falling back to
+    /// the programmed detection heuristics.
+    fn resolve_effective_game_mode(
+        &self,
+        window: &WindowInfo,
+    ) -> crate::niri::gamemode_detection::GameModeState {
+        resolve_effective_game_mode(
+            window.app_id.as_deref(),
+            window.pid,
+            window.title.as_deref(),
+            self.global_override,
+            &self.window_overrides,
+        )
+    }
+
+    /// Record a window focus event and apply its resulting game mode.
+    /// Called for every focus-change event reported by any watcher process.
+    async fn handle_window_focus_changed(&mut self, window: WindowInfo) {
+        let state = self.resolve_effective_game_mode(&window);
+        debug!(
+            "Window focus changed: app_id={:?}, game mode={:?}",
+            window.app_id, state
+        );
+        self.last_focused_window = Some(window);
+        self.set_game_mode_all(state.is_game_mode()).await;
+    }
+
+    /// Recompute game mode from the last known focused window and apply it.
+    /// Called whenever an override changes, so the effect is immediate
+    /// rather than waiting for the next focus-change event.
+    async fn recompute_and_apply_game_mode(&mut self) {
+        if let Some(window) = self.last_focused_window.clone() {
+            let state = self.resolve_effective_game_mode(&window);
+            self.set_game_mode_all(state.is_game_mode()).await;
+        }
+    }
+
+    /// Stop every active processor thread. Used for graceful shutdown.
+    async fn stop_all_processors(&mut self) {
+        let paths: Vec<PathBuf> = self.active_processors.keys().cloned().collect();
+        info!("Stopping {} processor thread(s) for shutdown", paths.len());
+
+        let mut join_tasks = Vec::new();
+        for path in paths {
+            if let Some((_, _, mut handle)) = self.active_processors.remove(&path) {
+                let _ = handle.shutdown_tx.send(());
+                if let Some(thread_handle) = handle.thread_handle.take() {
+                    join_tasks.push((path.display().to_string(), thread_handle));
+                }
+            }
+        }
+
+        let join_futures: Vec<_> = join_tasks
+            .into_iter()
+            .map(|(path_str, thread_handle)| {
+                tokio::task::spawn_blocking(move || {
+                    let _ = thread_handle.join();
+                    path_str
+                })
+            })
+            .collect();
+
+        for fut in join_futures {
+            match fut.await {
+                Ok(path_str) => info!("Stopped processor for: {}", path_str),
+                Err(e) => warn!("Thread join task panicked during shutdown: {}", e),
+            }
+        }
+    }
+
     /// Handle a single IPC request
     #[allow(clippy::future_not_send)]
     async fn handle_ipc_request(&mut self, request: IpcRequest) -> IpcResponse {
         match request {
             IpcRequest::Ping => IpcResponse::Pong,
-            IpcRequest::SetGameMode(enabled) => {
-                self.set_game_mode_all(enabled).await;
+            IpcRequest::WindowFocusChanged {
+                app_id,
+                pid,
+                title,
+            } => {
+                self.handle_window_focus_changed(WindowInfo { app_id, pid, title })
+                    .await;
                 IpcResponse::Ok
             }
+            IpcRequest::GetFocusedWindow => {
+                IpcResponse::FocusedWindow(self.last_focused_window.clone().unwrap_or(
+                    WindowInfo {
+                        app_id: None,
+                        pid: None,
+                        title: None,
+                    },
+                ))
+            }
+            IpcRequest::SetWindowOverride { app_id, state } => {
+                match state {
+                    Some(s) => {
+                        self.window_overrides.insert(app_id, s);
+                    }
+                    None => {
+                        self.window_overrides.remove(&app_id);
+                    }
+                }
+                self.recompute_and_apply_game_mode().await;
+                IpcResponse::Ok
+            }
+            IpcRequest::ToggleWindowOverride { app_id } => {
+                // Determine the currently-effective boolean for this app_id
+                // (using pid/title context if it happens to be the window
+                // we last saw focused), then flip it into an explicit
+                // override.
+                let (pid, title) = self
+                    .last_focused_window
+                    .as_ref()
+                    .filter(|w| w.app_id.as_deref() == Some(app_id.as_str()))
+                    .map(|w| (w.pid, w.title.clone()))
+                    .unwrap_or((None, None));
+
+                let currently_enabled = resolve_effective_game_mode(
+                    Some(&app_id),
+                    pid,
+                    title.as_deref(),
+                    self.global_override,
+                    &self.window_overrides,
+                )
+                .is_game_mode();
+
+                let new_state = if currently_enabled {
+                    WindowOverride::Off
+                } else {
+                    WindowOverride::On
+                };
+                self.window_overrides.insert(app_id, new_state);
+                self.recompute_and_apply_game_mode().await;
+                IpcResponse::Ok
+            }
+            IpcRequest::ListWindowOverrides => {
+                let mut overrides: Vec<(String, WindowOverride)> = self
+                    .window_overrides
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect();
+                overrides.sort_by(|a, b| a.0.cmp(&b.0));
+                IpcResponse::WindowOverrides(overrides)
+            }
+            IpcRequest::SetGlobalOverride(state) => {
+                self.global_override = state;
+                self.recompute_and_apply_game_mode().await;
+                IpcResponse::Ok
+            }
+            IpcRequest::GetGlobalOverride => IpcResponse::GlobalOverrideStatus(self.global_override),
             IpcRequest::ListKeyboards => {
                 // Collect all enabled_keyboards entries from all user configs for annotation
                 let mut all_config_entries: Vec<(String, bool)> = Vec::new(); // (pattern, is_enable)
@@ -1354,19 +1544,31 @@ impl AsyncDaemon {
             }
             IpcRequest::Shutdown => {
                 info!("Shutdown requested via IPC");
-                // TODO: Implement graceful shutdown
+                self.stop_all_processors().await;
+                // Exit shortly after returning, so the client still gets its
+                // `Ok` response before the process disappears.
+                tokio::spawn(async {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    info!("Daemon exiting after graceful shutdown");
+                    std::process::exit(0);
+                });
                 IpcResponse::Ok
             }
         }
     }
 
-    /// Process a single niri event
+    /// Process a single window-focus event from the daemon's own inline
+    /// niri monitor (`start_niri_monitor`). Note: this only matters when the
+    /// root daemon itself can see a niri socket, which in the common
+    /// multi-user deployment (root daemon, user's niri session) it normally
+    /// cannot - the standalone `keymux niri-daemon` watcher process
+    /// (running as the user, reporting via `WindowFocusChanged` IPC) is what
+    /// actually drives game mode detection in that setup. Both paths route
+    /// through the same `handle_window_focus_changed` evaluator.
     async fn process_niri_event(&mut self, event: crate::window_manager::WindowManagerEvent) {
         match event {
             crate::window_manager::WindowManagerEvent::WindowFocusChanged(window_info) => {
-                let should_enable = crate::niri::should_enable_gamemode(&window_info);
-                debug!("Niri window focus changed, game mode: {}", should_enable);
-                self.set_game_mode_all(should_enable).await;
+                self.handle_window_focus_changed(window_info).await;
             }
         }
     }

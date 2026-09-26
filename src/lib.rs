@@ -3,6 +3,7 @@
 pub mod config;
 pub mod daemon;
 pub mod event_processor;
+pub mod gamemode_state;
 pub mod hyprland;
 pub mod ipc;
 pub mod keyboard_id;

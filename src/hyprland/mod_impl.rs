@@ -5,9 +5,7 @@ use std::sync::mpsc::Sender;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{error, info};
 
-use crate::window_manager::{
-    default_should_enable_gamemode, WindowInfo, WindowManager, WindowManagerEvent,
-};
+use crate::window_manager::{WindowInfo, WindowManager, WindowManagerEvent};
 
 #[derive(Clone)]
 pub struct WaylandCompositor {
@@ -168,10 +166,6 @@ impl WindowManager for WaylandCompositor {
             None
         }
     }
-
-    fn should_enable_gamemode(&self, window_info: &WindowInfo) -> bool {
-        default_should_enable_gamemode(window_info)
-    }
 }
 
 pub fn is_hyprland_available() -> bool {
@@ -237,8 +231,4 @@ pub fn get_focused_window() -> WindowInfo {
         },
         |wm| wm.get_focused_window(),
     )
-}
-
-pub fn should_enable_gamemode(window_info: &WindowInfo) -> bool {
-    default_should_enable_gamemode(window_info)
 }

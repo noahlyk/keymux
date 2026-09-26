@@ -32,7 +32,7 @@ pub fn validate_config(config_path: Option<&std::path::Path>) -> Result<()> {
     println!();
 
     print!("  {} Loading config... ", "→".bright_blue());
-    let config = match Config::load(&config_path) {
+    let config = match Config::load_or_hint(&config_path) {
         Ok(cfg) => {
             println!("{}", "✓".bright_green().bold());
             cfg

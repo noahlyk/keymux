@@ -31,54 +31,65 @@
 
 ## 🔧 Installation
 
-### One-Line Install (Arch Linux)
+### Arch Linux (AUR)
 
-**Precompiled binary (default, fast):**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/fibsussy/keymux/main/install.sh | bash
+yay -S keymux
 ```
 
-**Or build from source:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/fibsussy/keymux/main/install.sh | bash -s local
-```
+The package's post-install message tells you exactly which service(s) to
+enable, based on the compositor/init system it detects on your machine.
 
-**Note:** For security, inspect the install script before running it. View it [here](https://github.com/fibsussy/keymux/blob/main/install.sh).
-
-### Manual Installation
+### From Source (any distro)
 
 #### Prerequisites
 
-Add yourself to the `input` group:
+The root daemon needs no group membership (it runs as root, see below), but
+the unprivileged `keymux list`/`toggle`/`debug` commands read `/dev/input`
+directly as your user, so add yourself to the `input` group for those:
 ```bash
 sudo usermod -a -G input $USER
 # Log out and log back in for changes to take effect
 ```
+Key remapping also needs the `uinput` kernel module loaded:
+```bash
+sudo modprobe uinput
+echo uinput | sudo tee /etc/modules-load.d/uinput.conf   # load it on every boot
+```
 
-#### From Source
+#### Build and install
 
 ```bash
 # Clone and build
-git clone https://github.com/fibsussy/keymux.git
+git clone https://github.com/noahlyk/keymux.git
 cd keymux
 cargo build --release
 
-# Install
+# Install the binary
 sudo cp target/release/keymux /usr/bin/
-sudo cp keymux.service /usr/lib/systemd/system/
-sudo cp keymux-niri.service /usr/lib/systemd/user/
-sudo cp config.example.ron /usr/share/doc/keymux/
 
-# Enable and start root daemon
+# Install the service(s) for your init system + compositor - see
+# systemd/, openrc/, or runit/ for the full list. Example for systemd + Niri:
+sudo cp systemd/keymux.service /usr/lib/systemd/system/
+cp systemd/keymux-niri.service ~/.config/systemd/user/
+
+# Enable and start the root daemon
 sudo systemctl enable --now keymux.service
+# Enable the compositor watcher (as your normal user, not root)
+systemctl --user enable --now keymux-niri.service
 ```
+
+Without any service manager, you can also just run `sudo keymux daemon`
+directly in a terminal (and `keymux niri-daemon` / `keymux hyprland-daemon` /
+etc. for the compositor watcher), which is useful for testing before wiring
+up services.
 
 ### Post-Installation Setup
 
-1. **Copy the example config:**
+1. **Create your config:**
 ```bash
-mkdir -p ~/.config/keymux
-cp /usr/share/doc/keymux/config.example.ron ~/.config/keymux/config.ron
+keymux init          # minimal starter config (home-row mod-tap only)
+keymux init --full   # or the full-featured reference config instead
 ```
 
 2. **Edit your config:**
@@ -91,20 +102,29 @@ $EDITOR ~/.config/keymux/config.ron
 keymux toggle
 ```
 
-4. **(Optional) Enable Niri watcher for automatic game mode:**
+4. **Check everything is wired up correctly:**
 ```bash
-systemctl --user enable --now keymux-niri.service
+keymux debug
 ```
 
-### Systemd Services
+### Services
 
-**Root daemon (required):** Manages keyboard devices
+**Root daemon (required):** owns the actual keyboard devices and does the
+remapping. Runs as root because raw `/dev/input` access and creating a
+virtual `/dev/uinput` device both require it. Internally it's a *single*
+process that multiplexes per logged-in user (see `ARCHITECTURE.md`) - you
+never run more than one copy of this, even on a multi-user machine.
 - Path: `/usr/lib/systemd/system/keymux.service`
 - Enable: `sudo systemctl enable --now keymux.service`
 
-**User service (optional):** Watches Niri windows for automatic game mode
-- Path: `/usr/lib/systemd/user/keymux-niri.service`
-- Enable: `systemctl --user enable --now keymux-niri.service`
+**Compositor watcher (optional, one per compositor):** a small per-user
+process (`keymux niri-daemon`, `keymux hyprland-daemon`, `keymux sway-daemon`,
+`keymux i3-daemon`, `keymux bspwm-daemon`) that watches window focus changes
+and reports them to the root daemon for automatic game mode detection. Only
+install the one matching your compositor/WM.
+- Path: `/usr/lib/systemd/user/keymux-<compositor>.service`
+- Enable: `systemctl --user enable --now keymux-niri.service` (or
+  `-hyprland`/`-sway`/`-i3`/`-bspwm`)
 
 ## 📖 Configuration Guide
 
@@ -128,7 +148,7 @@ systemctl --user enable --now keymux-niri.service
     remaps: { /* base layer keymaps */ },
     layers: { /* additional layers */ },
     game_mode: ( remaps: { /* game mode keymaps */ } ),
-    keyboard_overrides: { /* per-keyboard configs */ },
+    per_keyboard_overrides: { /* per-keyboard configs */ },
     
     // MT configuration (all optional, shown with defaults)
     mt_config: (
@@ -284,7 +304,7 @@ KC_F2: CMD("/usr/bin/playerctl play-pause"),
 
     layers: {},
     game_mode: (remaps: {}),
-    keyboard_overrides: {},
+    per_keyboard_overrides: {},
 )
 ```
 
@@ -343,7 +363,7 @@ KC_F2: CMD("/usr/bin/playerctl play-pause"),
         },
     ),
 
-    keyboard_overrides: {},
+    per_keyboard_overrides: {},
 
     // Optional: Customize MT behavior
     mt_config: (
@@ -379,12 +399,46 @@ Clear statistics: `keymux clear-stats`
 
 ### Game Mode Detection
 
-Game mode activates automatically when:
-1. **Steam games**: Process tree contains `steam` + game executable
-2. **Gamescope**: Window manager reports gamescope app ID
-3. **IS_GAME env var**: Process has `IS_GAME=1` environment variable
+Game mode activates automatically when the focused window matches one of:
+1. **Gamescope**: app_id is `gamescope`
+2. **Steam games**: app_id starts with `steam_app_`
+3. **Wine games**: app_id is `wine`/`wine-*`, or ends in `.exe`
+4. **Roblox**: app_id is/contains `roblox`
+5. **Epic Games**: app_id contains `epicgames`
+6. **Lutris / Heroic**: app_id contains `lutris`/`heroic`
+7. **Sober**: app_id is `org.vinegarhq.Sober`
+8. **.NET games**: app_id is `dotnet` and the window title matches a known
+   game (Terraria, Stardew Valley, Minecraft, and others)
+9. **IS_GAME env var**: the process has `IS_GAME=1` in its environment
+10. **Process tree**: a parent process is `gamescope` or `gamemode`(d)
 
-Game mode is controlled automatically via the Niri daemon or can be toggled via IPC
+This runs per-compositor (Niri, Hyprland, Sway, i3, bspwm - see
+Installation), and is intentionally a fixed set of heuristics, not something
+you edit in `config.ron`. When a heuristic gets something wrong for a
+specific app, override it instead of fighting the config:
+
+```bash
+# Force game mode on/off for the app_id you're currently focused on
+keymux gamemode window on
+keymux gamemode window off
+keymux gamemode window toggle
+# Back to automatic detection for that app
+keymux gamemode window auto
+# See all active per-app overrides
+keymux gamemode window list
+
+# System-wide kill switch, ignoring every per-window rule/override
+keymux gamemode global always-on
+keymux gamemode global always-off
+keymux gamemode global auto      # default: defer to window overrides / detection
+keymux gamemode global status
+```
+
+All of these target the currently focused window by default, or take an
+explicit app_id (`keymux gamemode window off com.obsproject.Studio`). They
+are **session-only**: overrides live in the running daemon's memory and
+reset to automatic detection on every daemon restart - they're meant for
+quick corrections, not a permanent rule change.
 
 ## 🎮 Usage
 
@@ -434,8 +488,10 @@ keymux validate
 # Reload config (automatic on file save, but manual trigger available)
 keymux reload
 
-# Game mode is automatically detected when running Steam/Gamescope
-# Manual toggle requires sending IPC requests to the daemon
+# Game mode is detected automatically (see Game Mode Detection above),
+# or controlled manually:
+keymux gamemode window off
+keymux gamemode global always-on
 
 # View adaptive timing statistics
 keymux adaptive-stats

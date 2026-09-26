@@ -309,14 +309,25 @@ remaps: {
 
 **Special layer activated during gaming** - auto-detected or manual toggle
 
-**Auto-detection methods:**
-1. **Gamescope App ID**: Detects Steam games in Gamescope
-2. **Steam App Prefix**: Detects processes starting with "steam_app_"
-3. **IS_GAME env var**: Detects games setting IS_GAME=1
-4. **Process tree walk**: Walks 10 levels up to find gaming processes
+**Auto-detection methods** (`src/niri/gamemode_detection.rs::detect_game_mode`,
+checked in order, first match wins):
+1. **Gamescope App ID**: app_id is exactly `gamescope`
+2. **Steam App Prefix**: app_id starts with `steam_app_`
+3. **Wine games**: app_id is `wine`/`wine-*`, or ends in `.exe`
+4. **Roblox / Epic Games / Lutris / Heroic / Sober**: known app_id patterns
+5. **.NET games**: app_id is `dotnet`, matched against known game titles
+6. **IS_GAME env var**: process has `IS_GAME=1` in its environment
+7. **Process tree walk**: walks 10 levels up to find `gamescope`/`gamemode`(d)
 
-**Automatic toggle:**
-Game mode is automatically detected via Steam/Gamescope or IS_GAME environment variable
+Two-tier manual override system (`src/gamemode_state.rs`,
+`AsyncDaemon::resolve_effective_game_mode` in `src/daemon/daemon.rs`), both
+session-only (reset on daemon restart):
+- **Window override** (`keymux gamemode window on|off|toggle|auto`): forces
+  game mode for one specific app_id, on top of the heuristics above.
+- **Global override** (`keymux gamemode global always-on|always-off|auto`):
+  ignores every per-window rule/override entirely.
+
+Precedence, highest first: global override → window override → heuristics.
 
 **Configuration:**
 ```ron
@@ -341,9 +352,10 @@ game_mode: (
 ```
 
 **How it works:**
-1. Daemon monitors window focus (Niri compositor)
-2. Checks if focused window is a game
-3. Automatically enables/disables game_mode layer
+1. A per-compositor watcher process (Niri/Hyprland/Sway/i3/bspwm) reports
+   every window focus change to the root daemon over IPC
+2. The root daemon resolves the effective state (overrides, then heuristics)
+3. Automatically enables/disables the game_mode layer
 4. Game mode has highest priority in lookup
 
 **Use cases:**
@@ -871,7 +883,15 @@ enum ProcessorCommand {
 
 ### systemd Integration
 
-**Root Daemon Service**:
+There is exactly **one** root daemon process, ever - `keymux daemon` always
+runs as `User=root` (it hard-refuses to start otherwise, see
+`AsyncDaemon::new`). It is not per-user: internally it multiplexes every
+currently logged-in user's own `~/.config/keymux/config.ron` via
+`SessionManager` + a `HashMap<uid, ConfigManager>`, attributing each keyboard
+to whichever session currently owns it. There is no separate "user daemon"
+binary or mode - `keymux daemon --user <name>` does not exist.
+
+**Root daemon service** (system-wide, one instance):
 ```ini
 [Unit]
 Description=Keyboard Middleware Root Daemon
@@ -886,32 +906,34 @@ User=root
 
 [Install]
 WantedBy=multi-user.target
-
-# User daemon service
-sudo cp target/release/keymux /usr/local/bin/
-sudo systemctl --user daemon-reload
-sudo systemctl --user enable --now keymux.service
-
-# Root daemon (optional, for system-wide keyboards)
+```
+```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now keymux.service
+```
 
-# Setup complete
-
-**User Daemon Service**:
+**Compositor watcher service** (per-user, one per compositor - this is what
+was previously mislabeled a "user daemon"): a lightweight process
+(`keymux niri-daemon`, `-hyprland-daemon`, `-sway-daemon`, `-i3-daemon`,
+`-bspwm-daemon`) that watches window focus changes in *your* session and
+reports them to the root daemon over IPC for game mode detection. Install
+only the one matching your compositor.
 ```ini
 [Unit]
-Description=Keyboard Middleware User Daemon
+Description=Keyboard Middleware Niri Watcher
 PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/keymux daemon --user %i
+ExecStart=/usr/bin/keymux niri-daemon
 Restart=on-failure
-User=%i
 
 [Install]
 WantedBy=default.target
+```
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now keymux-niri.service
 ```
 
 ## Migration Path

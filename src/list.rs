@@ -19,7 +19,7 @@ pub fn run_list() -> Result<()> {
 
     // Load current config to check enabled keyboards
     let config_path = Config::default_path()?;
-    let config = Config::load(&config_path)?;
+    let config = Config::load_or_hint(&config_path)?;
 
     // Find all keyboards
     let keyboards = find_all_keyboards();

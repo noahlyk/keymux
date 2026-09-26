@@ -1,0 +1,32 @@
+// Minimal keymux starter config: home-row mod-tap only, no layers, no
+// per-keyboard overrides. This is what `keymux init` writes by default.
+// See config.example.ron for a fully-featured reference config, and
+// README.md for the complete config option reference.
+(
+    tapping_term_ms: 130,
+    enabled_keyboards: [
+        "*", // enable all keyboards
+    ],
+
+    remaps: {
+        // Escape/Caps swap
+        KC_CAPS: KC_ESC,
+        KC_ESC: KC_GRV,
+
+        // Mod-Tap - left hand
+        KC_A: MT(KC_A, KC_LGUI),
+        KC_S: MT(KC_S, KC_LALT),
+        KC_D: MT(KC_D, KC_LCTL),
+        KC_F: MT(KC_F, KC_LSFT),
+
+        // Mod-Tap - right hand
+        KC_J: MT(KC_J, KC_RSFT),
+        KC_K: MT(KC_K, KC_RCTL),
+        KC_L: MT(KC_L, KC_RALT),
+        KC_SCLN: MT(KC_SCLN, KC_RGUI),
+    },
+
+    layers: {},
+    game_mode: (remaps: {}),
+    per_keyboard_overrides: {},
+)

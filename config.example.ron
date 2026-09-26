@@ -293,10 +293,10 @@
                 KC_P: Key(KC_0),
                 
                 // Add numpad operators
-                KC_A: Key(KC_KP_ASTERISK),  // * 
-                KC_S: Key(KC_KP_SLASH),    // /
-                KC_D: Key(KC_KP_MINUS),    // -
-                KC_F: Key(KC_KP_PLUS),     // +
+                KC_A: Key(KC_PAST),  // *
+                KC_S: Key(KC_PSLS),  // /
+                KC_D: Key(KC_PMNS),  // -
+                KC_F: Key(KC_PPLS),  // +
             },
         ),
         

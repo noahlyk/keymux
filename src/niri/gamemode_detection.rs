@@ -1,3 +1,5 @@
+use crate::gamemode_state::{GlobalOverride, WindowOverride};
+use std::collections::HashMap;
 use std::fs;
 use tracing::debug;
 
@@ -9,8 +11,8 @@ pub enum GameModeState {
 }
 
 impl GameModeState {
-    pub fn is_game_mode(&self) -> bool {
-        matches!(self, GameModeState::GameMode(_))
+    pub const fn is_game_mode(&self) -> bool {
+        matches!(self, Self::GameMode(_))
     }
 }
 
@@ -36,8 +38,10 @@ pub fn detect_game_mode(
             return GameModeState::GameMode("Steam game".to_string());
         }
 
-        // Wine games
-        if app_id.contains("wine") || app_id.contains(".exe") {
+        // Wine games. Bare "wine" is tightened to avoid matching unrelated
+        // apps that merely contain the fragment (e.g. WineHQ's own
+        // `org.winehq.Wine` config utility, which is not a game).
+        if app_id == "wine" || app_id.starts_with("wine-") || app_id.contains(".exe") {
             return GameModeState::GameMode("Wine game".to_string());
         }
 
@@ -46,17 +50,20 @@ pub fn detect_game_mode(
             return GameModeState::GameMode("Roblox".to_string());
         }
 
-        // Epic Games Launcher
-        if app_id.contains("epicgames") || app_id.contains("epic") {
+        // Epic Games Launcher. Bare "epic" was dropped: it matched any
+        // app_id merely containing that fragment, unrelated to the launcher.
+        if app_id.contains("epicgames") {
             return GameModeState::GameMode("Epic Games".to_string());
         }
 
-        // Lutris games
+        // Lutris games. Substring match kept for now (lower false-positive
+        // risk than "epic"/"proton"/"wine" alone), but still a known trap if
+        // some unrelated app_id ever contains this fragment.
         if app_id.contains("lutris") {
             return GameModeState::GameMode("Lutris game".to_string());
         }
 
-        // Heroic Games Launcher
+        // Heroic Games Launcher. Same caveat as Lutris above.
         if app_id.contains("heroic") {
             return GameModeState::GameMode("Heroic Games".to_string());
         }
@@ -66,15 +73,21 @@ pub fn detect_game_mode(
             return GameModeState::GameMode("Sober virtualization".to_string());
         }
 
-        // Proton games
-        if app_id.contains("proton") {
-            return GameModeState::GameMode("Proton game".to_string());
-        }
-
-        // Flatpak games
-        if app_id.contains("com") && app_id.contains(".") {
-            return GameModeState::GameMode("Flatpak application".to_string());
-        }
+        // NOTE: a former "Proton games" rule (`app_id.contains("proton")`) was
+        // removed here. It was both a false-positive risk (would match e.g. a
+        // Proton Mail/VPN Linux app_id) and redundant: real Proton games
+        // surface as a `steam_app_*` id (handled above) or as a Wine process
+        // caught by the Wine rule above / the process-tree check below.
+        //
+        // NOTE: a former "Flatpak games" rule (`app_id.contains("com") &&
+        // app_id.contains(".")`) was removed here. It was not real Flatpak
+        // detection — it matched any reverse-DNS-style app_id containing the
+        // substring "com" and a dot anywhere (e.g. `com.obsproject.Studio`,
+        // `com.discordapp.Discord`, `com.spotify.Client`), misclassifying
+        // ordinary non-game apps as games. Packaging format is not a game
+        // signal; anything genuinely missed here falls through to the
+        // PID/env checks below, or can be corrected with a manual
+        // `keymux gamemode window` override.
 
         // .NET applications (Terraria, Stardew Valley, etc.)
         if app_id == "dotnet" {
@@ -154,6 +167,45 @@ pub fn detect_game_mode(
     GameModeState::Normal
 }
 
+/// Resolve the *effective* game mode state for a window.
+///
+/// Applies the two-tier override system on top of the programmed detection
+/// rules (`detect_game_mode`). This is what every real call site should use;
+/// `detect_game_mode` itself stays override-unaware so it remains cleanly
+/// unit-testable in isolation.
+///
+/// Precedence, highest first:
+/// 1. `global_override` (if not `Auto`) - ignores everything else.
+/// 2. `window_overrides` entry for this app_id (if present).
+/// 3. `detect_game_mode` (the programmed heuristics).
+pub fn resolve_effective_game_mode(
+    app_id: Option<&str>,
+    pid: Option<u32>,
+    title: Option<&str>,
+    global_override: GlobalOverride,
+    window_overrides: &HashMap<String, WindowOverride>,
+) -> GameModeState {
+    match global_override {
+        GlobalOverride::AlwaysOn => {
+            return GameModeState::GameMode("Global override: always-on".to_string())
+        }
+        GlobalOverride::AlwaysOff => return GameModeState::Normal,
+        GlobalOverride::Auto => {}
+    }
+
+    if let Some(id) = app_id {
+        match window_overrides.get(id) {
+            Some(WindowOverride::On) => {
+                return GameModeState::GameMode("Window override: on".to_string())
+            }
+            Some(WindowOverride::Off) => return GameModeState::Normal,
+            None => {}
+        }
+    }
+
+    detect_game_mode(app_id, pid, title)
+}
+
 /// Check if a process has `IS_GAME=1` in its environment
 fn check_is_game_env(pid: u32) -> bool {
     let env_path = format!("/proc/{pid}/environ");
@@ -224,4 +276,182 @@ fn check_process_tree(process_id: u32) -> (bool, bool) {
     }
 
     (has_gamescope, has_gamemode)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn obs_studio_is_not_game_mode() {
+        // Regression test for the false positive that prompted this fix:
+        // OBS's app_id used to trip the bogus "Flatpak application" rule.
+        assert_eq!(
+            detect_game_mode(Some("com.obsproject.Studio"), None, None),
+            GameModeState::Normal
+        );
+    }
+
+    #[test]
+    fn other_reverse_dns_apps_are_not_game_mode() {
+        for app_id in [
+            "com.discordapp.Discord",
+            "com.spotify.Client",
+            "com.slack.Slack",
+            "org.gimp.GIMP",
+            "org.blender.Blender",
+            "com.github.Extractor",
+        ] {
+            assert_eq!(
+                detect_game_mode(Some(app_id), None, None),
+                GameModeState::Normal,
+                "{app_id} should not be classified as game mode"
+            );
+        }
+    }
+
+    #[test]
+    fn steam_app_prefix_is_game_mode() {
+        assert!(detect_game_mode(Some("steam_app_570"), None, None).is_game_mode());
+    }
+
+    #[test]
+    fn gamescope_is_game_mode() {
+        assert!(detect_game_mode(Some("gamescope"), None, None).is_game_mode());
+    }
+
+    #[test]
+    fn exe_suffix_is_game_mode() {
+        assert!(detect_game_mode(Some("battle.net.exe"), None, None).is_game_mode());
+    }
+
+    #[test]
+    fn winehq_utility_is_not_game_mode() {
+        // Regression test for the tightened "wine" rule: WineHQ's own
+        // config tool is not a game, unlike an actual "wine"/"wine-*" prefix.
+        assert_eq!(
+            detect_game_mode(Some("org.winehq.Wine"), None, None),
+            GameModeState::Normal
+        );
+    }
+
+    #[test]
+    fn bare_wine_app_id_is_game_mode() {
+        assert!(detect_game_mode(Some("wine"), None, None).is_game_mode());
+        assert!(detect_game_mode(Some("wine-Some.Game"), None, None).is_game_mode());
+    }
+
+    #[test]
+    fn epic_fragment_alone_is_not_game_mode() {
+        // Regression test for the tightened "epic" rule.
+        assert_eq!(
+            detect_game_mode(Some("com.epicdesign.NotesApp"), None, None),
+            GameModeState::Normal
+        );
+    }
+
+    #[test]
+    fn epic_games_launcher_is_game_mode() {
+        assert!(detect_game_mode(Some("com.epicgames.Launcher"), None, None).is_game_mode());
+    }
+
+    #[test]
+    fn proton_named_app_is_not_game_mode() {
+        // Regression test for the removed "proton" fragment rule.
+        assert_eq!(
+            detect_game_mode(Some("me.proton.Mail"), None, None),
+            GameModeState::Normal
+        );
+    }
+
+    #[test]
+    fn dotnet_known_game_title_is_game_mode() {
+        let state = detect_game_mode(Some("dotnet"), None, Some("Terraria v1.4"));
+        assert!(matches!(state, GameModeState::GameMode(ref reason) if reason == "Terraria"));
+    }
+
+    #[test]
+    fn dotnet_unknown_title_falls_back_to_generic() {
+        let state = detect_game_mode(Some("dotnet"), None, Some("Some .NET App"));
+        assert!(matches!(state, GameModeState::GameMode(ref reason) if reason == ".NET game"));
+    }
+
+    #[test]
+    fn no_app_id_no_pid_is_normal() {
+        assert_eq!(detect_game_mode(None, None, None), GameModeState::Normal);
+    }
+
+    // NOTE: check_is_game_env and check_process_tree read real /proc paths
+    // and are not covered by unit tests here (no filesystem-injection seam
+    // exists for them yet) — this is a known, intentional gap, not an
+    // oversight, and behavior for those paths is verified manually.
+
+    #[test]
+    fn global_always_on_overrides_a_normal_app() {
+        let overrides = HashMap::new();
+        let state = resolve_effective_game_mode(
+            Some("com.obsproject.Studio"),
+            None,
+            None,
+            GlobalOverride::AlwaysOn,
+            &overrides,
+        );
+        assert!(state.is_game_mode());
+    }
+
+    #[test]
+    fn global_always_off_overrides_a_game() {
+        let overrides = HashMap::new();
+        let state = resolve_effective_game_mode(
+            Some("gamescope"),
+            None,
+            None,
+            GlobalOverride::AlwaysOff,
+            &overrides,
+        );
+        assert_eq!(state, GameModeState::Normal);
+    }
+
+    #[test]
+    fn window_override_beats_heuristic_but_loses_to_global() {
+        let mut overrides = HashMap::new();
+        overrides.insert("gamescope".to_string(), WindowOverride::Off);
+
+        // Window override wins over the heuristic when global is Auto.
+        assert_eq!(
+            resolve_effective_game_mode(
+                Some("gamescope"),
+                None,
+                None,
+                GlobalOverride::Auto,
+                &overrides
+            ),
+            GameModeState::Normal
+        );
+
+        // Global override still wins over the window override.
+        assert!(resolve_effective_game_mode(
+            Some("gamescope"),
+            None,
+            None,
+            GlobalOverride::AlwaysOn,
+            &overrides
+        )
+        .is_game_mode());
+    }
+
+    #[test]
+    fn no_override_falls_back_to_heuristic() {
+        let overrides = HashMap::new();
+        assert_eq!(
+            resolve_effective_game_mode(
+                Some("com.obsproject.Studio"),
+                None,
+                None,
+                GlobalOverride::Auto,
+                &overrides
+            ),
+            GameModeState::Normal
+        );
+    }
 }

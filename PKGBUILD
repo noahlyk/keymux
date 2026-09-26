@@ -17,6 +17,7 @@ optdepends=('systemd: for systemd service files (or use OpenRC/runit scripts)'
             'i3-wm: automatic game mode detection in i3 window manager'
             'bspwm: automatic game mode detection in bspwm window manager')
 options=('!debug')
+install=keymux.install
 
 source=()
 sha256sums=()
@@ -119,40 +120,4 @@ package() {
     "$_keymux" completion zsh > "$pkgdir/usr/share/zsh/site-functions/_keymux"
     
     install -dm755 "$pkgdir/etc/skel/.config/keymux"
-}
-
-post_install() {
-    # Detect init system and provide appropriate instructions
-    if [ -d "/run/systemd/system" ]; then
-        echo ""
-        echo "==> systemd detected. Enable services with:"
-        echo "    sudo systemctl enable --now keymux.service"
-        echo "    systemctl --user enable --now keymux-niri.service  # for Niri"
-        echo "    systemctl --user enable --now keymux-hyprland.service"
-        echo "    systemctl --user enable --now keymux-sway.service"
-        echo "    systemctl --user enable --now keymux-i3.service"
-        echo "    systemctl --user enable --now keymux-bspwm.service"
-    elif [ -d "/etc/openrc" ] || [ -d "/etc/init.d" ]; then
-        echo ""
-        echo "==> OpenRC detected. Add to default runlevel:"
-        echo "    rc-update add keymux default"
-        echo "    rc-update add keymux-niri default  # for Niri"
-        echo "    rc-update add keymux-hyprland default"
-        echo "    rc-update add keymux-sway default"
-        echo "    rc-update add keymux-i3 default"
-        echo "    rc-update add keymux-bspwm default"
-    elif [ -d "/etc/runit" ] || [ -d "/service" ]; then
-        echo ""
-        echo "==> runit detected. Enable services with:"
-        echo "    ln -s /etc/sv/keymux /service/keymux"
-        echo "    ln -s /etc/sv/keymux-niri /service/keymux-niri  # for Niri"
-        echo "    ln -s /etc/sv/keymux-hyprland /service/keymux-hyprland"
-        echo "    ln -s /etc/sv/keymux-sway /service/keymux-sway"
-        echo "    ln -s /etc/sv/keymux-i3 /service/keymux-i3"
-        echo "    ln -s /etc/sv/keymux-bspwm /service/keymux-bspwm"
-    else
-        echo ""
-        echo "==> No supported init system detected (systemd, OpenRC, or runit)."
-        echo "    Run keymux manually: sudo keymux daemon"
-    fi
 }

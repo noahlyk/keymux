@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::process::Command;
 
+use crate::gamemode_state::{GlobalOverride, WindowOverride};
 pub use crate::niri::gamemode_detection::GameModeState;
 
 #[derive(Debug, Clone)]
@@ -13,13 +15,32 @@ pub struct Window {
 }
 
 impl Window {
-    /// Check if this window should be in game mode.
-    /// Delegates to the shared detection logic in `niri::gamemode_detection`.
+    /// Check if this window should be in game mode by the programmed
+    /// heuristics alone (does not account for any active override - use
+    /// `effective_game_mode_state` for that).
     pub fn game_mode_state(&self) -> GameModeState {
         crate::niri::gamemode_detection::detect_game_mode(
             Some(&self.app_id),
             Some(self.pid),
             Some(&self.title),
+        )
+    }
+
+    /// Like `game_mode_state`, but also applies the daemon's current
+    /// global/per-app_id overrides (`keymux gamemode`), so callers like
+    /// `keymux debug` show what's actually active, not just the raw
+    /// heuristic guess.
+    pub fn effective_game_mode_state(
+        &self,
+        global_override: GlobalOverride,
+        window_overrides: &HashMap<String, WindowOverride>,
+    ) -> GameModeState {
+        crate::niri::gamemode_detection::resolve_effective_game_mode(
+            Some(&self.app_id),
+            Some(self.pid),
+            Some(&self.title),
+            global_override,
+            window_overrides,
         )
     }
 }

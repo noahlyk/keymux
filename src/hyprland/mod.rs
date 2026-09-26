@@ -5,8 +5,8 @@ pub mod sway_daemon;
 pub use hyprland_daemon::run_hyprland_daemon;
 pub use mod_impl::{
     detect_wayland_compositor, get_focused_window, is_hyprland_available, is_sway_available,
-    should_enable_gamemode, start_hyprland_monitor, start_hyprland_monitor_sync,
-    start_sway_monitor, start_sway_monitor_sync, WaylandCompositor,
+    start_hyprland_monitor, start_hyprland_monitor_sync, start_sway_monitor,
+    start_sway_monitor_sync, WaylandCompositor,
 };
 pub use sway_daemon::run_sway_daemon;
 

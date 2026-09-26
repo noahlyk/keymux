@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::thread;
@@ -5,7 +6,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowInfo {
     pub app_id: Option<String>,
     pub pid: Option<u32>,
@@ -44,10 +45,6 @@ pub trait WindowManager: Send + Sync + Clone + 'static {
     {
         let wm: &'static Self = Box::leak(Box::new(self.clone()));
         spawn_event_monitor_sync(wm, tx);
-    }
-
-    fn should_enable_gamemode(&self, window_info: &WindowInfo) -> bool {
-        default_should_enable_gamemode(window_info)
     }
 }
 
@@ -195,13 +192,4 @@ pub fn spawn_event_monitor_sync<T: WindowManager + 'static>(
         );
         thread::sleep(Duration::from_secs(5));
     });
-}
-
-pub fn default_should_enable_gamemode(window_info: &WindowInfo) -> bool {
-    crate::niri::gamemode_detection::detect_game_mode(
-        window_info.app_id.as_deref(),
-        window_info.pid,
-        window_info.title.as_deref(),
-    )
-    .is_game_mode()
 }

@@ -4,9 +4,7 @@ use std::sync::mpsc::Sender;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{error, info};
 
-use crate::window_manager::{
-    default_should_enable_gamemode, WindowInfo, WindowManager, WindowManagerEvent,
-};
+use crate::window_manager::{WindowInfo, WindowManager, WindowManagerEvent};
 
 #[derive(Clone)]
 pub struct Niri;
@@ -133,10 +131,6 @@ impl WindowManager for Niri {
             None
         }
     }
-
-    fn should_enable_gamemode(&self, window_info: &WindowInfo) -> bool {
-        default_should_enable_gamemode(window_info)
-    }
 }
 
 pub fn is_niri_available() -> bool {
@@ -163,8 +157,4 @@ pub fn start_niri_monitor_sync(tx: Sender<WindowManagerEvent>) {
 
 pub fn get_focused_window() -> WindowInfo {
     Niri::new().get_focused_window()
-}
-
-pub fn should_enable_gamemode(window_info: &WindowInfo) -> bool {
-    Niri::new().should_enable_gamemode(window_info)
 }

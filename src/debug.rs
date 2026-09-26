@@ -3,10 +3,13 @@ use colored::Colorize;
 
 use keymux::config::Config;
 use keymux::daemon::DaemonDisplay;
+use keymux::gamemode_state::GlobalOverride;
+use keymux::ipc::{send_request, IpcRequest, IpcResponse};
 use keymux::ui::display::{
     ConfigDisplay, DeviceDisplay, KeyboardDisplay, PermissionsDisplay, SessionDisplay,
 };
 use keymux::ui::window::{get_all_windows, GameModeState};
+use std::collections::HashMap;
 
 pub fn run_debug(config_path: Option<&std::path::Path>) -> Result<()> {
     let config_path = if let Some(p) = config_path {
@@ -67,6 +70,19 @@ pub fn run_debug(config_path: Option<&std::path::Path>) -> Result<()> {
     // Window info
     println!("{}", "🪟 Window Info:".bright_yellow().bold());
 
+    // Best-effort: pull the daemon's current gamemode overrides so the table
+    // reflects what's actually active, not just the raw heuristic guess. If
+    // the daemon isn't reachable, fall back to no overrides (heuristic-only
+    // display) rather than failing the whole command.
+    let global_override = match send_request(&IpcRequest::GetGlobalOverride) {
+        Ok(IpcResponse::GlobalOverrideStatus(state)) => state,
+        _ => GlobalOverride::default(),
+    };
+    let window_overrides: HashMap<_, _> = match send_request(&IpcRequest::ListWindowOverrides) {
+        Ok(IpcResponse::WindowOverrides(list)) => list.into_iter().collect(),
+        _ => HashMap::new(),
+    };
+
     match get_all_windows() {
         Ok(windows) => {
             let terminal_width = keymux::ui::window::get_terminal_width();
@@ -78,8 +94,15 @@ pub fn run_debug(config_path: Option<&std::path::Path>) -> Result<()> {
             println!();
 
             // Calculate required width for table format
-            let windows_with_gamemode: Vec<_> =
-                windows.iter().map(|w| (w, w.game_mode_state())).collect();
+            let windows_with_gamemode: Vec<_> = windows
+                .iter()
+                .map(|w| {
+                    (
+                        w,
+                        w.effective_game_mode_state(global_override, &window_overrides),
+                    )
+                })
+                .collect();
 
             // Calculate column widths based on content
             let mut max_id_width = 6;
@@ -177,7 +200,8 @@ pub fn run_debug(config_path: Option<&std::path::Path>) -> Result<()> {
             } else {
                 // Paragraph format for narrow terminals or no windows
                 for window in &windows {
-                    let game_state = window.game_mode_state();
+                    let game_state =
+                        window.effective_game_mode_state(global_override, &window_overrides);
                     let game_info = match game_state {
                         GameModeState::Normal => "○ Normal".to_string(),
                         GameModeState::GameMode(reason) => {

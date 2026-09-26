@@ -80,27 +80,58 @@ pub fn get_subcommands() -> Vec<(String, String)> {
 
 #[derive(Subcommand)]
 pub enum GamemodeAction {
-    /// Control game mode for currently focused window
+    /// Temporary, per-app override for the currently focused window (or a
+    /// given app_id). Resets to automatic detection when the daemon
+    /// restarts.
     Window {
         #[command(subcommand)]
         action: WindowGamemodeAction,
+    },
+    /// System-wide override that ignores every per-window rule/override.
+    /// Resets to `auto` when the daemon restarts.
+    Global {
+        #[command(subcommand)]
+        action: GlobalGamemodeAction,
     },
 }
 
 #[derive(Subcommand)]
 pub enum WindowGamemodeAction {
-    /// Invert game mode state for this window
-    Invert,
-    /// Toggle between invert and normal for this window
-    ToggleInvert,
-    /// Use normal automatic detection for this window
-    Normal,
-    /// Always force game mode on for this window
-    AlwaysOn,
-    /// Always force game mode off for this window
-    AlwaysOff,
-    /// List all window-specific overrides
+    /// Force game mode ON for this window (or the given app_id)
+    On {
+        /// app_id to target instead of the currently focused window
+        app_id: Option<String>,
+    },
+    /// Force game mode OFF for this window (or the given app_id)
+    Off {
+        /// app_id to target instead of the currently focused window
+        app_id: Option<String>,
+    },
+    /// Flip the currently-effective state into an explicit override
+    Toggle {
+        /// app_id to target instead of the currently focused window
+        app_id: Option<String>,
+    },
+    /// Clear the override for this window (or app_id) - back to automatic
+    /// detection
+    Auto {
+        /// app_id to target instead of the currently focused window
+        app_id: Option<String>,
+    },
+    /// List all active per-app_id overrides
     List,
+}
+
+#[derive(Subcommand)]
+pub enum GlobalGamemodeAction {
+    /// Force game mode ON everywhere, ignoring per-window rules/overrides
+    AlwaysOn,
+    /// Force game mode OFF everywhere, ignoring per-window rules/overrides
+    AlwaysOff,
+    /// Default: defer to per-window overrides / automatic detection
+    Auto,
+    /// Show the current global override state
+    Status,
 }
 
 #[derive(Parser)]
@@ -145,6 +176,17 @@ pub enum Commands {
     /// Run the bspwm window watcher daemon
     #[command(hide = true)]
     BspwmDaemon,
+
+    /// Create a starter config file if one doesn't already exist
+    Init {
+        /// Use the full-featured example config instead of the minimal starter
+        #[arg(long)]
+        full: bool,
+
+        /// Overwrite an existing config file
+        #[arg(long)]
+        force: bool,
+    },
 
     /// List all detected keyboards
     List,

@@ -8,6 +8,7 @@ mod cli;
 mod gamemode;
 
 mod debug;
+mod init;
 pub mod keycode;
 mod list;
 mod toggle;
@@ -58,6 +59,9 @@ fn main() -> Result<()> {
         Some(cli::Commands::BspwmDaemon) => {
             keymux::x11::run_bspwm_daemon()?;
         }
+        Some(cli::Commands::Init { full, force }) => {
+            init::run_init(*full, *force)?;
+        }
         Some(cli::Commands::List) => {
             list::run_list()?;
         }
@@ -68,7 +72,7 @@ fn main() -> Result<()> {
             } else if !*multi && !patterns.is_empty() {
                 // Handle toggle patterns directly
                 let config_path = keymux::config::Config::default_path()?;
-                let mut config = keymux::config::Config::load(&config_path)?;
+                let mut config = keymux::config::Config::load_or_hint(&config_path)?;
                 let keyboards = keymux::keyboard_id::find_all_keyboards();
                 let items: Vec<_> = keyboards
                     .into_iter()
@@ -345,7 +349,10 @@ set -e COMPLETE
                     }
                 }
                 "gamemode" => {
-                    completions = vec!["window:Game mode for focused window".to_string()];
+                    completions = vec![
+                        "window:Temporary override for the focused window".to_string(),
+                        "global:System-wide game mode override".to_string(),
+                    ];
                 }
                 _ => {
                     // Get subcommands dynamically from clap
@@ -386,7 +393,10 @@ set -e COMPLETE
                         }
                     }
                     "gamemode" => {
-                        completions = vec!["window:Game mode for focused window".to_string()];
+                        completions = vec![
+                            "window:Temporary override for the focused window".to_string(),
+                            "global:System-wide game mode override".to_string(),
+                        ];
                     }
                     _ => {}
                 }

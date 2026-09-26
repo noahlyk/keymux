@@ -4,9 +4,7 @@ use std::sync::mpsc::Sender;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::error;
 
-use crate::window_manager::{
-    default_should_enable_gamemode, WindowInfo, WindowManager, WindowManagerEvent,
-};
+use crate::window_manager::{WindowInfo, WindowManager, WindowManagerEvent};
 
 #[derive(Clone)]
 pub struct I3WindowManager;
@@ -126,10 +124,6 @@ impl WindowManager for I3WindowManager {
             None
         }
     }
-
-    fn should_enable_gamemode(&self, window_info: &WindowInfo) -> bool {
-        default_should_enable_gamemode(window_info)
-    }
 }
 
 #[derive(Clone)]
@@ -233,10 +227,6 @@ impl WindowManager for BspwmWindowManager {
             None
         }
     }
-
-    fn should_enable_gamemode(&self, window_info: &WindowInfo) -> bool {
-        default_should_enable_gamemode(window_info)
-    }
 }
 
 pub fn is_i3_available() -> bool {
@@ -297,8 +287,4 @@ pub fn get_focused_window() -> WindowInfo {
             title: None,
         }
     }
-}
-
-pub fn should_enable_gamemode(window_info: &WindowInfo) -> bool {
-    default_should_enable_gamemode(window_info)
 }

@@ -82,7 +82,7 @@ pub fn show_adaptive_stats(config_path: Option<&std::path::Path>) -> Result<()> 
     });
 
     print!("  → Loading config... ");
-    let config = Config::load(&config_path)?;
+    let config = Config::load_or_hint(&config_path)?;
     println!("{}", "✓".bright_green());
 
     print!("  → Requesting fresh stats from daemon... ");

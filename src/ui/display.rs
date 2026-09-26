@@ -166,7 +166,10 @@ impl ConfigDisplay {
             }
         } else {
             println!("  Status: {}", "✗ Not found".bright_red());
-            println!("  Hint: Copy config.example.ron to {:?}", self.config_path);
+            println!(
+                "  Hint: Run `keymux init` to create a starter config at {:?}",
+                self.config_path
+            );
         }
         println!();
     }

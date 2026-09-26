@@ -17,7 +17,7 @@ pub enum ToggleAction {
 pub fn run_toggle(multi: bool, action_patterns: Option<(bool, Vec<String>)>) -> Result<()> {
     // Load config and keyboards
     let config_path = Config::default_path()?;
-    let mut config = Config::load(&config_path)?;
+    let mut config = Config::load_or_hint(&config_path)?;
     let keyboards = find_all_keyboards();
 
     if keyboards.is_empty() {

@@ -1,5 +1,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
+use crate::gamemode_state::{GlobalOverride, WindowOverride};
+use crate::window_manager::WindowInfo;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -19,14 +21,39 @@ pub enum IpcRequest {
     EnableKeyboard(String),
     /// Disable specific keyboard by hardware ID
     DisableKeyboard(String),
-    /// Set game mode state (true = on, false = off)
-    SetGameMode(bool),
     /// Reload configuration from disk
     Reload,
     /// Force save adaptive timing stats immediately
     SaveAdaptiveStats,
     /// Shutdown daemon
     Shutdown,
+
+    /// Reported by a per-compositor watcher process on every focus change.
+    /// The daemon resolves the effective game mode itself (heuristics +
+    /// overrides) and applies it - watchers no longer compute a boolean.
+    WindowFocusChanged {
+        app_id: Option<String>,
+        pid: Option<u32>,
+        title: Option<String>,
+    },
+    /// Ask the daemon for the last window focus event it received (used by
+    /// `keymux gamemode window` to default to "the currently focused app"
+    /// without any compositor-specific code in the CLI).
+    GetFocusedWindow,
+    /// Set (or clear, with `state: None`) a temporary per-app_id override.
+    SetWindowOverride {
+        app_id: String,
+        state: Option<WindowOverride>,
+    },
+    /// Flip the currently-effective state for an app_id into an explicit
+    /// override (On -> Off, Off/heuristic-Normal -> On).
+    ToggleWindowOverride { app_id: String },
+    /// List all active per-app_id overrides
+    ListWindowOverrides,
+    /// Set the global override (Auto/AlwaysOn/AlwaysOff)
+    SetGlobalOverride(GlobalOverride),
+    /// Get the current global override
+    GetGlobalOverride,
 }
 
 /// IPC response from daemon to client
@@ -40,6 +67,12 @@ pub enum IpcResponse {
     Ok,
     /// Operation failed with error message
     Error(String),
+    /// The last window the daemon saw focused (empty fields if none yet)
+    FocusedWindow(WindowInfo),
+    /// Active per-app_id overrides, sorted by app_id
+    WindowOverrides(Vec<(String, WindowOverride)>),
+    /// Current global override
+    GlobalOverrideStatus(GlobalOverride),
 }
 
 /// Information about a detected keyboard
