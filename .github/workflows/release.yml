@@ -57,6 +57,14 @@ jobs:
             PATCH=0
           elif echo "$COMMITS" | grep -q "^chore:\|^fix:\|^docs:"; then
             PATCH=$((PATCH + 1))
+          else
+            # No conventional-commit prefix matched anything since the last
+            # tag. check-skip already filters out the one case that should
+            # produce no release at all (an actual "chore: bump version"
+            # commit) - any push that reaches this step is otherwise meant
+            # to ship something, so default to a patch bump rather than
+            # silently republishing the same version under a new binary.
+            PATCH=$((PATCH + 1))
           fi
 
           if echo "$COMMITS" | grep -q "^BREAKING CHANGE:"; then
