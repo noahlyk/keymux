@@ -250,7 +250,52 @@ impl KeyAction {
 /// Layer configuration
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayerConfig {
+    /// What the layer does. Defaults to ordinary remapping.
+    #[serde(default)]
+    pub kind: LayerKind,
+    /// Key remaps. On a steno layer these apply to non-stroke keys only (e.g. an
+    /// exit key); unmapped non-stroke keys are swallowed while the layer is active.
+    #[serde(default)]
     pub remaps: HashMap<KeyCode, KeyAction>,
+    /// Stop capturing strokes while game mode is active. Only affects steno layers.
+    #[serde(default)]
+    pub disabled_in_game_mode: bool,
+}
+
+/// What a layer does with the keys pressed while it's active.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LayerKind {
+    /// Remap keys; anything unmapped falls through to the layers below.
+    #[default]
+    Remap,
+    /// Capture stroke keys as a steno chord and type dictionary text.
+    Steno(StenoConfig),
+}
+
+/// Settings for a steno layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StenoConfig {
+    /// Built-in layout preset to start from.
+    #[serde(default = "default_steno_layout")]
+    pub layout: String,
+    /// Per-key changes to the preset, e.g. `{ "S-": Key(KC_Q) }`.
+    #[serde(default)]
+    pub layout_overrides: HashMap<String, KeyAction>,
+    /// Plover-format dictionaries, highest priority first. `~/` expands to the
+    /// session user's home; relative paths resolve against the config directory.
+    #[serde(default)]
+    pub dictionaries: Vec<String>,
+    /// A stroke is flushed after this long even if keys are still held.
+    #[serde(default = "default_stroke_timeout_ms")]
+    pub stroke_timeout_ms: u32,
+}
+
+fn default_steno_layout() -> String {
+    "qwerty".to_string()
+}
+
+const fn default_stroke_timeout_ms() -> u32 {
+    1000
 }
 
 /// Game mode configuration
@@ -1118,6 +1163,22 @@ impl Config {
             }
         }
 
+        // Validation 4: Steno layers have a valid layout
+        for (layer, layer_config) in &self.layers {
+            if let LayerKind::Steno(steno) = &layer_config.kind {
+                if let Err(layout_errors) = crate::steno::layout::preset(&steno.layout)
+                    .map_err(|e| vec![e])
+                    .and_then(|preset| {
+                        crate::steno::layout::build_key_map(&preset, &steno.layout_overrides)
+                    })
+                {
+                    for layout_error in layout_errors {
+                        errors.push(format!("steno layer \"{}\": {}", layer.0, layout_error));
+                    }
+                }
+            }
+        }
+
         if !errors.is_empty() {
             Err(anyhow::anyhow!(
                 "Config validation failed: {}",
@@ -1132,6 +1193,34 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn existing_layers_default_to_remap() {
+        let layer: LayerConfig = ron::from_str("(remaps: { KC_A: Key(KC_B) })").unwrap();
+        assert_eq!(layer.kind, LayerKind::Remap);
+        assert!(!layer.disabled_in_game_mode);
+    }
+
+    #[test]
+    fn steno_layer_parses_with_defaults() {
+        let layer: LayerConfig = ron::from_str(
+            r#"(
+                kind: Steno((
+                    layout_overrides: { "S-": Key(KC_Q) },
+                    dictionaries: ["~/.config/keymux/steno/main.json"],
+                )),
+                disabled_in_game_mode: true,
+            )"#,
+        )
+        .unwrap();
+        assert!(layer.disabled_in_game_mode);
+        let LayerKind::Steno(steno) = layer.kind else {
+            panic!("expected a steno layer");
+        };
+        assert_eq!(steno.layout, "qwerty");
+        assert_eq!(steno.stroke_timeout_ms, 1000);
+        assert_eq!(steno.dictionaries.len(), 1);
+    }
 
     #[test]
     fn test_preprocess_bare_keycode() {

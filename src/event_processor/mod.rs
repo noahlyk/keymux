@@ -15,6 +15,8 @@ pub mod actions;
 pub mod adaptive;
 pub mod keymap;
 pub mod layer_stack;
+#[cfg(test)]
+mod steno_tests;
 
 // SYN event constants
 const SYN_REPORT: i32 = 0;
@@ -261,6 +263,11 @@ fn run_event_processor(
                     _ => {
                         // No timeouts to process
                     }
+                }
+
+                // A stroke held past its timeout is typed now
+                if let Some(text) = keymap.check_steno_timeouts() {
+                    type_string(&mut virtual_device, &text, false)?;
                 }
 
                 // Sleep briefly to avoid CPU spinning
