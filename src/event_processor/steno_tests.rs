@@ -55,6 +55,52 @@ impl Drop for Fixture {
     }
 }
 
+/// Right Ctrl toggles the steno layer on and off, like the config this is meant for.
+const TOGGLE_CONFIG: &str = r#"(
+    remaps: {
+        KC_RCTL: TG("steno"),
+    },
+    layers: {
+        "steno": (
+            kind: Steno((
+                dictionaries: ["DICT"],
+            )),
+            remaps: {
+                KC_RCTL: TG("steno"),
+            },
+            disabled_in_game_mode: true,
+        ),
+    },
+    game_mode: (
+        remaps: {},
+    ),
+)"#;
+
+#[test]
+fn tg_latches_after_release_and_toggles_off() {
+    let fixture = Fixture::new("toggle");
+    let dict = fixture.dir.join("main.json");
+    std::fs::write(&dict, r#"{"KAT": "cat"}"#).unwrap();
+    let config_path = fixture.dir.join("toggle.ron");
+    std::fs::write(&config_path, TOGGLE_CONFIG.replace("DICT", &path_str(&dict))).unwrap();
+    let config = Config::load(&config_path).unwrap();
+    let mut p = KeymapProcessor::new(&config, config_path, 0);
+
+    // Press and release: the layer stays on
+    p.process_key(KeyCode::KC_RCTL, true);
+    p.process_key(KeyCode::KC_RCTL, false);
+    assert_eq!(p.current_layer_name(), "steno");
+
+    // Strokes work while latched
+    assert_eq!(chord(&mut p, &[KeyCode::KC_D, KeyCode::KC_Z, KeyCode::KC_K]),
+        ProcessResult::TypeString("cat ".to_string(), false));
+
+    // Pressing it again on the steno layer exits it (via the layer's own remap)
+    p.process_key(KeyCode::KC_RCTL, true);
+    p.process_key(KeyCode::KC_RCTL, false);
+    assert_eq!(p.current_layer_name(), "base");
+}
+
 fn path_str(path: &Path) -> String {
     path.display().to_string()
 }
