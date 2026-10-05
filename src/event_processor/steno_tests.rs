@@ -97,7 +97,7 @@ fn tg_latches_after_release_and_toggles_off() {
 
     // Strokes work while latched
     assert_eq!(
-        chord(&mut p, &[KeyCode::KC_D, KeyCode::KC_Z, KeyCode::KC_K]),
+        chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]),
         ProcessResult::TypeString("cat".to_string(), false)
     );
 
@@ -136,7 +136,7 @@ fn chord_on_steno_layer_types_dictionary_text() {
     enter_steno(&mut p);
 
     // K- A- -T is "cat"
-    let result = chord(&mut p, &[KeyCode::KC_D, KeyCode::KC_Z, KeyCode::KC_K]);
+    let result = chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]);
     assert_eq!(result, ProcessResult::TypeString("cat".to_string(), false));
 }
 
@@ -149,8 +149,8 @@ fn unmapped_keys_are_swallowed_not_leaked_to_base() {
     // KC_CAPS remaps to Escape on the base layer, but the steno layer must not leak it
     assert_eq!(p.process_key(KeyCode::KC_CAPS, true), ProcessResult::None);
     assert_eq!(p.process_key(KeyCode::KC_CAPS, false), ProcessResult::None);
-    assert_eq!(p.process_key(KeyCode::KC_1, true), ProcessResult::None);
-    assert_eq!(p.process_key(KeyCode::KC_1, false), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_Y, true), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_Y, false), ProcessResult::None);
 }
 
 #[test]
@@ -187,14 +187,14 @@ fn stroke_released_after_layer_exit_still_types() {
     let mut p = fixture.processor();
     enter_steno(&mut p);
 
-    assert_eq!(p.process_key(KeyCode::KC_D, true), ProcessResult::None);
-    assert_eq!(p.process_key(KeyCode::KC_Z, true), ProcessResult::None);
-    assert_eq!(p.process_key(KeyCode::KC_K, true), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_S, true), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_C, true), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_P, true), ProcessResult::None);
     p.deactivate_layer_for_test(&Layer("chords".to_string()));
-    assert_eq!(p.process_key(KeyCode::KC_D, false), ProcessResult::None);
-    assert_eq!(p.process_key(KeyCode::KC_Z, false), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_S, false), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_C, false), ProcessResult::None);
     assert_eq!(
-        p.process_key(KeyCode::KC_K, false),
+        p.process_key(KeyCode::KC_P, false),
         ProcessResult::TypeString("cat".to_string(), false)
     );
 }
