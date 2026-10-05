@@ -1,4 +1,11 @@
-// Default QWERTY steno layout: Plover's built-in "Keyboard" machine mapping.
+// Default QWERTY steno layout. Dictionary strokes are Plover's, so Plover's
+// dictionaries work unchanged. Only the physical keys differ from Plover's
+// "Keyboard" machine mapping, in three places:
+//
+// - `-E` is `,` and `-U` is `.`. Plover uses N and M, both on the right index
+//   finger's bottom row. Chords that use them split easily. The comma and period
+//   are on the middle and ring fingers, so the index finger no longer covers two keys.
+// - `-Z` is the grave key, not the apostrophe, so `lazy` (HRAEZ) is one stroke.
 //
 // Plover lists several keys for some steno keys (e.g. S- is both A and Q). Only
 // the first is used here, since each steno key takes one physical key.
@@ -18,8 +25,8 @@
     "A-": Key(KC_C),
     "O-": Key(KC_V),
     "*": Key(KC_T),
-    "-E": Key(KC_N),
-    "-U": Key(KC_M),
+    "-E": Key(KC_COMM),
+    "-U": Key(KC_DOT),
     "-F": Key(KC_U),
     "-R": Key(KC_J),
     "-P": Key(KC_I),
@@ -29,6 +36,6 @@
     "-T": Key(KC_P),
     "-S": Key(KC_SCLN),
     "-D": Key(KC_LBRC),
-    "-Z": Key(KC_QUOT),
+    "-Z": Key(KC_GRV),
     "#": Key(KC_1),
 }
