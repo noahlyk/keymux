@@ -54,11 +54,50 @@ pub fn show_stroke(config_dir: &Path, text: &str) -> Result<()> {
 /// Print the keys that type `text` on the built-in QWERTY layout, one row per stroke.
 pub fn keys(config_dir: &Path, text: &str) -> Result<()> {
     let dict = load_dictionary(config_dir);
+    print_table(&chord_rows(&dict, &qwerty_keys_by_bit()?, text));
+    Ok(())
+}
+
+/// Print the built-in QWERTY layout: each steno key, the physical key that presses it,
+/// and the sound it stands for.
+pub fn layout() -> Result<()> {
+    let keys_by_bit = qwerty_keys_by_bit()?;
+    let rows: Vec<[String; 3]> = SLOTS
+        .iter()
+        .enumerate()
+        .map(|(slot, &(_, name))| {
+            let press = keys_by_bit
+                .get(&(1 << slot))
+                .map_or_else(String::new, |&key| key_label(key));
+            [name.to_string(), press, SLOT_SOUNDS[slot].to_string()]
+        })
+        .collect();
+    let widths = [0, 1, 2].map(|col| {
+        rows.iter().map(|row| row[col].len()).max().unwrap_or(0)
+    });
+    let headers = ["Steno", "Press", "Sound"];
+    let line = |cells: [&str; 3]| {
+        println!(
+            "{:<w0$}  {:<w1$}  {}",
+            cells[0],
+            cells[1],
+            cells[2],
+            w0 = widths[0].max(headers[0].len()),
+            w1 = widths[1].max(headers[1].len()),
+        );
+    };
+    line(headers);
+    for row in &rows {
+        line([&row[0], &row[1], &row[2]]);
+    }
+    Ok(())
+}
+
+/// The physical key for each stroke key on the built-in QWERTY layout, keyed by stroke bit.
+fn qwerty_keys_by_bit() -> Result<HashMap<u32, KeyCode>> {
     let preset = preset("qwerty").map_err(|e| anyhow!(e))?;
     let layout = build_key_map(&preset, &HashMap::new()).map_err(|errs| anyhow!(errs.join("; ")))?;
-    let keys_by_bit: HashMap<u32, KeyCode> = layout.into_iter().map(|(key, bit)| (bit, key)).collect();
-    print_table(&chord_rows(&dict, &keys_by_bit, text));
-    Ok(())
+    Ok(layout.into_iter().map(|(key, bit)| (bit, key)).collect())
 }
 
 /// One line of `keymux steno keys`: a word, one of its strokes, and the keys that press it.
