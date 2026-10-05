@@ -92,6 +92,9 @@ pub enum HeldAction {
     /// A stroke key captured by the steno layer with this name. Released by the
     /// keymap processor, which owns the chord state.
     StenoManaged(Layer),
+    /// A key pressed on a steno layer that isn't a stroke key or a remap. Its press
+    /// was swallowed, so its release is swallowed too.
+    SwallowedBySteno,
 }
 
 pub struct HandleContext<'a> {
@@ -136,7 +139,7 @@ pub fn handle_action_release(
             ProcessResult::None
         }
         // Steno releases are intercepted by KeymapProcessor before reaching here
-        HeldAction::StenoManaged(_) => ProcessResult::None,
+        HeldAction::StenoManaged(_) | HeldAction::SwallowedBySteno => ProcessResult::None,
     }
 }
 

@@ -180,13 +180,20 @@ impl KeymapProcessor {
     fn steno_capture(&mut self, keycode: KeyCode, pressed: bool) -> Option<ProcessResult> {
         if !pressed {
             // Releases belong to whoever pressed the key, even if its layer is gone now
-            let layer = match self.held_keys.get(&keycode)?.first()? {
-                HeldAction::StenoManaged(layer) => layer.clone(),
+            match self.held_keys.get(&keycode)?.first()? {
+                HeldAction::StenoManaged(layer) => {
+                    let layer = layer.clone();
+                    self.held_keys.remove(&keycode);
+                    let output = self.steno_engines.get_mut(&layer)?.release(keycode);
+                    return Some(steno_result(output));
+                }
+                // A swallowed press must not produce a release on its own
+                HeldAction::SwallowedBySteno => {
+                    self.held_keys.remove(&keycode);
+                    return Some(ProcessResult::None);
+                }
                 _ => return None,
-            };
-            self.held_keys.remove(&keycode);
-            let output = self.steno_engines.get_mut(&layer)?.release(keycode);
-            return Some(steno_result(output));
+            }
         }
 
         let top = self.layer_stack.current_layer();
@@ -203,6 +210,8 @@ impl KeymapProcessor {
             return Some(ProcessResult::None);
         }
 
+        // On a steno layer, a key does nothing unless the layer remaps it. Its press
+        // and release are both swallowed, so it can't leak a stray key event.
         let has_remap = self
             .layer_stack
             .layer_configs()
@@ -211,6 +220,8 @@ impl KeymapProcessor {
         if has_remap {
             None
         } else {
+            self.held_keys
+                .insert(keycode, vec![HeldAction::SwallowedBySteno]);
             Some(ProcessResult::None)
         }
     }

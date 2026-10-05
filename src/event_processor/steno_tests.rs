@@ -115,6 +115,40 @@ fn path_str(path: &Path) -> String {
 }
 
 /// Switch to the steno layer. `TO` is momentary here, so the activation key stays held.
+#[test]
+fn stray_space_during_a_chord_does_not_disturb_the_stroke() {
+    let fixture = Fixture::new("stray-space");
+    let mut p = fixture.processor();
+    enter_steno(&mut p);
+
+    // Space lands in the middle of "cat": it's swallowed both ways and the stroke still completes
+    assert_eq!(p.process_key(KeyCode::KC_S, true), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_SPC, true), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_SPC, false), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_C, true), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_P, true), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_S, false), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_C, false), ProcessResult::None);
+    assert_eq!(
+        p.process_key(KeyCode::KC_P, false),
+        ProcessResult::TypeString("cat".to_string(), false)
+    );
+}
+
+#[test]
+fn a_key_swallowed_on_press_is_swallowed_on_release_too() {
+    let fixture = Fixture::new("swallowed-release");
+    let mut p = fixture.processor();
+    enter_steno(&mut p);
+
+    // Hold space on the steno layer, then leave the layer before letting go
+    assert_eq!(p.process_key(KeyCode::KC_SPC, true), ProcessResult::None);
+    p.process_key(KeyCode::KC_TAB, false);
+    assert_eq!(p.current_layer_name(), "base");
+    // Its release must not reach the output as a key-up nobody pressed
+    assert_eq!(p.process_key(KeyCode::KC_SPC, false), ProcessResult::None);
+}
+
 fn enter_steno(p: &mut KeymapProcessor) {
     p.process_key(KeyCode::KC_TAB, true);
     assert_eq!(p.current_layer_name(), "chords");
