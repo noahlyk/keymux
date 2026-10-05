@@ -1,4 +1,3 @@
-use crate::config::Config;
 use crate::keyboard_id::KeyboardId;
 use crate::keycode::KeyCode;
 use actions::ProcessResult as ProcResult;
@@ -8,7 +7,7 @@ use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
 use evdev::{AttributeSet, Device, EventType, InputEvent, Key};
 pub use keymap::KeymapProcessor;
 use std::os::unix::io::AsRawFd;
-use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
 
 pub mod actions;
@@ -32,8 +31,7 @@ pub fn run_processor(
     keyboard_id: KeyboardId,
     mut device: Device,
     keyboard_name: String,
-    config: Config,
-    config_path: PathBuf,
+    keymap: Arc<Mutex<KeymapProcessor>>,
     user_id: u32,
     shutdown_rx: crossbeam_channel::Receiver<()>,
     game_mode_rx: std::sync::mpsc::Receiver<bool>,
@@ -43,8 +41,7 @@ pub fn run_processor(
         &keyboard_id,
         &mut device,
         &keyboard_name,
-        &config,
-        config_path,
+        &keymap,
         user_id,
         shutdown_rx,
         game_mode_rx,
@@ -60,8 +57,7 @@ fn run_event_processor(
     keyboard_id: &KeyboardId,
     device: &mut Device,
     keyboard_name: &str,
-    config: &Config,
-    config_path: PathBuf,
+    shared_keymap: &Arc<Mutex<KeymapProcessor>>,
     user_id: u32,
     shutdown_rx: crossbeam_channel::Receiver<()>,
     game_mode_rx: std::sync::mpsc::Receiver<bool>,
@@ -92,18 +88,16 @@ fn run_event_processor(
     release_all_keys_on_startup(&mut virtual_device);
     info!("Released all keys on startup for safety: {}", keyboard_name);
 
-    // Create keymap processor (QMK-inspired)
-    let mut keymap = KeymapProcessor::new(config, config_path, user_id);
-
-    // Load adaptive timing stats from disk
-    let _ = keymap.load_adaptive_stats(user_id); // Ignore errors if file doesn't exist
-
     // Track last save time for periodic stats saving
     let mut last_stats_save = std::time::Instant::now();
     const STATS_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
-    // Event processing loop
+    // Event processing loop. Each pass locks the keyboard's shared keymap, so the
+    // device threads for one keyboard take turns and see one chord and layer state.
     loop {
+        let mut keymap = shared_keymap
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Check for shutdown signal (non-blocking)
         match shutdown_rx.try_recv() {
             Ok(()) => {
@@ -279,6 +273,8 @@ fn run_event_processor(
                     _ => {}
                 }
 
+                // Let the keyboard's other device threads in before sleeping
+                drop(keymap);
                 // Sleep briefly to avoid CPU spinning
                 // 1ms sleep provides excellent responsiveness while preventing busy-wait
                 std::thread::sleep(std::time::Duration::from_millis(1));
