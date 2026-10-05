@@ -127,7 +127,7 @@ pub struct ChordRow {
     pub word: String,
     pub stroke: String,
     pub keys: Vec<String>,
-    /// Each stroke key pressed, with the sound it stands for, e.g. `K- (k), W- (w)`.
+    /// The sounds of the stroke keys pressed, run together, e.g. `kweug`.
     pub sounds: String,
 }
 
@@ -145,10 +145,29 @@ const SEARCH_BUDGET: usize = 20_000;
 pub fn chord_rows(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &str) -> Vec<ChordRow> {
     let words: Vec<&str> = text.split_whitespace().collect();
     let candidates: Vec<Vec<Vec<u32>>> = words.iter().map(|word| ranked_strokes(&dict, word)).collect();
-    let chosen: Vec<Option<Vec<u32>>> = match exact_strokes(dict, &words, &candidates) {
-        Some(exact) => exact.into_iter().map(Some).collect(),
-        None => candidates.iter().map(|options| options.first().cloned()).collect(),
-    };
+
+    // Words with no entry can't be typed, so each run of known words is searched on its own,
+    // starting from a fresh translator
+    let base = Translator::new(dict);
+    let mut chosen: Vec<Option<Vec<u32>>> = Vec::with_capacity(words.len());
+    let mut start = 0;
+    while start < words.len() {
+        if candidates[start].is_empty() {
+            chosen.push(None);
+            start += 1;
+            continue;
+        }
+        let end = (start..words.len())
+            .find(|&i| candidates[i].is_empty())
+            .unwrap_or(words.len());
+        let run_words = &words[start..end];
+        let run_candidates = &candidates[start..end];
+        match exact_strokes(&base, run_words, run_candidates) {
+            Some(exact) => chosen.extend(exact.into_iter().map(Some)),
+            None => chosen.extend(run_candidates.iter().map(|options| options.first().cloned())),
+        }
+        start = end;
+    }
 
     let mut rows = Vec::new();
     for (word, strokes) in words.iter().zip(chosen) {
@@ -183,13 +202,11 @@ fn ranked_strokes(dict: &Dictionary, word: &str) -> Vec<Vec<u32>> {
 }
 
 /// One stroke sequence per word that together type `words` exactly, or `None`.
-fn exact_strokes(dict: Dictionary, words: &[&str], candidates: &[Vec<Vec<u32>>]) -> Option<Vec<Vec<u32>>> {
-    if candidates.iter().any(Vec::is_empty) {
-        return None;
-    }
+/// `base` is a fresh translator, so the run starts with no leading space.
+fn exact_strokes(base: &Translator, words: &[&str], candidates: &[Vec<Vec<u32>>]) -> Option<Vec<Vec<u32>>> {
     let mut chosen = Vec::new();
     let mut budget = SEARCH_BUDGET;
-    search(&Translator::new(dict), words, candidates, &mut budget, &mut chosen).then_some(chosen)
+    search(base, words, candidates, &mut budget, &mut chosen).then_some(chosen)
 }
 
 /// Depth-first search over each word's stroke sequences. A choice is kept when the
@@ -262,13 +279,12 @@ fn stroke_keys(bits: u32, keys_by_bit: &HashMap<u32, KeyCode>) -> Vec<String> {
     presses.into_iter().map(|(_, key)| key_label(key)).collect()
 }
 
-/// The sound behind each stroke key in `bits`, e.g. `K- (k), W- (w), -G (g)`.
+/// The sounds of the stroke keys in `bits`, run together in stroke order, e.g. `hrubg`.
 fn stroke_sounds(bits: u32) -> String {
     (0..SLOTS.len())
         .filter(|&slot| bits & (1 << slot) != 0)
-        .map(|slot| format!("{} ({})", SLOTS[slot].1, SLOT_SOUNDS[slot]))
-        .collect::<Vec<_>>()
-        .join(", ")
+        .map(|slot| SLOT_SOUNDS[slot])
+        .collect()
 }
 
 /// How a physical key is written on the page: `KC_SCLN` is `;`, `KC_A` is `A`.
@@ -439,7 +455,7 @@ mod tests {
                 word: "the".to_string(),
                 stroke: "-T".to_string(),
                 keys: vec!["O".to_string()],
-                sounds: "-T (t)".to_string(),
+                sounds: "t".to_string(),
             }]
         );
     }
@@ -455,11 +471,27 @@ mod tests {
     }
 
     #[test]
+    fn unknown_word_does_not_stop_the_rest_from_matching() {
+        let mut dict = Dictionary::default();
+        dict.merge_json(r#"{"AOT": "{out^}", "A": "out", "W": "with"}"#).unwrap();
+        let rows = chord_rows(dict, &qwerty_keys_by_bit(), "out zzyzx with");
+        let strokes: Vec<String> = rows.iter().map(|row| row.stroke.clone()).collect();
+        assert_eq!(
+            strokes,
+            [
+                render_stroke(parse_stroke("A").unwrap()),
+                "no stroke".to_string(),
+                render_stroke(parse_stroke("W").unwrap()),
+            ]
+        );
+    }
+
+    #[test]
     fn quick_breaks_down_into_its_sounds() {
         let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "quick");
         assert_eq!(rows[0].stroke, "KWEUG");
         assert_eq!(rows[0].keys, ["S", "D", "B", "K"]);
-        assert_eq!(rows[0].sounds, "K- (k), W- (w), -E (e), -U (u), -G (g)");
+        assert_eq!(rows[0].sounds, "kweug");
     }
 
     #[test]
