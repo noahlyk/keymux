@@ -12,10 +12,11 @@ use super::dict::Dictionary;
 use super::format::{capitalize_word, render, FormatState, Piece};
 use super::numbers::number_text;
 use super::orthography;
+use std::sync::Arc;
 use tracing::info;
 
 /// The stroke that undoes the last translation: `*` on its own.
-const UNDO_STROKE: u32 = 1 << 9;
+pub const UNDO_STROKE: u32 = 1 << 9;
 
 /// How many translations stay undoable. Older output is never touched again.
 const MAX_HISTORY: usize = 4096;
@@ -29,7 +30,7 @@ pub enum StenoOutput {
     Retype { backspaces: usize, text: String },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Emitted {
     /// Every stroke this translation covers, including any it replaced
     strokes: Vec<u32>,
@@ -42,9 +43,10 @@ struct Emitted {
     consumed: Vec<Emitted>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Translator {
-    dict: Dictionary,
+    /// Shared, so a copy of the translator (see `keys`) doesn't copy the dictionary
+    dict: Arc<Dictionary>,
     /// Everything typed that can still be retyped, most recent last
     output: String,
     history: Vec<Emitted>,
@@ -56,7 +58,7 @@ impl Translator {
     #[must_use]
     pub fn new(dict: Dictionary) -> Self {
         Self {
-            dict,
+            dict: Arc::new(dict),
             output: String::new(),
             history: Vec::new(),
             state: FormatState::default(),
@@ -75,7 +77,13 @@ impl Translator {
 
     /// Swap in dictionaries that finished loading in the background.
     pub fn set_dictionary(&mut self, dict: Dictionary) {
-        self.dict = dict;
+        self.dict = Arc::new(dict);
+    }
+
+    /// Everything typed so far that can still be retyped.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.output
     }
 
     /// The user pressed Backspace, which deleted the last character on screen.

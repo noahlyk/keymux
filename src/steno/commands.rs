@@ -6,6 +6,7 @@ use super::layout::{build_key_map, parse_stroke, preset, render_stroke, SLOTS, S
 use super::numbers::number_text;
 use super::setup::{default_dictionaries, steno_dir};
 use super::tape;
+use super::translate::Translator;
 use crate::keycode::KeyCode;
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashMap;
@@ -54,7 +55,7 @@ pub fn show_stroke(config_dir: &Path, text: &str) -> Result<()> {
 /// Print the keys that type `text` on the built-in QWERTY layout, one row per stroke.
 pub fn keys(config_dir: &Path, text: &str) -> Result<()> {
     let dict = load_dictionary(config_dir);
-    print_table(&chord_rows(&dict, &qwerty_keys_by_bit()?, text));
+    print_table(&chord_rows(dict, &qwerty_keys_by_bit()?, text));
     Ok(())
 }
 
@@ -130,21 +131,30 @@ pub struct ChordRow {
     pub sounds: String,
 }
 
+/// Stroke sequences tried per word before giving up on an exact match.
+const SEARCH_BUDGET: usize = 20_000;
+
 /// The rows that type `text`, one per stroke.
 ///
-/// Each word uses the translation with the fewest strokes, then the fewest keys. The word
-/// is written on the first row of a multi-stroke word only. A word with no entry gets a
-/// single row marked "no stroke".
+/// Words are typed through the same translator a steno layer uses, so spacing and
+/// attached suffixes come out as written. Where a word has more than one stroke
+/// sequence, the first that types the text exactly is used. When no sequence types
+/// the text exactly, each word gets its fewest-stroke translation. A word with no
+/// entry gets a single row marked "no stroke".
 #[must_use]
-pub fn chord_rows(dict: &Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &str) -> Vec<ChordRow> {
+pub fn chord_rows(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &str) -> Vec<ChordRow> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let candidates: Vec<Vec<Vec<u32>>> = words.iter().map(|word| ranked_strokes(&dict, word)).collect();
+    let chosen: Vec<Option<Vec<u32>>> = match exact_strokes(dict, &words, &candidates) {
+        Some(exact) => exact.into_iter().map(Some).collect(),
+        None => candidates.iter().map(|options| options.first().cloned()).collect(),
+    };
+
     let mut rows = Vec::new();
-    for word in text.split_whitespace() {
-        let best = dict.strokes_for(word).into_iter().min_by_key(|strokes| {
-            (strokes.len(), strokes.iter().map(|s| s.count_ones()).sum::<u32>())
-        });
-        let Some(strokes) = best else {
+    for (word, strokes) in words.iter().zip(chosen) {
+        let Some(strokes) = strokes else {
             rows.push(ChordRow {
-                word: word.to_string(),
+                word: (*word).to_string(),
                 stroke: "no stroke".to_string(),
                 keys: Vec::new(),
                 sounds: String::new(),
@@ -153,7 +163,7 @@ pub fn chord_rows(dict: &Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: 
         };
         for (i, &bits) in strokes.iter().enumerate() {
             rows.push(ChordRow {
-                word: if i == 0 { word.to_string() } else { String::new() },
+                word: if i == 0 { (*word).to_string() } else { String::new() },
                 stroke: render_stroke(bits),
                 keys: stroke_keys(bits, keys_by_bit),
                 sounds: stroke_sounds(bits),
@@ -161,6 +171,62 @@ pub fn chord_rows(dict: &Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: 
         }
     }
     rows
+}
+
+/// Every stroke sequence that translates `word`, fewest strokes first, then fewest keys.
+fn ranked_strokes(dict: &Dictionary, word: &str) -> Vec<Vec<u32>> {
+    let mut found = dict.strokes_for(word);
+    found.sort_by_key(|strokes| {
+        (strokes.len(), strokes.iter().map(|s| s.count_ones()).sum::<u32>())
+    });
+    found
+}
+
+/// One stroke sequence per word that together type `words` exactly, or `None`.
+fn exact_strokes(dict: Dictionary, words: &[&str], candidates: &[Vec<Vec<u32>>]) -> Option<Vec<Vec<u32>>> {
+    if candidates.iter().any(Vec::is_empty) {
+        return None;
+    }
+    let mut chosen = Vec::new();
+    let mut budget = SEARCH_BUDGET;
+    search(&Translator::new(dict), words, candidates, &mut budget, &mut chosen).then_some(chosen)
+}
+
+/// Depth-first search over each word's stroke sequences. A choice is kept when the
+/// text so far is exactly the words up to it. Each try runs on a copy of the
+/// translator, so a rejected choice leaves nothing behind.
+fn search(
+    translator: &Translator,
+    words: &[&str],
+    candidates: &[Vec<Vec<u32>>],
+    budget: &mut usize,
+    chosen: &mut Vec<Vec<u32>>,
+) -> bool {
+    let i = chosen.len();
+    if i == words.len() {
+        return true;
+    }
+    let want = words[..=i].join(" ");
+    for option in &candidates[i] {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        let mut next = translator.clone();
+        let mut fits = true;
+        for &bits in option {
+            next.stroke(bits);
+            fits &= !next.was_unmatched();
+        }
+        if fits && next.text() == want {
+            chosen.push(option.clone());
+            if search(&next, words, candidates, budget, chosen) {
+                return true;
+            }
+            chosen.pop();
+        }
+    }
+    false
 }
 
 /// The physical keys for each stroke key pressed in `bits`, in stroke order.
@@ -366,7 +432,7 @@ mod tests {
 
     #[test]
     fn one_stroke_word_shows_its_keys_and_sounds() {
-        let rows = chord_rows(&sample_dict(), &qwerty_keys_by_bit(), "the");
+        let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "the");
         assert_eq!(
             rows,
             vec![ChordRow {
@@ -379,8 +445,18 @@ mod tests {
     }
 
     #[test]
+    fn keys_pick_the_stroke_that_types_the_text_exactly() {
+        // AOT attaches "out" to the next word, so "out with" needs the plain "A" instead
+        let mut dict = Dictionary::default();
+        dict.merge_json(r#"{"AOT": "{out^}", "A": "out", "W": "with"}"#).unwrap();
+        let rows = chord_rows(dict, &qwerty_keys_by_bit(), "out with");
+        let strokes: Vec<&str> = rows.iter().map(|row| row.stroke.as_str()).collect();
+        assert_eq!(strokes, [render_stroke(parse_stroke("A").unwrap()), render_stroke(parse_stroke("W").unwrap())]);
+    }
+
+    #[test]
     fn quick_breaks_down_into_its_sounds() {
-        let rows = chord_rows(&sample_dict(), &qwerty_keys_by_bit(), "quick");
+        let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "quick");
         assert_eq!(rows[0].stroke, "KWEUG");
         assert_eq!(rows[0].keys, ["S", "D", "B", "K"]);
         assert_eq!(rows[0].sounds, "K- (k), W- (w), -E (e), -U (u), -G (g)");
@@ -399,14 +475,14 @@ mod tests {
     #[test]
     fn word_uses_the_fewest_strokes() {
         // The one-stroke form beats the two-stroke "jump" + "ed" form
-        let rows = chord_rows(&sample_dict(), &qwerty_keys_by_bit(), "jumped");
+        let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "jumped");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].stroke, render_stroke(parse_stroke("SKWR*UPLD").unwrap()));
     }
 
     #[test]
     fn unknown_word_gets_a_no_stroke_row() {
-        let rows = chord_rows(&sample_dict(), &qwerty_keys_by_bit(), "zzyzx");
+        let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "zzyzx");
         assert_eq!(rows[0].stroke, "no stroke");
         assert!(rows[0].keys.is_empty());
     }
