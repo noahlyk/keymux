@@ -100,7 +100,7 @@ fn tg_latches_after_release_and_toggles_off() {
 
     // Strokes work while latched
     assert_eq!(
-        chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]),
+        chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_X, KeyCode::KC_P]),
         ProcessResult::TypeString("cat".to_string(), false)
     );
 
@@ -125,10 +125,10 @@ fn stray_space_during_a_chord_does_not_disturb_the_stroke() {
     assert_eq!(p.process_key(KeyCode::KC_S, true), ProcessResult::None);
     assert_eq!(p.process_key(KeyCode::KC_SPC, true), ProcessResult::None);
     assert_eq!(p.process_key(KeyCode::KC_SPC, false), ProcessResult::None);
-    assert_eq!(p.process_key(KeyCode::KC_C, true), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_X, true), ProcessResult::None);
     assert_eq!(p.process_key(KeyCode::KC_P, true), ProcessResult::None);
     assert_eq!(p.process_key(KeyCode::KC_S, false), ProcessResult::None);
-    assert_eq!(p.process_key(KeyCode::KC_C, false), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_X, false), ProcessResult::None);
     assert_eq!(
         p.process_key(KeyCode::KC_P, false),
         ProcessResult::TypeString("cat".to_string(), false)
@@ -156,7 +156,7 @@ fn backspace_on_a_steno_layer_reaches_the_screen_and_fixes_undo() {
     enter_steno(&mut p);
 
     // "cat" is typed, then Backspace removes its last letter by hand
-    chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]);
+    chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_X, KeyCode::KC_P]);
     assert_eq!(
         p.process_key(KeyCode::KC_BSPC, true),
         ProcessResult::EmitKey(KeyCode::KC_BSPC, true)
@@ -203,7 +203,7 @@ fn chord_on_steno_layer_types_dictionary_text() {
     enter_steno(&mut p);
 
     // K- A- -T is "cat"
-    let result = chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]);
+    let result = chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_X, KeyCode::KC_P]);
     assert_eq!(result, ProcessResult::TypeString("cat".to_string(), false));
 }
 
@@ -255,11 +255,11 @@ fn stroke_released_after_layer_exit_still_types() {
     enter_steno(&mut p);
 
     assert_eq!(p.process_key(KeyCode::KC_S, true), ProcessResult::None);
-    assert_eq!(p.process_key(KeyCode::KC_C, true), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_X, true), ProcessResult::None);
     assert_eq!(p.process_key(KeyCode::KC_P, true), ProcessResult::None);
     p.deactivate_layer_for_test(&Layer("chords".to_string()));
     assert_eq!(p.process_key(KeyCode::KC_S, false), ProcessResult::None);
-    assert_eq!(p.process_key(KeyCode::KC_C, false), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_X, false), ProcessResult::None);
     assert_eq!(
         p.process_key(KeyCode::KC_P, false),
         ProcessResult::TypeString("cat".to_string(), false)
