@@ -165,11 +165,35 @@ pub fn chord_rows(dict: &Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: 
 
 /// The physical keys for each stroke key pressed in `bits`, in stroke order.
 fn stroke_keys(bits: u32, keys_by_bit: &HashMap<u32, KeyCode>) -> Vec<String> {
-    (0..SLOTS.len())
-        .map(|slot| 1 << slot)
-        .filter(|bit| bits & bit != 0)
-        .map(|bit| keys_by_bit.get(&bit).map_or_else(|| "?".to_string(), |&key| key_label(key)))
-        .collect()
+    // Cover the stroke with the widest combined keys that fit inside it, then press
+    // single keys for whatever is left
+    let mut combined: Vec<(u32, KeyCode)> = keys_by_bit
+        .iter()
+        .filter(|(&mask, _)| mask.count_ones() > 1 && mask & !bits == 0)
+        .map(|(&mask, &key)| (mask, key))
+        .collect();
+    combined.sort_by_key(|&(mask, _)| (std::cmp::Reverse(mask.count_ones()), mask));
+
+    let mut remaining = bits;
+    let mut presses: Vec<(u32, KeyCode)> = Vec::new();
+    for (mask, key) in combined {
+        if remaining & mask == mask {
+            remaining &= !mask;
+            presses.push((mask, key));
+        }
+    }
+    for slot in 0..SLOTS.len() {
+        let bit = 1 << slot;
+        if remaining & bit != 0 {
+            if let Some(&key) = keys_by_bit.get(&bit) {
+                presses.push((bit, key));
+            }
+        }
+    }
+
+    // Stroke order: each press sits where its lowest stroke key sits
+    presses.sort_by_key(|&(mask, _)| mask.trailing_zeros());
+    presses.into_iter().map(|(_, key)| key_label(key)).collect()
 }
 
 /// The sound behind each stroke key in `bits`, e.g. `K- (k), W- (w), -G (g)`.
@@ -358,8 +382,18 @@ mod tests {
     fn quick_breaks_down_into_its_sounds() {
         let rows = chord_rows(&sample_dict(), &qwerty_keys_by_bit(), "quick");
         assert_eq!(rows[0].stroke, "KWEUG");
-        assert_eq!(rows[0].keys, ["S", "D", "N", "M", "K"]);
+        assert_eq!(rows[0].keys, ["S", "D", "B", "K"]);
         assert_eq!(rows[0].sounds, "K- (k), W- (w), -E (e), -U (u), -G (g)");
+    }
+
+    #[test]
+    fn combined_key_replaces_the_pair_it_presses() {
+        let keys = qwerty_keys_by_bit();
+        // K- and -T are single keys; A- and O- together are the combined V
+        let stroke = parse_stroke("KAO-T").unwrap();
+        assert_eq!(stroke_keys(stroke, &keys), ["S", "V", "O"]);
+        // A lone A- still presses its single key
+        assert_eq!(stroke_keys(parse_stroke("KA").unwrap(), &keys), ["S", "X"]);
     }
 
     #[test]
