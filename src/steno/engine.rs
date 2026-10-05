@@ -92,6 +92,11 @@ impl StenoEngine {
         self.keys.contains_key(&key)
     }
 
+    /// Start a fresh sentence, as when the layer is entered. See [`Translator::start_fresh`].
+    pub fn start_fresh(&mut self) {
+        self.translator.start_fresh();
+    }
+
     /// A stroke key went down.
     pub fn press(&mut self, key: KeyCode, now: Instant) {
         if let Some(&bit) = self.keys.get(&key) {

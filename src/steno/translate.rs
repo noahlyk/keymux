@@ -64,6 +64,15 @@ impl Translator {
         }
     }
 
+    /// Forget what was typed, as when a steno layer is entered. Text typed before
+    /// then is not retyped or undone, and the next word starts with no leading space.
+    pub fn start_fresh(&mut self) {
+        self.output.clear();
+        self.history.clear();
+        self.state = FormatState::default();
+        self.unmatched = false;
+    }
+
     /// Swap in dictionaries that finished loading in the background.
     pub fn set_dictionary(&mut self, dict: Dictionary) {
         self.dict = dict;

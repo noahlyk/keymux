@@ -55,6 +55,8 @@ pub struct KeymapProcessor {
     adaptive_processor: AdaptiveProcessor,
     /// Chord state for each steno layer, keyed by layer name
     steno_engines: HashMap<Layer, StenoEngine>,
+    /// The steno layer that was on top at the last key press, if any
+    steno_active: Option<Layer>,
     /// Limits the "steno isn't set up" notification
     setup_hint: Cooldown,
     config_dir: PathBuf,
@@ -98,6 +100,7 @@ impl KeymapProcessor {
             socd_processor: crate::event_processor::actions::SocdProcessor::from_config(config),
             adaptive_processor: AdaptiveProcessor::new(),
             steno_engines,
+            steno_active: None,
             setup_hint: Cooldown::new(Duration::from_secs(3)),
             config_dir,
             user_id,
@@ -201,6 +204,13 @@ impl KeymapProcessor {
         }
 
         let top = self.layer_stack.current_layer();
+        // Entering a steno layer starts a fresh sentence, so its first word has no leading space
+        if self.steno_active.as_ref() != Some(&top) {
+            if let Some(engine) = self.steno_engines.get_mut(&top) {
+                engine.start_fresh();
+            }
+            self.steno_active = self.steno_engines.contains_key(&top).then(|| top.clone());
+        }
         let game_mode = self.layer_stack.is_game_mode_active();
         let engine = self.steno_engines.get_mut(&top)?;
         if game_mode && engine.disabled_in_game_mode {

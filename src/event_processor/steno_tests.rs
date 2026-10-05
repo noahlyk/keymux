@@ -265,3 +265,23 @@ fn stroke_released_after_layer_exit_still_types() {
         ProcessResult::TypeString("cat".to_string(), false)
     );
 }
+
+#[test]
+fn reentering_a_steno_layer_starts_without_a_leading_space() {
+    let fixture = Fixture::new("reenter");
+    let mut p = fixture.processor();
+    enter_steno(&mut p);
+    let cat = [KeyCode::KC_S, KeyCode::KC_X, KeyCode::KC_O];
+    assert_eq!(
+        chord(&mut p, &cat),
+        ProcessResult::TypeString("cat".to_string(), false)
+    );
+
+    // Leaving and coming back starts a new sentence, so "cat" gets no leading space
+    p.deactivate_layer_for_test(&Layer("chords".to_string()));
+    enter_steno(&mut p);
+    assert_eq!(
+        chord(&mut p, &cat),
+        ProcessResult::TypeString("cat".to_string(), false)
+    );
+}
