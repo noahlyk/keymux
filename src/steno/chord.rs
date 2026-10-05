@@ -30,18 +30,20 @@ impl ChordState {
 
     /// A stroke key went down.
     pub const fn press(&mut self, bit: u32, now: Instant) {
-        if self.held & bit != 0 {
-            // Auto-repeat or a duplicate event; the key is already in the chord
+        // Bits already held came from another key or an auto-repeat; only new bits count
+        let new = bit & !self.held;
+        if new == 0 {
             return;
         }
         if self.stroke == 0 {
             self.started = Some(now);
         }
-        self.held |= bit;
-        self.stroke |= bit;
+        self.held |= new;
+        self.stroke |= new;
     }
 
-    /// A stroke key came up. Returns the finished stroke once nothing is held.
+    /// A stroke key came up. `bit` is the part of its stroke no other held key still
+    /// presses. Returns the finished stroke once nothing is held.
     pub fn release(&mut self, bit: u32) -> Option<u32> {
         self.held &= !bit;
         if self.held == 0 {

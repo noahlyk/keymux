@@ -72,6 +72,26 @@ pub fn layout() -> Result<()> {
             [name.to_string(), press, SLOT_SOUNDS[slot].to_string()]
         })
         .collect();
+    // Combined keys press several stroke keys at once, so list them after the single ones
+    let mut combined: Vec<[String; 3]> = keys_by_bit
+        .iter()
+        .filter(|(bits, _)| bits.count_ones() > 1)
+        .map(|(&bits, &key)| {
+            let parts: Vec<(&str, &str)> = SLOTS
+                .iter()
+                .enumerate()
+                .filter(|(slot, _)| bits & (1 << slot) != 0)
+                .map(|(slot, &(_, name))| (name, SLOT_SOUNDS[slot]))
+                .collect();
+            [
+                parts.iter().map(|(name, _)| *name).collect::<Vec<_>>().join("+"),
+                key_label(key),
+                parts.iter().map(|(_, sound)| *sound).collect::<Vec<_>>().join(" + "),
+            ]
+        })
+        .collect();
+    combined.sort_by(|a, b| a[0].cmp(&b[0]));
+    let rows: Vec<[String; 3]> = rows.into_iter().chain(combined).collect();
     let widths = [0, 1, 2].map(|col| {
         rows.iter().map(|row| row[col].len()).max().unwrap_or(0)
     });
@@ -338,7 +358,7 @@ mod tests {
     fn quick_breaks_down_into_its_sounds() {
         let rows = chord_rows(&sample_dict(), &qwerty_keys_by_bit(), "quick");
         assert_eq!(rows[0].stroke, "KWEUG");
-        assert_eq!(rows[0].keys, ["S", "D", "N", ",", "K"]);
+        assert_eq!(rows[0].keys, ["S", "D", "N", "M", "K"]);
         assert_eq!(rows[0].sounds, "K- (k), W- (w), -E (e), -U (u), -G (g)");
     }
 

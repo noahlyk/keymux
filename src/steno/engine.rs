@@ -10,7 +10,7 @@ use super::translate::{StenoOutput, Translator};
 use crate::config::{KeyAction, StenoConfig};
 use crate::keycode::KeyCode;
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 #[derive(Debug)]
 pub struct StenoEngine {
     keys: HashMap<KeyCode, u32>,
+    /// Stroke keys physically down, so a release can tell which of their bits are still pressed
+    held_keys: HashSet<KeyCode>,
     chord: ChordState,
     translator: Translator,
     /// Dictionaries still loading on a background thread
@@ -67,6 +69,7 @@ impl StenoEngine {
 
         Ok(Self {
             keys,
+            held_keys: HashSet::new(),
             chord: ChordState::new(Duration::from_millis(u64::from(config.stroke_timeout_ms))),
             translator: Translator::new(Dictionary::default()),
             loading: Some(loading),
@@ -92,6 +95,7 @@ impl StenoEngine {
     /// A stroke key went down.
     pub fn press(&mut self, key: KeyCode, now: Instant) {
         if let Some(&bit) = self.keys.get(&key) {
+            self.held_keys.insert(key);
             self.chord.press(bit, now);
         }
     }
@@ -99,7 +103,14 @@ impl StenoEngine {
     /// A stroke key came up. Returns output if this completed a stroke.
     pub fn release(&mut self, key: KeyCode) -> Option<StenoOutput> {
         let bit = *self.keys.get(&key)?;
-        let stroke = self.chord.release(bit)?;
+        self.held_keys.remove(&key);
+        // A combined key (V = A- and O-) shares bits with the keys still down, so keep those
+        let still_held: u32 = self
+            .held_keys
+            .iter()
+            .filter_map(|other| self.keys.get(other))
+            .fold(0, |bits, &other| bits | other);
+        let stroke = self.chord.release(bit & !still_held)?;
         self.on_stroke(stroke)
     }
 
@@ -230,6 +241,7 @@ mod tests {
         dict.merge_json(json).unwrap();
         StenoEngine {
             keys: build_key_map(&preset("qwerty").unwrap(), &HashMap::new()).unwrap(),
+            held_keys: HashSet::new(),
             chord: ChordState::new(Duration::from_secs(1)),
             translator: Translator::new(dict),
             loading: None,
@@ -241,6 +253,24 @@ mod tests {
 
     fn key_for(engine: &StenoEngine, bit: u32) -> KeyCode {
         *engine.keys.iter().find(|(_, b)| **b == bit).unwrap().0
+    }
+
+    #[test]
+    fn combined_key_keeps_bits_that_another_held_key_still_presses() {
+        let mut engine = engine_with_dict(r#"{"AO": "ao"}"#);
+        let now = Instant::now();
+        let a_bit = 1 << crate::steno::layout::slot_by_name("A-").unwrap();
+        let o_bit = 1 << crate::steno::layout::slot_by_name("O-").unwrap();
+        let x = key_for(&engine, a_bit);
+        let v = key_for(&engine, a_bit | o_bit);
+
+        // Letting go of X must not lift A-, since V still presses it
+        engine.press(x, now);
+        engine.press(v, now);
+        assert!(engine.release(x).is_none());
+        // V was the last key, so the stroke A- O- completes
+        let out = engine.release(v);
+        assert!(matches!(out, Some(StenoOutput::Type(ref text)) if text.trim() == "ao"));
     }
 
     #[test]

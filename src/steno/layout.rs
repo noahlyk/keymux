@@ -146,7 +146,7 @@ pub fn build_key_map(
     let mut assigned: HashMap<String, KeyCode> = preset.clone();
 
     for (slot, action) in overrides {
-        if slot_by_name(slot).is_none() {
+        if !slot.split('+').all(|part| slot_by_name(part).is_some()) {
             errors.push(format!("layout override for unknown steno key \"{slot}\""));
             continue;
         }
@@ -174,6 +174,32 @@ pub fn build_key_map(
             continue;
         }
         keys.insert(key, 1 << slot_index);
+    }
+
+    // A combined key presses several stroke keys at once, e.g. "A-+O-" on V.
+    // Its bits are the union of its parts.
+    let mut combined: Vec<(&String, KeyCode)> = assigned
+        .iter()
+        .filter(|(name, _)| name.contains('+'))
+        .map(|(name, &key)| (name, key))
+        .collect();
+    combined.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, key) in combined {
+        let Some(mask) = name
+            .split('+')
+            .map(|part| slot_by_name(part).map(|index| 1 << index))
+            .try_fold(0, |mask, bit| bit.map(|bit| mask | bit))
+        else {
+            errors.push(format!("combined key \"{name}\" names an unknown steno key"));
+            continue;
+        };
+        if let Some(other) = owners.insert(key, name.as_str()) {
+            errors.push(format!(
+                "{key:?} is used by both \"{other}\" and \"{name}\""
+            ));
+            continue;
+        }
+        keys.insert(key, mask);
     }
 
     if errors.is_empty() {
@@ -247,7 +273,21 @@ mod tests {
     #[test]
     fn qwerty_preset_covers_every_steno_key_once() {
         let map = build_key_map(&preset("qwerty").unwrap(), &HashMap::new()).unwrap();
-        assert_eq!(map.len(), SLOTS.len());
+        // One physical key per stroke key, plus the two combined keys
+        assert_eq!(map.len(), SLOTS.len() + 2);
+        let single = map
+            .values()
+            .filter(|bits| bits.count_ones() == 1)
+            .fold(0, |all, bits| all | bits);
+        assert_eq!(single.count_ones() as usize, SLOTS.len());
+    }
+
+    #[test]
+    fn combined_keys_press_both_of_their_parts() {
+        let map = build_key_map(&preset("qwerty").unwrap(), &HashMap::new()).unwrap();
+        let bit = |name: &str| 1 << slot_by_name(name).unwrap();
+        assert_eq!(map[&KeyCode::KC_V], bit("A-") | bit("O-"));
+        assert_eq!(map[&KeyCode::KC_B], bit("-E") | bit("-U"));
     }
 
     #[test]
