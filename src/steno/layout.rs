@@ -95,6 +95,13 @@ pub fn render_stroke(bits: u32) -> String {
     out
 }
 
+/// The sound each stroke key stands for, in the same order as [`SLOTS`]. This is the
+/// reason a key is in a stroke: `KWEUBG` is K (k), W (w), E (e), U (u), B and G (ck).
+pub const SLOT_SOUNDS: [&str; 23] = [
+    "s", "t", "k", "p", "w", "h", "r", "a", "o", "*", "e", "u", "f", "r", "p", "b", "l", "g", "t",
+    "s", "d", "z", "#",
+];
+
 /// Look up a stroke slot by its config name (`"S-"`, `"*"`, `"-E"`, ...).
 #[must_use]
 pub fn slot_by_name(name: &str) -> Option<usize> {

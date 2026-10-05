@@ -2,11 +2,13 @@
 
 use super::dict::Dictionary;
 use super::format::{parse_pieces, render, FormatState};
-use super::layout::{parse_stroke, render_stroke};
+use super::layout::{build_key_map, parse_stroke, preset, render_stroke, SLOTS, SLOT_SOUNDS};
 use super::numbers::number_text;
 use super::setup::{default_dictionaries, steno_dir};
 use super::tape;
-use anyhow::{bail, Context, Result};
+use crate::keycode::KeyCode;
+use anyhow::{anyhow, bail, Context, Result};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -47,6 +49,114 @@ pub fn show_stroke(config_dir: &Path, text: &str) -> Result<()> {
         println!("{} has no translation", format_strokes(&strokes));
     }
     Ok(())
+}
+
+/// Print the keys that type `text` on the built-in QWERTY layout, one row per stroke.
+pub fn keys(config_dir: &Path, text: &str) -> Result<()> {
+    let dict = load_dictionary(config_dir);
+    let preset = preset("qwerty").map_err(|e| anyhow!(e))?;
+    let layout = build_key_map(&preset, &HashMap::new()).map_err(|errs| anyhow!(errs.join("; ")))?;
+    let keys_by_bit: HashMap<u32, KeyCode> = layout.into_iter().map(|(key, bit)| (bit, key)).collect();
+    print_table(&chord_rows(&dict, &keys_by_bit, text));
+    Ok(())
+}
+
+/// One line of `keymux steno keys`: a word, one of its strokes, and the keys that press it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ChordRow {
+    pub word: String,
+    pub stroke: String,
+    pub keys: Vec<String>,
+    /// Each stroke key pressed, with the sound it stands for, e.g. `K- (k), W- (w)`.
+    pub sounds: String,
+}
+
+/// The rows that type `text`, one per stroke.
+///
+/// Each word uses the translation with the fewest strokes, then the fewest keys. The word
+/// is written on the first row of a multi-stroke word only. A word with no entry gets a
+/// single row marked "no stroke".
+#[must_use]
+pub fn chord_rows(dict: &Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &str) -> Vec<ChordRow> {
+    let mut rows = Vec::new();
+    for word in text.split_whitespace() {
+        let best = dict.strokes_for(word).into_iter().min_by_key(|strokes| {
+            (strokes.len(), strokes.iter().map(|s| s.count_ones()).sum::<u32>())
+        });
+        let Some(strokes) = best else {
+            rows.push(ChordRow {
+                word: word.to_string(),
+                stroke: "no stroke".to_string(),
+                keys: Vec::new(),
+                sounds: String::new(),
+            });
+            continue;
+        };
+        for (i, &bits) in strokes.iter().enumerate() {
+            rows.push(ChordRow {
+                word: if i == 0 { word.to_string() } else { String::new() },
+                stroke: render_stroke(bits),
+                keys: stroke_keys(bits, keys_by_bit),
+                sounds: stroke_sounds(bits),
+            });
+        }
+    }
+    rows
+}
+
+/// The physical keys for each stroke key pressed in `bits`, in stroke order.
+fn stroke_keys(bits: u32, keys_by_bit: &HashMap<u32, KeyCode>) -> Vec<String> {
+    (0..SLOTS.len())
+        .map(|slot| 1 << slot)
+        .filter(|bit| bits & bit != 0)
+        .map(|bit| keys_by_bit.get(&bit).map_or_else(|| "?".to_string(), |&key| key_label(key)))
+        .collect()
+}
+
+/// The sound behind each stroke key in `bits`, e.g. `K- (k), W- (w), -G (g)`.
+fn stroke_sounds(bits: u32) -> String {
+    (0..SLOTS.len())
+        .filter(|&slot| bits & (1 << slot) != 0)
+        .map(|slot| format!("{} ({})", SLOTS[slot].1, SLOT_SOUNDS[slot]))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// How a physical key is written on the page: `KC_SCLN` is `;`, `KC_A` is `A`.
+#[must_use]
+pub fn key_label(key: KeyCode) -> String {
+    let name = format!("{key:?}");
+    let name = name.strip_prefix("KC_").unwrap_or(&name);
+    match name {
+        "COMM" => ",".to_string(),
+        "DOT" => ".".to_string(),
+        "SLSH" => "/".to_string(),
+        "SCLN" => ";".to_string(),
+        "QUOT" => "'".to_string(),
+        "LBRC" => "[".to_string(),
+        "RBRC" => "]".to_string(),
+        "MINS" => "-".to_string(),
+        "EQL" => "=".to_string(),
+        "GRV" => "`".to_string(),
+        "BSLS" => "\\".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn print_table(rows: &[ChordRow]) {
+    let word_w = rows.iter().map(|r| r.word.len()).max().unwrap_or(0).max("Word".len());
+    let stroke_w = rows.iter().map(|r| r.stroke.len()).max().unwrap_or(0).max("Stroke".len());
+    let keys_w = rows.iter().map(|r| r.keys.join(" ").len()).max().unwrap_or(0).max("Keys".len());
+    println!("{:<word_w$}  {:<stroke_w$}  {:<keys_w$}  Sounds", "Word", "Stroke", "Keys");
+    for row in rows {
+        println!(
+            "{:<word_w$}  {:<stroke_w$}  {:<keys_w$}  {}",
+            row.word,
+            row.stroke,
+            row.keys.join(" "),
+            row.sounds
+        );
+    }
 }
 
 /// Add or replace a translation in the user dictionary.
@@ -150,5 +260,69 @@ mod tests {
     #[test]
     fn invalid_strokes_are_rejected() {
         assert!(parse_strokes("not a stroke").is_err());
+    }
+
+    fn qwerty_keys_by_bit() -> HashMap<u32, KeyCode> {
+        let preset = preset("qwerty").unwrap();
+        build_key_map(&preset, &HashMap::new())
+            .unwrap()
+            .into_iter()
+            .map(|(key, bit)| (bit, key))
+            .collect()
+    }
+
+    fn sample_dict() -> Dictionary {
+        let mut dict = Dictionary::default();
+        dict.merge_json(
+            r#"{"-T": "the", "KWEUG": "quick", "SKWR*UPLD": "jumped",
+                "SKWRUPL/-PD": "jumped", "TKOG": "dog"}"#,
+        )
+        .unwrap();
+        dict
+    }
+
+    #[test]
+    fn one_stroke_word_shows_its_keys_and_sounds() {
+        let rows = chord_rows(&sample_dict(), &qwerty_keys_by_bit(), "the");
+        assert_eq!(
+            rows,
+            vec![ChordRow {
+                word: "the".to_string(),
+                stroke: "-T".to_string(),
+                keys: vec!["O".to_string()],
+                sounds: "-T (t)".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn quick_breaks_down_into_its_sounds() {
+        let rows = chord_rows(&sample_dict(), &qwerty_keys_by_bit(), "quick");
+        assert_eq!(rows[0].stroke, "KWEUG");
+        assert_eq!(rows[0].keys, ["S", "D", "N", ",", "K"]);
+        assert_eq!(rows[0].sounds, "K- (k), W- (w), -E (e), -U (u), -G (g)");
+    }
+
+    #[test]
+    fn word_uses_the_fewest_strokes() {
+        // The one-stroke form beats the two-stroke "jump" + "ed" form
+        let rows = chord_rows(&sample_dict(), &qwerty_keys_by_bit(), "jumped");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].stroke, render_stroke(parse_stroke("SKWR*UPLD").unwrap()));
+    }
+
+    #[test]
+    fn unknown_word_gets_a_no_stroke_row() {
+        let rows = chord_rows(&sample_dict(), &qwerty_keys_by_bit(), "zzyzx");
+        assert_eq!(rows[0].stroke, "no stroke");
+        assert!(rows[0].keys.is_empty());
+    }
+
+    #[test]
+    fn key_labels_show_punctuation_as_characters() {
+        assert_eq!(key_label(KeyCode::KC_A), "A");
+        assert_eq!(key_label(KeyCode::KC_COMM), ",");
+        assert_eq!(key_label(KeyCode::KC_SCLN), ";");
+        assert_eq!(key_label(KeyCode::KC_QUOT), "'");
     }
 }

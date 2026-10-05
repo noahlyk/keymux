@@ -125,6 +125,9 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|| std::path::Path::new("."));
             match action {
                 cli::StenoAction::Setup => keymux::steno::setup::run_setup(config_dir)?,
+                cli::StenoAction::Keys { text } => {
+                    keymux::steno::commands::keys(config_dir, text)?;
+                }
                 cli::StenoAction::Lookup { word } => {
                     keymux::steno::commands::lookup(config_dir, word);
                 }

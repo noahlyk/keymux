@@ -268,6 +268,12 @@ pub enum Commands {
 pub enum StenoAction {
     /// Download Plover's dictionary into ~/.config/keymux/steno
     Setup,
+    /// Show the keys that type a string on the QWERTY layout, with the sound behind each key,
+    /// e.g. `keymux steno keys "the quick brown fox"`
+    Keys {
+        /// The text to type, split on spaces
+        text: String,
+    },
     /// Show the stroke that types a word, e.g. `keymux steno lookup cat`
     Lookup {
         /// The word to look up (case-sensitive, as the dictionary spells it)
