@@ -4,19 +4,16 @@
 //! parsed once at load time. Entries using commands we don't support are counted
 //! and skipped.
 
-use super::format::{parse_pieces, Piece};
+use super::format::{parse_pieces, render, FormatState, Piece};
 use super::layout::parse_stroke;
 use anyhow::{Context, Result};
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap};
 use std::path::Path;
 use tracing::{info, warn};
 
 #[derive(Debug, Default)]
 pub struct Dictionary {
     entries: HashMap<Vec<u32>, Vec<Piece>>,
-    /// Every proper prefix of a multi-stroke entry. A stroke sequence in here
-    /// might still be part of a longer entry, so translation waits for more strokes.
-    prefixes: HashSet<Vec<u32>>,
     max_len: usize,
 }
 
@@ -70,9 +67,6 @@ impl Dictionary {
             };
             if let Entry::Vacant(slot) = self.entries.entry(strokes.clone()) {
                 self.max_len = self.max_len.max(strokes.len());
-                for len in 1..strokes.len() {
-                    self.prefixes.insert(strokes[..len].to_vec());
-                }
                 slot.insert(pieces);
                 stats.loaded += 1;
             }
@@ -86,10 +80,23 @@ impl Dictionary {
         self.entries.get(strokes).map(Vec::as_slice)
     }
 
-    /// Whether `strokes` is a proper prefix of some longer entry.
+    /// Every stroke sequence whose translation is exactly `text`, ignoring the
+    /// leading space that spacing adds. Case matters.
     #[must_use]
-    pub fn is_prefix(&self, strokes: &[u32]) -> bool {
-        self.prefixes.contains(strokes)
+    pub fn strokes_for(&self, text: &str) -> Vec<Vec<u32>> {
+        let mut found: Vec<Vec<u32>> = self
+            .entries
+            .iter()
+            .filter(|(_, pieces)| render(pieces, &mut FormatState::default()).trim_start() == text)
+            .map(|(strokes, _)| strokes.clone())
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// Every entry, for listing and search.
+    pub fn iter(&self) -> impl Iterator<Item = (&Vec<u32>, &Vec<Piece>)> {
+        self.entries.iter()
     }
 
     /// Length in strokes of the longest entry.
@@ -146,12 +153,20 @@ mod tests {
     }
 
     #[test]
-    fn prefixes_of_multi_stroke_entries_are_tracked() {
+    fn longest_entry_length_is_tracked() {
         let mut dict = Dictionary::default();
         dict.merge_json(r#"{"KPA/TKAOEU": "example"}"#).unwrap();
-        assert!(dict.is_prefix(&[KPA]));
-        assert!(!dict.is_prefix(&[KPA, TKAOEU]));
         assert_eq!(dict.max_len(), 2);
+    }
+
+    #[test]
+    fn strokes_for_finds_every_stroke_sequence_for_a_word() {
+        let mut dict = Dictionary::default();
+        dict.merge_json(r#"{"KAT": "cat", "KPA/TKAOEU": "example"}"#)
+            .unwrap();
+        assert_eq!(dict.strokes_for("cat"), vec![vec![KAT]]);
+        assert_eq!(dict.strokes_for("example"), vec![vec![KPA, TKAOEU]]);
+        assert!(dict.strokes_for("dog").is_empty());
     }
 
     #[test]

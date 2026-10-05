@@ -198,6 +198,12 @@ pub fn validate_config(config_path: Option<&std::path::Path>) -> Result<()> {
                 steno_errors.push(format!("steno layer \"{}\": {}", layer.0, layout_error));
             }
         }
+        if steno.translation_timeout_ms.is_some() {
+            warnings.push(format!(
+                "steno layer \"{}\": translation_timeout_ms is no longer used and can be removed",
+                layer.0
+            ));
+        }
         for raw in &steno.dictionaries {
             let path = resolve_dictionary_path(raw, config_dir, home.as_deref());
             if !path.exists() {

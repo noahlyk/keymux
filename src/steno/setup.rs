@@ -6,6 +6,7 @@
 //! used before anything is installed, the daemon points at this command.
 
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -13,6 +14,11 @@ use std::time::{Duration, Instant};
 /// Plover's main dictionary, as shipped in its repository
 pub const MAIN_DICT_URL: &str =
     "https://raw.githubusercontent.com/openstenoproject/plover/master/plover/assets/main.json";
+
+/// SHA-256 of the `main.json` this release was tested against. A different
+/// download still installs, with a warning, since Plover's master changes.
+pub const MAIN_DICT_SHA256: &str =
+    "6570873c7f703ecd39c9870083f643db3475b49462a8db80fe22fe33ac3cfe92";
 
 /// Shown when the config has no steno layer. Right Ctrl toggles steno on and off.
 const LAYER_SNIPPET: &str = r#"
@@ -58,8 +64,18 @@ pub fn run_setup(config_dir: &Path) -> Result<()> {
 
     let main = dir.join("main.json");
     println!("downloading Plover's main dictionary...");
-    let entries = download_dictionary(MAIN_DICT_URL, &main)?;
+    let (entries, checksum) = download_dictionary(MAIN_DICT_URL, &main)?;
     println!("installed {entries} entries at {}", main.display());
+    if checksum == MAIN_DICT_SHA256 {
+        println!("checksum matches this keymux release");
+    } else {
+        println!(
+            "warning: Plover's dictionary changed since this keymux release.\n  \
+             expected sha256 {MAIN_DICT_SHA256}\n  \
+             got      sha256 {checksum}\n  \
+             It's installed anyway. Report it if strokes stop matching."
+        );
+    }
 
     let config_file = config_dir.join("config.ron");
     let has_steno_layer = std::fs::read_to_string(&config_file)
@@ -77,10 +93,10 @@ pub fn run_setup(config_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Download a dictionary to `dest`, checking that it parses. Returns its entry count.
-/// The file is written to a temporary name first, so a failed download never
-/// replaces a working dictionary.
-fn download_dictionary(url: &str, dest: &Path) -> Result<usize> {
+/// Download a dictionary to `dest`, checking that it parses. Returns its entry
+/// count and SHA-256 in hex. The file is written to a temporary name first, so a
+/// failed download never replaces a working dictionary.
+fn download_dictionary(url: &str, dest: &Path) -> Result<(usize, String)> {
     let partial = dest.with_extension("json.part");
     let status = Command::new("curl")
         .args(["--silent", "--show-error", "--fail", "--location"])
@@ -103,8 +119,9 @@ fn download_dictionary(url: &str, dest: &Path) -> Result<usize> {
         bail!("the download has no entries, so nothing was installed");
     }
 
+    let checksum = format!("{:x}", Sha256::digest(text.as_bytes()));
     std::fs::rename(&partial, dest).with_context(|| format!("installing {}", dest.display()))?;
-    Ok(entries.len())
+    Ok((entries.len(), checksum))
 }
 
 /// Desktop notification for a user, sent through their session like the daemon does.

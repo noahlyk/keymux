@@ -3,9 +3,16 @@
 //!
 //! Supported commands:
 //! - `{^}`: no space before or after the neighbouring text
-//! - `{^text}`: attach `text` to the previous word with no space
+//! - `{^text}`: attach `text` to the previous word with no space (suffixes get
+//!   orthography applied by the translator)
 //! - `{text^}`: type `text`, then no space before the next word
 //! - `{-|}`: capitalize the next word
+//! - `{.}` `{?}` `{!}`: attach and capitalize the next word
+//! - `{,}` `{;}` `{:}`: attach
+//! - `{&x}`: fingerspelling; consecutive letters join with no space
+//! - `{*<}`: capitalize the previous word
+//! - `{*!}`: delete the space before this stroke
+//! - `{*?}`: insert a space before this stroke
 //!
 //! Anything else makes the entry unsupported and it's skipped at load time, so
 //! an unknown command never gets typed out as literal text.
@@ -23,6 +30,14 @@ pub enum Piece {
     Attach,
     /// Capitalize the next word
     CapNext,
+    /// A fingerspelled letter or group; joins a preceding fingerspelled letter
+    Fingerspell(String),
+    /// Capitalize the previous word
+    RetroCapitalize,
+    /// Remove the space before this point
+    RetroDeleteSpace,
+    /// Put a space before this point
+    RetroInsertSpace,
 }
 
 /// Spacing and capitalization state carried from one entry to the next.
@@ -34,6 +49,8 @@ pub struct FormatState {
     pub suppress_space: bool,
     /// The next word is capitalized
     pub capitalize: bool,
+    /// The last thing typed was a fingerspelled letter
+    pub last_fingerspell: bool,
 }
 
 /// Parse a dictionary value into pieces. Returns `None` for unsupported commands.
@@ -65,32 +82,44 @@ fn parse_command(command: &str) -> Option<Vec<Piece>> {
     match command {
         "^" => Some(vec![Piece::Attach]),
         "-|" => Some(vec![Piece::CapNext]),
+        "*<" => Some(vec![Piece::RetroCapitalize]),
+        "*!" => Some(vec![Piece::RetroDeleteSpace]),
+        "*?" => Some(vec![Piece::RetroInsertSpace]),
         // Sentence-ending punctuation attaches to the previous word and capitalizes the next
         "." | "?" | "!" => Some(vec![Piece::AttachText(command.to_string()), Piece::CapNext]),
         // Other punctuation attaches without capitalizing
         "," | ";" | ":" => Some(vec![Piece::AttachText(command.to_string())]),
-        _ => command
-            .strip_prefix('^')
-            .map_or_else(
-                || {
-                    command
-                        .strip_suffix('^')
-                        .filter(|text| !text.is_empty())
-                        .map(|text| Piece::TextAttach(text.to_string()))
-                },
-                |text| (!text.is_empty()).then(|| Piece::AttachText(text.to_string())),
-            )
-            .map(|piece| vec![piece]),
+        _ => {
+            if let Some(letters) = command.strip_prefix('&') {
+                return (!letters.is_empty())
+                    .then(|| vec![Piece::Fingerspell(letters.to_string())]);
+            }
+            command
+                .strip_prefix('^')
+                .map_or_else(
+                    || {
+                        command
+                            .strip_suffix('^')
+                            .filter(|text| !text.is_empty())
+                            .map(|text| Piece::TextAttach(text.to_string()))
+                    },
+                    |text| (!text.is_empty()).then(|| Piece::AttachText(text.to_string())),
+                )
+                .map(|piece| vec![piece])
+        }
     }
 }
 
 /// Render pieces to text, updating the spacing state for whatever comes next.
+///
+/// Retro pieces produce no text here; the translator applies them to earlier output.
 pub fn render(pieces: &[Piece], state: &mut FormatState) -> String {
     let mut out = String::new();
     for piece in pieces {
         match piece {
             Piece::Attach => state.suppress_space = true,
             Piece::CapNext => state.capitalize = true,
+            Piece::RetroCapitalize | Piece::RetroDeleteSpace | Piece::RetroInsertSpace => {}
             Piece::Text(text) | Piece::AttachText(text) | Piece::TextAttach(text) => {
                 let attaches_back = matches!(piece, Piece::AttachText(_));
                 if state.has_text && !state.suppress_space && !attaches_back {
@@ -100,9 +129,28 @@ pub fn render(pieces: &[Piece], state: &mut FormatState) -> String {
                 state.has_text = true;
                 state.suppress_space = matches!(piece, Piece::TextAttach(_));
                 state.capitalize = false;
+                state.last_fingerspell = false;
+            }
+            Piece::Fingerspell(letters) => {
+                if state.has_text && !state.suppress_space && !state.last_fingerspell {
+                    out.push(' ');
+                }
+                push_word(&mut out, letters, state.capitalize);
+                state.has_text = true;
+                state.suppress_space = false;
+                state.capitalize = false;
+                state.last_fingerspell = true;
             }
         }
     }
+    out
+}
+
+/// Capitalize the first letter of `word`, leaving the rest alone.
+#[must_use]
+pub fn capitalize_word(word: &str) -> String {
+    let mut out = String::new();
+    push_word(&mut out, word, true);
     out
 }
 
@@ -153,6 +201,24 @@ mod tests {
     }
 
     #[test]
+    fn retro_and_fingerspelling_commands_parse() {
+        assert_eq!(parse_pieces("{*<}"), Some(vec![Piece::RetroCapitalize]));
+        assert_eq!(parse_pieces("{*!}"), Some(vec![Piece::RetroDeleteSpace]));
+        assert_eq!(
+            parse_pieces("{&t}"),
+            Some(vec![Piece::Fingerspell("t".to_string())])
+        );
+    }
+
+    #[test]
+    fn fingerspelled_letters_join() {
+        let mut state = FormatState::default();
+        assert_eq!(render(&[Piece::Fingerspell("t".into())], &mut state), "t");
+        assert_eq!(render(&[Piece::Fingerspell("h".into())], &mut state), "h");
+        assert_eq!(render(&[text("cat")], &mut state), " cat");
+    }
+
+    #[test]
     fn sentence_end_capitalizes_the_next_word() {
         let mut state = FormatState::default();
         render(&[text("cat")], &mut state);
@@ -167,6 +233,7 @@ mod tests {
         assert_eq!(parse_pieces("{unbalanced"), None);
         assert_eq!(parse_pieces("stray}"), None);
         assert_eq!(parse_pieces("{^}}"), None);
+        assert_eq!(parse_pieces("{&}"), None);
     }
 
     #[test]

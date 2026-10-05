@@ -45,7 +45,9 @@ impl Fixture {
         let config_path = self.dir.join("config.ron");
         std::fs::write(&config_path, CONFIG.replace("DICT", &path_str(&dict))).unwrap();
         let config = Config::load(&config_path).unwrap();
-        KeymapProcessor::new(&config, config_path, 0)
+        let mut keymap = KeymapProcessor::new(&config, config_path, 0);
+        keymap.wait_for_steno_dictionaries();
+        keymap
     }
 }
 
@@ -89,6 +91,7 @@ fn tg_latches_after_release_and_toggles_off() {
     .unwrap();
     let config = Config::load(&config_path).unwrap();
     let mut p = KeymapProcessor::new(&config, config_path, 0);
+    p.wait_for_steno_dictionaries();
 
     // Press and release: the layer stays on
     p.process_key(KeyCode::KC_RCTL, true);

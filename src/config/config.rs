@@ -285,13 +285,14 @@ pub struct StenoConfig {
     /// session user's home; relative paths resolve against the config directory.
     #[serde(default)]
     pub dictionaries: Vec<String>,
-    /// A stroke is flushed after this long even if keys are still held.
+    /// Safety net for a key that never comes up: the stroke is finished after this
+    /// long. Strokes normally finish when the last key is released, with no delay.
     #[serde(default = "default_stroke_timeout_ms")]
     pub stroke_timeout_ms: u32,
-    /// Held strokes that could still start a longer entry are translated after this
-    /// long with no new stroke, so a short word doesn't wait forever.
-    #[serde(default = "default_translation_timeout_ms")]
-    pub translation_timeout_ms: u32,
+    /// No longer used. Translation is immediate and corrects earlier text when a
+    /// longer entry matches. Setting it is a validation warning.
+    #[serde(default)]
+    pub translation_timeout_ms: Option<u32>,
 }
 
 fn default_steno_layout() -> String {
@@ -299,11 +300,7 @@ fn default_steno_layout() -> String {
 }
 
 const fn default_stroke_timeout_ms() -> u32 {
-    1000
-}
-
-const fn default_translation_timeout_ms() -> u32 {
-    400
+    5000
 }
 
 /// Game mode configuration
@@ -1226,7 +1223,8 @@ mod tests {
             panic!("expected a steno layer");
         };
         assert_eq!(steno.layout, "qwerty");
-        assert_eq!(steno.stroke_timeout_ms, 1000);
+        assert_eq!(steno.stroke_timeout_ms, 5000);
+        assert_eq!(steno.translation_timeout_ms, None);
         assert_eq!(steno.dictionaries.len(), 1);
     }
 

@@ -5,12 +5,14 @@ use super::chord::ChordState;
 use super::dict::Dictionary;
 use super::layout::{build_key_map, preset};
 use super::setup::default_dictionaries;
+use super::tape;
 use super::translate::{StenoOutput, Translator};
 use crate::config::{KeyAction, StenoConfig};
 use crate::keycode::KeyCode;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 #[derive(Debug)]
@@ -18,14 +20,24 @@ pub struct StenoEngine {
     keys: HashMap<KeyCode, u32>,
     chord: ChordState,
     translator: Translator,
+    /// Dictionaries still loading on a background thread
+    loading: Option<Receiver<Dictionary>>,
+    /// Strokes finished before the dictionaries arrived. Translated once they do.
+    backlog: Vec<u32>,
+    /// Where each stroke is recorded. `None` when the home directory is unknown.
+    tape: Option<PathBuf>,
     pub disabled_in_game_mode: bool,
 }
 
 impl StenoEngine {
     /// Build an engine from a layer's steno config.
     ///
+    /// Dictionaries load on a background thread, so the daemon doesn't wait on
+    /// a large file. Until they arrive, strokes wait in the chord.
+    ///
     /// `home` is the session user's home directory, used to expand `~/` in
-    /// dictionary paths. Relative dictionary paths are resolved against `config_dir`.
+    /// dictionary paths and to place the tape. Relative dictionary paths are
+    /// resolved against `config_dir`.
     pub fn from_config(
         config: &StenoConfig,
         disabled_in_game_mode: bool,
@@ -47,23 +59,28 @@ impl StenoEngine {
                 .map(|raw| resolve_dictionary_path(raw, config_dir, home))
                 .collect()
         };
-        let dict = Dictionary::load(&paths);
+        let (sender, loading) = mpsc::channel();
+        std::thread::spawn(move || {
+            // The engine may be dropped before this finishes; nothing to do then
+            let _ = sender.send(Dictionary::load(&paths));
+        });
 
         Ok(Self {
             keys,
             chord: ChordState::new(Duration::from_millis(u64::from(config.stroke_timeout_ms))),
-            translator: Translator::new(
-                dict,
-                Duration::from_millis(u64::from(config.translation_timeout_ms)),
-            ),
+            translator: Translator::new(Dictionary::default()),
+            loading: Some(loading),
+            backlog: Vec::new(),
+            tape: home.map(tape::default_path),
             disabled_in_game_mode,
         })
     }
 
     /// Whether dictionaries are loaded. False means `keymux steno setup` hasn't run.
+    /// Still loading counts as set up, so the hint doesn't fire during startup.
     #[must_use]
-    pub fn has_dictionary(&self) -> bool {
-        self.translator.has_dictionary()
+    pub fn needs_setup(&self) -> bool {
+        self.loading.is_none() && !self.translator.has_dictionary()
     }
 
     /// Whether this physical key is a stroke key on this layer.
@@ -80,19 +97,107 @@ impl StenoEngine {
     }
 
     /// A stroke key came up. Returns output if this completed a stroke.
-    pub fn release(&mut self, key: KeyCode, now: Instant) -> Option<StenoOutput> {
+    pub fn release(&mut self, key: KeyCode) -> Option<StenoOutput> {
         let bit = *self.keys.get(&key)?;
         let stroke = self.chord.release(bit)?;
-        self.translator.stroke(stroke, now)
+        self.on_stroke(stroke)
     }
 
-    /// Check timeouts. Returns output if a stuck stroke was flushed, or if held
-    /// strokes have been idle long enough to translate.
+    /// Check the stuck-key timeout and pick up finished dictionary loads.
+    /// Returns output if a stuck stroke was flushed, or if strokes queued during
+    /// loading were just translated.
     pub fn tick(&mut self, now: Instant) -> Option<StenoOutput> {
-        if let Some(stroke) = self.chord.tick(now) {
-            return self.translator.stroke(stroke, now);
+        if let Some(output) = self.poll_dictionary() {
+            return Some(output);
         }
-        self.translator.idle_flush(now)
+        let stroke = self.chord.tick(now)?;
+        self.on_stroke(stroke)
+    }
+
+    /// Install the dictionaries once they arrive, and translate what was queued.
+    fn poll_dictionary(&mut self) -> Option<StenoOutput> {
+        let loading = self.loading.as_ref()?;
+        let dict = match loading.try_recv() {
+            Ok(dict) => dict,
+            Err(TryRecvError::Empty) => return None,
+            // The loader thread died. Steno stays unset up instead of stuck loading.
+            Err(TryRecvError::Disconnected) => Dictionary::default(),
+        };
+        self.loading = None;
+        self.translator.set_dictionary(dict);
+        let mut merged = Merged::default();
+        for stroke in std::mem::take(&mut self.backlog) {
+            if let Some(output) = self.translate(stroke) {
+                merged.push(output);
+            }
+        }
+        merged.finish()
+    }
+
+    fn on_stroke(&mut self, stroke: u32) -> Option<StenoOutput> {
+        if self.loading.is_some() {
+            self.backlog.push(stroke);
+            return None;
+        }
+        self.translate(stroke)
+    }
+
+    fn translate(&mut self, stroke: u32) -> Option<StenoOutput> {
+        let output = self.translator.stroke(stroke);
+        if let Some(path) = &self.tape {
+            tape::append(
+                path,
+                stroke,
+                &tape::describe(output.as_ref(), self.translator.was_unmatched()),
+            );
+        }
+        output
+    }
+
+    /// Block until the dictionaries are loaded. Tests use this so they don't race
+    /// the loader thread.
+    #[cfg(test)]
+    pub fn wait_until_loaded(&mut self) {
+        if let Some(loading) = self.loading.take() {
+            if let Ok(dict) = loading.recv() {
+                self.translator.set_dictionary(dict);
+            }
+        }
+    }
+}
+
+/// Several outputs combined into one, so a backlog replays as a single edit.
+#[derive(Default)]
+struct Merged {
+    backspaces: usize,
+    text: String,
+}
+
+impl Merged {
+    fn push(&mut self, output: StenoOutput) {
+        match output {
+            StenoOutput::Type(text) => self.text.push_str(&text),
+            StenoOutput::Retype { backspaces, text } => {
+                let mut remaining = backspaces;
+                while remaining > 0 && self.text.pop().is_some() {
+                    remaining -= 1;
+                }
+                // Whatever is left was already on screen
+                self.backspaces += remaining;
+                self.text.push_str(&text);
+            }
+        }
+    }
+
+    fn finish(self) -> Option<StenoOutput> {
+        match (self.backspaces, self.text.is_empty()) {
+            (0, true) => None,
+            (0, false) => Some(StenoOutput::Type(self.text)),
+            (backspaces, _) => Some(StenoOutput::Retype {
+                backspaces,
+                text: self.text,
+            }),
+        }
     }
 }
 
@@ -120,7 +225,10 @@ mod tests {
         StenoEngine {
             keys: build_key_map(&preset("qwerty").unwrap(), &HashMap::new()).unwrap(),
             chord: ChordState::new(Duration::from_secs(1)),
-            translator: Translator::new(dict, Duration::from_millis(400)),
+            translator: Translator::new(dict),
+            loading: None,
+            backlog: Vec::new(),
+            tape: None,
             disabled_in_game_mode: true,
         }
     }
@@ -139,10 +247,10 @@ mod tests {
         engine.press(k, now);
         engine.press(a, now);
         engine.press(t, now);
-        assert_eq!(engine.release(a, now), None);
-        assert_eq!(engine.release(k, now), None);
+        assert_eq!(engine.release(a), None);
+        assert_eq!(engine.release(k), None);
         assert_eq!(
-            engine.release(t, now),
+            engine.release(t),
             Some(StenoOutput::Type("cat".to_string()))
         );
     }
@@ -153,7 +261,30 @@ mod tests {
         let now = Instant::now();
         let k = key_for(&engine, 1 << 2);
         engine.press(k, now);
-        assert_eq!(engine.release(k, now), None);
+        assert_eq!(engine.release(k), None);
+    }
+
+    #[test]
+    fn strokes_made_before_the_dictionary_arrives_type_once_it_does() {
+        let mut engine = engine_with_dict("{}");
+        let (sender, loading) = mpsc::channel();
+        engine.loading = Some(loading);
+        engine.translator = Translator::new(Dictionary::default());
+
+        let now = Instant::now();
+        let keys = [1 << 2, 1 << 7, 1 << 18].map(|bit| key_for(&engine, bit));
+        for key in keys {
+            engine.press(key, now);
+        }
+        for key in keys {
+            // Still loading, so the stroke waits in the backlog
+            assert_eq!(engine.release(key), None);
+        }
+
+        let mut dict = Dictionary::default();
+        dict.merge_json(r#"{"KAT": "cat"}"#).unwrap();
+        sender.send(dict).unwrap();
+        assert_eq!(engine.tick(now), Some(StenoOutput::Type("cat".to_string())));
     }
 
     #[test]
@@ -188,10 +319,16 @@ mod tests {
             layout: "dvorak".to_string(),
             layout_overrides: HashMap::new(),
             dictionaries: Vec::new(),
-            stroke_timeout_ms: 1000,
-            translation_timeout_ms: 400,
+            stroke_timeout_ms: 5000,
+            translation_timeout_ms: None,
         };
         let err = StenoEngine::from_config(&config, true, Path::new("."), None).unwrap_err();
         assert!(err.to_string().contains("unknown steno layout preset"));
+    }
+
+    #[test]
+    fn stroke_names_render_for_the_tape() {
+        use crate::steno::layout::render_stroke;
+        assert_eq!(render_stroke(1 << 2 | 1 << 7 | 1 << 18), "KAT");
     }
 }

@@ -268,6 +268,32 @@ pub enum Commands {
 pub enum StenoAction {
     /// Download Plover's dictionary into ~/.config/keymux/steno
     Setup,
+    /// Show the stroke that types a word, e.g. `keymux steno lookup cat`
+    Lookup {
+        /// The word to look up (case-sensitive, as the dictionary spells it)
+        word: String,
+    },
+    /// Show what a stroke types, e.g. `KAT` or `KPA/TKAOEU`
+    Stroke {
+        /// Stroke in Plover notation; use `/` between strokes of one word
+        stroke: String,
+    },
+    /// Add a translation to your dictionary (user.json), replacing any existing one
+    Add {
+        /// Stroke in Plover notation, e.g. `KAT` or `KPA/TKAOEU`
+        stroke: String,
+        /// The text the stroke types
+        text: String,
+    },
+    /// Show the steno tape: what each stroke typed, and strokes that matched nothing as `?`
+    Tape {
+        /// Keep printing new strokes as they arrive
+        #[arg(short, long)]
+        follow: bool,
+        /// How many recent lines to show first
+        #[arg(short = 'n', long, default_value_t = 30)]
+        lines: usize,
+    },
 }
 
 pub fn print_help() {

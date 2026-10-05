@@ -25,6 +25,13 @@ fn steno_result(output: Option<StenoOutput>) -> ProcessResult {
 
 #[cfg(test)]
 impl KeymapProcessor {
+    /// Block until every steno layer's dictionaries have loaded.
+    pub(crate) fn wait_for_steno_dictionaries(&mut self) {
+        for engine in self.steno_engines.values_mut() {
+            engine.wait_until_loaded();
+        }
+    }
+
     pub(crate) fn current_layer_name(&self) -> String {
         self.layer_stack.current_layer().0
     }
@@ -155,7 +162,7 @@ impl KeymapProcessor {
         let needs_setup = self
             .steno_engines
             .get(&top)
-            .is_some_and(|engine| !engine.has_dictionary());
+            .is_some_and(|engine| engine.needs_setup());
         if needs_setup && self.setup_hint.ready(Instant::now()) {
             steno::setup::notify_user(
                 self.user_id,
@@ -178,10 +185,7 @@ impl KeymapProcessor {
                 _ => return None,
             };
             self.held_keys.remove(&keycode);
-            let output = self
-                .steno_engines
-                .get_mut(&layer)?
-                .release(keycode, Instant::now());
+            let output = self.steno_engines.get_mut(&layer)?.release(keycode);
             return Some(steno_result(output));
         }
 
