@@ -49,7 +49,7 @@ pub fn parse_pieces(value: &str) -> Option<Vec<Piece>> {
         if rest[open + 1..close].contains('{') {
             return None;
         }
-        pieces.push(parse_command(&rest[open + 1..close])?);
+        pieces.extend(parse_command(&rest[open + 1..close])?);
         rest = &rest[close + 1..];
     }
     if rest.contains('}') {
@@ -61,19 +61,26 @@ pub fn parse_pieces(value: &str) -> Option<Vec<Piece>> {
     (!pieces.is_empty()).then_some(pieces)
 }
 
-fn parse_command(command: &str) -> Option<Piece> {
+fn parse_command(command: &str) -> Option<Vec<Piece>> {
     match command {
-        "^" => Some(Piece::Attach),
-        "-|" => Some(Piece::CapNext),
-        _ => command.strip_prefix('^').map_or_else(
-            || {
-                command
-                    .strip_suffix('^')
-                    .filter(|text| !text.is_empty())
-                    .map(|text| Piece::TextAttach(text.to_string()))
-            },
-            |text| (!text.is_empty()).then(|| Piece::AttachText(text.to_string())),
-        ),
+        "^" => Some(vec![Piece::Attach]),
+        "-|" => Some(vec![Piece::CapNext]),
+        // Sentence-ending punctuation attaches to the previous word and capitalizes the next
+        "." | "?" | "!" => Some(vec![Piece::AttachText(command.to_string()), Piece::CapNext]),
+        // Other punctuation attaches without capitalizing
+        "," | ";" | ":" => Some(vec![Piece::AttachText(command.to_string())]),
+        _ => command
+            .strip_prefix('^')
+            .map_or_else(
+                || {
+                    command
+                        .strip_suffix('^')
+                        .filter(|text| !text.is_empty())
+                        .map(|text| Piece::TextAttach(text.to_string()))
+                },
+                |text| (!text.is_empty()).then(|| Piece::AttachText(text.to_string())),
+            )
+            .map(|piece| vec![piece]),
     }
 }
 
@@ -134,8 +141,28 @@ mod tests {
     }
 
     #[test]
+    fn punctuation_commands_attach_and_capitalize() {
+        assert_eq!(
+            parse_pieces("{.}"),
+            Some(vec![Piece::AttachText(".".to_string()), Piece::CapNext])
+        );
+        assert_eq!(
+            parse_pieces("{,}"),
+            Some(vec![Piece::AttachText(",".to_string())])
+        );
+    }
+
+    #[test]
+    fn sentence_end_capitalizes_the_next_word() {
+        let mut state = FormatState::default();
+        render(&[text("cat")], &mut state);
+        let end = parse_pieces("{.}").unwrap();
+        assert_eq!(render(&end, &mut state), ".");
+        assert_eq!(render(&[text("and")], &mut state), " And");
+    }
+
+    #[test]
     fn rejects_unsupported_commands() {
-        assert_eq!(parse_pieces("{.}"), None);
         assert_eq!(parse_pieces("{PLOVER:ADD_TRANSLATION}"), None);
         assert_eq!(parse_pieces("{unbalanced"), None);
         assert_eq!(parse_pieces("stray}"), None);

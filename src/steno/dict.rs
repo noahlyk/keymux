@@ -127,7 +127,7 @@ mod tests {
         let json = r#"{
             "KAT": "cat",
             "KPA/TKAOEU": "example",
-            "-PB": "{.}",
+            "-PB": "{PLOVER:ADD_TRANSLATION}",
             "not a stroke": "x",
             "TK": 5
         }"#;
