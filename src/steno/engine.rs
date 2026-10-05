@@ -4,6 +4,7 @@
 use super::chord::ChordState;
 use super::dict::Dictionary;
 use super::layout::{build_key_map, preset};
+use super::setup::default_dictionaries;
 use super::translate::{StenoOutput, Translator};
 use crate::config::{KeyAction, StenoConfig};
 use crate::keycode::KeyCode;
@@ -36,11 +37,16 @@ impl StenoEngine {
         let keys =
             build_key_map(&preset, &overrides).map_err(|errors| anyhow!(errors.join("; ")))?;
 
-        let paths: Vec<PathBuf> = config
-            .dictionaries
-            .iter()
-            .map(|raw| resolve_dictionary_path(raw, config_dir, home))
-            .collect();
+        // Without an explicit list, use what `keymux steno setup` installed
+        let paths: Vec<PathBuf> = if config.dictionaries.is_empty() {
+            default_dictionaries(config_dir)
+        } else {
+            config
+                .dictionaries
+                .iter()
+                .map(|raw| resolve_dictionary_path(raw, config_dir, home))
+                .collect()
+        };
         let dict = Dictionary::load(&paths);
 
         Ok(Self {
@@ -52,6 +58,12 @@ impl StenoEngine {
             ),
             disabled_in_game_mode,
         })
+    }
+
+    /// Whether dictionaries are loaded. False means `keymux steno setup` hasn't run.
+    #[must_use]
+    pub fn has_dictionary(&self) -> bool {
+        self.translator.has_dictionary()
     }
 
     /// Whether this physical key is a stroke key on this layer.

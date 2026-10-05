@@ -6,10 +6,11 @@ use crate::event_processor::actions::{
 use crate::event_processor::layer_stack::LayerStack;
 use crate::keycode::KeyCode;
 use crate::steno::translate::StenoOutput;
-use crate::steno::StenoEngine;
+use crate::steno::setup::Cooldown;
+use crate::steno::{self, StenoEngine};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::error;
 
 fn steno_result(output: Option<StenoOutput>) -> ProcessResult {
@@ -43,6 +44,8 @@ pub struct KeymapProcessor {
     adaptive_processor: AdaptiveProcessor,
     /// Chord state for each steno layer, keyed by layer name
     steno_engines: HashMap<Layer, StenoEngine>,
+    /// Limits the "steno isn't set up" notification
+    setup_hint: Cooldown,
     config_dir: PathBuf,
     user_id: u32,
 }
@@ -84,6 +87,7 @@ impl KeymapProcessor {
             socd_processor: crate::event_processor::actions::SocdProcessor::from_config(config),
             adaptive_processor: AdaptiveProcessor::new(),
             steno_engines,
+            setup_hint: Cooldown::new(Duration::from_secs(3)),
             config_dir,
             user_id,
         }
@@ -133,13 +137,31 @@ impl KeymapProcessor {
     }
 
     pub fn process_key(&mut self, keycode: KeyCode, pressed: bool) -> ProcessResult {
-        if let Some(result) = self.steno_capture(keycode, pressed) {
-            return result;
-        }
+        let result = match self.steno_capture(keycode, pressed) {
+            Some(result) => result,
+            None if pressed => self.process_key_press(keycode),
+            None => self.process_key_release(keycode),
+        };
         if pressed {
-            self.process_key_press(keycode)
-        } else {
-            self.process_key_release(keycode)
+            self.steno_setup_hint();
+        }
+        result
+    }
+
+    /// On a steno layer that has no dictionary yet, point the user at setup.
+    /// Rate-limited so holding a key doesn't spam notifications.
+    fn steno_setup_hint(&mut self) {
+        let top = self.layer_stack.current_layer();
+        let needs_setup = self
+            .steno_engines
+            .get(&top)
+            .is_some_and(|engine| !engine.has_dictionary());
+        if needs_setup && self.setup_hint.ready(Instant::now()) {
+            steno::setup::notify_user(
+                self.user_id,
+                "Steno isn't set up",
+                "Run: keymux steno setup",
+            );
         }
     }
 

@@ -118,6 +118,15 @@ fn main() -> Result<()> {
         Some(cli::Commands::Reload) => {
             run_reload()?;
         }
+        Some(cli::Commands::Steno { action }) => match action {
+            cli::StenoAction::Setup => {
+                let config_path = keymux::config::Config::default_path()?;
+                let config_dir = config_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."));
+                keymux::steno::setup::run_setup(config_dir)?;
+            }
+        },
         Some(cli::Commands::Validate { config }) => {
             keymux::config::validate_config(config.as_deref())?;
         }

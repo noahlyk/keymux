@@ -66,6 +66,12 @@ impl Translator {
         self.translate(false)
     }
 
+    /// Whether any dictionary entries loaded. False means steno isn't set up yet.
+    #[must_use]
+    pub fn has_dictionary(&self) -> bool {
+        !self.dict.is_empty()
+    }
+
     /// Release held strokes once nothing has arrived for `idle_timeout`.
     pub fn idle_flush(&mut self, now: Instant) -> Option<StenoOutput> {
         let idle = self

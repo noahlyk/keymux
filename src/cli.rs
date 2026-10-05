@@ -230,6 +230,12 @@ pub enum Commands {
     /// Reload configuration from disk
     Reload,
 
+    /// Stenography: install Plover's dictionary and check steno setup
+    Steno {
+        #[command(subcommand)]
+        action: StenoAction,
+    },
+
     /// Validate configuration file for errors
     Validate {
         /// Path to config file (default: ~/.config/keymux/config.ron)
@@ -256,6 +262,12 @@ pub enum Commands {
         /// Shell to generate completions for
         shell: clap_complete::Shell,
     },
+}
+
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum StenoAction {
+    /// Download Plover's dictionary into ~/.config/keymux/steno
+    Setup,
 }
 
 pub fn print_help() {

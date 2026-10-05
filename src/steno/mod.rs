@@ -9,6 +9,7 @@ pub mod dict;
 pub mod engine;
 pub mod format;
 pub mod layout;
+pub mod setup;
 pub mod translate;
 
 pub use engine::StenoEngine;
