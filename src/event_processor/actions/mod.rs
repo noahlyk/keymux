@@ -25,6 +25,8 @@ pub enum ProcessResult {
     TapKeyPressRelease(KeyCode),
     MultipleEvents(Vec<(KeyCode, bool)>),
     TypeString(String, bool),
+    /// Delete `backspaces` characters, then type `text` (used for undo)
+    Retype { backspaces: usize, text: String },
     None,
 }
 

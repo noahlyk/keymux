@@ -288,6 +288,10 @@ pub struct StenoConfig {
     /// A stroke is flushed after this long even if keys are still held.
     #[serde(default = "default_stroke_timeout_ms")]
     pub stroke_timeout_ms: u32,
+    /// Held strokes that could still start a longer entry are translated after this
+    /// long with no new stroke, so a short word doesn't wait forever.
+    #[serde(default = "default_translation_timeout_ms")]
+    pub translation_timeout_ms: u32,
 }
 
 fn default_steno_layout() -> String {
@@ -296,6 +300,10 @@ fn default_steno_layout() -> String {
 
 const fn default_stroke_timeout_ms() -> u32 {
     1000
+}
+
+const fn default_translation_timeout_ms() -> u32 {
+    400
 }
 
 /// Game mode configuration

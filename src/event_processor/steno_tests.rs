@@ -82,7 +82,11 @@ fn tg_latches_after_release_and_toggles_off() {
     let dict = fixture.dir.join("main.json");
     std::fs::write(&dict, r#"{"KAT": "cat"}"#).unwrap();
     let config_path = fixture.dir.join("toggle.ron");
-    std::fs::write(&config_path, TOGGLE_CONFIG.replace("DICT", &path_str(&dict))).unwrap();
+    std::fs::write(
+        &config_path,
+        TOGGLE_CONFIG.replace("DICT", &path_str(&dict)),
+    )
+    .unwrap();
     let config = Config::load(&config_path).unwrap();
     let mut p = KeymapProcessor::new(&config, config_path, 0);
 
@@ -92,8 +96,10 @@ fn tg_latches_after_release_and_toggles_off() {
     assert_eq!(p.current_layer_name(), "steno");
 
     // Strokes work while latched
-    assert_eq!(chord(&mut p, &[KeyCode::KC_D, KeyCode::KC_Z, KeyCode::KC_K]),
-        ProcessResult::TypeString("cat ".to_string(), false));
+    assert_eq!(
+        chord(&mut p, &[KeyCode::KC_D, KeyCode::KC_Z, KeyCode::KC_K]),
+        ProcessResult::TypeString("cat".to_string(), false)
+    );
 
     // Pressing it again on the steno layer exits it (via the layer's own remap)
     p.process_key(KeyCode::KC_RCTL, true);
@@ -131,7 +137,7 @@ fn chord_on_steno_layer_types_dictionary_text() {
 
     // K- A- -T is "cat"
     let result = chord(&mut p, &[KeyCode::KC_D, KeyCode::KC_Z, KeyCode::KC_K]);
-    assert_eq!(result, ProcessResult::TypeString("cat ".to_string(), false));
+    assert_eq!(result, ProcessResult::TypeString("cat".to_string(), false));
 }
 
 #[test]
@@ -189,6 +195,6 @@ fn stroke_released_after_layer_exit_still_types() {
     assert_eq!(p.process_key(KeyCode::KC_Z, false), ProcessResult::None);
     assert_eq!(
         p.process_key(KeyCode::KC_K, false),
-        ProcessResult::TypeString("cat ".to_string(), false)
+        ProcessResult::TypeString("cat".to_string(), false)
     );
 }

@@ -337,7 +337,9 @@
         // stroke keys and have no remap here are swallowed while it's active.
         //
         // Dictionaries are Plover JSON files, highest priority first.
-        // Multi-stroke entries and formatting commands ({...}) are skipped for now.
+        // Multi-stroke entries (KPA/TKAOEU) and the formatting commands {^}, {^text},
+        // {text^} and {-|} are supported. Entries using any other command are skipped.
+        // Bare * undoes the last translation.
         "steno": (
             kind: Steno((
                 layout: "qwerty",

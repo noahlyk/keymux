@@ -199,6 +199,9 @@ fn run_event_processor(
                                     );
                                     virtual_device.emit(&[output_event])?;
                                 }
+                                ProcessResult::Retype { backspaces, text } => {
+                                    retype(&mut virtual_device, backspaces, &text)?;
+                                }
                                 ProcessResult::TypeString(text, add_enter) => {
                                     // Type out the string character by character
                                     type_string(&mut virtual_device, &text, add_enter)?;
@@ -265,9 +268,15 @@ fn run_event_processor(
                     }
                 }
 
-                // A stroke held past its timeout is typed now
-                if let Some(text) = keymap.check_steno_timeouts() {
-                    type_string(&mut virtual_device, &text, false)?;
+                // A stroke held past its timeout, or a held prefix gone idle, is typed now
+                match keymap.check_steno_timeouts() {
+                    ProcResult::TypeString(text, add_enter) => {
+                        type_string(&mut virtual_device, &text, add_enter)?;
+                    }
+                    ProcResult::Retype { backspaces, text } => {
+                        retype(&mut virtual_device, backspaces, &text)?;
+                    }
+                    _ => {}
                 }
 
                 // Sleep briefly to avoid CPU spinning
@@ -433,6 +442,21 @@ fn release_all_keys(virtual_device: &mut VirtualDevice, keymap: &KeymapProcessor
     // Send final SYN_REPORT
     let syn_event = InputEvent::new_now(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT);
     let _ = virtual_device.emit(&[syn_event]);
+}
+
+/// Delete `backspaces` characters before the cursor, then type `text`
+fn retype(virtual_device: &mut VirtualDevice, backspaces: usize, text: &str) -> Result<()> {
+    let mut events = Vec::with_capacity(backspaces * 4);
+    for _ in 0..backspaces {
+        events.push(InputEvent::new(EventType::KEY, Key::KEY_BACKSPACE.code(), 1));
+        events.push(InputEvent::new(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT));
+        events.push(InputEvent::new(EventType::KEY, Key::KEY_BACKSPACE.code(), 0));
+        events.push(InputEvent::new(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT));
+    }
+    if !events.is_empty() {
+        virtual_device.emit(&events)?;
+    }
+    type_string(virtual_device, text, false)
 }
 
 /// Type a string by emitting key events for each character

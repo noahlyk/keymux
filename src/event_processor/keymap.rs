@@ -5,16 +5,21 @@ use crate::event_processor::actions::{
 };
 use crate::event_processor::layer_stack::LayerStack;
 use crate::keycode::KeyCode;
+use crate::steno::translate::StenoOutput;
 use crate::steno::StenoEngine;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::error;
 
-fn text_result(text: Option<String>) -> ProcessResult {
-    text.map_or(ProcessResult::None, |text| {
-        ProcessResult::TypeString(text, false)
-    })
+fn steno_result(output: Option<StenoOutput>) -> ProcessResult {
+    match output {
+        None => ProcessResult::None,
+        Some(StenoOutput::Type(text)) => ProcessResult::TypeString(text, false),
+        Some(StenoOutput::Retype { backspaces, text }) => {
+            ProcessResult::Retype { backspaces, text }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -98,13 +103,15 @@ impl KeymapProcessor {
         }
     }
 
-    /// Finish any steno stroke that has been held past its timeout.
-    /// Returns text to type, if any.
-    pub fn check_steno_timeouts(&mut self) -> Option<String> {
+    /// Finish any steno stroke that has been held past its timeout, or translate
+    /// held strokes that have gone idle. Returns what to type, if anything.
+    pub fn check_steno_timeouts(&mut self) -> ProcessResult {
         let now = Instant::now();
-        self.steno_engines
+        let output = self
+            .steno_engines
             .values_mut()
-            .find_map(|engine| engine.tick(now))
+            .find_map(|engine| engine.tick(now));
+        steno_result(output)
     }
 
     pub fn get_held_keys(&self) -> Vec<KeyCode> {
@@ -149,8 +156,11 @@ impl KeymapProcessor {
                 _ => return None,
             };
             self.held_keys.remove(&keycode);
-            let text = self.steno_engines.get_mut(&layer)?.release(keycode);
-            return Some(text_result(text));
+            let output = self
+                .steno_engines
+                .get_mut(&layer)?
+                .release(keycode, Instant::now());
+            return Some(steno_result(output));
         }
 
         let top = self.layer_stack.current_layer();

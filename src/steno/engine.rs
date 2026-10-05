@@ -1,22 +1,22 @@
 //! One steno layer's runtime state: which physical keys are stroke keys, the
-//! chord in progress, and the dictionary used to translate finished strokes.
+//! chord in progress, and the translator that turns strokes into text.
 
 use super::chord::ChordState;
 use super::dict::Dictionary;
-use super::layout::{build_key_map, preset, render_stroke};
+use super::layout::{build_key_map, preset};
+use super::translate::{StenoOutput, Translator};
 use crate::config::{KeyAction, StenoConfig};
 use crate::keycode::KeyCode;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tracing::info;
 
 #[derive(Debug)]
 pub struct StenoEngine {
     keys: HashMap<KeyCode, u32>,
     chord: ChordState,
-    dict: Dictionary,
+    translator: Translator,
     pub disabled_in_game_mode: bool,
 }
 
@@ -46,7 +46,10 @@ impl StenoEngine {
         Ok(Self {
             keys,
             chord: ChordState::new(Duration::from_millis(u64::from(config.stroke_timeout_ms))),
-            dict,
+            translator: Translator::new(
+                dict,
+                Duration::from_millis(u64::from(config.translation_timeout_ms)),
+            ),
             disabled_in_game_mode,
         })
     }
@@ -64,32 +67,20 @@ impl StenoEngine {
         }
     }
 
-    /// A stroke key came up. Returns text to type if this completed a stroke.
-    pub fn release(&mut self, key: KeyCode) -> Option<String> {
+    /// A stroke key came up. Returns output if this completed a stroke.
+    pub fn release(&mut self, key: KeyCode, now: Instant) -> Option<StenoOutput> {
         let bit = *self.keys.get(&key)?;
         let stroke = self.chord.release(bit)?;
-        self.resolve(stroke)
+        self.translator.stroke(stroke, now)
     }
 
-    /// Check the stroke timeout. Returns text to type if a stuck stroke was flushed.
-    pub fn tick(&mut self, now: Instant) -> Option<String> {
-        let stroke = self.chord.tick(now)?;
-        self.resolve(stroke)
-    }
-
-    fn resolve(&self, stroke: u32) -> Option<String> {
-        let rendered = render_stroke(stroke);
-        self.dict.lookup(stroke).map_or_else(
-            || {
-                info!("steno {rendered} -> (not in dictionary)");
-                None
-            },
-            |text| {
-                info!("steno {rendered} -> {text:?}");
-                // Plover-style: each word is followed by a space
-                Some(format!("{text} "))
-            },
-        )
+    /// Check timeouts. Returns output if a stuck stroke was flushed, or if held
+    /// strokes have been idle long enough to translate.
+    pub fn tick(&mut self, now: Instant) -> Option<StenoOutput> {
+        if let Some(stroke) = self.chord.tick(now) {
+            return self.translator.stroke(stroke, now);
+        }
+        self.translator.idle_flush(now)
     }
 }
 
@@ -117,7 +108,7 @@ mod tests {
         StenoEngine {
             keys: build_key_map(&preset("qwerty").unwrap(), &HashMap::new()).unwrap(),
             chord: ChordState::new(Duration::from_secs(1)),
-            dict,
+            translator: Translator::new(dict, Duration::from_millis(400)),
             disabled_in_game_mode: true,
         }
     }
@@ -136,9 +127,12 @@ mod tests {
         engine.press(k, now);
         engine.press(a, now);
         engine.press(t, now);
-        assert_eq!(engine.release(a), None);
-        assert_eq!(engine.release(k), None);
-        assert_eq!(engine.release(t), Some("cat ".to_string()));
+        assert_eq!(engine.release(a, now), None);
+        assert_eq!(engine.release(k, now), None);
+        assert_eq!(
+            engine.release(t, now),
+            Some(StenoOutput::Type("cat".to_string()))
+        );
     }
 
     #[test]
@@ -147,7 +141,7 @@ mod tests {
         let now = Instant::now();
         let k = key_for(&engine, 1 << 2);
         engine.press(k, now);
-        assert_eq!(engine.release(k), None);
+        assert_eq!(engine.release(k, now), None);
     }
 
     #[test]
@@ -183,6 +177,7 @@ mod tests {
             layout_overrides: HashMap::new(),
             dictionaries: Vec::new(),
             stroke_timeout_ms: 1000,
+            translation_timeout_ms: 400,
         };
         let err = StenoEngine::from_config(&config, true, Path::new("."), None).unwrap_err();
         assert!(err.to_string().contains("unknown steno layout preset"));
