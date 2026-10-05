@@ -311,15 +311,15 @@ pub fn key_label(key: KeyCode) -> String {
 fn print_table(rows: &[ChordRow]) {
     let word_w = rows.iter().map(|r| r.word.len()).max().unwrap_or(0).max("Word".len());
     let stroke_w = rows.iter().map(|r| r.stroke.len()).max().unwrap_or(0).max("Stroke".len());
-    let keys_w = rows.iter().map(|r| r.keys.join(" ").len()).max().unwrap_or(0).max("Keys".len());
-    println!("{:<word_w$}  {:<stroke_w$}  {:<keys_w$}  Sounds", "Word", "Stroke", "Keys");
+    let sounds_w = rows.iter().map(|r| r.sounds.len()).max().unwrap_or(0).max("Sounds".len());
+    println!("{:<word_w$}  {:<sounds_w$}  {:<stroke_w$}  Keys", "Word", "Sounds", "Stroke");
     for row in rows {
         println!(
-            "{:<word_w$}  {:<stroke_w$}  {:<keys_w$}  {}",
+            "{:<word_w$}  {:<sounds_w$}  {:<stroke_w$}  {}",
             row.word,
+            row.sounds,
             row.stroke,
-            row.keys.join(" "),
-            row.sounds
+            row.keys.join(" ")
         );
     }
 }
