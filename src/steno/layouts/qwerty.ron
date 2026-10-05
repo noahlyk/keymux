@@ -1,4 +1,6 @@
-// Default QWERTY steno layout: Plover's built-in "Keyboard" machine mapping.
+// Default QWERTY steno layout: Plover's built-in "Keyboard" machine mapping,
+// with the right hand squished onto the columns its fingers already cover and
+// the vowels moved next to each other on the bottom row.
 //
 // Plover lists several keys for some steno keys (e.g. S- is both A and Q). Only
 // the first is used here, since each steno key takes one physical key.
@@ -15,21 +17,22 @@
     "W-": Key(KC_D),
     "H-": Key(KC_R),
     "R-": Key(KC_F),
-    // Vowels sit on the bottom row, one per finger, so no finger covers two of them.
-    "A-": Key(KC_X),
-    "O-": Key(KC_C),
     "*": Key(KC_T),
+    // Vowels: one per finger, next to each other on the bottom row.
+    "A-": Key(KC_C),
+    "O-": Key(KC_V),
     "-E": Key(KC_N),
     "-U": Key(KC_COMM),
-    "-F": Key(KC_U),
-    "-R": Key(KC_J),
-    "-P": Key(KC_I),
-    "-B": Key(KC_K),
-    "-L": Key(KC_O),
-    "-G": Key(KC_L),
-    "-T": Key(KC_P),
-    "-S": Key(KC_SCLN),
-    "-D": Key(KC_LBRC),
-    "-Z": Key(KC_QUOT),
+    // Right hand: index Y H U J, middle I K, ring O L, pinky P ;
+    "-F": Key(KC_Y),
+    "-R": Key(KC_H),
+    "-P": Key(KC_U),
+    "-B": Key(KC_J),
+    "-L": Key(KC_I),
+    "-G": Key(KC_K),
+    "-T": Key(KC_O),
+    "-S": Key(KC_L),
+    "-D": Key(KC_P),
+    "-Z": Key(KC_SCLN),
     "#": Key(KC_1),
 }
