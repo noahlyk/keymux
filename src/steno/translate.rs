@@ -18,7 +18,7 @@ use tracing::info;
 const UNDO_STROKE: u32 = 1 << 9;
 
 /// How many translations stay undoable. Older output is never touched again.
-const MAX_HISTORY: usize = 256;
+const MAX_HISTORY: usize = 4096;
 
 /// What the caller should do with the keyboard after a stroke.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +67,20 @@ impl Translator {
     /// Swap in dictionaries that finished loading in the background.
     pub fn set_dictionary(&mut self, dict: Dictionary) {
         self.dict = dict;
+    }
+
+    /// The user pressed Backspace, which deleted the last character on screen.
+    /// Keep the buffer in step, so a later `*` doesn't delete text already gone.
+    pub fn backspace(&mut self) {
+        self.output.pop();
+        let len = self.output.len();
+        while self.history.last().is_some_and(|entry| entry.start >= len) {
+            self.history.pop();
+        }
+        self.state = FormatState {
+            has_text: !self.output.is_empty(),
+            ..FormatState::default()
+        };
     }
 
     /// Whether any dictionary entries loaded. False means steno isn't set up yet.

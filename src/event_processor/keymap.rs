@@ -13,6 +13,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tracing::error;
 
+/// Keys that always reach the screen on a steno layer, without a remap. Backspace
+/// and Delete are the ones a steno user needs to correct text.
+const STENO_PASSTHROUGH: [KeyCode; 2] = [KeyCode::KC_BSPC, KeyCode::KC_DEL];
+
 fn steno_result(output: Option<StenoOutput>) -> ProcessResult {
     match output {
         None => ProcessResult::None,
@@ -208,6 +212,15 @@ impl KeymapProcessor {
             self.held_keys
                 .insert(keycode, vec![HeldAction::StenoManaged(top)]);
             return Some(ProcessResult::None);
+        }
+
+        // Editing keys reach the screen as usual. Backspace also tells the translator,
+        // so `*` never deletes text that Backspace already removed.
+        if keycode == KeyCode::KC_BSPC {
+            engine.backspace();
+        }
+        if STENO_PASSTHROUGH.contains(&keycode) {
+            return None;
         }
 
         // On a steno layer, a key does nothing unless the layer remaps it. Its press

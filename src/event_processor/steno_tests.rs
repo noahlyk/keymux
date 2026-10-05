@@ -149,6 +149,36 @@ fn a_key_swallowed_on_press_is_swallowed_on_release_too() {
     assert_eq!(p.process_key(KeyCode::KC_SPC, false), ProcessResult::None);
 }
 
+#[test]
+fn backspace_on_a_steno_layer_reaches_the_screen_and_fixes_undo() {
+    let fixture = Fixture::new("backspace");
+    let mut p = fixture.processor();
+    enter_steno(&mut p);
+
+    // "cat" is typed, then Backspace removes its last letter by hand
+    chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]);
+    assert_eq!(
+        p.process_key(KeyCode::KC_BSPC, true),
+        ProcessResult::EmitKey(KeyCode::KC_BSPC, true)
+    );
+    assert_eq!(
+        p.process_key(KeyCode::KC_BSPC, false),
+        ProcessResult::EmitKey(KeyCode::KC_BSPC, false)
+    );
+    // Undo now removes what's left, "ca", and nothing more
+    assert_eq!(
+        p.process_key(KeyCode::KC_T, true),
+        ProcessResult::None
+    );
+    assert_eq!(
+        p.process_key(KeyCode::KC_T, false),
+        ProcessResult::Retype {
+            backspaces: 2,
+            text: String::new(),
+        }
+    );
+}
+
 fn enter_steno(p: &mut KeymapProcessor) {
     p.process_key(KeyCode::KC_TAB, true);
     assert_eq!(p.current_layer_name(), "chords");

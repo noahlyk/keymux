@@ -103,6 +103,12 @@ impl StenoEngine {
         self.on_stroke(stroke)
     }
 
+    /// Backspace was pressed on this layer. It still reaches the screen, and the
+    /// translator drops the character it removed.
+    pub fn backspace(&mut self) {
+        self.translator.backspace();
+    }
+
     /// Check the stuck-key timeout and pick up finished dictionary loads.
     /// Returns output if a stuck stroke was flushed, or if strokes queued during
     /// loading were just translated.
