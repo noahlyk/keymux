@@ -100,6 +100,16 @@ impl Translator {
         };
     }
 
+    /// The user typed a space on the steno layer. The space goes into the buffer as
+    /// its own step, so the next word doesn't add another one. `*` takes it back.
+    pub fn space(&mut self) -> StenoOutput {
+        let start = self.output.len();
+        self.output.push(' ');
+        self.record(Vec::new(), start, String::new(), Vec::new(), self.state);
+        self.state = FormatState::default();
+        StenoOutput::Type(" ".to_string())
+    }
+
     /// Whether any dictionary entries loaded. False means steno isn't set up yet.
     #[must_use]
     pub fn has_dictionary(&self) -> bool {
@@ -138,6 +148,10 @@ impl Translator {
         let mut best = self.dict.get(&[stroke]).map(|pieces| (0, pieces.to_vec()));
         let mut joined = vec![stroke];
         for (k, entry) in self.history.iter().rev().enumerate() {
+            // A typed space is a step of its own. No entry can span it
+            if entry.strokes.is_empty() {
+                break;
+            }
             joined.splice(0..0, entry.strokes.iter().copied());
             if joined.len() > self.dict.max_len() {
                 break;
@@ -182,6 +196,10 @@ impl Translator {
         }
         text.push_str(&render(&pieces[used..], &mut state));
         self.output.truncate(start);
+        // Steps that started in the text just cut away can't be undone any more
+        while self.history.last().is_some_and(|entry| entry.start >= start) {
+            self.history.pop();
+        }
         self.output.push_str(&text);
         self.state = state;
 

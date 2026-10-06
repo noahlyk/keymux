@@ -125,6 +125,11 @@ impl StenoEngine {
         self.translator.backspace();
     }
 
+    /// A space was typed on the steno layer. Returns what to type.
+    pub fn space(&mut self) -> StenoOutput {
+        self.translator.space()
+    }
+
     /// Check the stuck-key timeout and pick up finished dictionary loads.
     /// Returns output if a stuck stroke was flushed, or if strokes queued during
     /// loading were just translated.
