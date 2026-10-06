@@ -121,9 +121,12 @@ fn stray_space_during_a_chord_does_not_disturb_the_stroke() {
     let mut p = fixture.processor();
     enter_steno(&mut p);
 
-    // Space lands in the middle of "cat": it's swallowed both ways and the stroke still completes
+    // Space lands in the middle of "cat": it types a space, and the stroke still completes after it
     assert_eq!(p.process_key(KeyCode::KC_S, true), ProcessResult::None);
-    assert_eq!(p.process_key(KeyCode::KC_SPC, true), ProcessResult::None);
+    assert_eq!(
+        p.process_key(KeyCode::KC_SPC, true),
+        ProcessResult::TypeString(" ".to_string(), false)
+    );
     assert_eq!(p.process_key(KeyCode::KC_SPC, false), ProcessResult::None);
     assert_eq!(p.process_key(KeyCode::KC_X, true), ProcessResult::None);
     assert_eq!(p.process_key(KeyCode::KC_O, true), ProcessResult::None);
@@ -142,7 +145,10 @@ fn a_key_swallowed_on_press_is_swallowed_on_release_too() {
     enter_steno(&mut p);
 
     // Hold space on the steno layer, then leave the layer before letting go
-    assert_eq!(p.process_key(KeyCode::KC_SPC, true), ProcessResult::None);
+    assert_eq!(
+        p.process_key(KeyCode::KC_SPC, true),
+        ProcessResult::TypeString(" ".to_string(), false)
+    );
     p.process_key(KeyCode::KC_TAB, false);
     assert_eq!(p.current_layer_name(), "base");
     // Its release must not reach the output as a key-up nobody pressed
@@ -280,6 +286,85 @@ fn reentering_a_steno_layer_starts_without_a_leading_space() {
     // Leaving and coming back starts a new sentence, so "cat" gets no leading space
     p.deactivate_layer_for_test(&Layer("chords".to_string()));
     enter_steno(&mut p);
+    assert_eq!(
+        chord(&mut p, &cat),
+        ProcessResult::TypeString("cat".to_string(), false)
+    );
+}
+
+#[test]
+fn space_types_a_space_and_the_next_word_does_not_add_another() {
+    let fixture = Fixture::new("space-word");
+    let mut p = fixture.processor();
+    enter_steno(&mut p);
+    let cat = [KeyCode::KC_S, KeyCode::KC_X, KeyCode::KC_O];
+    assert_eq!(
+        chord(&mut p, &cat),
+        ProcessResult::TypeString("cat".to_string(), false)
+    );
+
+    assert_eq!(
+        p.process_key(KeyCode::KC_SPC, true),
+        ProcessResult::TypeString(" ".to_string(), false)
+    );
+    assert_eq!(p.process_key(KeyCode::KC_SPC, false), ProcessResult::None);
+
+    // "and" follows the typed space, so it has no prefix space of its own
+    assert_eq!(
+        chord(&mut p, &[KeyCode::KC_U, KeyCode::KC_J]),
+        ProcessResult::TypeString("and".to_string(), false)
+    );
+}
+
+#[test]
+fn undo_takes_back_a_word_typed_after_a_space() {
+    let fixture = Fixture::new("space-undo");
+    let mut p = fixture.processor();
+    enter_steno(&mut p);
+    chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_X, KeyCode::KC_O]);
+    p.process_key(KeyCode::KC_SPC, true);
+    p.process_key(KeyCode::KC_SPC, false);
+    chord(&mut p, &[KeyCode::KC_U, KeyCode::KC_J]);
+
+    // `*` removes "and" and leaves the space the user typed
+    assert_eq!(
+        chord(&mut p, &[KeyCode::KC_T]),
+        ProcessResult::Retype {
+            backspaces: 3,
+            text: String::new(),
+        }
+    );
+}
+
+#[test]
+fn toggling_back_into_steno_starts_without_a_prefix_space() {
+    let fixture = Fixture::new("toggle-reenter");
+    let dict = fixture.dir.join("main.json");
+    std::fs::write(&dict, r#"{"KAT": "cat"}"#).unwrap();
+    let config_path = fixture.dir.join("toggle.ron");
+    std::fs::write(&config_path, TOGGLE_CONFIG.replace("DICT", &path_str(&dict))).unwrap();
+    let config = Config::load(&config_path).unwrap();
+    let mut p = KeymapProcessor::new(&config, config_path, 0);
+    p.wait_for_steno_dictionaries();
+    let cat = [KeyCode::KC_S, KeyCode::KC_X, KeyCode::KC_O];
+
+    // Right Ctrl on, "cat", Right Ctrl off
+    p.process_key(KeyCode::KC_RCTL, true);
+    p.process_key(KeyCode::KC_RCTL, false);
+    assert_eq!(
+        chord(&mut p, &cat),
+        ProcessResult::TypeString("cat".to_string(), false)
+    );
+    p.process_key(KeyCode::KC_RCTL, true);
+    p.process_key(KeyCode::KC_RCTL, false);
+    assert_eq!(p.current_layer_name(), "base");
+
+    // Some typing on base, then back into steno: "cat" still gets no prefix space
+    p.process_key(KeyCode::KC_Q, true);
+    p.process_key(KeyCode::KC_Q, false);
+    p.process_key(KeyCode::KC_RCTL, true);
+    p.process_key(KeyCode::KC_RCTL, false);
+    assert_eq!(p.current_layer_name(), "steno");
     assert_eq!(
         chord(&mut p, &cat),
         ProcessResult::TypeString("cat".to_string(), false)

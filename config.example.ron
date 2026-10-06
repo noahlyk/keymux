@@ -333,8 +333,9 @@
         // types the dictionary text for each stroke. The name doesn't matter;
         // `kind` is what makes it a steno layer.
         //
-        // Switch to it with TO/TG/MO, like any other layer. Keys that aren't
-        // stroke keys and have no remap here are swallowed while it's active.
+        // Switch to it with TO/TG/MO, like any other layer. Space types a space.
+        // Other keys that aren't stroke keys and have no remap here are swallowed
+        // while it's active.
         //
         // Dictionaries are Plover JSON files, highest priority first.
         // Multi-stroke entries (KPA/TKAOEU) and the formatting commands {^}, {^text},

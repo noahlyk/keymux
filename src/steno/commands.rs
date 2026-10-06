@@ -540,7 +540,7 @@ mod tests {
     fn quick_breaks_down_into_its_sounds() {
         let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "quick");
         assert_eq!(rows[0].stroke, "KWEUG");
-        assert_eq!(rows[0].keys, ["S", "D", "B", "K"]);
+        assert_eq!(rows[0].keys, ["S", "D", ",", "K"]);
         assert_eq!(rows[0].sounds, "kweug");
     }
 

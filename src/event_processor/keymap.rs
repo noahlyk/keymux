@@ -233,20 +233,28 @@ impl KeymapProcessor {
             return None;
         }
 
-        // On a steno layer, a key does nothing unless the layer remaps it. Its press
-        // and release are both swallowed, so it can't leak a stray key event.
         let has_remap = self
             .layer_stack
             .layer_configs()
             .get(&top)
             .is_some_and(|config| config.remaps.contains_key(&keycode));
         if has_remap {
-            None
-        } else {
+            return None;
+        }
+
+        // Space types a space and the translator records it, so the next word doesn't
+        // add a second one. The press is typed here, so its release has nothing to do.
+        if keycode == KeyCode::KC_SPC {
             self.held_keys
                 .insert(keycode, vec![HeldAction::SwallowedBySteno]);
-            Some(ProcessResult::None)
+            return Some(steno_result(Some(engine.space())));
         }
+
+        // On a steno layer, any other key does nothing unless the layer remaps it. Its
+        // press and release are both swallowed, so it can't leak a stray key event.
+        self.held_keys
+            .insert(keycode, vec![HeldAction::SwallowedBySteno]);
+        Some(ProcessResult::None)
     }
 
     fn process_key_press(&mut self, keycode: KeyCode) -> ProcessResult {
