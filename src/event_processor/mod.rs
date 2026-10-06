@@ -1,4 +1,3 @@
-use crate::config::Config;
 use crate::keyboard_id::KeyboardId;
 use crate::keycode::KeyCode;
 use actions::ProcessResult as ProcResult;
@@ -8,13 +7,15 @@ use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
 use evdev::{AttributeSet, Device, EventType, InputEvent, Key};
 pub use keymap::KeymapProcessor;
 use std::os::unix::io::AsRawFd;
-use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
 
 pub mod actions;
 pub mod adaptive;
 pub mod keymap;
 pub mod layer_stack;
+#[cfg(test)]
+mod steno_tests;
 
 // SYN event constants
 const SYN_REPORT: i32 = 0;
@@ -30,8 +31,7 @@ pub fn run_processor(
     keyboard_id: KeyboardId,
     mut device: Device,
     keyboard_name: String,
-    config: Config,
-    config_path: PathBuf,
+    keymap: Arc<Mutex<KeymapProcessor>>,
     user_id: u32,
     shutdown_rx: crossbeam_channel::Receiver<()>,
     game_mode_rx: std::sync::mpsc::Receiver<bool>,
@@ -41,8 +41,7 @@ pub fn run_processor(
         &keyboard_id,
         &mut device,
         &keyboard_name,
-        &config,
-        config_path,
+        &keymap,
         user_id,
         shutdown_rx,
         game_mode_rx,
@@ -58,8 +57,7 @@ fn run_event_processor(
     keyboard_id: &KeyboardId,
     device: &mut Device,
     keyboard_name: &str,
-    config: &Config,
-    config_path: PathBuf,
+    shared_keymap: &Arc<Mutex<KeymapProcessor>>,
     user_id: u32,
     shutdown_rx: crossbeam_channel::Receiver<()>,
     game_mode_rx: std::sync::mpsc::Receiver<bool>,
@@ -90,18 +88,16 @@ fn run_event_processor(
     release_all_keys_on_startup(&mut virtual_device);
     info!("Released all keys on startup for safety: {}", keyboard_name);
 
-    // Create keymap processor (QMK-inspired)
-    let mut keymap = KeymapProcessor::new(config, config_path, user_id);
-
-    // Load adaptive timing stats from disk
-    let _ = keymap.load_adaptive_stats(user_id); // Ignore errors if file doesn't exist
-
     // Track last save time for periodic stats saving
     let mut last_stats_save = std::time::Instant::now();
     const STATS_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
-    // Event processing loop
+    // Event processing loop. Each pass locks the keyboard's shared keymap, so the
+    // device threads for one keyboard take turns and see one chord and layer state.
     loop {
+        let mut keymap = shared_keymap
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Check for shutdown signal (non-blocking)
         match shutdown_rx.try_recv() {
             Ok(()) => {
@@ -197,6 +193,9 @@ fn run_event_processor(
                                     );
                                     virtual_device.emit(&[output_event])?;
                                 }
+                                ProcessResult::Retype { backspaces, text } => {
+                                    retype(&mut virtual_device, backspaces, &text)?;
+                                }
                                 ProcessResult::TypeString(text, add_enter) => {
                                     // Type out the string character by character
                                     type_string(&mut virtual_device, &text, add_enter)?;
@@ -263,6 +262,19 @@ fn run_event_processor(
                     }
                 }
 
+                // A stroke held past its timeout, or a held prefix gone idle, is typed now
+                match keymap.check_steno_timeouts() {
+                    ProcResult::TypeString(text, add_enter) => {
+                        type_string(&mut virtual_device, &text, add_enter)?;
+                    }
+                    ProcResult::Retype { backspaces, text } => {
+                        retype(&mut virtual_device, backspaces, &text)?;
+                    }
+                    _ => {}
+                }
+
+                // Let the keyboard's other device threads in before sleeping
+                drop(keymap);
                 // Sleep briefly to avoid CPU spinning
                 // 1ms sleep provides excellent responsiveness while preventing busy-wait
                 std::thread::sleep(std::time::Duration::from_millis(1));
@@ -426,6 +438,21 @@ fn release_all_keys(virtual_device: &mut VirtualDevice, keymap: &KeymapProcessor
     // Send final SYN_REPORT
     let syn_event = InputEvent::new_now(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT);
     let _ = virtual_device.emit(&[syn_event]);
+}
+
+/// Delete `backspaces` characters before the cursor, then type `text`
+fn retype(virtual_device: &mut VirtualDevice, backspaces: usize, text: &str) -> Result<()> {
+    let mut events = Vec::with_capacity(backspaces * 4);
+    for _ in 0..backspaces {
+        events.push(InputEvent::new(EventType::KEY, Key::KEY_BACKSPACE.code(), 1));
+        events.push(InputEvent::new(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT));
+        events.push(InputEvent::new(EventType::KEY, Key::KEY_BACKSPACE.code(), 0));
+        events.push(InputEvent::new(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT));
+    }
+    if !events.is_empty() {
+        virtual_device.emit(&events)?;
+    }
+    type_string(virtual_device, text, false)
 }
 
 /// Type a string by emitting key events for each character

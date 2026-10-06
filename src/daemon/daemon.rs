@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -614,6 +614,13 @@ impl AsyncDaemon {
             uid
         );
 
+        // One keymap per physical keyboard. A keyboard can expose several event files,
+        // and a chord can span them, so every file's thread shares this layer, chord,
+        // and steno state.
+        let mut keymap = event_processor::KeymapProcessor::new(&config, config_path, uid);
+        let _ = keymap.load_adaptive_stats(uid); // Ignore errors if file doesn't exist
+        let shared_keymap = Arc::new(Mutex::new(keymap));
+
         // Track which paths we successfully started so we can roll back on partial failure
         let mut started_paths: Vec<PathBuf> = Vec::new();
 
@@ -656,8 +663,7 @@ impl AsyncDaemon {
             let kbd_id_clone = kbd_id.clone();
             let kbd_name_clone = kbd_name.to_string();
             let event_path_clone = event_path.clone();
-            let config_clone = config.clone();
-            let config_path_clone = config_path.clone();
+            let shared_keymap_clone = Arc::clone(&shared_keymap);
             let dead_tx = self.processor_dead_tx.clone();
 
             let handle = thread::spawn(move || {
@@ -670,8 +676,7 @@ impl AsyncDaemon {
                     kbd_id_clone,
                     device,
                     kbd_name_clone,
-                    config_clone,
-                    config_path_clone,
+                    shared_keymap_clone,
                     uid,
                     shutdown_rx,
                     game_mode_rx,

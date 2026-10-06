@@ -1,5 +1,7 @@
-use crate::config::{Config, KeyAction, Layer};
+use crate::config::{Config, KeyAction, Layer, LayerKind, StenoConfig};
 use crate::keycode::KeyCode;
+use crate::steno::engine::resolve_dictionary_path;
+use crate::steno::layout::{build_key_map, preset};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 
@@ -170,6 +172,59 @@ pub fn validate_config(config_path: Option<&std::path::Path>) -> Result<()> {
         for layer_name in missing_layers {
             errors.push(format!("Referenced layer not defined: \"{}\"", layer_name));
         }
+    }
+
+    print!("  {} Checking steno layers... ", "→".bright_blue());
+    let steno_layers: Vec<(&Layer, &StenoConfig)> = config
+        .layers
+        .iter()
+        .filter_map(|(layer, layer_config)| match &layer_config.kind {
+            LayerKind::Steno(steno) => Some((layer, steno)),
+            LayerKind::Remap => None,
+        })
+        .collect();
+    let (uid, _) = crate::get_actual_user_uid();
+    let home = crate::get_user_home_dir(uid).ok();
+    let config_dir = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut steno_errors = Vec::new();
+    for (layer, steno) in &steno_layers {
+        let layout = preset(&steno.layout)
+            .map_err(|e| vec![e])
+            .and_then(|preset| build_key_map(&preset, &steno.layout_overrides));
+        if let Err(layout_errors) = layout {
+            for layout_error in layout_errors {
+                steno_errors.push(format!("steno layer \"{}\": {}", layer.0, layout_error));
+            }
+        }
+        if steno.translation_timeout_ms.is_some() {
+            warnings.push(format!(
+                "steno layer \"{}\": translation_timeout_ms is no longer used and can be removed",
+                layer.0
+            ));
+        }
+        for raw in &steno.dictionaries {
+            let path = resolve_dictionary_path(raw, config_dir, home.as_deref());
+            if !path.exists() {
+                // Not fatal: the layer loads without this dictionary
+                warnings.push(format!(
+                    "steno layer \"{}\": dictionary not found: {}",
+                    layer.0,
+                    path.display()
+                ));
+            }
+        }
+    }
+    if steno_errors.is_empty() {
+        println!(
+            "{} {} steno layers",
+            "✓".bright_green().bold(),
+            steno_layers.len()
+        );
+    } else {
+        println!("{}", "✗".bright_red().bold());
+        errors.extend(steno_errors);
     }
 
     println!();

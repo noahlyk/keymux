@@ -325,6 +325,39 @@
                 KC_F: CMD("/usr/bin/notify-send 'Media Layer Active'"),
             },
         ),
+
+        // ------------------------------------------------------------------------
+        // STENO LAYER (optional)
+        // ------------------------------------------------------------------------
+        // A steno layer captures its stroke keys, groups them into chords, and
+        // types the dictionary text for each stroke. The name doesn't matter;
+        // `kind` is what makes it a steno layer.
+        //
+        // Switch to it with TO/TG/MO, like any other layer. Keys that aren't
+        // stroke keys and have no remap here are swallowed while it's active.
+        //
+        // Dictionaries are Plover JSON files, highest priority first.
+        // Multi-stroke entries (KPA/TKAOEU) and the formatting commands {^}, {^text},
+        // {text^} and {-|} are supported. Entries using any other command are skipped.
+        // Bare * undoes the last translation.
+        "steno": (
+            kind: Steno((
+                layout: "qwerty",
+                // Change individual stroke keys, e.g. { "S-": Key(KC_Q) }
+                layout_overrides: {},
+                dictionaries: [
+                    "~/.config/keymux/steno/user.json",
+                    "~/.config/keymux/steno/main.json",
+                ],
+                // A stroke is flushed after this long even if keys are still held
+                stroke_timeout_ms: 1000,
+            )),
+            // Non-stroke keys listed here still work while steno is active,
+            // e.g. KC_ESC: TO("base") to leave. Anything else is swallowed.
+            remaps: {},
+            // Stop capturing strokes during game mode
+            disabled_in_game_mode: true,
+        ),
     },
 
     // ============================================================================

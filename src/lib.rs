@@ -10,6 +10,7 @@ pub mod keyboard_id;
 pub mod keycode;
 pub mod niri;
 pub mod session_manager;
+pub mod steno;
 pub mod ui;
 pub mod window_manager;
 pub mod x11;

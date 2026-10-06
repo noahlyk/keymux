@@ -1,12 +1,49 @@
 use super::adaptive::AdaptiveProcessor;
-use crate::config::{Config, KeyAction};
+use crate::config::{Config, KeyAction, Layer, LayerKind};
 use crate::event_processor::actions::{
     handle_action_release, EmitResult, HandleContext, HeldAction, ProcessResult, TdResolution,
 };
 use crate::event_processor::layer_stack::LayerStack;
 use crate::keycode::KeyCode;
+use crate::steno::translate::StenoOutput;
+use crate::steno::setup::Cooldown;
+use crate::steno::{self, StenoEngine};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+use tracing::error;
+
+/// Keys that always reach the screen on a steno layer, without a remap. Backspace
+/// and Delete are the ones a steno user needs to correct text.
+const STENO_PASSTHROUGH: [KeyCode; 2] = [KeyCode::KC_BSPC, KeyCode::KC_DEL];
+
+fn steno_result(output: Option<StenoOutput>) -> ProcessResult {
+    match output {
+        None => ProcessResult::None,
+        Some(StenoOutput::Type(text)) => ProcessResult::TypeString(text, false),
+        Some(StenoOutput::Retype { backspaces, text }) => {
+            ProcessResult::Retype { backspaces, text }
+        }
+    }
+}
+
+#[cfg(test)]
+impl KeymapProcessor {
+    /// Block until every steno layer's dictionaries have loaded.
+    pub(crate) fn wait_for_steno_dictionaries(&mut self) {
+        for engine in self.steno_engines.values_mut() {
+            engine.wait_until_loaded();
+        }
+    }
+
+    pub(crate) fn current_layer_name(&self) -> String {
+        self.layer_stack.current_layer().0
+    }
+
+    pub(crate) fn deactivate_layer_for_test(&mut self, layer: &Layer) {
+        self.layer_stack.deactivate_layer(layer);
+    }
+}
 
 pub struct KeymapProcessor {
     held_keys: HashMap<KeyCode, Vec<HeldAction>>,
@@ -16,6 +53,12 @@ pub struct KeymapProcessor {
     osm_processor: crate::event_processor::actions::OsmProcessor,
     socd_processor: crate::event_processor::actions::SocdProcessor,
     adaptive_processor: AdaptiveProcessor,
+    /// Chord state for each steno layer, keyed by layer name
+    steno_engines: HashMap<Layer, StenoEngine>,
+    /// The steno layer that was on top at the last key press, if any
+    steno_active: Option<Layer>,
+    /// Limits the "steno isn't set up" notification
+    setup_hint: Cooldown,
     config_dir: PathBuf,
     user_id: u32,
 }
@@ -27,6 +70,27 @@ impl KeymapProcessor {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
+
+        let home = crate::get_user_home_dir(user_id).ok();
+        let mut steno_engines = HashMap::new();
+        for (layer, layer_config) in &config.layers {
+            let LayerKind::Steno(steno) = &layer_config.kind else {
+                continue;
+            };
+            match StenoEngine::from_config(
+                steno,
+                layer_config.disabled_in_game_mode,
+                &config_dir,
+                home.as_deref(),
+            ) {
+                Ok(engine) => {
+                    steno_engines.insert(layer.clone(), engine);
+                }
+                // Left out of steno_engines, so the layer behaves as a plain remap layer
+                Err(e) => error!("steno layer \"{}\" disabled: {e:#}", layer.0),
+            }
+        }
+
         Self {
             held_keys: HashMap::new(),
             layer_stack: LayerStack::new(config),
@@ -35,6 +99,9 @@ impl KeymapProcessor {
             osm_processor: crate::event_processor::actions::OsmProcessor::new(config),
             socd_processor: crate::event_processor::actions::SocdProcessor::from_config(config),
             adaptive_processor: AdaptiveProcessor::new(),
+            steno_engines,
+            steno_active: None,
+            setup_hint: Cooldown::new(Duration::from_secs(3)),
             config_dir,
             user_id,
         }
@@ -52,6 +119,17 @@ impl KeymapProcessor {
         } else {
             ProcessResult::MultipleEvents(events)
         }
+    }
+
+    /// Finish any steno stroke that has been held past its timeout, or translate
+    /// held strokes that have gone idle. Returns what to type, if anything.
+    pub fn check_steno_timeouts(&mut self) -> ProcessResult {
+        let now = Instant::now();
+        let output = self
+            .steno_engines
+            .values_mut()
+            .find_map(|engine| engine.tick(now));
+        steno_result(output)
     }
 
     pub fn get_held_keys(&self) -> Vec<KeyCode> {
@@ -73,10 +151,101 @@ impl KeymapProcessor {
     }
 
     pub fn process_key(&mut self, keycode: KeyCode, pressed: bool) -> ProcessResult {
+        let result = match self.steno_capture(keycode, pressed) {
+            Some(result) => result,
+            None if pressed => self.process_key_press(keycode),
+            None => self.process_key_release(keycode),
+        };
         if pressed {
-            self.process_key_press(keycode)
+            self.steno_setup_hint();
+        }
+        result
+    }
+
+    /// On a steno layer that has no dictionary yet, point the user at setup.
+    /// Rate-limited so holding a key doesn't spam notifications.
+    fn steno_setup_hint(&mut self) {
+        let top = self.layer_stack.current_layer();
+        let needs_setup = self
+            .steno_engines
+            .get(&top)
+            .is_some_and(|engine| engine.needs_setup());
+        if needs_setup && self.setup_hint.ready(Instant::now()) {
+            steno::setup::notify_user(
+                self.user_id,
+                "Steno isn't set up",
+                "Run: keymux steno setup",
+            );
+        }
+    }
+
+    /// Route a key to the top layer if that layer is steno. Returns `None` when the
+    /// key should go through the normal remap path.
+    ///
+    /// On a steno layer, stroke keys are captured. Other keys use the layer's remaps
+    /// if it has one, and are swallowed otherwise so they don't leak to layers below.
+    fn steno_capture(&mut self, keycode: KeyCode, pressed: bool) -> Option<ProcessResult> {
+        if !pressed {
+            // Releases belong to whoever pressed the key, even if its layer is gone now
+            match self.held_keys.get(&keycode)?.first()? {
+                HeldAction::StenoManaged(layer) => {
+                    let layer = layer.clone();
+                    self.held_keys.remove(&keycode);
+                    let output = self.steno_engines.get_mut(&layer)?.release(keycode);
+                    return Some(steno_result(output));
+                }
+                // A swallowed press must not produce a release on its own
+                HeldAction::SwallowedBySteno => {
+                    self.held_keys.remove(&keycode);
+                    return Some(ProcessResult::None);
+                }
+                _ => return None,
+            }
+        }
+
+        let top = self.layer_stack.current_layer();
+        // Entering a steno layer starts a fresh sentence, so its first word has no leading space
+        if self.steno_active.as_ref() != Some(&top) {
+            if let Some(engine) = self.steno_engines.get_mut(&top) {
+                engine.start_fresh();
+            }
+            self.steno_active = self.steno_engines.contains_key(&top).then(|| top.clone());
+        }
+        let game_mode = self.layer_stack.is_game_mode_active();
+        let engine = self.steno_engines.get_mut(&top)?;
+        if game_mode && engine.disabled_in_game_mode {
+            return None;
+        }
+
+        if engine.owns(keycode) {
+            engine.press(keycode, Instant::now());
+            self.held_keys
+                .insert(keycode, vec![HeldAction::StenoManaged(top)]);
+            return Some(ProcessResult::None);
+        }
+
+        // Editing keys reach the screen as usual. Backspace also tells the translator,
+        // so `*` never deletes text that Backspace already removed.
+        if keycode == KeyCode::KC_BSPC {
+            engine.backspace();
+        }
+        if STENO_PASSTHROUGH.contains(&keycode) {
+            return None;
+        }
+
+        // On a steno layer, a key does nothing unless the layer remaps it. Its press
+        // and release are both swallowed, so it can't leak a stray key event.
+        let has_remap = self
+            .layer_stack
+            .layer_configs()
+            .get(&top)
+            .is_some_and(|config| config.remaps.contains_key(&keycode));
+        if has_remap {
+            None
         } else {
-            self.process_key_release(keycode)
+            self.held_keys
+                .insert(keycode, vec![HeldAction::SwallowedBySteno]);
+            Some(ProcessResult::None)
         }
     }
 

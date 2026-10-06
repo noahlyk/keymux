@@ -118,6 +118,33 @@ fn main() -> Result<()> {
         Some(cli::Commands::Reload) => {
             run_reload()?;
         }
+        Some(cli::Commands::Steno { action }) => {
+            let config_path = keymux::config::Config::default_path()?;
+            let config_dir = config_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            match action {
+                cli::StenoAction::Setup => keymux::steno::setup::run_setup(config_dir)?,
+                cli::StenoAction::Layout => keymux::steno::commands::layout()?,
+                cli::StenoAction::Keys { text } => {
+                    keymux::steno::commands::keys(config_dir, text)?;
+                }
+                cli::StenoAction::Lookup { word } => {
+                    keymux::steno::commands::lookup(config_dir, word);
+                }
+                cli::StenoAction::Stroke { stroke } => {
+                    keymux::steno::commands::show_stroke(config_dir, stroke)?;
+                }
+                cli::StenoAction::Add { stroke, text } => {
+                    keymux::steno::commands::add(config_dir, stroke, text)?;
+                }
+                cli::StenoAction::Tape { follow, lines } => {
+                    let (uid, _) = keymux::get_actual_user_uid();
+                    let home = keymux::get_user_home_dir(uid)?;
+                    keymux::steno::commands::tail_tape(&home, *lines, *follow)?;
+                }
+            }
+        }
         Some(cli::Commands::Validate { config }) => {
             keymux::config::validate_config(config.as_deref())?;
         }

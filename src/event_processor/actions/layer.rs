@@ -17,15 +17,13 @@ pub fn emit_layer(
             )
         }
         KeyAction::TG(layer) => {
+            // Toggles on press and latches: nothing is held, so release doesn't undo it
             if layer_stack.layers().contains(layer) {
                 layer_stack.deactivate_layer(layer);
             } else {
                 layer_stack.activate_layer(layer.clone());
             }
-            (
-                EmitResult::LayerAction(layer.clone()),
-                Some(HeldAction::Layer(layer.clone())),
-            )
+            (EmitResult::LayerAction(layer.clone()), None)
         }
         KeyAction::MO(layer) => {
             layer_stack.activate_layer(layer.clone());

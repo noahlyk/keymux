@@ -25,6 +25,8 @@ pub enum ProcessResult {
     TapKeyPressRelease(KeyCode),
     MultipleEvents(Vec<(KeyCode, bool)>),
     TypeString(String, bool),
+    /// Delete `backspaces` characters, then type `text` (used for undo)
+    Retype { backspaces: usize, text: String },
     None,
 }
 
@@ -87,6 +89,12 @@ pub enum HeldAction {
         double_tap_action: KeyAction,
     },
     OsmManaged,
+    /// A stroke key captured by the steno layer with this name. Released by the
+    /// keymap processor, which owns the chord state.
+    StenoManaged(Layer),
+    /// A key pressed on a steno layer that isn't a stroke key or a remap. Its press
+    /// was swallowed, so its release is swallowed too.
+    SwallowedBySteno,
 }
 
 pub struct HandleContext<'a> {
@@ -130,6 +138,8 @@ pub fn handle_action_release(
             let _ = osm::handle_osm_release(ctx.osm_processor, keycode);
             ProcessResult::None
         }
+        // Steno releases are intercepted by KeymapProcessor before reaching here
+        HeldAction::StenoManaged(_) | HeldAction::SwallowedBySteno => ProcessResult::None,
     }
 }
 
