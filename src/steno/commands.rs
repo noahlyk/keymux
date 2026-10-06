@@ -143,7 +143,8 @@ const SEARCH_BUDGET: usize = 20_000;
 /// entry gets a single row marked "no stroke".
 #[must_use]
 pub fn chord_rows(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &str) -> Vec<ChordRow> {
-    let words: Vec<&str> = text.split_whitespace().collect();
+    let spans = word_spans(text);
+    let words: Vec<&str> = spans.iter().map(|&(start, end)| &text[start..end]).collect();
     let candidates: Vec<Vec<Vec<u32>>> = words.iter().map(|word| ranked_strokes(&dict, word)).collect();
 
     // Words with no entry can't be typed, so each run of known words is searched on its own,
@@ -160,9 +161,14 @@ pub fn chord_rows(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &
         let end = (start..words.len())
             .find(|&i| candidates[i].is_empty())
             .unwrap_or(words.len());
-        let run_words = &words[start..end];
+        // What the run should type after each word: the text from its first word to that word's end
+        let run_start = spans[start].0;
+        let wants: Vec<String> = spans[start..end]
+            .iter()
+            .map(|&(_, word_end)| text[run_start..word_end].split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect();
         let run_candidates = &candidates[start..end];
-        match exact_strokes(&base, run_words, run_candidates) {
+        match exact_strokes(&base, &wants, run_candidates) {
             Some(exact) => chosen.extend(exact.into_iter().map(Some)),
             None => chosen.extend(run_candidates.iter().map(|options| options.first().cloned())),
         }
@@ -192,6 +198,50 @@ pub fn chord_rows(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &
     rows
 }
 
+/// Byte ranges of the words in `text`. Each whitespace-separated chunk is split so that
+/// punctuation on either end is its own word: `now,` is `now` then `,`. Punctuation
+/// inside a word stays with it, so `12:29am` is one word.
+fn word_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut chunk_start: Option<usize> = None;
+    for (i, c) in text.char_indices().chain(std::iter::once((text.len(), ' '))) {
+        match (c.is_whitespace(), chunk_start) {
+            (false, None) => chunk_start = Some(i),
+            (true, Some(start)) => {
+                spans.extend(split_punctuation(text, start, i));
+                chunk_start = None;
+            }
+            _ => {}
+        }
+    }
+    spans
+}
+
+/// Splits `text[start..end]`, a chunk with no whitespace, into its core and the
+/// punctuation around it. A chunk with no letters or digits splits into single characters.
+fn split_punctuation(text: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
+    let chunk = &text[start..end];
+    let is_punctuation = |c: char| !c.is_alphanumeric();
+    let core = chunk.trim_matches(is_punctuation);
+    if core.is_empty() {
+        return chars_as_spans(text, start, end);
+    }
+    let core_start = start + chunk.find(core).unwrap_or(0);
+    let core_end = core_start + core.len();
+    let mut spans = chars_as_spans(text, start, core_start);
+    spans.push((core_start, core_end));
+    spans.extend(chars_as_spans(text, core_end, end));
+    spans
+}
+
+/// Each character of `text[start..end]` as its own span.
+fn chars_as_spans(text: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
+    text[start..end]
+        .char_indices()
+        .map(|(i, c)| (start + i, start + i + c.len_utf8()))
+        .collect()
+}
+
 /// Every stroke sequence that translates `word`, fewest strokes first, then fewest keys.
 fn ranked_strokes(dict: &Dictionary, word: &str) -> Vec<Vec<u32>> {
     let mut found = dict.strokes_for(word);
@@ -201,12 +251,13 @@ fn ranked_strokes(dict: &Dictionary, word: &str) -> Vec<Vec<u32>> {
     found
 }
 
-/// One stroke sequence per word that together type `words` exactly, or `None`.
+/// One stroke sequence per word that together type the text exactly, or `None`.
+/// `wants[i]` is the text that should be typed once word `i` is done.
 /// `base` is a fresh translator, so the run starts with no leading space.
-fn exact_strokes(base: &Translator, words: &[&str], candidates: &[Vec<Vec<u32>>]) -> Option<Vec<Vec<u32>>> {
+fn exact_strokes(base: &Translator, wants: &[String], candidates: &[Vec<Vec<u32>>]) -> Option<Vec<Vec<u32>>> {
     let mut chosen = Vec::new();
     let mut budget = SEARCH_BUDGET;
-    search(base, words, candidates, &mut budget, &mut chosen).then_some(chosen)
+    search(base, wants, candidates, &mut budget, &mut chosen).then_some(chosen)
 }
 
 /// Depth-first search over each word's stroke sequences. A choice is kept when the
@@ -214,16 +265,15 @@ fn exact_strokes(base: &Translator, words: &[&str], candidates: &[Vec<Vec<u32>>]
 /// translator, so a rejected choice leaves nothing behind.
 fn search(
     translator: &Translator,
-    words: &[&str],
+    wants: &[String],
     candidates: &[Vec<Vec<u32>>],
     budget: &mut usize,
     chosen: &mut Vec<Vec<u32>>,
 ) -> bool {
     let i = chosen.len();
-    if i == words.len() {
+    if i == wants.len() {
         return true;
     }
-    let want = words[..=i].join(" ");
     for option in &candidates[i] {
         if *budget == 0 {
             return false;
@@ -235,9 +285,9 @@ fn search(
             next.stroke(bits);
             fits &= !next.was_unmatched();
         }
-        if fits && next.text() == want {
+        if fits && next.text() == wants[i] {
             chosen.push(option.clone());
-            if search(&next, words, candidates, budget, chosen) {
+            if search(&next, wants, candidates, budget, chosen) {
                 return true;
             }
             chosen.pop();
@@ -517,6 +567,23 @@ mod tests {
         let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "zzyzx");
         assert_eq!(rows[0].stroke, "no stroke");
         assert!(rows[0].keys.is_empty());
+    }
+
+    #[test]
+    fn trailing_punctuation_is_its_own_word() {
+        let mut dict = sample_dict();
+        dict.merge_json(r#"{"TPHOU": "now", "KW-B": ","}"#).unwrap();
+        let rows = chord_rows(dict, &qwerty_keys_by_bit(), "now, the");
+        let words: Vec<&str> = rows.iter().map(|row| row.word.as_str()).collect();
+        assert_eq!(words, ["now", ",", "the"]);
+        assert_eq!(rows[0].stroke, render_stroke(parse_stroke("TPHOU").unwrap()));
+        assert_eq!(rows[1].stroke, render_stroke(parse_stroke("KW-B").unwrap()));
+    }
+
+    #[test]
+    fn punctuation_inside_a_word_stays_with_it() {
+        assert_eq!(word_spans("12:29am, ok"), [(0, 7), (7, 8), (9, 11)]);
+        assert_eq!(word_spans("(a)..."), [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6)]);
     }
 
     #[test]
