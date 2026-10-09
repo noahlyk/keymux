@@ -31,74 +31,29 @@ package() {
     cd "$startdir"
     install -Dm755 "target/release/keymux" "$pkgdir/usr/bin/keymux"
 
-    # Install systemd services (if systemd is detected)
-    if [ -d "/run/systemd/system" ]; then
-        install -Dm644 "systemd/keymux.service" "$pkgdir/usr/lib/systemd/system/keymux.service"
+    # Service/init files are shipped unconditionally for every supported init
+    # system and WM, since package() runs in the build environment (which may
+    # be a clean chroot) rather than the end user's machine - detecting the
+    # target init system/WM has to happen at install time in keymux.install,
+    # not here.
+    install -Dm644 "systemd/keymux.service" "$pkgdir/usr/lib/systemd/system/keymux.service"
+    install -Dm644 "systemd/keymux-niri.service" "$pkgdir/usr/lib/systemd/user/keymux-niri.service"
+    install -Dm644 "systemd/keymux-hyprland.service" "$pkgdir/usr/lib/systemd/user/keymux-hyprland.service"
+    install -Dm644 "systemd/keymux-sway.service" "$pkgdir/usr/lib/systemd/user/keymux-sway.service"
+    install -Dm644 "systemd/keymux-i3.service" "$pkgdir/usr/lib/systemd/user/keymux-i3.service"
+    install -Dm644 "systemd/keymux-bspwm.service" "$pkgdir/usr/lib/systemd/user/keymux-bspwm.service"
 
-        if pacman -Qq niri &>/dev/null; then
-            install -Dm644 "systemd/keymux-niri.service" "$pkgdir/usr/lib/systemd/user/keymux-niri.service"
-        fi
-        if pacman -Qq hyprland &>/dev/null; then
-            install -Dm644 "systemd/keymux-hyprland.service" "$pkgdir/usr/lib/systemd/user/keymux-hyprland.service"
-        fi
-        if pacman -Qq sway &>/dev/null; then
-            install -Dm644 "systemd/keymux-sway.service" "$pkgdir/usr/lib/systemd/user/keymux-sway.service"
-        fi
-        if pacman -Qq i3-wm &>/dev/null; then
-            install -Dm644 "systemd/keymux-i3.service" "$pkgdir/usr/lib/systemd/user/keymux-i3.service"
-        fi
-        if pacman -Qq bspwm &>/dev/null; then
-            install -Dm644 "systemd/keymux-bspwm.service" "$pkgdir/usr/lib/systemd/user/keymux-bspwm.service"
-        fi
-    fi
+    install -Dm755 "openrc/keymux" "$pkgdir/etc/init.d/keymux"
+    install -Dm755 "openrc/keymux-niri" "$pkgdir/etc/init.d/keymux-niri"
+    install -Dm755 "openrc/keymux-hyprland" "$pkgdir/etc/init.d/keymux-hyprland"
+    install -Dm755 "openrc/keymux-sway" "$pkgdir/etc/init.d/keymux-sway"
+    install -Dm755 "openrc/keymux-i3" "$pkgdir/etc/init.d/keymux-i3"
+    install -Dm755 "openrc/keymux-bspwm" "$pkgdir/etc/init.d/keymux-bspwm"
 
-    # Install OpenRC scripts (if OpenRC is detected)
-    if [ -d "/etc/openrc" ] || [ -d "/etc/init.d" ]; then
-        install -Dm755 "openrc/keymux" "$pkgdir/etc/init.d/keymux"
-        
-        if pacman -Qq niri &>/dev/null; then
-            install -Dm755 "openrc/keymux-niri" "$pkgdir/etc/init.d/keymux-niri"
-        fi
-        if pacman -Qq hyprland &>/dev/null; then
-            install -Dm755 "openrc/keymux-hyprland" "$pkgdir/etc/init.d/keymux-hyprland"
-        fi
-        if pacman -Qq sway &>/dev/null; then
-            install -Dm755 "openrc/keymux-sway" "$pkgdir/etc/init.d/keymux-sway"
-        fi
-        if pacman -Qq i3-wm &>/dev/null; then
-            install -Dm755 "openrc/keymux-i3" "$pkgdir/etc/init.d/keymux-i3"
-        fi
-        if pacman -Qq bspwm &>/dev/null; then
-            install -Dm755 "openrc/keymux-bspwm" "$pkgdir/etc/init.d/keymux-bspwm"
-        fi
-    fi
-
-    # Install runit service directories (if runit is detected)
-    if [ -d "/etc/runit" ] || [ -d "/service" ]; then
-        cp -r "runit/keymux" "$pkgdir/etc/sv/keymux"
-        chmod 755 "$pkgdir/etc/sv/keymux/run" "$pkgdir/etc/sv/keymux/log/run"
-        
-        if pacman -Qq niri &>/dev/null; then
-            cp -r "runit/keymux-niri" "$pkgdir/etc/sv/keymux-niri"
-            chmod 755 "$pkgdir/etc/sv/keymux-niri/run" "$pkgdir/etc/sv/keymux-niri/log/run"
-        fi
-        if pacman -Qq hyprland &>/dev/null; then
-            cp -r "runit/keymux-hyprland" "$pkgdir/etc/sv/keymux-hyprland"
-            chmod 755 "$pkgdir/etc/sv/keymux-hyprland/run" "$pkgdir/etc/sv/keymux-hyprland/log/run"
-        fi
-        if pacman -Qq sway &>/dev/null; then
-            cp -r "runit/keymux-sway" "$pkgdir/etc/sv/keymux-sway"
-            chmod 755 "$pkgdir/etc/sv/keymux-sway/run" "$pkgdir/etc/sv/keymux-sway/log/run"
-        fi
-        if pacman -Qq i3-wm &>/dev/null; then
-            cp -r "runit/keymux-i3" "$pkgdir/etc/sv/keymux-i3"
-            chmod 755 "$pkgdir/etc/sv/keymux-i3/run" "$pkgdir/etc/sv/keymux-i3/log/run"
-        fi
-        if pacman -Qq bspwm &>/dev/null; then
-            cp -r "runit/keymux-bspwm" "$pkgdir/etc/sv/keymux-bspwm"
-            chmod 755 "$pkgdir/etc/sv/keymux-bspwm/run" "$pkgdir/etc/sv/keymux-bspwm/log/run"
-        fi
-    fi
+    for sv in keymux keymux-niri keymux-hyprland keymux-sway keymux-i3 keymux-bspwm; do
+        cp -r "runit/$sv" "$pkgdir/etc/sv/$sv"
+        chmod 755 "$pkgdir/etc/sv/$sv/run" "$pkgdir/etc/sv/$sv/log/run"
+    done
 
     install -Dm644 "config.example.ron" "$pkgdir/usr/share/doc/keymux/config.example.ron"
     install -Dm644 "README.md" "$pkgdir/usr/share/doc/keymux/README.md"
