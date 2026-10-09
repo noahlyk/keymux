@@ -547,11 +547,11 @@ mod tests {
     #[test]
     fn combined_key_replaces_the_pair_it_presses() {
         let keys = qwerty_keys_by_bit();
-        // K- and -T are single keys; A- and O- together are the combined V
+        // K- and -T are single keys; A- and O- together are the combined X
         let stroke = parse_stroke("KAO-T").unwrap();
-        assert_eq!(stroke_keys(stroke, &keys), ["S", "V", "O"]);
+        assert_eq!(stroke_keys(stroke, &keys), ["S", "X", "O"]);
         // A lone A- still presses its single key
-        assert_eq!(stroke_keys(parse_stroke("KA").unwrap(), &keys), ["S", "X"]);
+        assert_eq!(stroke_keys(parse_stroke("KA").unwrap(), &keys), ["S", "C"]);
     }
 
     #[test]

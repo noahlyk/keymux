@@ -286,7 +286,7 @@ mod tests {
     fn combined_keys_press_both_of_their_parts() {
         let map = build_key_map(&preset("qwerty").unwrap(), &HashMap::new()).unwrap();
         let bit = |name: &str| 1 << slot_by_name(name).unwrap();
-        assert_eq!(map[&KeyCode::KC_V], bit("A-") | bit("O-"));
+        assert_eq!(map[&KeyCode::KC_X], bit("A-") | bit("O-"));
         assert_eq!(map[&KeyCode::KC_COMM], bit("-E") | bit("-U"));
     }
 

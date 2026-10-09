@@ -100,7 +100,7 @@ fn tg_latches_after_release_and_toggles_off() {
 
     // Strokes work while latched
     assert_eq!(
-        chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_X, KeyCode::KC_O]),
+        chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_O]),
         ProcessResult::TypeString("cat".to_string(), false)
     );
 
@@ -128,10 +128,10 @@ fn stray_space_during_a_chord_does_not_disturb_the_stroke() {
         ProcessResult::TypeString(" ".to_string(), false)
     );
     assert_eq!(p.process_key(KeyCode::KC_SPC, false), ProcessResult::None);
-    assert_eq!(p.process_key(KeyCode::KC_X, true), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_C, true), ProcessResult::None);
     assert_eq!(p.process_key(KeyCode::KC_O, true), ProcessResult::None);
     assert_eq!(p.process_key(KeyCode::KC_S, false), ProcessResult::None);
-    assert_eq!(p.process_key(KeyCode::KC_X, false), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_C, false), ProcessResult::None);
     assert_eq!(
         p.process_key(KeyCode::KC_O, false),
         ProcessResult::TypeString("cat".to_string(), false)
@@ -162,7 +162,7 @@ fn backspace_on_a_steno_layer_reaches_the_screen_and_fixes_undo() {
     enter_steno(&mut p);
 
     // "cat" is typed, then Backspace removes its last letter by hand
-    chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_X, KeyCode::KC_O]);
+    chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_O]);
     assert_eq!(
         p.process_key(KeyCode::KC_BSPC, true),
         ProcessResult::EmitKey(KeyCode::KC_BSPC, true)
@@ -209,7 +209,7 @@ fn chord_on_steno_layer_types_dictionary_text() {
     enter_steno(&mut p);
 
     // K- A- -T is "cat"
-    let result = chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_X, KeyCode::KC_O]);
+    let result = chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_O]);
     assert_eq!(result, ProcessResult::TypeString("cat".to_string(), false));
 }
 
@@ -261,11 +261,11 @@ fn stroke_released_after_layer_exit_still_types() {
     enter_steno(&mut p);
 
     assert_eq!(p.process_key(KeyCode::KC_S, true), ProcessResult::None);
-    assert_eq!(p.process_key(KeyCode::KC_X, true), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_C, true), ProcessResult::None);
     assert_eq!(p.process_key(KeyCode::KC_O, true), ProcessResult::None);
     p.deactivate_layer_for_test(&Layer("chords".to_string()));
     assert_eq!(p.process_key(KeyCode::KC_S, false), ProcessResult::None);
-    assert_eq!(p.process_key(KeyCode::KC_X, false), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_C, false), ProcessResult::None);
     assert_eq!(
         p.process_key(KeyCode::KC_O, false),
         ProcessResult::TypeString("cat".to_string(), false)
@@ -277,7 +277,7 @@ fn reentering_a_steno_layer_starts_without_a_leading_space() {
     let fixture = Fixture::new("reenter");
     let mut p = fixture.processor();
     enter_steno(&mut p);
-    let cat = [KeyCode::KC_S, KeyCode::KC_X, KeyCode::KC_O];
+    let cat = [KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_O];
     assert_eq!(
         chord(&mut p, &cat),
         ProcessResult::TypeString("cat".to_string(), false)
@@ -297,7 +297,7 @@ fn space_types_a_space_and_the_next_word_does_not_add_another() {
     let fixture = Fixture::new("space-word");
     let mut p = fixture.processor();
     enter_steno(&mut p);
-    let cat = [KeyCode::KC_S, KeyCode::KC_X, KeyCode::KC_O];
+    let cat = [KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_O];
     assert_eq!(
         chord(&mut p, &cat),
         ProcessResult::TypeString("cat".to_string(), false)
@@ -321,7 +321,7 @@ fn undo_takes_back_a_word_typed_after_a_space() {
     let fixture = Fixture::new("space-undo");
     let mut p = fixture.processor();
     enter_steno(&mut p);
-    chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_X, KeyCode::KC_O]);
+    chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_O]);
     p.process_key(KeyCode::KC_SPC, true);
     p.process_key(KeyCode::KC_SPC, false);
     chord(&mut p, &[KeyCode::KC_U, KeyCode::KC_J]);
@@ -346,7 +346,7 @@ fn toggling_back_into_steno_starts_without_a_prefix_space() {
     let config = Config::load(&config_path).unwrap();
     let mut p = KeymapProcessor::new(&config, config_path, 0);
     p.wait_for_steno_dictionaries();
-    let cat = [KeyCode::KC_S, KeyCode::KC_X, KeyCode::KC_O];
+    let cat = [KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_O];
 
     // Right Ctrl on, "cat", Right Ctrl off
     p.process_key(KeyCode::KC_RCTL, true);
