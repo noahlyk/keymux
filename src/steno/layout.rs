@@ -273,8 +273,8 @@ mod tests {
     #[test]
     fn qwerty_preset_covers_every_steno_key_once() {
         let map = build_key_map(&preset("qwerty").unwrap(), &HashMap::new()).unwrap();
-        // One physical key per stroke key, plus the two combined keys
-        assert_eq!(map.len(), SLOTS.len() + 2);
+        // One physical key per stroke key; the default preset has no combined keys
+        assert_eq!(map.len(), SLOTS.len());
         let single = map
             .values()
             .filter(|bits| bits.count_ones() == 1)
@@ -284,7 +284,12 @@ mod tests {
 
     #[test]
     fn combined_keys_press_both_of_their_parts() {
-        let map = build_key_map(&preset("qwerty").unwrap(), &HashMap::new()).unwrap();
+        // The default preset has no combined keys any more, but the mechanism is still
+        // there: an override can still bind a combined key name to one physical key.
+        let mut overrides = HashMap::new();
+        overrides.insert("A-+O-".to_string(), KeyAction::Key(KeyCode::KC_X));
+        overrides.insert("-E+-U".to_string(), KeyAction::Key(KeyCode::KC_COMM));
+        let map = build_key_map(&preset("qwerty").unwrap(), &overrides).unwrap();
         let bit = |name: &str| 1 << slot_by_name(name).unwrap();
         assert_eq!(map[&KeyCode::KC_X], bit("A-") | bit("O-"));
         assert_eq!(map[&KeyCode::KC_COMM], bit("-E") | bit("-U"));

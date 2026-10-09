@@ -465,6 +465,7 @@ fn format_strokes(strokes: &[u32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::KeyAction;
 
     #[test]
     fn strokes_round_trip_through_their_text() {
@@ -540,18 +541,33 @@ mod tests {
     fn quick_breaks_down_into_its_sounds() {
         let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "quick");
         assert_eq!(rows[0].stroke, "KWEUG");
-        assert_eq!(rows[0].keys, ["S", "D", ",", "K"]);
+        // The default preset has no combined keys, so -E and -U each press their own key
+        assert_eq!(rows[0].keys, ["S", "D", "N", "M", "K"]);
         assert_eq!(rows[0].sounds, "kweug");
     }
 
     #[test]
-    fn combined_key_replaces_the_pair_it_presses() {
+    fn a_stroke_presses_each_key_s_own_physical_key() {
         let keys = qwerty_keys_by_bit();
-        // K- and -T are single keys; A- and O- together are the combined X
+        // K- and -T are single keys; A- and O- each press their own key too, since the
+        // default preset has no combined keys
+        let stroke = parse_stroke("KAO-T").unwrap();
+        assert_eq!(stroke_keys(stroke, &keys), ["S", "C", "V", "O"]);
+        assert_eq!(stroke_keys(parse_stroke("KA").unwrap(), &keys), ["S", "C"]);
+    }
+
+    #[test]
+    fn a_combined_key_added_by_an_override_still_replaces_the_pair_it_presses() {
+        let preset = preset("qwerty").unwrap();
+        let mut overrides = HashMap::new();
+        overrides.insert("A-+O-".to_string(), KeyAction::Key(KeyCode::KC_X));
+        let keys: HashMap<u32, KeyCode> = build_key_map(&preset, &overrides)
+            .unwrap()
+            .into_iter()
+            .map(|(key, bit)| (bit, key))
+            .collect();
         let stroke = parse_stroke("KAO-T").unwrap();
         assert_eq!(stroke_keys(stroke, &keys), ["S", "X", "O"]);
-        // A lone A- still presses its single key
-        assert_eq!(stroke_keys(parse_stroke("KA").unwrap(), &keys), ["S", "C"]);
     }
 
     #[test]

@@ -513,7 +513,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "keymux"
-version = "1.3.2"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "bincode",

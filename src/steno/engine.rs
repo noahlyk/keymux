@@ -109,7 +109,8 @@ impl StenoEngine {
     pub fn release(&mut self, key: KeyCode) -> Option<StenoOutput> {
         let bit = *self.keys.get(&key)?;
         self.held_keys.remove(&key);
-        // A combined key (V = A- and O-) shares bits with the keys still down, so keep those
+        // A combined key (an override binding one physical key to several stroke keys at
+        // once) shares bits with the keys still down, so keep those
         let still_held: u32 = self
             .held_keys
             .iter()
@@ -247,10 +248,17 @@ mod tests {
     use super::*;
 
     fn engine_with_dict(json: &str) -> StenoEngine {
+        engine_with_dict_and_overrides(json, &HashMap::new())
+    }
+
+    fn engine_with_dict_and_overrides(
+        json: &str,
+        overrides: &HashMap<String, crate::config::KeyAction>,
+    ) -> StenoEngine {
         let mut dict = Dictionary::default();
         dict.merge_json(json).unwrap();
         StenoEngine {
-            keys: build_key_map(&preset("qwerty").unwrap(), &HashMap::new()).unwrap(),
+            keys: build_key_map(&preset("qwerty").unwrap(), overrides).unwrap(),
             held_keys: HashSet::new(),
             chord: ChordState::new(Duration::from_secs(1)),
             translator: Translator::new(dict),
@@ -267,19 +275,26 @@ mod tests {
 
     #[test]
     fn combined_key_keeps_bits_that_another_held_key_still_presses() {
-        let mut engine = engine_with_dict(r#"{"AO": "ao"}"#);
+        // The default preset has no combined keys any more, but an override can still add
+        // one, and the chord logic around it is unchanged.
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "A-+O-".to_string(),
+            crate::config::KeyAction::Key(KeyCode::KC_X),
+        );
+        let mut engine = engine_with_dict_and_overrides(r#"{"AO": "ao"}"#, &overrides);
         let now = Instant::now();
         let a_bit = 1 << crate::steno::layout::slot_by_name("A-").unwrap();
         let o_bit = 1 << crate::steno::layout::slot_by_name("O-").unwrap();
-        let x = key_for(&engine, a_bit);
-        let v = key_for(&engine, a_bit | o_bit);
+        let a_key = key_for(&engine, a_bit);
+        let combined_key = key_for(&engine, a_bit | o_bit);
 
-        // Letting go of X must not lift A-, since V still presses it
-        engine.press(x, now);
-        engine.press(v, now);
-        assert!(engine.release(x).is_none());
-        // V was the last key, so the stroke A- O- completes
-        let out = engine.release(v);
+        // Letting go of the lone A- key must not lift A-, since the combined key still presses it
+        engine.press(a_key, now);
+        engine.press(combined_key, now);
+        assert!(engine.release(a_key).is_none());
+        // The combined key was the last one held, so the stroke A- O- completes
+        let out = engine.release(combined_key);
         assert!(matches!(out, Some(StenoOutput::Type(ref text)) if text.trim() == "ao"));
     }
 
