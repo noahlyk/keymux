@@ -440,38 +440,47 @@ fn release_all_keys(virtual_device: &mut VirtualDevice, keymap: &KeymapProcessor
     let _ = virtual_device.emit(&[syn_event]);
 }
 
+/// Delay between each typed character's key events. Emitting a whole word in one
+/// burst with zero spacing lets the consuming app's input queue drop or coalesce
+/// events under load, truncating the output unpredictably.
+const TYPE_CHAR_DELAY: std::time::Duration = std::time::Duration::from_millis(1);
+
 /// Delete `backspaces` characters before the cursor, then type `text`
 fn retype(virtual_device: &mut VirtualDevice, backspaces: usize, text: &str) -> Result<()> {
-    let mut events = Vec::with_capacity(backspaces * 4);
     for _ in 0..backspaces {
-        events.push(InputEvent::new(EventType::KEY, Key::KEY_BACKSPACE.code(), 1));
-        events.push(InputEvent::new(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT));
-        events.push(InputEvent::new(EventType::KEY, Key::KEY_BACKSPACE.code(), 0));
-        events.push(InputEvent::new(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT));
-    }
-    if !events.is_empty() {
+        let events = [
+            InputEvent::new_now(EventType::KEY, Key::KEY_BACKSPACE.code(), 1),
+            InputEvent::new_now(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT),
+        ];
         virtual_device.emit(&events)?;
+        std::thread::sleep(TYPE_CHAR_DELAY);
+        let events = [
+            InputEvent::new_now(EventType::KEY, Key::KEY_BACKSPACE.code(), 0),
+            InputEvent::new_now(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT),
+        ];
+        virtual_device.emit(&events)?;
+        std::thread::sleep(TYPE_CHAR_DELAY);
     }
     type_string(virtual_device, text, false)
 }
 
-/// Type a string by emitting key events for each character
-/// Batches all events with SYN events into a single emit for INSTANT typing
+/// Type a string by emitting key events for each character, pacing each one so the
+/// consuming app's input queue can keep up.
 fn type_string(virtual_device: &mut VirtualDevice, text: &str, _add_enter: bool) -> Result<()> {
-    let mut events = Vec::with_capacity(text.len() * 8); // Pre-allocate for speed
-
     for ch in text.chars() {
         let (key, needs_shift) = char_to_key(ch);
 
         if let Some(key) = key {
+            let mut events = Vec::with_capacity(8);
+
             // Press shift if needed
             if needs_shift {
-                events.push(InputEvent::new(
+                events.push(InputEvent::new_now(
                     EventType::KEY,
                     Key::KEY_LEFTSHIFT.code(),
                     1,
                 ));
-                events.push(InputEvent::new(
+                events.push(InputEvent::new_now(
                     EventType::SYNCHRONIZATION,
                     SYN_CODE,
                     SYN_REPORT,
@@ -479,16 +488,16 @@ fn type_string(virtual_device: &mut VirtualDevice, text: &str, _add_enter: bool)
             }
 
             // Press key
-            events.push(InputEvent::new(EventType::KEY, key.code(), 1));
-            events.push(InputEvent::new(
+            events.push(InputEvent::new_now(EventType::KEY, key.code(), 1));
+            events.push(InputEvent::new_now(
                 EventType::SYNCHRONIZATION,
                 SYN_CODE,
                 SYN_REPORT,
             ));
 
             // Release key
-            events.push(InputEvent::new(EventType::KEY, key.code(), 0));
-            events.push(InputEvent::new(
+            events.push(InputEvent::new_now(EventType::KEY, key.code(), 0));
+            events.push(InputEvent::new_now(
                 EventType::SYNCHRONIZATION,
                 SYN_CODE,
                 SYN_REPORT,
@@ -496,22 +505,22 @@ fn type_string(virtual_device: &mut VirtualDevice, text: &str, _add_enter: bool)
 
             // Release shift if needed
             if needs_shift {
-                events.push(InputEvent::new(
+                events.push(InputEvent::new_now(
                     EventType::KEY,
                     Key::KEY_LEFTSHIFT.code(),
                     0,
                 ));
-                events.push(InputEvent::new(
+                events.push(InputEvent::new_now(
                     EventType::SYNCHRONIZATION,
                     SYN_CODE,
                     SYN_REPORT,
                 ));
             }
+
+            virtual_device.emit(&events)?;
+            std::thread::sleep(TYPE_CHAR_DELAY);
         }
     }
-
-    // Emit ALL events at once - INSTANT like paste!
-    virtual_device.emit(&events)?;
 
     Ok(())
 }
