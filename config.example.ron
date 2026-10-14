@@ -344,6 +344,8 @@
         "steno": (
             kind: Steno((
                 layout: "qwerty",
+                // The default layout also presses S- on Q, * on G, and # on the whole
+                // number row 1 to 0, on top of the main keys (see `keymux steno layout`).
                 // Change individual stroke keys, e.g. { "S-": Key(KC_Q) }
                 layout_overrides: {},
                 dictionaries: [

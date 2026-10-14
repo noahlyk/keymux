@@ -2,7 +2,9 @@
 
 use super::dict::Dictionary;
 use super::format::{parse_pieces, render, FormatState};
-use super::layout::{build_key_map, parse_stroke, preset, render_stroke, SLOTS, SLOT_SOUNDS};
+use super::layout::{
+    build_key_map, extra_keys, parse_stroke, preset, render_stroke, without_extra_keys, SLOTS, SLOT_SOUNDS,
+};
 use super::numbers::number_text;
 use super::setup::{default_dictionaries, steno_dir};
 use super::tape;
@@ -60,9 +62,14 @@ pub fn keys(config_dir: &Path, text: &str) -> Result<()> {
 }
 
 /// Print the built-in QWERTY layout: each steno key, the physical key that presses it,
-/// and the sound it stands for.
+/// and the sound it stands for. Extra keys for a steno key (a second key that presses
+/// it too) follow as repeated rows.
 pub fn layout() -> Result<()> {
     let keys_by_bit = qwerty_keys_by_bit()?;
+    let extras: Vec<[String; 3]> = extra_keys(&preset("qwerty").map_err(|e| anyhow!(e))?)
+        .into_iter()
+        .map(|(slot, key)| [SLOTS[slot].1.to_string(), key_label(key), SLOT_SOUNDS[slot].to_string()])
+        .collect();
     let rows: Vec<[String; 3]> = SLOTS
         .iter()
         .enumerate()
@@ -92,7 +99,7 @@ pub fn layout() -> Result<()> {
         })
         .collect();
     combined.sort_by(|a, b| a[0].cmp(&b[0]));
-    let rows: Vec<[String; 3]> = rows.into_iter().chain(combined).collect();
+    let rows: Vec<[String; 3]> = rows.into_iter().chain(extras).chain(combined).collect();
     let widths = [0, 1, 2].map(|col| {
         rows.iter().map(|row| row[col].len()).max().unwrap_or(0)
     });
@@ -116,7 +123,8 @@ pub fn layout() -> Result<()> {
 
 /// The physical key for each stroke key on the built-in QWERTY layout, keyed by stroke bit.
 fn qwerty_keys_by_bit() -> Result<HashMap<u32, KeyCode>> {
-    let preset = preset("qwerty").map_err(|e| anyhow!(e))?;
+    // Main keys only, so each stroke key names one physical key
+    let preset = without_extra_keys(preset("qwerty").map_err(|e| anyhow!(e))?);
     let layout = build_key_map(&preset, &HashMap::new()).map_err(|errs| anyhow!(errs.join("; ")))?;
     Ok(layout.into_iter().map(|(key, bit)| (bit, key)).collect())
 }
@@ -479,7 +487,7 @@ mod tests {
     }
 
     fn qwerty_keys_by_bit() -> HashMap<u32, KeyCode> {
-        let preset = preset("qwerty").unwrap();
+        let preset = without_extra_keys(preset("qwerty").unwrap());
         build_key_map(&preset, &HashMap::new())
             .unwrap()
             .into_iter()
@@ -558,7 +566,7 @@ mod tests {
 
     #[test]
     fn a_combined_key_added_by_an_override_still_replaces_the_pair_it_presses() {
-        let preset = preset("qwerty").unwrap();
+        let preset = without_extra_keys(preset("qwerty").unwrap());
         let mut overrides = HashMap::new();
         overrides.insert("A-+O-".to_string(), KeyAction::Key(KeyCode::KC_X));
         let keys: HashMap<u32, KeyCode> = build_key_map(&preset, &overrides)

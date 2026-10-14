@@ -135,6 +135,38 @@ pub const fn key_from_action(action: &KeyAction) -> Option<KeyCode> {
     }
 }
 
+/// Separates a stroke key from a label in a preset entry that gives it an extra
+/// physical key: `"S-|Q"` makes Q press S- as well as the key `"S-"` names. An extra
+/// key never replaces the main one, and is skipped if a user override already took it.
+const EXTRA_KEY_SEPARATOR: char = '|';
+
+/// The stroke key an extra-key entry such as `"S-|Q"` is for.
+fn extra_key_slot(name: &str) -> Option<usize> {
+    name.split_once(EXTRA_KEY_SEPARATOR)
+        .and_then(|(slot, _)| slot_by_name(slot))
+}
+
+/// The extra physical keys in a preset as (stroke slot, key), ordered by slot then name.
+#[must_use]
+pub fn extra_keys(preset: &HashMap<String, KeyCode>) -> Vec<(usize, KeyCode)> {
+    let mut named: Vec<(&String, usize, KeyCode)> = preset
+        .iter()
+        .filter_map(|(name, &key)| extra_key_slot(name).map(|slot| (name, slot, key)))
+        .collect();
+    named.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+    named.into_iter().map(|(_, slot, key)| (slot, key)).collect()
+}
+
+/// A preset with only its main key for each stroke key, no extra keys. What the
+/// `layout` and `keys` commands describe, so each stroke key has one answer.
+#[must_use]
+pub fn without_extra_keys(preset: HashMap<String, KeyCode>) -> HashMap<String, KeyCode> {
+    preset
+        .into_iter()
+        .filter(|(name, _)| !name.contains(EXTRA_KEY_SEPARATOR))
+        .collect()
+}
+
 /// Combine a preset with per-layer overrides into a physical-key → stroke-bit map.
 ///
 /// Returns every problem found, not just the first.
@@ -200,6 +232,25 @@ pub fn build_key_map(
             continue;
         }
         keys.insert(key, mask);
+    }
+
+    // Extra keys come last and give way to anything already bound, so a user override
+    // that moves a stroke key onto one of them keeps working.
+    let mut extras: Vec<(&String, KeyCode)> = assigned
+        .iter()
+        .filter(|(name, _)| name.contains(EXTRA_KEY_SEPARATOR))
+        .map(|(name, &key)| (name, key))
+        .collect();
+    extras.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, key) in extras {
+        let Some(slot) = extra_key_slot(name) else {
+            errors.push(format!("extra key \"{name}\" names an unknown steno key"));
+            continue;
+        };
+        if let std::collections::hash_map::Entry::Vacant(entry) = owners.entry(key) {
+            entry.insert(name.as_str());
+            keys.insert(key, 1 << slot);
+        }
     }
 
     if errors.is_empty() {
@@ -272,14 +323,56 @@ mod tests {
 
     #[test]
     fn qwerty_preset_covers_every_steno_key_once() {
-        let map = build_key_map(&preset("qwerty").unwrap(), &HashMap::new()).unwrap();
-        // One physical key per stroke key; the default preset has no combined keys
+        let main_only = without_extra_keys(preset("qwerty").unwrap());
+        let map = build_key_map(&main_only, &HashMap::new()).unwrap();
+        // One main physical key per stroke key; the default preset has no combined keys
         assert_eq!(map.len(), SLOTS.len());
         let single = map
             .values()
             .filter(|bits| bits.count_ones() == 1)
             .fold(0, |all, bits| all | bits);
         assert_eq!(single.count_ones() as usize, SLOTS.len());
+    }
+
+    #[test]
+    fn q_g_and_the_number_row_are_extra_keys_for_s_star_and_number() {
+        let map = build_key_map(&preset("qwerty").unwrap(), &HashMap::new()).unwrap();
+        let bit = |name: &str| 1 << slot_by_name(name).unwrap();
+        // Q and A both press S-; T and G both press *
+        assert_eq!(map[&KeyCode::KC_Q], bit("S-"));
+        assert_eq!(map[&KeyCode::KC_A], bit("S-"));
+        assert_eq!(map[&KeyCode::KC_T], bit("*"));
+        assert_eq!(map[&KeyCode::KC_G], bit("*"));
+        // 1 to 0 all press #
+        for key in [
+            KeyCode::KC_1,
+            KeyCode::KC_2,
+            KeyCode::KC_3,
+            KeyCode::KC_4,
+            KeyCode::KC_5,
+            KeyCode::KC_6,
+            KeyCode::KC_7,
+            KeyCode::KC_8,
+            KeyCode::KC_9,
+            KeyCode::KC_0,
+        ] {
+            assert_eq!(map[&key], bit("#"), "{key:?}");
+        }
+        // 23 main keys plus Q, G and 2 to 0
+        assert_eq!(map.len(), SLOTS.len() + 1 + 1 + 9);
+        assert_eq!(extra_keys(&preset("qwerty").unwrap()).len(), 11);
+    }
+
+    #[test]
+    fn an_override_onto_an_extra_key_wins_over_it() {
+        // The documented `{ "S-": Key(KC_Q) }` override must keep working: Q is then S-'s
+        // own key, and the extra Q entry quietly steps aside.
+        let mut overrides = HashMap::new();
+        overrides.insert("S-".to_string(), KeyAction::Key(KeyCode::KC_Q));
+        overrides.insert("W-".to_string(), KeyAction::Key(KeyCode::KC_A));
+        let map = build_key_map(&preset("qwerty").unwrap(), &overrides).unwrap();
+        assert_eq!(map.get(&KeyCode::KC_Q), Some(&(1 << 0)));
+        assert_eq!(map.get(&KeyCode::KC_A), Some(&(1 << 4)));
     }
 
     #[test]
