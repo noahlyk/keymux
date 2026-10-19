@@ -377,12 +377,6 @@ impl KeymapProcessor {
     }
 
     fn lookup_action(&self, keycode: KeyCode) -> Option<&KeyAction> {
-        if self.layer_stack.is_game_mode_active() {
-            if let Some(action) = self.layer_stack.game_mode_remaps().get(&keycode) {
-                return Some(action);
-            }
-        }
-
         for layer in self.layer_stack.layers().iter().rev() {
             if let Some(config) = self.layer_stack.layer_configs().get(layer) {
                 if let Some(action) = config.remaps.get(&keycode) {
@@ -391,6 +385,13 @@ impl KeymapProcessor {
                     }
                     return Some(action);
                 }
+            }
+        }
+
+        // Game mode only replaces the base layer; active layers still take priority
+        if self.layer_stack.is_game_mode_active() {
+            if let Some(action) = self.layer_stack.game_mode_remaps().get(&keycode) {
+                return Some(action);
             }
         }
 
