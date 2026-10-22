@@ -43,12 +43,83 @@ pub fn steno_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("steno")
 }
 
+/// Lapwing's JSON dictionaries from plover-lapwing-aio, highest priority first. Its
+/// `.modal` and `.py` files need Plover's plugin runtime, so they aren't used here.
+pub const LAPWING_BASE_URL: &str =
+    "https://raw.githubusercontent.com/aerickt/plover-lapwing-aio/main/plover_lapwing/dictionaries/";
+pub const LAPWING_FILES: [&str; 6] = [
+    "lapwing-base.json",
+    "lapwing-numbers.json",
+    "lapwing-commands.json",
+    "lapwing-semi-modal-movement.json",
+    "lapwing-prefixed-proper-nouns.json",
+    "lapwing-uk-additions.json",
+];
+
+/// Which theory `keymux steno theory` chose, stored in `<config>/steno/theory`.
+const THEORY_FILE: &str = "theory";
+
+/// The chosen theory, `plover` unless `keymux steno theory lapwing` was run.
+#[must_use]
+pub fn read_theory(config_dir: &Path) -> String {
+    std::fs::read_to_string(steno_dir(config_dir).join(THEORY_FILE))
+        .map(|text| text.trim().to_string())
+        .unwrap_or_else(|_| "plover".to_string())
+}
+
 /// Dictionaries used when a steno layer doesn't list any: the user's own first,
-/// then Plover's main dictionary.
+/// then the chosen theory's: Plover's main dictionary, or Lapwing's set.
 #[must_use]
 pub fn default_dictionaries(config_dir: &Path) -> Vec<PathBuf> {
     let dir = steno_dir(config_dir);
-    vec![dir.join("user.json"), dir.join("main.json")]
+    let mut paths = vec![dir.join("user.json")];
+    if read_theory(config_dir) == "lapwing" {
+        paths.extend(LAPWING_FILES.iter().map(|file| dir.join("lapwing").join(file)));
+    } else {
+        paths.push(dir.join("main.json"));
+    }
+    paths
+}
+
+/// `keymux steno theory [plover|lapwing]`: with no argument, show the current theory.
+/// Choosing Lapwing downloads its dictionaries first, so a failed download leaves the
+/// current theory in place.
+pub fn run_theory(config_dir: &Path, choice: Option<&str>) -> Result<()> {
+    let Some(choice) = choice else {
+        println!("steno theory: {}", read_theory(config_dir));
+        return Ok(());
+    };
+    let dir = steno_dir(config_dir);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    match choice {
+        "plover" => {
+            if !dir.join("main.json").exists() {
+                bail!("Plover's dictionary isn't installed yet; run `keymux steno setup` first");
+            }
+        }
+        "lapwing" => download_lapwing(&dir)?,
+        other => bail!("unknown theory `{other}`: use `plover` or `lapwing`"),
+    }
+    std::fs::write(dir.join(THEORY_FILE), format!("{choice}\n"))
+        .context("saving the theory choice")?;
+    println!("steno theory set to {choice}. Run `keymux reload` to apply it.");
+    Ok(())
+}
+
+/// Download Lapwing's dictionaries into `<steno>/lapwing/`, checking each one parses.
+fn download_lapwing(dir: &Path) -> Result<()> {
+    let lapwing = dir.join("lapwing");
+    std::fs::create_dir_all(&lapwing).with_context(|| format!("creating {}", lapwing.display()))?;
+    for file in LAPWING_FILES {
+        println!("downloading {file}...");
+        let (entries, _) = download_dictionary(&format!("{LAPWING_BASE_URL}{file}"), &lapwing.join(file))?;
+        println!("installed {entries} entries");
+    }
+    println!(
+        "Lapwing's inflected forms (accorded, arranging, ...) live in its .modal files, \
+         which keymux doesn't read, so those words won't type."
+    );
+    Ok(())
 }
 
 /// `keymux steno setup`
@@ -185,6 +256,23 @@ mod tests {
                 PathBuf::from("/home/a/.config/keymux/steno/main.json"),
             ]
         );
+    }
+
+    #[test]
+    fn lapwing_theory_loads_its_files_after_the_user_dictionary() {
+        let config = std::env::temp_dir().join(format!("keymux-theory-test-{}", std::process::id()));
+        let steno = steno_dir(&config);
+        std::fs::create_dir_all(&steno).unwrap();
+        std::fs::write(steno.join(THEORY_FILE), "lapwing\n").unwrap();
+
+        let paths = default_dictionaries(&config);
+        assert_eq!(read_theory(&config), "lapwing");
+        assert_eq!(paths[0], steno.join("user.json"));
+        assert_eq!(paths.len(), 1 + LAPWING_FILES.len());
+        assert_eq!(paths[1], steno.join("lapwing").join("lapwing-base.json"));
+        assert!(!paths.iter().any(|path| path.ends_with("main.json")));
+
+        std::fs::remove_dir_all(&config).unwrap();
     }
 
     #[test]

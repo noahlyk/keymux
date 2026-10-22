@@ -268,6 +268,12 @@ pub enum Commands {
 pub enum StenoAction {
     /// Download Plover's dictionary into ~/.config/keymux/steno
     Setup,
+    /// Show or set the steno theory: `plover` (the default) or `lapwing`. Choosing
+    /// lapwing downloads its dictionaries the first time.
+    Theory {
+        /// `plover` or `lapwing`. Leave out to show the current theory.
+        theory: Option<String>,
+    },
     /// Show the built-in QWERTY layout: each steno key, the key that presses it, and its sound
     Layout,
     /// Show the keys that type a string on the QWERTY layout, with the sound behind each key,
