@@ -338,11 +338,13 @@ mod tests {
     fn q_g_and_the_number_row_are_extra_keys_for_s_star_and_number() {
         let map = build_key_map(&preset("qwerty").unwrap(), &HashMap::new()).unwrap();
         let bit = |name: &str| 1 << slot_by_name(name).unwrap();
-        // Q and A both press S-; T and G both press *
+        // Q and A both press S-; T, G, H and Y all press *
         assert_eq!(map[&KeyCode::KC_Q], bit("S-"));
         assert_eq!(map[&KeyCode::KC_A], bit("S-"));
         assert_eq!(map[&KeyCode::KC_T], bit("*"));
         assert_eq!(map[&KeyCode::KC_G], bit("*"));
+        assert_eq!(map[&KeyCode::KC_H], bit("*"));
+        assert_eq!(map[&KeyCode::KC_Y], bit("*"));
         // 1 to 0 all press #
         for key in [
             KeyCode::KC_1,
@@ -358,9 +360,9 @@ mod tests {
         ] {
             assert_eq!(map[&key], bit("#"), "{key:?}");
         }
-        // 23 main keys plus Q, G and 2 to 0
-        assert_eq!(map.len(), SLOTS.len() + 1 + 1 + 9);
-        assert_eq!(extra_keys(&preset("qwerty").unwrap()).len(), 11);
+        // 23 main keys plus Q, G, H, Y and 2 to 0
+        assert_eq!(map.len(), SLOTS.len() + 1 + 3 + 9);
+        assert_eq!(extra_keys(&preset("qwerty").unwrap()).len(), 13);
     }
 
     #[test]

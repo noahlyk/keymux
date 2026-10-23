@@ -37,9 +37,11 @@
     "-D": Key(KC_LBRC),
     "-Z": Key(KC_QUOT),
     "#": Key(KC_1),
-    // Extra keys: Q and A are both S-, T and G are both *, 1 to 0 are all #
+    // Extra keys: Q and A are both S-, T, G, H and Y are all *, 1 to 0 are all #
     "S-|Q": Key(KC_Q),
     "*|G": Key(KC_G),
+    "*|H": Key(KC_H),
+    "*|Y": Key(KC_Y),
     "#|2": Key(KC_2),
     "#|3": Key(KC_3),
     "#|4": Key(KC_4),
