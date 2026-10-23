@@ -70,10 +70,12 @@ pub fn layout() -> Result<()> {
         .into_iter()
         .map(|(slot, key)| [SLOTS[slot].1.to_string(), key_label(key), SLOT_SOUNDS[slot].to_string()])
         .collect();
-    let rows: Vec<[String; 3]> = SLOTS
-        .iter()
-        .enumerate()
-        .map(|(slot, &(_, name))| {
+    // Sounds order: the number key (the last slot) first, then the rest in slot order
+    let number_slot = SLOTS.len() - 1;
+    let rows: Vec<[String; 3]> = std::iter::once(number_slot)
+        .chain(0..number_slot)
+        .map(|slot| {
+            let (_, name) = SLOTS[slot];
             let press = keys_by_bit
                 .get(&(1 << slot))
                 .map_or_else(String::new, |&key| key_label(key));
@@ -324,9 +326,21 @@ fn stroke_keys(bits: u32, keys_by_bit: &HashMap<u32, KeyCode>) -> Vec<String> {
         }
     }
 
-    // Stroke order: each press sits where its lowest stroke key sits
-    presses.sort_by_key(|&(mask, _)| mask.trailing_zeros());
+    // Sounds order (#STKPWHRAO*EUFRPBLGTSDZ): each press sits where its first stroke key sits,
+    // with the number key first
+    presses.sort_by_key(|&(mask, _)| display_rank(mask));
     presses.into_iter().map(|(_, key)| key_label(key)).collect()
+}
+
+/// Where a press sits in the sounds order: the number key is the last slot in SLOTS but reads
+/// first, so it ranks before every other key.
+fn display_rank(mask: u32) -> u32 {
+    let number_bit = 1 << (SLOTS.len() - 1);
+    if mask & number_bit != 0 {
+        0
+    } else {
+        mask.trailing_zeros() + 1
+    }
 }
 
 /// How a physical key is written on the page: `KC_SCLN` is `;`, `KC_A` is `A`.
@@ -517,6 +531,13 @@ mod tests {
         assert_eq!(rows[0].outline, "KWEUG");
         // The default preset has no combined keys, so -E and -U each press their own key
         assert_eq!(rows[0].keys, "S D N M L");
+    }
+
+    #[test]
+    fn the_number_key_is_pressed_first_in_sounds_order() {
+        // The number key is the last slot but reads first: #STKPWHRAO*EUFRPBLGTSDZ
+        let stroke = parse_stroke("#SK").unwrap();
+        assert_eq!(stroke_keys(stroke, &qwerty_keys_by_bit()), ["1", "A", "S"]);
     }
 
     #[test]
