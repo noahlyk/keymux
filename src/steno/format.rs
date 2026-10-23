@@ -30,6 +30,8 @@ pub enum Piece {
     Attach,
     /// Capitalize the next word
     CapNext,
+    /// Keep the next word or letter lowercase (`{>}`, as in Lapwing's fingerspelling)
+    LowercaseNext,
     /// A fingerspelled letter or group; joins a preceding fingerspelled letter
     Fingerspell(String),
     /// Capitalize the previous word
@@ -38,6 +40,8 @@ pub enum Piece {
     RetroDeleteSpace,
     /// Put a space before this point
     RetroInsertSpace,
+    /// Type the last translation again. Resolved by the translator, which knows what that was
+    RepeatLastTranslation,
 }
 
 /// Spacing and capitalization state carried from one entry to the next.
@@ -56,6 +60,14 @@ pub struct FormatState {
 /// Parse a dictionary value into pieces. Returns `None` for unsupported commands.
 #[must_use]
 pub fn parse_pieces(value: &str) -> Option<Vec<Piece>> {
+    // Plover commands written without braces, such as `=repeat_last_translation`. Only the
+    // ones we can run are supported; any other is skipped rather than typed out
+    if let Some(command) = value.strip_prefix('=') {
+        return match command {
+            "repeat_last_translation" => Some(vec![Piece::RepeatLastTranslation]),
+            _ => None,
+        };
+    }
     let mut pieces = Vec::new();
     let mut rest = value;
     while let Some(open) = rest.find('{') {
@@ -82,6 +94,7 @@ fn parse_command(command: &str) -> Option<Vec<Piece>> {
     match command {
         "^" => Some(vec![Piece::Attach]),
         "-|" => Some(vec![Piece::CapNext]),
+        ">" => Some(vec![Piece::LowercaseNext]),
         "*<" => Some(vec![Piece::RetroCapitalize]),
         "*!" => Some(vec![Piece::RetroDeleteSpace]),
         "*?" => Some(vec![Piece::RetroInsertSpace]),
@@ -119,7 +132,8 @@ pub fn render(pieces: &[Piece], state: &mut FormatState) -> String {
         match piece {
             Piece::Attach => state.suppress_space = true,
             Piece::CapNext => state.capitalize = true,
-            Piece::RetroCapitalize | Piece::RetroDeleteSpace | Piece::RetroInsertSpace => {}
+            Piece::LowercaseNext => state.capitalize = false,
+            Piece::RetroCapitalize | Piece::RetroDeleteSpace | Piece::RetroInsertSpace | Piece::RepeatLastTranslation => {}
             Piece::Text(text) | Piece::AttachText(text) | Piece::TextAttach(text) => {
                 let attaches_back = matches!(piece, Piece::AttachText(_));
                 if state.has_text && !state.suppress_space && !attaches_back {
@@ -225,6 +239,20 @@ mod tests {
         let end = parse_pieces("{.}").unwrap();
         assert_eq!(render(&end, &mut state), ".");
         assert_eq!(render(&[text("and")], &mut state), " And");
+    }
+
+    #[test]
+    fn lowercase_next_and_repeat_parse() {
+        assert_eq!(
+            parse_pieces("{>}{&n}"),
+            Some(vec![Piece::LowercaseNext, Piece::Fingerspell("n".into())])
+        );
+        assert_eq!(
+            parse_pieces("=repeat_last_translation"),
+            Some(vec![Piece::RepeatLastTranslation])
+        );
+        // Other Plover commands are skipped, not typed out
+        assert_eq!(parse_pieces("=undo"), None);
     }
 
     #[test]
