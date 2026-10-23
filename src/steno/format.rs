@@ -136,8 +136,7 @@ pub fn render(pieces: &[Piece], state: &mut FormatState) -> String {
             Piece::RetroCapitalize | Piece::RetroDeleteSpace | Piece::RetroInsertSpace | Piece::RepeatLastTranslation => {}
             Piece::Text(text) | Piece::AttachText(text) | Piece::TextAttach(text) => {
                 let attaches_back = matches!(piece, Piece::AttachText(_));
-                // A word after a fingerspelled letter joins it, so `n` then `vim` types `nvim`
-                if state.has_text && !state.suppress_space && !attaches_back && !state.last_fingerspell {
+                if state.has_text && !state.suppress_space && !attaches_back {
                     out.push(' ');
                 }
                 push_word(&mut out, text, state.capitalize);
@@ -230,8 +229,7 @@ mod tests {
         let mut state = FormatState::default();
         assert_eq!(render(&[Piece::Fingerspell("t".into())], &mut state), "t");
         assert_eq!(render(&[Piece::Fingerspell("h".into())], &mut state), "h");
-        // A word after fingerspelled letters joins them
-        assert_eq!(render(&[text("cat")], &mut state), "cat");
+        assert_eq!(render(&[text("cat")], &mut state), " cat");
     }
 
     #[test]

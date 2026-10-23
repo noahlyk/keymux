@@ -431,43 +431,6 @@ mod tests {
     }
 
     #[test]
-    fn a_word_after_a_fingerspelled_letter_joins_it() {
-        let mut t = translator(r#"{"TPH": "{&n}", "SREUPL": "vim"}"#);
-        let mut typed = String::new();
-        apply(&mut typed, t.stroke(stroke("TPH")));
-        apply(&mut typed, t.stroke(stroke("SREUPL")));
-        assert_eq!(typed, "nvim");
-    }
-
-    /// Types each chord in order, the way a steno layer does, and returns the text on screen.
-    fn type_chords(t: &mut Translator, chords: &[&str]) -> String {
-        let mut typed = String::new();
-        for chord in chords {
-            apply(&mut typed, t.stroke(stroke(chord)));
-        }
-        typed
-    }
-
-    #[test]
-    fn typed_nvim_joins_then_the_next_word_is_spaced() {
-        let mut t = translator(r#"{"TPH": "{&n}", "SREUPL": "vim", "KAT": "cat"}"#);
-        assert_eq!(type_chords(&mut t, &["TPH", "SREUPL", "KAT"]), "nvim cat");
-    }
-
-    #[test]
-    fn typed_word_before_nvim_is_spaced_from_it() {
-        let mut t = translator(r#"{"TPH": "{&n}", "SREUPL": "vim", "KAT": "cat"}"#);
-        assert_eq!(type_chords(&mut t, &["KAT", "TPH", "SREUPL"]), "cat nvim");
-    }
-
-    #[test]
-    fn typed_repeat_after_nvim_repeats_the_word() {
-        let mut t = translator(r##"{"TPH": "{&n}", "SREUPL": "vim", "#": "=repeat_last_translation"}"##);
-        // The last translation is `vim`, so the repeat types that again, spaced
-        assert_eq!(type_chords(&mut t, &["TPH", "SREUPL", "#"]), "nvim vim");
-    }
-
-    #[test]
     fn fingerspelled_letters_type_a_word() {
         let mut t = translator(r#"{"TPH": "{&n}", "SRA": "{&v}", "EU": "{&i}", "PL": "{&m}"}"#);
         let mut typed = String::new();
