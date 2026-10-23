@@ -281,6 +281,9 @@ pub enum StenoAction {
     Keys {
         /// The text to type, split on spaces
         text: Option<String>,
+        /// Also show the physical keys that press each stroke
+        #[arg(long)]
+        show_keys: bool,
     },
     /// Show the stroke that types a word, e.g. `keymux steno lookup cat`
     Lookup {

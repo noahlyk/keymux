@@ -57,18 +57,18 @@ pub fn show_stroke(config_dir: &Path, text: &str) -> Result<()> {
 
 /// Print the keys that type `text` on the built-in QWERTY layout, one row per word.
 /// Without text, keeps asking for strings until an empty line or Ctrl-D.
-pub fn keys(config_dir: &Path, text: Option<&str>) -> Result<()> {
+pub fn keys(config_dir: &Path, text: Option<&str>, show_keys: bool) -> Result<()> {
     let keys_by_bit = qwerty_keys_by_bit()?;
     let dict = load_dictionary(config_dir);
     match text {
-        Some(text) => print_table(&chord_rows(dict, &keys_by_bit, text)),
-        None => keys_session(dict, &keys_by_bit)?,
+        Some(text) => print_table(&chord_rows(dict, &keys_by_bit, text), show_keys),
+        None => keys_session(dict, &keys_by_bit, show_keys)?,
     }
     Ok(())
 }
 
 /// The interactive `steno keys`: a prompt that shows the table for each line typed.
-fn keys_session(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>) -> Result<()> {
+fn keys_session(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, show_keys: bool) -> Result<()> {
     println!("{}", style("keymux steno keys").bold().cyan());
     println!("{}", style("type a string and press Enter · empty line or Ctrl-D to quit").dim());
     let stdin = std::io::stdin();
@@ -85,7 +85,7 @@ fn keys_session(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>) -> Result
             break;
         }
         println!();
-        print_table(&chord_rows(dict.clone(), keys_by_bit, text));
+        print_table(&chord_rows(dict.clone(), keys_by_bit, text), show_keys);
         println!();
     }
     Ok(())
@@ -395,16 +395,19 @@ pub fn key_label(key: KeyCode) -> String {
     }
 }
 
-fn print_table(rows: &[ChordRow]) {
+fn print_table(rows: &[ChordRow], show_keys: bool) {
     let word_w = rows.iter().map(|r| r.word.len()).max().unwrap_or(0).max("Word".len());
     let outline_w = rows.iter().map(|r| r.outline.len()).max().unwrap_or(0).max("Outline".len());
     // Pad before styling, so the escape codes don't throw the columns off
-    println!(
-        "{}  {}  {}",
+    let mut header = format!(
+        "{}  {}",
         style(format!("{:<word_w$}", "Word")).bold().underlined(),
         style(format!("{:<outline_w$}", "Outline")).bold().underlined(),
-        style("Keys").bold().underlined(),
     );
+    if show_keys {
+        header.push_str(&format!("  {}", style("Keys").bold().underlined()));
+    }
+    println!("{header}");
     for row in rows {
         let word = format!("{:<word_w$}", row.word);
         let outline = format!("{:<outline_w$}", row.outline);
@@ -413,7 +416,11 @@ fn print_table(rows: &[ChordRow]) {
         } else {
             (style(word).bold(), style(outline).cyan(), style(row.keys.clone()).green())
         };
-        println!("{word}  {outline}  {keys}");
+        if show_keys {
+            println!("{word}  {outline}  {keys}");
+        } else {
+            println!("{word}  {outline}");
+        }
     }
 }
 
