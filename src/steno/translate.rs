@@ -135,15 +135,7 @@ impl Translator {
         if stroke == UNDO_STROKE {
             return self.undo();
         }
-        let resolved = match self.best_match(stroke) {
-            // Repeats the last translation, which is only known here. With nothing to repeat,
-            // the stroke is unmatched
-            Some((consume, pieces)) if matches!(pieces.as_slice(), [Piece::RepeatLastTranslation]) => {
-                self.last_translation_text().map(|text| (consume, vec![Piece::Text(text)]))
-            }
-            other => other,
-        };
-        match resolved {
+        match self.best_match(stroke) {
             Some((consume, pieces)) => self.apply(stroke, consume, &pieces),
             None => {
                 self.unmatched = true;
@@ -154,26 +146,6 @@ impl Translator {
                 None
             }
         }
-    }
-
-    /// The text of the last translation that typed something, without the spacing before it.
-    fn last_translation_text(&self) -> Option<String> {
-        (0..self.history.len())
-            .rev()
-            .filter(|&i| !self.history[i].strokes.is_empty())
-            .map(|i| self.typed_text(i).trim())
-            .find(|text| !text.is_empty())
-            .map(str::to_string)
-    }
-
-    /// The text history entry `index` typed: from its start up to the next entry's start, or to the end.
-    fn typed_text(&self, index: usize) -> &str {
-        let start = self.history[index].start;
-        let end = self
-            .history
-            .get(index + 1)
-            .map_or(self.output.len(), |next| next.start);
-        self.output.get(start..end).unwrap_or("")
     }
 
     /// The longest dictionary entry that ends with `stroke`, and how many earlier
@@ -403,31 +375,6 @@ mod tests {
         let mut dict = Dictionary::default();
         dict.merge_json(json).unwrap();
         Translator::new(dict)
-    }
-
-    #[test]
-    fn repeat_last_translation_types_the_previous_word_again() {
-        let mut t = translator(r##"{"KAT": "cat", "#": "=repeat_last_translation"}"##);
-        assert_eq!(t.stroke(stroke("KAT")), Some(StenoOutput::Type("cat".into())));
-        assert_eq!(t.stroke(stroke("#")), Some(StenoOutput::Type(" cat".into())));
-    }
-
-    #[test]
-    fn repeat_with_nothing_to_repeat_types_nothing() {
-        let mut t = translator(r##"{"#": "=repeat_last_translation"}"##);
-        assert_eq!(t.stroke(stroke("#")), None);
-        assert!(t.was_unmatched());
-    }
-
-    #[test]
-    fn a_word_after_a_repeat_corrects_the_repeat() {
-        // `#` types the last word again, then `#/H-L` replaces that repeat with its own entry
-        let mut t = translator(r##"{"KAT": "cat", "#": "=repeat_last_translation", "#/H-L": "Hello"}"##);
-        let mut typed = String::new();
-        apply(&mut typed, t.stroke(stroke("KAT")));
-        apply(&mut typed, t.stroke(stroke("#")));
-        apply(&mut typed, t.stroke(stroke("H-L")));
-        assert_eq!(typed, "cat Hello");
     }
 
     #[test]

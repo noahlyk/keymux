@@ -13,6 +13,7 @@ pub mod layout;
 pub mod numbers;
 pub mod orthography;
 pub mod setup;
+pub mod shortest;
 pub mod tape;
 pub mod translate;
 

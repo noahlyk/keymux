@@ -1,12 +1,13 @@
 //! `keymux steno` commands that read or edit dictionaries, and show the tape.
 
 use super::dict::Dictionary;
-use super::format::{parse_pieces, render, FormatState, Piece};
+use super::format::{parse_pieces, render, FormatState};
 use super::layout::{
     build_key_map, extra_keys, parse_stroke, preset, render_stroke, without_extra_keys, SLOTS, SLOT_SOUNDS,
 };
 use super::numbers::number_text;
 use super::setup::{default_dictionaries, steno_dir};
+use super::shortest::shortest_outline;
 use super::tape;
 use super::translate::Translator;
 use crate::keycode::KeyCode;
@@ -179,15 +180,20 @@ const SEARCH_BUDGET: usize = 20_000;
 /// attached suffixes come out as written. Where a word has more than one stroke
 /// sequence, the first that types the text exactly is used. When no sequence types
 /// the text exactly, each word gets its fewest-stroke translation. A word with no
-/// entry gets a single row marked "no stroke".
+/// entry gets its shortest outline (see `shortest`), or a single row marked "no stroke"
+/// when no outline types it.
 #[must_use]
 pub fn chord_rows(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &str) -> Vec<ChordRow> {
     let spans = word_spans(text);
     let words: Vec<&str> = spans.iter().map(|&(start, end)| &text[start..end]).collect();
     let candidates: Vec<Vec<Vec<u32>>> = words.iter().map(|word| ranked_strokes(&dict, word)).collect();
 
-    // A word with no entry is fingerspelled, one letter stroke per letter
-    let letters = letter_strokes(&dict);
+    // A word with no entry gets its shortest outline, found before the dictionary moves into the translator
+    let shortest: Vec<Option<Vec<u32>>> = words
+        .iter()
+        .zip(&candidates)
+        .map(|(word, options)| options.is_empty().then(|| shortest_outline(&dict, word)).flatten())
+        .collect();
 
     // Words with no entry can't be typed, so each run of known words is searched on its own,
     // starting from a fresh translator
@@ -196,7 +202,7 @@ pub fn chord_rows(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &
     let mut start = 0;
     while start < words.len() {
         if candidates[start].is_empty() {
-            chosen.push(fingerspell(words[start], &letters));
+            chosen.push(shortest[start].clone());
             start += 1;
             continue;
         }
@@ -232,32 +238,6 @@ pub fn chord_rows(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &
         });
     }
     rows
-}
-
-/// The stroke that fingerspells each letter, from the dictionary's `{&x}` entries. Where a
-/// letter has more than one, the lowest stroke is used so the answer doesn't depend on order.
-fn letter_strokes(dict: &Dictionary) -> HashMap<char, u32> {
-    let mut map: HashMap<char, u32> = HashMap::new();
-    for (strokes, pieces) in dict.iter() {
-        // `{>}` only keeps the letter lowercase, which it already is
-        let pieces: Vec<&Piece> = pieces.iter().filter(|piece| !matches!(piece, Piece::LowercaseNext)).collect();
-        let ([stroke], [Piece::Fingerspell(letters)]) = (strokes.as_slice(), pieces.as_slice()) else {
-            continue;
-        };
-        let mut chars = letters.chars();
-        if let (Some(letter), None) = (chars.next(), chars.next()) {
-            map.entry(letter).and_modify(|s| *s = (*s).min(*stroke)).or_insert(*stroke);
-        }
-    }
-    map
-}
-
-/// The letter strokes that spell `word`, or None if a character has no letter stroke.
-/// Capitals fall back to the lowercase letter, since that is the only one most dictionaries have.
-fn fingerspell(word: &str, letters: &HashMap<char, u32>) -> Option<Vec<u32>> {
-    word.chars()
-        .map(|c| letters.get(&c).or_else(|| letters.get(&c.to_ascii_lowercase())).copied())
-        .collect()
 }
 
 /// Byte ranges of the words in `text`. Each whitespace-separated chunk is split so that

@@ -40,8 +40,6 @@ pub enum Piece {
     RetroDeleteSpace,
     /// Put a space before this point
     RetroInsertSpace,
-    /// Type the last translation again. Resolved by the translator, which knows what that was
-    RepeatLastTranslation,
 }
 
 /// Spacing and capitalization state carried from one entry to the next.
@@ -60,13 +58,10 @@ pub struct FormatState {
 /// Parse a dictionary value into pieces. Returns `None` for unsupported commands.
 #[must_use]
 pub fn parse_pieces(value: &str) -> Option<Vec<Piece>> {
-    // Plover commands written without braces, such as `=repeat_last_translation`. Only the
-    // ones we can run are supported; any other is skipped rather than typed out
-    if let Some(command) = value.strip_prefix('=') {
-        return match command {
-            "repeat_last_translation" => Some(vec![Piece::RepeatLastTranslation]),
-            _ => None,
-        };
+    // Plover commands written without braces, such as `=undo`, are unsupported and skipped
+    // rather than typed out
+    if value.starts_with('=') {
+        return None;
     }
     let mut pieces = Vec::new();
     let mut rest = value;
@@ -133,7 +128,7 @@ pub fn render(pieces: &[Piece], state: &mut FormatState) -> String {
             Piece::Attach => state.suppress_space = true,
             Piece::CapNext => state.capitalize = true,
             Piece::LowercaseNext => state.capitalize = false,
-            Piece::RetroCapitalize | Piece::RetroDeleteSpace | Piece::RetroInsertSpace | Piece::RepeatLastTranslation => {}
+            Piece::RetroCapitalize | Piece::RetroDeleteSpace | Piece::RetroInsertSpace => {}
             Piece::Text(text) | Piece::AttachText(text) | Piece::TextAttach(text) => {
                 let attaches_back = matches!(piece, Piece::AttachText(_));
                 if state.has_text && !state.suppress_space && !attaches_back {
@@ -242,17 +237,14 @@ mod tests {
     }
 
     #[test]
-    fn lowercase_next_and_repeat_parse() {
+    fn lowercase_next_parses_and_equals_commands_are_skipped() {
         assert_eq!(
             parse_pieces("{>}{&n}"),
             Some(vec![Piece::LowercaseNext, Piece::Fingerspell("n".into())])
         );
-        assert_eq!(
-            parse_pieces("=repeat_last_translation"),
-            Some(vec![Piece::RepeatLastTranslation])
-        );
-        // Other Plover commands are skipped, not typed out
+        // Plover `=` commands are unsupported, so the entry is skipped, not typed out
         assert_eq!(parse_pieces("=undo"), None);
+        assert_eq!(parse_pieces("=repeat_last_translation"), None);
     }
 
     #[test]
