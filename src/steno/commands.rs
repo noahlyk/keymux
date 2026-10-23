@@ -513,7 +513,7 @@ mod tests {
             vec![ChordRow {
                 word: "the".to_string(),
                 stroke: "-T".to_string(),
-                keys: vec!["O".to_string()],
+                keys: vec!["P".to_string()],
                 sounds: "t".to_string(),
             }]
         );
@@ -550,7 +550,7 @@ mod tests {
         let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "quick");
         assert_eq!(rows[0].stroke, "KWEUG");
         // The default preset has no combined keys, so -E and -U each press their own key
-        assert_eq!(rows[0].keys, ["S", "D", "N", "M", "K"]);
+        assert_eq!(rows[0].keys, ["S", "D", "N", "M", "L"]);
         assert_eq!(rows[0].sounds, "kweug");
     }
 
@@ -560,7 +560,7 @@ mod tests {
         // K- and -T are single keys; A- and O- each press their own key too, since the
         // default preset has no combined keys
         let stroke = parse_stroke("KAO-T").unwrap();
-        assert_eq!(stroke_keys(stroke, &keys), ["S", "C", "V", "O"]);
+        assert_eq!(stroke_keys(stroke, &keys), ["S", "C", "V", "P"]);
         assert_eq!(stroke_keys(parse_stroke("KA").unwrap(), &keys), ["S", "C"]);
     }
 
@@ -575,7 +575,7 @@ mod tests {
             .map(|(key, bit)| (bit, key))
             .collect();
         let stroke = parse_stroke("KAO-T").unwrap();
-        assert_eq!(stroke_keys(stroke, &keys), ["S", "X", "O"]);
+        assert_eq!(stroke_keys(stroke, &keys), ["S", "X", "P"]);
     }
 
     #[test]
