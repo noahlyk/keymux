@@ -129,14 +129,13 @@ fn qwerty_keys_by_bit() -> Result<HashMap<u32, KeyCode>> {
     Ok(layout.into_iter().map(|(key, bit)| (bit, key)).collect())
 }
 
-/// One line of `keymux steno keys`: a word, one of its strokes, and the keys that press it.
+/// One line of `keymux steno keys`: a word, its outline (the strokes that type it, joined by
+/// "/"), and the keys that press each stroke, one group per stroke.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ChordRow {
     pub word: String,
-    pub stroke: String,
-    pub keys: Vec<String>,
-    /// The sounds of the stroke keys pressed, run together, e.g. `kweug`.
-    pub sounds: String,
+    pub outline: String,
+    pub keys: String,
 }
 
 /// Stroke sequences tried per word before giving up on an exact match.
@@ -186,22 +185,15 @@ pub fn chord_rows(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &
     let mut rows = Vec::new();
     for (word, strokes) in words.iter().zip(chosen) {
         let Some(strokes) = strokes else {
-            rows.push(ChordRow {
-                word: (*word).to_string(),
-                stroke: "no stroke".to_string(),
-                keys: Vec::new(),
-                sounds: String::new(),
-            });
+            rows.push(ChordRow { word: (*word).to_string(), outline: "no stroke".to_string(), keys: String::new() });
             continue;
         };
-        for (i, &bits) in strokes.iter().enumerate() {
-            rows.push(ChordRow {
-                word: if i == 0 { (*word).to_string() } else { String::new() },
-                stroke: render_stroke(bits),
-                keys: stroke_keys(bits, keys_by_bit),
-                sounds: stroke_sounds(bits),
-            });
-        }
+        let keys: Vec<String> = strokes.iter().map(|&bits| stroke_keys(bits, keys_by_bit).join(" ")).collect();
+        rows.push(ChordRow {
+            word: (*word).to_string(),
+            outline: format_strokes(&strokes),
+            keys: keys.join(" / "),
+        });
     }
     rows
 }
@@ -337,14 +329,6 @@ fn stroke_keys(bits: u32, keys_by_bit: &HashMap<u32, KeyCode>) -> Vec<String> {
     presses.into_iter().map(|(_, key)| key_label(key)).collect()
 }
 
-/// The sounds of the stroke keys in `bits`, run together in stroke order, e.g. `hrubg`.
-fn stroke_sounds(bits: u32) -> String {
-    (0..SLOTS.len())
-        .filter(|&slot| bits & (1 << slot) != 0)
-        .map(|slot| SLOT_SOUNDS[slot])
-        .collect()
-}
-
 /// How a physical key is written on the page: `KC_SCLN` is `;`, `KC_A` is `A`.
 #[must_use]
 pub fn key_label(key: KeyCode) -> String {
@@ -368,17 +352,10 @@ pub fn key_label(key: KeyCode) -> String {
 
 fn print_table(rows: &[ChordRow]) {
     let word_w = rows.iter().map(|r| r.word.len()).max().unwrap_or(0).max("Word".len());
-    let stroke_w = rows.iter().map(|r| r.stroke.len()).max().unwrap_or(0).max("Stroke".len());
-    let sounds_w = rows.iter().map(|r| r.sounds.len()).max().unwrap_or(0).max("Sounds".len());
-    println!("{:<word_w$}  {:<sounds_w$}  {:<stroke_w$}  Keys", "Word", "Sounds", "Stroke");
+    let outline_w = rows.iter().map(|r| r.outline.len()).max().unwrap_or(0).max("Outline".len());
+    println!("{:<word_w$}  {:<outline_w$}  Keys", "Word", "Outline");
     for row in rows {
-        println!(
-            "{:<word_w$}  {:<sounds_w$}  {:<stroke_w$}  {}",
-            row.word,
-            row.sounds,
-            row.stroke,
-            row.keys.join(" ")
-        );
+        println!("{:<word_w$}  {:<outline_w$}  {}", row.word, row.outline, row.keys);
     }
 }
 
@@ -506,16 +483,11 @@ mod tests {
     }
 
     #[test]
-    fn one_stroke_word_shows_its_keys_and_sounds() {
+    fn one_stroke_word_shows_its_outline_and_keys() {
         let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "the");
         assert_eq!(
             rows,
-            vec![ChordRow {
-                word: "the".to_string(),
-                stroke: "-T".to_string(),
-                keys: vec!["P".to_string()],
-                sounds: "t".to_string(),
-            }]
+            vec![ChordRow { word: "the".to_string(), outline: "-T".to_string(), keys: "P".to_string() }]
         );
     }
 
@@ -525,8 +497,9 @@ mod tests {
         let mut dict = Dictionary::default();
         dict.merge_json(r#"{"AOT": "{out^}", "A": "out", "W": "with"}"#).unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "out with");
-        let strokes: Vec<&str> = rows.iter().map(|row| row.stroke.as_str()).collect();
-        assert_eq!(strokes, [render_stroke(parse_stroke("A").unwrap()), render_stroke(parse_stroke("W").unwrap())]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].outline, "A");
+        assert_eq!(rows[1].outline, "W");
     }
 
     #[test]
@@ -534,24 +507,16 @@ mod tests {
         let mut dict = Dictionary::default();
         dict.merge_json(r#"{"AOT": "{out^}", "A": "out", "W": "with"}"#).unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "out zzyzx with");
-        let strokes: Vec<String> = rows.iter().map(|row| row.stroke.clone()).collect();
-        assert_eq!(
-            strokes,
-            [
-                render_stroke(parse_stroke("A").unwrap()),
-                "no stroke".to_string(),
-                render_stroke(parse_stroke("W").unwrap()),
-            ]
-        );
+        let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
+        assert_eq!(outlines, ["A", "no stroke", "W"]);
     }
 
     #[test]
     fn quick_breaks_down_into_its_sounds() {
         let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "quick");
-        assert_eq!(rows[0].stroke, "KWEUG");
+        assert_eq!(rows[0].outline, "KWEUG");
         // The default preset has no combined keys, so -E and -U each press their own key
-        assert_eq!(rows[0].keys, ["S", "D", "N", "M", "L"]);
-        assert_eq!(rows[0].sounds, "kweug");
+        assert_eq!(rows[0].keys, "S D N M L");
     }
 
     #[test]
@@ -583,13 +548,13 @@ mod tests {
         // The one-stroke form beats the two-stroke "jump" + "ed" form
         let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "jumped");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].stroke, render_stroke(parse_stroke("SKWR*UPLD").unwrap()));
+        assert_eq!(rows[0].outline, render_stroke(parse_stroke("SKWR*UPLD").unwrap()));
     }
 
     #[test]
     fn unknown_word_gets_a_no_stroke_row() {
         let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "zzyzx");
-        assert_eq!(rows[0].stroke, "no stroke");
+        assert_eq!(rows[0].outline, "no stroke");
         assert!(rows[0].keys.is_empty());
     }
 
@@ -600,8 +565,8 @@ mod tests {
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "now, the");
         let words: Vec<&str> = rows.iter().map(|row| row.word.as_str()).collect();
         assert_eq!(words, ["now", ",", "the"]);
-        assert_eq!(rows[0].stroke, render_stroke(parse_stroke("TPHOU").unwrap()));
-        assert_eq!(rows[1].stroke, render_stroke(parse_stroke("KW-B").unwrap()));
+        assert_eq!(rows[0].outline, render_stroke(parse_stroke("TPHOU").unwrap()));
+        assert_eq!(rows[1].outline, render_stroke(parse_stroke("KW-B").unwrap()));
     }
 
     #[test]
