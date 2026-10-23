@@ -130,7 +130,7 @@ fn main() -> Result<()> {
                 }
                 cli::StenoAction::Layout => keymux::steno::commands::layout()?,
                 cli::StenoAction::Keys { text } => {
-                    keymux::steno::commands::keys(config_dir, text)?;
+                    keymux::steno::commands::keys(config_dir, text.as_deref())?;
                 }
                 cli::StenoAction::Lookup { word } => {
                     keymux::steno::commands::lookup(config_dir, word);

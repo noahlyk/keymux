@@ -276,11 +276,11 @@ pub enum StenoAction {
     },
     /// Show the built-in QWERTY layout: each steno key, the key that presses it, and its sound
     Layout,
-    /// Show the keys that type a string on the QWERTY layout, with the sound behind each key,
-    /// e.g. `keymux steno keys "the quick brown fox"`
+    /// Show the keys that type a string on the QWERTY layout, e.g. `keymux steno keys "candy"`.
+    /// Leave out the text to type strings one after another in an interactive session.
     Keys {
         /// The text to type, split on spaces
-        text: String,
+        text: Option<String>,
     },
     /// Show the stroke that types a word, e.g. `keymux steno lookup cat`
     Lookup {

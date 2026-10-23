@@ -11,7 +11,7 @@ use std::collections::{hash_map::Entry, HashMap};
 use std::path::Path;
 use tracing::{info, warn};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Dictionary {
     entries: HashMap<Vec<u32>, Vec<Piece>>,
     max_len: usize,

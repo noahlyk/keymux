@@ -11,6 +11,7 @@ use super::tape;
 use super::translate::Translator;
 use crate::keycode::KeyCode;
 use anyhow::{anyhow, bail, Context, Result};
+use console::style;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -54,10 +55,39 @@ pub fn show_stroke(config_dir: &Path, text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Print the keys that type `text` on the built-in QWERTY layout, one row per stroke.
-pub fn keys(config_dir: &Path, text: &str) -> Result<()> {
+/// Print the keys that type `text` on the built-in QWERTY layout, one row per word.
+/// Without text, keeps asking for strings until an empty line or Ctrl-D.
+pub fn keys(config_dir: &Path, text: Option<&str>) -> Result<()> {
+    let keys_by_bit = qwerty_keys_by_bit()?;
     let dict = load_dictionary(config_dir);
-    print_table(&chord_rows(dict, &qwerty_keys_by_bit()?, text));
+    match text {
+        Some(text) => print_table(&chord_rows(dict, &keys_by_bit, text)),
+        None => keys_session(dict, &keys_by_bit)?,
+    }
+    Ok(())
+}
+
+/// The interactive `steno keys`: a prompt that shows the table for each line typed.
+fn keys_session(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>) -> Result<()> {
+    println!("{}", style("keymux steno keys").bold().cyan());
+    println!("{}", style("type a string and press Enter · empty line or Ctrl-D to quit").dim());
+    let stdin = std::io::stdin();
+    loop {
+        print!("{} ", style("›").magenta().bold());
+        std::io::stdout().flush()?;
+        let mut line = String::new();
+        if stdin.read_line(&mut line)? == 0 {
+            println!();
+            break;
+        }
+        let text = line.trim();
+        if text.is_empty() {
+            break;
+        }
+        println!();
+        print_table(&chord_rows(dict.clone(), keys_by_bit, text));
+        println!();
+    }
     Ok(())
 }
 
@@ -190,11 +220,12 @@ pub fn chord_rows(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &
             rows.push(ChordRow { word: (*word).to_string(), outline: "no stroke".to_string(), keys: String::new() });
             continue;
         };
-        let keys: Vec<String> = strokes.iter().map(|&bits| stroke_keys(bits, keys_by_bit).join(" ")).collect();
+        // Keys within a stroke run together; strokes are split by `/`, as in the outline
+        let keys: Vec<String> = strokes.iter().map(|&bits| stroke_keys(bits, keys_by_bit).concat()).collect();
         rows.push(ChordRow {
             word: (*word).to_string(),
             outline: format_strokes(&strokes),
-            keys: keys.join(" / "),
+            keys: keys.join("/"),
         });
     }
     rows
@@ -367,9 +398,22 @@ pub fn key_label(key: KeyCode) -> String {
 fn print_table(rows: &[ChordRow]) {
     let word_w = rows.iter().map(|r| r.word.len()).max().unwrap_or(0).max("Word".len());
     let outline_w = rows.iter().map(|r| r.outline.len()).max().unwrap_or(0).max("Outline".len());
-    println!("{:<word_w$}  {:<outline_w$}  Keys", "Word", "Outline");
+    // Pad before styling, so the escape codes don't throw the columns off
+    println!(
+        "{}  {}  {}",
+        style(format!("{:<word_w$}", "Word")).bold().underlined(),
+        style(format!("{:<outline_w$}", "Outline")).bold().underlined(),
+        style("Keys").bold().underlined(),
+    );
     for row in rows {
-        println!("{:<word_w$}  {:<outline_w$}  {}", row.word, row.outline, row.keys);
+        let word = format!("{:<word_w$}", row.word);
+        let outline = format!("{:<outline_w$}", row.outline);
+        let (word, outline, keys) = if row.outline == "no stroke" {
+            (style(word).dim(), style(outline).red().dim(), style(row.keys.clone()).dim())
+        } else {
+            (style(word).bold(), style(outline).cyan(), style(row.keys.clone()).green())
+        };
+        println!("{word}  {outline}  {keys}");
     }
 }
 
@@ -530,7 +574,7 @@ mod tests {
         let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "quick");
         assert_eq!(rows[0].outline, "KWEUG");
         // The default preset has no combined keys, so -E and -U each press their own key
-        assert_eq!(rows[0].keys, "S D N M L");
+        assert_eq!(rows[0].keys, "SDNML");
     }
 
     #[test]
