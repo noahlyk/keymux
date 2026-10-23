@@ -556,6 +556,76 @@ mod tests {
         assert_eq!(typed, "cat and jumped");
     }
 
+    /// Type `strokes` one by one, as the keyboard would, and return the text on screen.
+    fn type_strokes(json: &str, strokes: &[&str]) -> String {
+        let mut t = translator(json);
+        let mut typed = String::new();
+        for chord in strokes {
+            apply(&mut typed, t.stroke(stroke(chord)));
+        }
+        typed
+    }
+
+    #[test]
+    fn first_word_has_no_space_in_front() {
+        assert_eq!(
+            type_strokes(r#"{"KAT": "cat", "-PB": "and"}"#, &["KAT", "-PB"]),
+            "cat and"
+        );
+    }
+
+    #[test]
+    fn word_after_a_fingerspelled_letter_is_spaced() {
+        // Plover: a fingerspelled letter leaves a trailing space, so the next word is not glued on
+        assert_eq!(
+            type_strokes(r#"{"TPH": "{>}{&n}", "KAT": "cat"}"#, &["TPH", "KAT"]),
+            "n cat"
+        );
+    }
+
+    #[test]
+    fn fingerspelled_letter_after_a_word_is_spaced() {
+        assert_eq!(
+            type_strokes(r#"{"KAT": "cat", "TPH": "{>}{&n}"}"#, &["KAT", "TPH"]),
+            "cat n"
+        );
+    }
+
+    #[test]
+    fn letter_then_word_is_spaced_without_attach() {
+        // Live check: TPH*/SREUPL types "n vim", not "nvim"
+        assert_eq!(
+            type_strokes(
+                r#"{"TPH": "{>}{&n}", "SREUPL": "vim"}"#,
+                &["TPH", "SREUPL"]
+            ),
+            "n vim"
+        );
+    }
+
+    #[test]
+    fn attach_after_a_letter_glues_the_next_word() {
+        // {^} after a fingerspelled letter makes the next word attach with no space
+        assert_eq!(
+            type_strokes(
+                r#"{"TPH": "{>}{&n}{^}", "SREUPL": "vim"}"#,
+                &["TPH", "SREUPL"]
+            ),
+            "nvim"
+        );
+    }
+
+    #[test]
+    fn sentence_end_attaches_and_capitalizes_the_next_word() {
+        assert_eq!(
+            type_strokes(
+                r#"{"KAT": "cat", "-PB": "and", "-PBG": "{.}"}"#,
+                &["KAT", "-PBG", "-PB"]
+            ),
+            "cat. And"
+        );
+    }
+
     #[test]
     fn retro_commands_edit_the_previous_word() {
         let mut t = translator(r#"{"KAT": "cat", "-PB": "{*<}and"}"#);
