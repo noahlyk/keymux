@@ -186,8 +186,18 @@ pub fn chord_rows(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &
     let words: Vec<&str> = spans.iter().map(|&(start, end)| &text[start..end]).collect();
     let candidates: Vec<Vec<Vec<u32>>> = words.iter().map(|word| ranked_strokes(&dict, word)).collect();
 
-    // A word with no entry is fingerspelled, one letter stroke per letter
-    let letters = letter_strokes(&dict);
+    // A word with no entry is split into entries that join with no space. Letters are the last
+    // resort, so the index and letters are only built when some word needs splitting
+    let (by_text, letters) = if candidates.iter().any(Vec::is_empty) {
+        (fewest_strokes_by_text(&dict), letter_strokes(&dict))
+    } else {
+        (HashMap::new(), HashMap::new())
+    };
+    let splits: Vec<Option<Vec<u32>>> = words
+        .iter()
+        .zip(&candidates)
+        .map(|(word, options)| if options.is_empty() { decompose(word, &by_text, &letters) } else { None })
+        .collect();
 
     // Words with no entry can't be typed, so each run of known words is searched on its own,
     // starting from a fresh translator
@@ -196,7 +206,7 @@ pub fn chord_rows(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &
     let mut start = 0;
     while start < words.len() {
         if candidates[start].is_empty() {
-            chosen.push(fingerspell(words[start], &letters));
+            chosen.push(splits[start].clone());
             start += 1;
             continue;
         }
@@ -250,6 +260,65 @@ fn letter_strokes(dict: &Dictionary) -> HashMap<char, u32> {
         }
     }
     map
+}
+
+/// Longest word the splitter searches. Longer words are fingerspelled outright, so a lookup
+/// stays quick.
+const MAX_SPLIT_CHARS: usize = 12;
+
+/// The fewest strokes that type each text as a whole entry, keyed by the text. Fingerspelled
+/// letters are left out, since they're only used as the last resort.
+fn fewest_strokes_by_text(dict: &Dictionary) -> HashMap<String, Vec<u32>> {
+    let mut map: HashMap<String, Vec<u32>> = HashMap::new();
+    for (strokes, pieces) in dict.iter() {
+        if pieces.iter().any(|piece| matches!(piece, Piece::Fingerspell(_))) {
+            continue;
+        }
+        let text = render(pieces, &mut FormatState::default()).trim_start().to_string();
+        let cost = |strokes: &[u32]| (strokes.len(), strokes.iter().map(|s| s.count_ones()).sum::<u32>());
+        let better = map.get(&text).map_or(true, |old| cost(strokes) < cost(old));
+        if better {
+            map.insert(text, strokes.clone());
+        }
+    }
+    map
+}
+
+/// The fewest strokes that type `word` by joining pieces with no space. A piece is a whole
+/// entry, or a single letter's stroke as the last resort, so `n` and `vim` make `nvim`.
+/// Ties on strokes prefer fewer letters. None when no split types the word.
+fn decompose(word: &str, by_text: &HashMap<String, Vec<u32>>, letters: &HashMap<char, u32>) -> Option<Vec<u32>> {
+    let chars: Vec<char> = word.chars().collect();
+    if chars.len() > MAX_SPLIT_CHARS {
+        return fingerspell(word, letters);
+    }
+    // cheapest[i] types chars[i..] as (strokes, letters spelled, the strokes)
+    let mut cheapest: Vec<Option<(usize, usize, Vec<u32>)>> = vec![None; chars.len() + 1];
+    cheapest[chars.len()] = Some((0, 0, Vec::new()));
+    for start in (0..chars.len()).rev() {
+        for end in start + 1..=chars.len() {
+            let Some((rest_strokes, rest_letters, rest)) = cheapest[end].clone() else {
+                continue;
+            };
+            let text: String = chars[start..end].iter().collect();
+            let piece = match by_text.get(&text) {
+                Some(strokes) => (strokes.clone(), 0),
+                None if end - start == 1 => match letters.get(&chars[start]).or_else(|| letters.get(&chars[start].to_ascii_lowercase())) {
+                    Some(&stroke) => (vec![stroke], 1),
+                    None => continue,
+                },
+                None => continue,
+            };
+            let total = (rest_strokes + piece.0.len(), rest_letters + piece.1);
+            let better = cheapest[start].as_ref().map_or(true, |(s, l, _)| total < (*s, *l));
+            if better {
+                let mut strokes = piece.0;
+                strokes.extend(rest);
+                cheapest[start] = Some((total.0, total.1, strokes));
+            }
+        }
+    }
+    cheapest[0].take().map(|(_, _, strokes)| strokes)
 }
 
 /// The letter strokes that spell `word`, or None if a character has no letter stroke.
@@ -660,14 +729,23 @@ mod tests {
     }
 
     #[test]
-    fn unknown_word_is_fingerspelled_one_letter_per_stroke() {
+    fn unknown_word_splits_into_entries_before_it_fingerspells() {
         let mut dict = Dictionary::default();
         dict.merge_json(r#"{"TPH": "{&n}", "SRA": "{&v}", "EU": "{&i}", "PL": "{&m}", "SREUPL": "vim"}"#)
             .unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "nvim vim");
+        // `n` as a letter, then the entry `vim`: two strokes instead of four letters
         assert_eq!(rows[0].word, "nvim");
-        assert_eq!(rows[0].outline, "TPH/SRA/EU/P-L");
+        assert_eq!(rows[0].outline, "TPH/SREUPL");
         assert_eq!(rows[1].outline, "SREUPL");
+    }
+
+    #[test]
+    fn a_word_with_no_entries_is_fingerspelled_one_letter_per_stroke() {
+        let mut dict = Dictionary::default();
+        dict.merge_json(r#"{"TPH": "{&n}", "SRA": "{&v}", "EU": "{&i}", "PL": "{&m}"}"#).unwrap();
+        let rows = chord_rows(dict, &qwerty_keys_by_bit(), "nvim");
+        assert_eq!(rows[0].outline, "TPH/SRA/EU/P-L");
     }
 
     #[test]
