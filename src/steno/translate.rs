@@ -86,6 +86,12 @@ impl Translator {
         &self.output
     }
 
+    /// Nothing typed on this layer is left to undo.
+    #[must_use]
+    pub fn tape_is_empty(&self) -> bool {
+        self.history.is_empty()
+    }
+
     /// The user pressed Backspace, which deleted the last character on screen.
     /// Keep the buffer in step, so a later `*` doesn't delete text already gone.
     pub fn backspace(&mut self) {

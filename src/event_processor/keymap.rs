@@ -13,9 +13,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tracing::error;
 
-/// Keys that always reach the screen on a steno layer, without a remap. Backspace
-/// and Delete are the ones a steno user needs to correct text.
-const STENO_PASSTHROUGH: [KeyCode; 2] = [KeyCode::KC_BSPC, KeyCode::KC_DEL];
+/// Keys that always reach the screen on a steno layer, without a remap.
+const STENO_PASSTHROUGH: [KeyCode; 1] = [KeyCode::KC_DEL];
 
 fn steno_result(output: Option<StenoOutput>) -> ProcessResult {
     match output {
@@ -224,12 +223,15 @@ impl KeymapProcessor {
             return Some(ProcessResult::None);
         }
 
-        // Editing keys reach the screen as usual. Backspace also tells the translator,
-        // so `*` never deletes text that Backspace already removed.
-        if keycode == KeyCode::KC_BSPC {
+        // Space and Backspace don't type on a steno layer, so an accidental press can't wipe
+        // the tape. Once the tape is empty (everything undone), they act as normal keys again.
+        let tape_empty = engine.tape_is_empty();
+        let tape_key = matches!(keycode, KeyCode::KC_SPC | KeyCode::KC_BSPC);
+        // Backspace reaches the screen here, so the translator drops the character it removed
+        if keycode == KeyCode::KC_BSPC && tape_empty {
             engine.backspace();
         }
-        if STENO_PASSTHROUGH.contains(&keycode) {
+        if STENO_PASSTHROUGH.contains(&keycode) || (tape_key && tape_empty) {
             return None;
         }
 
@@ -242,12 +244,12 @@ impl KeymapProcessor {
             return None;
         }
 
-        // Space types a space and the translator records it, so the next word doesn't
-        // add a second one. The press is typed here, so its release has nothing to do.
-        if keycode == KeyCode::KC_SPC {
+        // While the tape has text to undo, Space and Backspace are swallowed: they neither type
+        // nor delete, so `*` is the only way to take text back
+        if tape_key {
             self.held_keys
                 .insert(keycode, vec![HeldAction::SwallowedBySteno]);
-            return Some(steno_result(Some(engine.space())));
+            return Some(ProcessResult::None);
         }
 
         // On a steno layer, any other key does nothing unless the layer remaps it. Its

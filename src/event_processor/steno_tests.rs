@@ -121,13 +121,17 @@ fn stray_space_during_a_chord_does_not_disturb_the_stroke() {
     let mut p = fixture.processor();
     enter_steno(&mut p);
 
-    // Space lands in the middle of "cat": it types a space, and the stroke still completes after it
+    // Space lands in the middle of "cat". The tape is empty, so Space is an ordinary key and
+    // reaches the screen, and the stroke still completes after it
     assert_eq!(p.process_key(KeyCode::KC_S, true), ProcessResult::None);
     assert_eq!(
         p.process_key(KeyCode::KC_SPC, true),
-        ProcessResult::TypeString(" ".to_string(), false)
+        ProcessResult::EmitKey(KeyCode::KC_SPC, true)
     );
-    assert_eq!(p.process_key(KeyCode::KC_SPC, false), ProcessResult::None);
+    assert_eq!(
+        p.process_key(KeyCode::KC_SPC, false),
+        ProcessResult::EmitKey(KeyCode::KC_SPC, false)
+    );
     assert_eq!(p.process_key(KeyCode::KC_C, true), ProcessResult::None);
     assert_eq!(p.process_key(KeyCode::KC_P, true), ProcessResult::None);
     assert_eq!(p.process_key(KeyCode::KC_S, false), ProcessResult::None);
@@ -144,11 +148,10 @@ fn a_key_swallowed_on_press_is_swallowed_on_release_too() {
     let mut p = fixture.processor();
     enter_steno(&mut p);
 
-    // Hold space on the steno layer, then leave the layer before letting go
-    assert_eq!(
-        p.process_key(KeyCode::KC_SPC, true),
-        ProcessResult::TypeString(" ".to_string(), false)
-    );
+    // With text on the tape, Space is swallowed on the steno layer. Hold it, then leave the
+    // layer before letting go
+    chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]);
+    assert_eq!(p.process_key(KeyCode::KC_SPC, true), ProcessResult::None);
     p.process_key(KeyCode::KC_TAB, false);
     assert_eq!(p.current_layer_name(), "base");
     // Its release must not reach the output as a key-up nobody pressed
@@ -156,22 +159,16 @@ fn a_key_swallowed_on_press_is_swallowed_on_release_too() {
 }
 
 #[test]
-fn backspace_on_a_steno_layer_reaches_the_screen_and_fixes_undo() {
+fn backspace_is_swallowed_while_the_tape_has_text_and_works_once_it_is_empty() {
     let fixture = Fixture::new("backspace");
     let mut p = fixture.processor();
     enter_steno(&mut p);
 
-    // "cat" is typed, then Backspace removes its last letter by hand
+    // "cat" is typed. Backspace doesn't delete on the steno layer while there is text to undo
     chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]);
-    assert_eq!(
-        p.process_key(KeyCode::KC_BSPC, true),
-        ProcessResult::EmitKey(KeyCode::KC_BSPC, true)
-    );
-    assert_eq!(
-        p.process_key(KeyCode::KC_BSPC, false),
-        ProcessResult::EmitKey(KeyCode::KC_BSPC, false)
-    );
-    // Undo now removes what's left, "ca", and nothing more
+    assert_eq!(p.process_key(KeyCode::KC_BSPC, true), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_BSPC, false), ProcessResult::None);
+    // Undo still removes all of "cat"
     assert_eq!(
         p.process_key(KeyCode::KC_T, true),
         ProcessResult::None
@@ -179,9 +176,18 @@ fn backspace_on_a_steno_layer_reaches_the_screen_and_fixes_undo() {
     assert_eq!(
         p.process_key(KeyCode::KC_T, false),
         ProcessResult::Retype {
-            backspaces: 2,
+            backspaces: 3,
             text: String::new(),
         }
+    );
+    // The tape is empty now, so Backspace is an ordinary key again and deletes on the screen
+    assert_eq!(
+        p.process_key(KeyCode::KC_BSPC, true),
+        ProcessResult::EmitKey(KeyCode::KC_BSPC, true)
+    );
+    assert_eq!(
+        p.process_key(KeyCode::KC_BSPC, false),
+        ProcessResult::EmitKey(KeyCode::KC_BSPC, false)
     );
 }
 
@@ -303,16 +309,14 @@ fn space_types_a_space_and_the_next_word_does_not_add_another() {
         ProcessResult::TypeString("cat".to_string(), false)
     );
 
-    assert_eq!(
-        p.process_key(KeyCode::KC_SPC, true),
-        ProcessResult::TypeString(" ".to_string(), false)
-    );
+    // Space is swallowed while "cat" is on the tape: it types nothing
+    assert_eq!(p.process_key(KeyCode::KC_SPC, true), ProcessResult::None);
     assert_eq!(p.process_key(KeyCode::KC_SPC, false), ProcessResult::None);
 
-    // "and" follows the typed space, so it has no prefix space of its own
+    // "and" gets its own leading space, since the screen has "cat" before it
     assert_eq!(
         chord(&mut p, &[KeyCode::KC_I, KeyCode::KC_K]),
-        ProcessResult::TypeString("and".to_string(), false)
+        ProcessResult::TypeString(" and".to_string(), false)
     );
 }
 
@@ -326,11 +330,11 @@ fn undo_takes_back_a_word_typed_after_a_space() {
     p.process_key(KeyCode::KC_SPC, false);
     chord(&mut p, &[KeyCode::KC_I, KeyCode::KC_K]);
 
-    // `*` removes "and" and leaves the space the user typed
+    // `*` removes " and", the space that goes with it included, and leaves "cat"
     assert_eq!(
         chord(&mut p, &[KeyCode::KC_T]),
         ProcessResult::Retype {
-            backspaces: 3,
+            backspaces: 4,
             text: String::new(),
         }
     );
