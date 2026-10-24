@@ -9,8 +9,8 @@
 //! corrections that reached back into earlier words.
 
 use super::dict::Dictionary;
-use super::format::{capitalize_word, render, FormatState, Piece};
-use super::numbers::number_text;
+use super::format::{capitalize_word, lowercase_word, render, FormatState, KeyPress, Piece};
+use super::numbers::{number_text, NUMBER_BIT};
 use super::orthography;
 use std::sync::Arc;
 use tracing::info;
@@ -28,6 +28,8 @@ pub enum StenoOutput {
     Type(String),
     /// Delete `backspaces` characters, then type `text`
     Retype { backspaces: usize, text: String },
+    /// Press these keys in order, such as cursor movement
+    Keys(Vec<KeyPress>),
 }
 
 #[derive(Debug, Clone)]
@@ -39,8 +41,12 @@ struct Emitted {
     /// The output text this translation replaced, restored on undo
     replaced: String,
     state_before: FormatState,
+    /// Spacing and capitalization after this translation, so restoring it restores them
+    state_after: FormatState,
     /// Earlier translations this one replaced. Restored on undo, in order.
     consumed: Vec<Emitted>,
+    /// A key press rather than text. Undo consumes it without retyping anything.
+    presses: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -111,8 +117,16 @@ impl Translator {
     pub fn space(&mut self) -> StenoOutput {
         let start = self.output.len();
         self.output.push(' ');
-        self.record(Vec::new(), start, String::new(), Vec::new(), self.state);
+        let state_before = self.state;
         self.state = FormatState::default();
+        self.record(
+            Vec::new(),
+            start,
+            String::new(),
+            Vec::new(),
+            state_before,
+            self.state,
+        );
         StenoOutput::Type(" ".to_string())
     }
 
@@ -135,14 +149,38 @@ impl Translator {
         if stroke == UNDO_STROKE {
             return self.undo();
         }
+        // `#` on its own repeats the last stroke, as in Lapwing's `#TPH*R/#/#/#`. It is also
+        // the start of proper-noun outlines such as `#/KAL/TKPWAR`, so it repeats only when
+        // nothing in the dictionary starts with it.
+        if stroke == NUMBER_BIT && self.best_match(stroke).is_none() {
+            return self.repeat_last();
+        }
+        // A retro space command acts between two strokes, which a joined entry hides, so
+        // split that entry first. The change is reported against the screen before the split.
+        let screen = self.output.clone();
+        let split = matches!(
+            self.best_match(stroke),
+            Some((0, ref pieces)) if is_retro_space(pieces)
+        ) && self.split_last();
         match self.best_match(stroke) {
+            Some((consume, pieces)) if split => {
+                self.apply(stroke, consume, &pieces);
+                diff(&screen, &self.output)
+            }
             Some((consume, pieces)) => self.apply(stroke, consume, &pieces),
             None => {
                 self.unmatched = true;
                 info!("steno stroke {stroke:#x} not in dictionary");
                 // Recorded with no text, so strokes on either side can't combine across it
                 let start = self.output.len();
-                self.record(vec![stroke], start, String::new(), Vec::new(), self.state);
+                self.record(
+                    vec![stroke],
+                    start,
+                    String::new(),
+                    Vec::new(),
+                    self.state,
+                    self.state,
+                );
                 None
             }
         }
@@ -176,21 +214,37 @@ impl Translator {
         let before = self.output.clone();
         let split = self.history.len() - consume;
         let consumed = self.history.split_off(split);
-        let strokes: Vec<u32> = consumed
-            .iter()
-            .flat_map(|entry| entry.strokes.iter().copied())
-            .chain([stroke])
-            .collect();
+        // The spacing and capitalization to start from. Entries that only rewrite text
+        // below don't change where this word starts, so only `consumed` decides it.
         let state_before = consumed
             .first()
-            .map_or(self.state, |entry| entry.state_before);
-
-        if let Some(first) = consumed.first() {
+            .map_or(self.state, |entry| earliest_translation(entry).state_before);
+        // Restore to before the earliest translation covered, which may sit inside an
+        // earlier join: `replaced` there is what that join replaced, not what came before it
+        if let Some(first) = consumed.first().map(earliest_translation) {
             self.output.truncate(first.start);
             self.output.push_str(&first.replaced);
         }
         let base = self.output.len();
         let (start, edit, used) = edit_before(&self.output[..base], pieces);
+        // Earlier translations whose text this edit rewrites are covered by this one now.
+        // Keeping them (rather than dropping them) means their strokes can still join and
+        // undo still restores them.
+        let mut covered = Vec::new();
+        while self.history.last().is_some_and(|entry| entry.start >= start) {
+            covered.extend(self.history.pop());
+        }
+        covered.reverse();
+        covered.extend(consumed);
+
+        let earliest = covered.first().map(earliest_translation);
+        let undo_start = earliest.map_or(start, |entry| entry.start).min(start);
+        let strokes: Vec<u32> = covered
+            .iter()
+            .flat_map(|entry| entry.strokes.iter().copied())
+            .chain([stroke])
+            .collect();
+
         let mut state = state_before;
         let mut text = edit;
         if used > 0 {
@@ -202,29 +256,35 @@ impl Translator {
         }
         text.push_str(&render(&pieces[used..], &mut state));
         self.output.truncate(start);
-        // Steps that started in the text just cut away can't be undone any more
-        while self.history.last().is_some_and(|entry| entry.start >= start) {
-            self.history.pop();
-        }
         self.output.push_str(&text);
         self.state = state;
 
         // Undo must restore everything from here on, including any earlier word
         // the edit re-spelled and any translations this one replaced
-        let undo_start = consumed
-            .first()
-            .map_or(start, |entry| entry.start)
-            .min(start);
         let screen_old = before[undo_start..].to_string();
         let screen_new = self.output[undo_start..].to_string();
+        let text_change = diff(&screen_old, &screen_new);
         self.record(
             strokes,
             undo_start,
-            screen_old.clone(),
-            consumed,
+            screen_old,
+            covered,
             state_before,
+            self.state,
         );
-        diff(&screen_old, &screen_new)
+        let keys = keys_of(pieces);
+        if keys.is_empty() {
+            return text_change;
+        }
+        if let Some(entry) = self.history.last_mut() {
+            entry.presses = true;
+        }
+        if text_change.is_some() {
+            // Keys and text in one outline have no single output, so the text wins
+            info!("steno outline mixes key presses and text; the key presses are dropped");
+            return text_change;
+        }
+        Some(StenoOutput::Keys(keys))
     }
 
     fn record(
@@ -234,13 +294,16 @@ impl Translator {
         replaced: String,
         consumed: Vec<Emitted>,
         state_before: FormatState,
+        state_after: FormatState,
     ) {
         self.history.push(Emitted {
             strokes,
             start,
             replaced,
             state_before,
+            state_after,
             consumed,
+            presses: false,
         });
         self.trim_history();
     }
@@ -262,23 +325,130 @@ impl Translator {
 
     fn undo(&mut self) -> Option<StenoOutput> {
         loop {
-            let entry = self.history.pop()?;
-            let removed = self.output[entry.start..].to_string();
-            self.output.truncate(entry.start);
-            self.output.push_str(&entry.replaced);
-            self.state = entry.state_before;
-            self.history.extend(entry.consumed);
+            let (removed, replaced, presses) = self.pop_translation()?;
+            // A key press has no text to take back, so undo ends here without touching the screen
+            if presses {
+                return None;
+            }
             // Barriers for unmatched strokes have nothing to undo; skip past them
-            if removed.is_empty() && entry.replaced.is_empty() {
+            if removed.is_empty() && replaced.is_empty() {
                 continue;
             }
             info!("steno undo ({} characters)", removed.chars().count());
             return Some(StenoOutput::Retype {
                 backspaces: removed.chars().count(),
-                text: entry.replaced,
+                text: replaced,
             });
         }
     }
+
+    /// Remove the most recent translation from the buffer and history, restoring what
+    /// it replaced and what it consumed. Returns the text it removed and the text it
+    /// restored.
+    fn pop_translation(&mut self) -> Option<(String, String, bool)> {
+        let entry = self.history.pop()?;
+        let removed = self.output[entry.start..].to_string();
+        self.output.truncate(entry.start);
+        self.output.push_str(&entry.replaced);
+        // The text is back to what the last restored translation left, so its spacing is too
+        self.state = entry
+            .consumed
+            .last()
+            .map_or(entry.state_before, |earlier| earlier.state_after);
+        self.history.extend(entry.consumed);
+        Some((removed, entry.replaced, entry.presses))
+    }
+
+    /// Repeat the last stroke that wasn't itself a repeat. The repeat is recorded as a `#`
+    /// stroke, so a later stroke can still join onto it, as in `#/KAL/TKPWAR`.
+    fn repeat_last(&mut self) -> Option<StenoOutput> {
+        let last = self
+            .history
+            .iter()
+            .rev()
+            .flat_map(|entry| entry.strokes.iter().rev())
+            .copied()
+            .find(|&s| s != NUMBER_BIT);
+        let output = match last {
+            Some(last) => self.stroke(last),
+            None => {
+                let start = self.output.len();
+                self.record(
+                    vec![NUMBER_BIT],
+                    start,
+                    String::new(),
+                    Vec::new(),
+                    self.state,
+                    self.state,
+                );
+                None
+            }
+        };
+        // The repeated stroke becomes `#`. Strokes that were merged into this entry stay.
+        if let Some(entry) = self.history.last_mut() {
+            if let Some(last) = entry.strokes.last_mut() {
+                *last = NUMBER_BIT;
+            }
+        }
+        output
+    }
+
+    /// Re-translate the last multi-stroke entry one stroke at a time, so a retro space
+    /// command can act at the boundary inside it. Returns false if there was nothing to
+    /// split.
+    fn split_last(&mut self) -> bool {
+        let Some(entry) = self.history.last() else {
+            return false;
+        };
+        if entry.strokes.len() < 2 {
+            return false;
+        }
+        let stroke = *entry.strokes.last().unwrap_or(&0);
+        self.pop_translation();
+        // The stroke alone: no joining with what came before, so the boundary stays
+        match self.dict.get(&[stroke]) {
+            Some(pieces) => {
+                let pieces = pieces.to_vec();
+                self.apply(stroke, 0, &pieces);
+            }
+            None => {
+                let start = self.output.len();
+                self.record(
+                    vec![stroke],
+                    start,
+                    String::new(),
+                    Vec::new(),
+                    self.state,
+                    self.state,
+                );
+            }
+        }
+        true
+    }
+}
+
+/// The first translation an entry covers, looking through earlier joins.
+fn earliest_translation(entry: &Emitted) -> &Emitted {
+    entry.consumed.first().map_or(entry, earliest_translation)
+}
+
+/// The key presses in an outline, in order.
+fn keys_of(pieces: &[Piece]) -> Vec<KeyPress> {
+    pieces
+        .iter()
+        .filter_map(|piece| match piece {
+            Piece::Key(press) => Some(press.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether a translation is one of the retro space commands (`{*?}` and `{*!}`).
+fn is_retro_space(pieces: &[Piece]) -> bool {
+    matches!(
+        pieces.first(),
+        Some(Piece::RetroInsertSpace | Piece::RetroDeleteSpace)
+    )
 }
 
 /// Where a dictionary entry's text starts, and what replaces the output from there.
@@ -304,18 +474,36 @@ fn edit_before(prefix: &str, pieces: &[Piece]) -> (usize, String, usize) {
             }
             (base - word.len(), capitalize_word(word), 1)
         }
+        Some(Piece::RetroLowercase) => {
+            let word = trailing_letters(prefix);
+            if word.is_empty() {
+                return (base, String::new(), 1);
+            }
+            (base - word.len(), lowercase_word(word), 1)
+        }
         Some(Piece::RetroDeleteSpace) => {
+            // A trailing space is the one just typed (`space()`), so it goes
             if prefix.ends_with(' ') {
-                (base - 1, String::new(), 1)
+                return (base - 1, String::new(), 1);
+            }
+            // Otherwise drop the space between the last two words
+            let word = trailing_letters(prefix);
+            let word_start = base - word.len();
+            if !word.is_empty() && prefix[..word_start].ends_with(' ') {
+                (word_start - 1, word.to_string(), 1)
             } else {
                 (base, String::new(), 1)
             }
         }
         Some(Piece::RetroInsertSpace) => {
-            if prefix.is_empty() || prefix.ends_with(' ') {
+            // Put a space between the last word and the one before it, if there is no
+            // space there already and a word before it exists
+            let word = trailing_letters(prefix);
+            let word_start = base - word.len();
+            if word.is_empty() || word_start == 0 || prefix[..word_start].ends_with(' ') {
                 (base, String::new(), 1)
             } else {
-                (base, " ".to_string(), 1)
+                (word_start, format!(" {word}"), 1)
             }
         }
         _ => (base, String::new(), 0),
@@ -365,6 +553,7 @@ fn shift(entry: &mut Emitted, cut: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::steno::format::parse_pieces;
     use crate::steno::layout::parse_stroke;
 
     fn stroke(text: &str) -> u32 {
@@ -511,7 +700,7 @@ mod tests {
     /// Apply a translator output to the text it has typed so far.
     fn apply(typed: &mut String, output: Option<StenoOutput>) {
         match output {
-            None => {}
+            None | Some(StenoOutput::Keys(_)) => {}
             Some(StenoOutput::Type(text)) => typed.push_str(&text),
             Some(StenoOutput::Retype { backspaces, text }) => {
                 for _ in 0..backspaces {
@@ -638,5 +827,69 @@ mod tests {
                 text: "Cat and".into(),
             })
         );
+    }
+
+    #[test]
+    fn book_retro_insert_space_splits_a_joined_word() {
+        // Lapwing ch20: KOR/TPHET is "cornet", and adding S-PD gives "core net"
+        assert_eq!(
+            type_strokes(
+                r#"{"KOR": "core", "TPHET": "net", "KOR/TPHET": "cornet", "S-PD": "{*?}"}"#,
+                &["KOR", "TPHET", "S-PD"]
+            ),
+            "core net"
+        );
+    }
+
+    #[test]
+    fn book_retro_delete_space_joins_two_words() {
+        // Lapwing ch20: PHOR/AUFR is "more over", and SP-LS gives "moreover"
+        assert_eq!(
+            type_strokes(
+                r#"{"PHOR": "more", "AUFR": "over", "SP-LS": "{*!}"}"#,
+                &["PHOR", "AUFR", "SP-LS"]
+            ),
+            "moreover"
+        );
+    }
+
+    #[test]
+    fn retro_insert_space_on_a_single_word_changes_nothing() {
+        assert_eq!(
+            type_strokes(r#"{"KAT": "cat", "S-PD": "{*?}"}"#, &["KAT", "S-PD"]),
+            "cat"
+        );
+    }
+
+    #[test]
+    fn retro_lowercase_lowers_the_last_word() {
+        assert_eq!(
+            type_strokes(
+                r#"{"KAT": "Cat", "HRO*ERD": "{:retro_case:lower_first_char}"}"#,
+                &["KAT", "HRO*ERD"]
+            ),
+            "cat"
+        );
+    }
+
+    #[test]
+    fn glue_and_raw_text_commands_parse() {
+        assert_eq!(
+            parse_pieces("{^ ^}"),
+            Some(vec![Piece::Glue(" ".to_string())])
+        );
+        assert_eq!(parse_pieces("{^^}"), Some(vec![Piece::Attach]));
+        assert_eq!(
+            parse_pieces("{~|\"^}"),
+            Some(vec![Piece::TextAttach("\"".to_string())])
+        );
+    }
+
+    #[test]
+    fn unknown_commands_are_not_typed_as_text() {
+        assert_eq!(parse_pieces("{:stitch:Z}"), None);
+        assert_eq!(parse_pieces("{PLOVER:FOCUS}"), None);
+        assert_eq!(parse_pieces("{#NotAKey}"), None);
+        assert_eq!(parse_pieces("{#Bogus(Left)}"), None);
     }
 }

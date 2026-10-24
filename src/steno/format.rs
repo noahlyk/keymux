@@ -17,6 +17,8 @@
 //! Anything else makes the entry unsupported and it's skipped at load time, so
 //! an unknown command never gets typed out as literal text.
 
+use crate::keycode::KeyCode;
+
 /// One parsed piece of a dictionary entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Piece {
@@ -40,6 +42,82 @@ pub enum Piece {
     RetroDeleteSpace,
     /// Put a space before this point
     RetroInsertSpace,
+    /// Lowercase the previous word's first letter (`{:retro_case:lower_first_char}`)
+    RetroLowercase,
+    /// Raw text glued to both neighbours with no spacing of its own (`{^ ^}`, `{^\n^}`)
+    Glue(String),
+    /// A key press, such as cursor movement or Enter (`{#Left}`, `{#Shift_l(Home)}`)
+    Key(KeyPress),
+}
+
+/// One key press, with any modifiers held down while it is pressed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyPress {
+    pub modifiers: Vec<KeyCode>,
+    pub key: KeyCode,
+}
+
+/// Parse the inside of a `{#...}` key command, such as `Left` or `Shift_l(Home)`.
+fn parse_key_press(expr: &str) -> Option<KeyPress> {
+    if let Some((name, rest)) = expr.split_once('(') {
+        let inner = rest.strip_suffix(')')?;
+        let modifier = modifier_key(name)?;
+        let mut press = parse_key_press(inner)?;
+        press.modifiers.insert(0, modifier);
+        return Some(press);
+    }
+    Some(KeyPress {
+        modifiers: Vec::new(),
+        key: key_name(expr)?,
+    })
+}
+
+/// Modifier names as Plover writes them, in either case.
+fn modifier_key(name: &str) -> Option<KeyCode> {
+    match name.to_ascii_lowercase().as_str() {
+        "shift_l" => Some(KeyCode::KC_LSFT),
+        "control_l" => Some(KeyCode::KC_LCTL),
+        "alt_l" => Some(KeyCode::KC_LALT),
+        _ => None,
+    }
+}
+
+/// Key names as Plover writes them. Matching ignores case, so `Return` and `return` agree.
+fn key_name(name: &str) -> Option<KeyCode> {
+    let lower = name.to_ascii_lowercase();
+    if let Some(number) = lower.strip_prefix('f') {
+        return match number.parse::<u8>().ok()? {
+            1 => Some(KeyCode::KC_F1),
+            2 => Some(KeyCode::KC_F2),
+            3 => Some(KeyCode::KC_F3),
+            4 => Some(KeyCode::KC_F4),
+            5 => Some(KeyCode::KC_F5),
+            6 => Some(KeyCode::KC_F6),
+            7 => Some(KeyCode::KC_F7),
+            8 => Some(KeyCode::KC_F8),
+            9 => Some(KeyCode::KC_F9),
+            10 => Some(KeyCode::KC_F10),
+            11 => Some(KeyCode::KC_F11),
+            12 => Some(KeyCode::KC_F12),
+            _ => None,
+        };
+    }
+    match lower.as_str() {
+        "left" => Some(KeyCode::KC_LEFT),
+        "right" => Some(KeyCode::KC_RGHT),
+        "up" => Some(KeyCode::KC_UP),
+        "down" => Some(KeyCode::KC_DOWN),
+        "home" => Some(KeyCode::KC_HOME),
+        "end" => Some(KeyCode::KC_END),
+        "page_up" => Some(KeyCode::KC_PGUP),
+        "page_down" => Some(KeyCode::KC_PGDN),
+        "delete" => Some(KeyCode::KC_DEL),
+        "backspace" => Some(KeyCode::KC_BSPC),
+        "escape" => Some(KeyCode::KC_ESC),
+        "tab" => Some(KeyCode::KC_TAB),
+        "return" => Some(KeyCode::KC_ENT),
+        _ => None,
+    }
 }
 
 /// Spacing and capitalization state carried from one entry to the next.
@@ -64,56 +142,89 @@ pub fn parse_pieces(value: &str) -> Option<Vec<Piece>> {
         return None;
     }
     let mut pieces = Vec::new();
-    let mut rest = value;
-    while let Some(open) = rest.find('{') {
-        if open > 0 {
-            pieces.push(Piece::Text(rest[..open].to_string()));
+    let mut text = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            // `\{` and `\}` are literal braces, as in Lapwing's ch20 brace outlines
+            '\\' if matches!(chars.peek(), Some('{' | '}')) => {
+                text.extend(chars.next());
+            }
+            '{' => {
+                if !text.is_empty() {
+                    pieces.push(Piece::Text(std::mem::take(&mut text)));
+                }
+                let mut command = String::new();
+                loop {
+                    match chars.next()? {
+                        '}' => break,
+                        '{' => return None,
+                        other => command.push(other),
+                    }
+                }
+                pieces.extend(parse_command(&command)?);
+            }
+            '}' => return None,
+            other => text.push(other),
         }
-        let close = rest[open..].find('}')? + open;
-        if rest[open + 1..close].contains('{') {
-            return None;
-        }
-        pieces.extend(parse_command(&rest[open + 1..close])?);
-        rest = &rest[close + 1..];
     }
-    if rest.contains('}') {
-        return None;
+    if !text.is_empty() {
+        pieces.push(Piece::Text(text));
     }
-    if !rest.is_empty() {
-        pieces.push(Piece::Text(rest.to_string()));
-    }
-    (!pieces.is_empty()).then_some(pieces)
+    // `{}` on its own is a valid no-op outline, so only plain empty text is rejected
+    (!pieces.is_empty() || value.contains('{')).then_some(pieces)
 }
 
 fn parse_command(command: &str) -> Option<Vec<Piece>> {
+    // `~|` marks raw text (quotes, brackets, Enter). Its spacing comes from the
+    // surrounding `^` marks, so the marker itself is dropped.
+    let command = command.replace("~|", "");
+    let command = command.as_str();
     match command {
+        // An empty command is a no-op, as in Lapwing's `{}{:case:...}` outlines
+        "" => Some(Vec::new()),
         "^" => Some(vec![Piece::Attach]),
         "-|" => Some(vec![Piece::CapNext]),
         ">" => Some(vec![Piece::LowercaseNext]),
         "*<" => Some(vec![Piece::RetroCapitalize]),
         "*!" => Some(vec![Piece::RetroDeleteSpace]),
         "*?" => Some(vec![Piece::RetroInsertSpace]),
+        ":case:cap_first_word" => Some(vec![Piece::CapNext]),
+        ":case:lower_first_char" => Some(vec![Piece::LowercaseNext]),
+        ":retro_case:cap_first_word" => Some(vec![Piece::RetroCapitalize]),
+        ":retro_case:lower_first_char" => Some(vec![Piece::RetroLowercase]),
         // Sentence-ending punctuation attaches to the previous word and capitalizes the next
         "." | "?" | "!" => Some(vec![Piece::AttachText(command.to_string()), Piece::CapNext]),
         // Other punctuation attaches without capitalizing
         "," | ";" | ":" => Some(vec![Piece::AttachText(command.to_string())]),
         _ => {
+            if let Some(expr) = command.strip_prefix('#') {
+                return parse_key_press(expr).map(|press| vec![Piece::Key(press)]);
+            }
             if let Some(letters) = command.strip_prefix('&') {
                 return (!letters.is_empty())
                     .then(|| vec![Piece::Fingerspell(letters.to_string())]);
             }
-            command
-                .strip_prefix('^')
-                .map_or_else(
-                    || {
-                        command
-                            .strip_suffix('^')
-                            .filter(|text| !text.is_empty())
-                            .map(|text| Piece::TextAttach(text.to_string()))
-                    },
-                    |text| (!text.is_empty()).then(|| Piece::AttachText(text.to_string())),
-                )
-                .map(|piece| vec![piece])
+            // `{^text^}` glues on both sides, `{^text}` only before, `{text^}` only after.
+            // Anything else is a command keymux doesn't know, so the entry is skipped.
+            match (command.strip_prefix('^'), command.strip_suffix('^')) {
+                (Some(_), Some(_)) if command.len() >= 2 => {
+                    let inner = &command[1..command.len() - 1];
+                    Some(vec![if inner.is_empty() {
+                        Piece::Attach
+                    } else {
+                        Piece::Glue(inner.to_string())
+                    }])
+                }
+                (Some(text), None) => {
+                    (!text.is_empty()).then(|| vec![Piece::AttachText(text.to_string())])
+                }
+                (None, Some(text)) => {
+                    (!text.is_empty()).then(|| vec![Piece::TextAttach(text.to_string())])
+                }
+                (None, None) => None,
+                (Some(_), Some(_)) => None,
+            }
         }
     }
 }
@@ -128,7 +239,17 @@ pub fn render(pieces: &[Piece], state: &mut FormatState) -> String {
             Piece::Attach => state.suppress_space = true,
             Piece::CapNext => state.capitalize = true,
             Piece::LowercaseNext => state.capitalize = false,
-            Piece::RetroCapitalize | Piece::RetroDeleteSpace | Piece::RetroInsertSpace => {}
+            Piece::RetroCapitalize
+            | Piece::RetroDeleteSpace
+            | Piece::RetroInsertSpace
+            | Piece::RetroLowercase
+            | Piece::Key(_) => {}
+            Piece::Glue(text) => {
+                out.push_str(text);
+                state.has_text = true;
+                state.suppress_space = true;
+                state.last_fingerspell = false;
+            }
             Piece::Text(text) | Piece::AttachText(text) | Piece::TextAttach(text) => {
                 let attaches_back = matches!(piece, Piece::AttachText(_));
                 if state.has_text && !state.suppress_space && !attaches_back {
@@ -161,6 +282,17 @@ pub fn capitalize_word(word: &str) -> String {
     let mut out = String::new();
     push_word(&mut out, word, true);
     out
+}
+
+/// Lowercase the first letter of `word`, leaving the rest alone.
+#[must_use]
+pub fn lowercase_word(word: &str) -> String {
+    let mut chars = word.chars();
+    chars.next().map_or_else(String::new, |first| {
+        let mut out: String = first.to_lowercase().collect();
+        out.push_str(chars.as_str());
+        out
+    })
 }
 
 fn push_word(out: &mut String, word: &str, capitalize: bool) {

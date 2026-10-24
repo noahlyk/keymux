@@ -23,6 +23,11 @@ pub fn describe(output: Option<&StenoOutput>, unmatched: bool) -> String {
         Some(StenoOutput::Retype { backspaces, text }) => {
             format!("-{backspaces} {text:?}")
         }
+        Some(StenoOutput::Keys(presses)) => presses
+            .iter()
+            .map(|press| format!("{:?}", press.key))
+            .collect::<Vec<_>>()
+            .join(" "),
         None if unmatched => "?".to_string(),
         None => String::new(),
     }

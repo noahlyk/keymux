@@ -3,6 +3,7 @@
 
 use super::chord::ChordState;
 use super::dict::Dictionary;
+use super::format::KeyPress;
 use super::layout::{build_key_map, preset};
 use super::setup::default_dictionaries;
 use super::tape;
@@ -205,6 +206,7 @@ impl StenoEngine {
 struct Merged {
     backspaces: usize,
     text: String,
+    keys: Vec<KeyPress>,
 }
 
 impl Merged {
@@ -220,12 +222,16 @@ impl Merged {
                 self.backspaces += remaining;
                 self.text.push_str(&text);
             }
+            StenoOutput::Keys(presses) => self.keys.extend(presses),
         }
     }
 
     fn finish(self) -> Option<StenoOutput> {
         match (self.backspaces, self.text.is_empty()) {
-            (0, true) => None,
+            (0, true) if self.keys.is_empty() => None,
+            (0, true) => Some(StenoOutput::Keys(self.keys)),
+            // Text and key presses backlogged together can't share one output. The text
+            // wins, as in the translator, so the key presses are dropped.
             (0, false) => Some(StenoOutput::Type(self.text)),
             (backspaces, _) => Some(StenoOutput::Retype {
                 backspaces,
