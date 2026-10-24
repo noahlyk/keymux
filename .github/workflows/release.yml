@@ -89,7 +89,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Build binary
-        run: cargo build --release
+        run: KEYMUX_VERSION=${{ needs.version.outputs.new_version }} cargo build --release
       - name: Determine architecture
         id: arch
         run: |

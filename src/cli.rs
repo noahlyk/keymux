@@ -137,7 +137,7 @@ pub enum GlobalGamemodeAction {
 #[derive(Parser)]
 #[command(name = "keymux")]
 #[command(about = "QMK-inspired keyboard middleware for Linux", long_about = None)]
-#[command(version)]
+#[command(version = env!("KEYMUX_VERSION"))]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
