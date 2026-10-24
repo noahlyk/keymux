@@ -374,3 +374,44 @@ fn toggling_back_into_steno_starts_without_a_prefix_space() {
         ProcessResult::TypeString("cat".to_string(), false)
     );
 }
+
+/// Lapwing's Enter outlines through the real key path: `R-R` (J here) types a newline, and
+/// `#R-R` presses Shift+Enter.
+#[test]
+fn enter_outlines_produce_their_output() {
+    let fixture = Fixture::new("enter");
+    let dict = fixture.dir.join("main.json");
+    std::fs::write(
+        &dict,
+        r##"{"R-R": "{^~|\n^}", "#R-R": "{#Shift_l(Return)}{^}"}"##,
+    )
+    .unwrap();
+    let config_path = fixture.dir.join("enter.ron");
+    std::fs::write(&config_path, CONFIG.replace("DICT", &path_str(&dict))).unwrap();
+    let config = Config::load(&config_path).unwrap();
+    let mut p = KeymapProcessor::new(&config, config_path, 0);
+    p.wait_for_steno_dictionaries();
+    enter_steno(&mut p);
+
+    // R-R: F is the left R and J the right R
+    assert_eq!(
+        chord(&mut p, &[KeyCode::KC_F, KeyCode::KC_J]),
+        ProcessResult::TypeString("\n".to_string(), false)
+    );
+    // #R-R: number key 1 (#), F (R-) and J (-R)
+    assert_eq!(
+        chord(&mut p, &[KeyCode::KC_1, KeyCode::KC_F, KeyCode::KC_J]),
+        ProcessResult::MultipleEvents(vec![
+            (KeyCode::KC_LSFT, true),
+            (KeyCode::KC_ENT, true),
+            (KeyCode::KC_ENT, false),
+            (KeyCode::KC_LSFT, false),
+        ])
+    );
+}
+
+#[test]
+fn newline_and_tab_have_keys_to_type() {
+    assert_eq!(super::char_to_key('\n').0, Some(evdev::Key::KEY_ENTER));
+    assert_eq!(super::char_to_key('\t').0, Some(evdev::Key::KEY_TAB));
+}
