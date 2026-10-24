@@ -49,16 +49,20 @@ fn untagged_version() -> String {
 /// Re-run this script when the checked-out commit, its branch, tags, or any tracked file change
 /// (`dirty` depends on the contents of tracked files, not just on commits).
 fn watch_git() {
-    let mut paths = vec!["HEAD".to_string(), "packed-refs".to_string(), "index".to_string(), "refs/tags".to_string()];
-    if let Some(files) = git(&["ls-files"]) {
-        paths.extend(files.lines().map(str::to_string));
-    }
+    // Git internals live under .git/, so resolve them with --git-path.
+    let mut internals = vec!["HEAD".to_string(), "packed-refs".to_string(), "index".to_string(), "refs/tags".to_string()];
     if let Some(branch_ref) = git(&["symbolic-ref", "-q", "HEAD"]) {
-        paths.push(branch_ref);
+        internals.push(branch_ref);
     }
-    for p in paths {
+    for p in internals {
         if let Some(path) = git(&["rev-parse", "--git-path", &p]) {
             println!("cargo:rerun-if-changed={path}");
+        }
+    }
+    // Tracked files are real paths in the worktree; --git-path would point into .git/ instead.
+    if let Some(files) = git(&["ls-files"]) {
+        for file in files.lines() {
+            println!("cargo:rerun-if-changed={file}");
         }
     }
 }
