@@ -24,7 +24,7 @@ sha256sums=()
 
 build() {
     cd "$startdir"
-    cargo build --release --locked
+    KEYMUX_VERSION="$pkgver" cargo build --release --locked
 }
 
 package() {
