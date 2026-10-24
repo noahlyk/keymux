@@ -605,6 +605,9 @@ const fn char_to_key(ch: char) -> (Option<Key>, bool) {
         ')' => (Some(Key::KEY_0), true),
 
         ' ' => (Some(Key::KEY_SPACE), false),
+        // Enter and Tab are keys, not characters, so they're typed by pressing those keys
+        '\n' => (Some(Key::KEY_ENTER), false),
+        '\t' => (Some(Key::KEY_TAB), false),
         '-' => (Some(Key::KEY_MINUS), false),
         '_' => (Some(Key::KEY_MINUS), true),
         '=' => (Some(Key::KEY_EQUAL), false),

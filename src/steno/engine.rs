@@ -3,6 +3,7 @@
 
 use super::chord::ChordState;
 use super::dict::Dictionary;
+use super::format::KeyPress;
 use super::layout::{build_key_map, preset};
 use super::setup::default_dictionaries;
 use super::tape;
@@ -205,6 +206,7 @@ impl StenoEngine {
 struct Merged {
     backspaces: usize,
     text: String,
+    keys: Vec<KeyPress>,
 }
 
 impl Merged {
@@ -220,12 +222,16 @@ impl Merged {
                 self.backspaces += remaining;
                 self.text.push_str(&text);
             }
+            StenoOutput::Keys(presses) => self.keys.extend(presses),
         }
     }
 
     fn finish(self) -> Option<StenoOutput> {
         match (self.backspaces, self.text.is_empty()) {
-            (0, true) => None,
+            (0, true) if self.keys.is_empty() => None,
+            (0, true) => Some(StenoOutput::Keys(self.keys)),
+            // Text and key presses backlogged together can't share one output. The text
+            // wins, as in the translator, so the key presses are dropped.
             (0, false) => Some(StenoOutput::Type(self.text)),
             (backspaces, _) => Some(StenoOutput::Retype {
                 backspaces,
@@ -391,6 +397,39 @@ mod tests {
         };
         let err = StenoEngine::from_config(&config, true, Path::new("."), None).unwrap_err();
         assert!(err.to_string().contains("unknown steno layout preset"));
+    }
+
+    #[test]
+    fn backlogged_key_presses_come_out_as_keys() {
+        use crate::keycode::KeyCode;
+        use crate::steno::format::KeyPress;
+        let press = |key| KeyPress {
+            modifiers: vec![],
+            key,
+        };
+        let mut merged = Merged::default();
+        merged.push(StenoOutput::Keys(vec![press(KeyCode::KC_LEFT)]));
+        merged.push(StenoOutput::Keys(vec![press(KeyCode::KC_RGHT)]));
+        assert_eq!(
+            merged.finish(),
+            Some(StenoOutput::Keys(vec![
+                press(KeyCode::KC_LEFT),
+                press(KeyCode::KC_RGHT),
+            ]))
+        );
+    }
+
+    #[test]
+    fn backlogged_text_wins_over_key_presses_in_one_batch() {
+        use crate::keycode::KeyCode;
+        use crate::steno::format::KeyPress;
+        let mut merged = Merged::default();
+        merged.push(StenoOutput::Keys(vec![KeyPress {
+            modifiers: vec![],
+            key: KeyCode::KC_LEFT,
+        }]));
+        merged.push(StenoOutput::Type("cat".into()));
+        assert_eq!(merged.finish(), Some(StenoOutput::Type("cat".into())));
     }
 
     #[test]

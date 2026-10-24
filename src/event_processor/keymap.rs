@@ -23,6 +23,20 @@ fn steno_result(output: Option<StenoOutput>) -> ProcessResult {
         Some(StenoOutput::Retype { backspaces, text }) => {
             ProcessResult::Retype { backspaces, text }
         }
+        // Each press is key down, then key up, with its modifiers held around it
+        Some(StenoOutput::Keys(presses)) => ProcessResult::MultipleEvents(
+            presses
+                .into_iter()
+                .flat_map(|press| {
+                    let mut events: Vec<(KeyCode, bool)> =
+                        press.modifiers.iter().map(|&m| (m, true)).collect();
+                    events.push((press.key, true));
+                    events.push((press.key, false));
+                    events.extend(press.modifiers.iter().rev().map(|&m| (m, false)));
+                    events
+                })
+                .collect(),
+        ),
     }
 }
 
