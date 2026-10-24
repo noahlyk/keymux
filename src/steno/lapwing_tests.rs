@@ -95,6 +95,92 @@ fn real_lapwing_dictionaries_have_no_invalid_strokes() {
     }
 }
 
+/// Real Lapwing entries from chapter 20 (punctuation and commands), with the words they're
+/// used with in these tests.
+const CH20: &str = r#"{
+    "KAT": "cat", "SKP": "and", "TKOG": "dog", "-T": "the",
+    "TP-PL": "{.}", "KW-PL": "{?}", "TP-BG": "{!}", "KW-BG": "{,}",
+    "H-PB": "{^}-{^}", "S-P": "{^ ^}", "S-PD": "{*?}", "SP-LS": "{*!}"
+}"#;
+
+/// Type `strokes` in order on a fresh translator, returning the text on screen.
+fn type_strokes(json: &str, strokes: &[&str]) -> String {
+    let mut dict = Dictionary::default();
+    dict.merge_json(json).unwrap();
+    let mut translator = Translator::new(dict);
+    let mut typed = String::new();
+    for stroke in strokes {
+        match translator.stroke(parse_stroke(stroke).unwrap()) {
+            None => {}
+            Some(StenoOutput::Type(text)) => typed.push_str(&text),
+            Some(StenoOutput::Retype { backspaces, text }) => {
+                for _ in 0..backspaces {
+                    typed.pop();
+                }
+                typed.push_str(&text);
+            }
+        }
+    }
+    typed
+}
+
+#[test]
+fn ch20_sentence_punctuation_attaches_and_capitalizes_the_next_word() {
+    assert_eq!(type_strokes(CH20, &["KAT", "TP-PL", "SKP"]), "cat. And");
+    assert_eq!(type_strokes(CH20, &["KAT", "KW-PL", "SKP"]), "cat? And");
+    assert_eq!(type_strokes(CH20, &["KAT", "TP-BG", "SKP"]), "cat! And");
+}
+
+#[test]
+fn ch20_comma_attaches_without_capitalizing() {
+    assert_eq!(type_strokes(CH20, &["KAT", "KW-BG", "-T"]), "cat, the");
+}
+
+#[test]
+fn ch20_hyphen_attaches_both_sides() {
+    assert_eq!(type_strokes(CH20, &["KAT", "H-PB", "TKOG"]), "cat-dog");
+}
+
+#[test]
+#[ignore = "known bug: `{^ ^}` parses as attach text \" ^\", so S-P types a stray caret"]
+fn ch20_insert_space_then_next_word_has_one_space() {
+    // S-P inserts a space by itself, so the next word must not add a second one
+    assert_eq!(type_strokes(CH20, &["KAT", "S-P", "TKOG"]), "cat dog");
+}
+
+#[test]
+#[ignore = "known bug: `{*!}` only removes a space that is already at the end of the text"]
+fn ch20_retro_delete_space_suppresses_the_last_space() {
+    // Lapwing ch20: SP-LS "retroactively suppress last space"
+    assert_eq!(type_strokes(CH20, &["KAT", "TKOG", "SP-LS"]), "catdog");
+}
+
+#[test]
+#[ignore = "known gap: keymux skips Plover's {:case:...} commands, so KPA types nothing (Lapwing ch20: capitalize next)"]
+fn ch20_capitalize_next_word() {
+    assert_eq!(type_strokes(CH20, &["KAT", "KPA", "TKOG"]), "cat Dog");
+}
+
+#[test]
+#[ignore = "known gap: keymux skips Plover's {:retro_case:...} commands, so KA*PD types nothing (Lapwing ch20: retro capitalize)"]
+fn ch20_retro_capitalize_last_word() {
+    assert_eq!(type_strokes(CH20, &["KAT", "KA*PD"]), "Cat");
+}
+
+#[test]
+#[ignore = "known bug: unsupported {~|...} quote commands are typed as literal text"]
+fn ch20_opening_quote_attaches_to_the_next_word() {
+    let json = r#"{"KAT": "cat", "TKOG": "dog", "KW-GS": "{~|\"^}"}"#;
+    assert_eq!(type_strokes(json, &["KAT", "KW-GS", "TKOG"]), r#"cat "dog"#);
+}
+
+#[test]
+#[ignore = "known bug: unsupported Enter command ({^~|\\n^}) is typed as literal text"]
+fn ch20_enter_key_is_typed() {
+    let json = r#"{"KAT": "cat", "R-R": "{^~|\n^}"}"#;
+    assert_eq!(type_strokes(json, &["KAT", "R-R"]), "cat\n");
+}
+
 #[test]
 #[ignore = "needs Lapwing's dictionaries in ~/.config/keymux/steno/lapwing; run with --ignored"]
 fn plover_plugin_commands_are_skipped_not_typed() {
