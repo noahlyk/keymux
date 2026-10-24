@@ -17,4 +17,7 @@ pub mod shortest;
 pub mod tape;
 pub mod translate;
 
+#[cfg(test)]
+mod lapwing_tests;
+
 pub use engine::StenoEngine;
