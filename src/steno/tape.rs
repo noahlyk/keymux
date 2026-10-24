@@ -91,6 +91,36 @@ mod tests {
     }
 
     #[test]
+    fn describes_key_presses_by_key_name() {
+        use crate::keycode::KeyCode;
+        use crate::steno::format::KeyPress;
+        let presses = vec![
+            KeyPress {
+                modifiers: vec![KeyCode::KC_LSFT],
+                key: KeyCode::KC_LEFT,
+            },
+            KeyPress {
+                modifiers: vec![],
+                key: KeyCode::KC_ENT,
+            },
+        ];
+        // The key name, not the modifier, is what the tape shows
+        assert_eq!(
+            describe(Some(&StenoOutput::Keys(presses)), false),
+            "KC_LEFT KC_ENT"
+        );
+    }
+
+    #[test]
+    fn describes_a_newline_as_its_escaped_text() {
+        // Debug formatting keeps a newline visible on one tape line
+        assert_eq!(
+            describe(Some(&StenoOutput::Type("\n".into())), false),
+            "\"\\n\""
+        );
+    }
+
+    #[test]
     fn append_writes_one_line_per_stroke() {
         let dir = std::env::temp_dir().join(format!("keymux-tape-test-{}", std::process::id()));
         let path = dir.join("tape.txt");

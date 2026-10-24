@@ -400,6 +400,39 @@ mod tests {
     }
 
     #[test]
+    fn backlogged_key_presses_come_out_as_keys() {
+        use crate::keycode::KeyCode;
+        use crate::steno::format::KeyPress;
+        let press = |key| KeyPress {
+            modifiers: vec![],
+            key,
+        };
+        let mut merged = Merged::default();
+        merged.push(StenoOutput::Keys(vec![press(KeyCode::KC_LEFT)]));
+        merged.push(StenoOutput::Keys(vec![press(KeyCode::KC_RGHT)]));
+        assert_eq!(
+            merged.finish(),
+            Some(StenoOutput::Keys(vec![
+                press(KeyCode::KC_LEFT),
+                press(KeyCode::KC_RGHT),
+            ]))
+        );
+    }
+
+    #[test]
+    fn backlogged_text_wins_over_key_presses_in_one_batch() {
+        use crate::keycode::KeyCode;
+        use crate::steno::format::KeyPress;
+        let mut merged = Merged::default();
+        merged.push(StenoOutput::Keys(vec![KeyPress {
+            modifiers: vec![],
+            key: KeyCode::KC_LEFT,
+        }]));
+        merged.push(StenoOutput::Type("cat".into()));
+        assert_eq!(merged.finish(), Some(StenoOutput::Type("cat".into())));
+    }
+
+    #[test]
     fn stroke_names_render_for_the_tape() {
         use crate::steno::layout::render_stroke;
         assert_eq!(render_stroke(1 << 2 | 1 << 7 | 1 << 18), "KAT");

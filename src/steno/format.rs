@@ -422,4 +422,45 @@ mod tests {
         );
         assert_eq!(render(&[text("world")], &mut state), " world");
     }
+
+    fn press(modifiers: &[KeyCode], key: KeyCode) -> Piece {
+        Piece::Key(KeyPress {
+            modifiers: modifiers.to_vec(),
+            key,
+        })
+    }
+
+    #[test]
+    fn key_names_parse_in_either_case() {
+        assert_eq!(parse_pieces("{#Left}"), Some(vec![press(&[], KeyCode::KC_LEFT)]));
+        // Lapwing writes both `Return` and `return`
+        assert_eq!(parse_pieces("{#Return}"), Some(vec![press(&[], KeyCode::KC_ENT)]));
+        assert_eq!(parse_pieces("{#return}"), Some(vec![press(&[], KeyCode::KC_ENT)]));
+        assert_eq!(parse_pieces("{#Page_Up}"), Some(vec![press(&[], KeyCode::KC_PGUP)]));
+        assert_eq!(parse_pieces("{#F12}"), Some(vec![press(&[], KeyCode::KC_F12)]));
+    }
+
+    #[test]
+    fn modifiers_wrap_the_key_they_hold_down() {
+        assert_eq!(
+            parse_pieces("{#Shift_l(Home)}"),
+            Some(vec![press(&[KeyCode::KC_LSFT], KeyCode::KC_HOME)])
+        );
+        // Nested modifiers: Control and Shift together, outermost first
+        assert_eq!(
+            parse_pieces("{#Control_L(Shift_l(Left))}"),
+            Some(vec![press(
+                &[KeyCode::KC_LCTL, KeyCode::KC_LSFT],
+                KeyCode::KC_LEFT
+            )])
+        );
+    }
+
+    #[test]
+    fn unknown_keys_and_broken_modifiers_are_rejected() {
+        assert_eq!(parse_pieces("{#Nope}"), None);
+        assert_eq!(parse_pieces("{#F13}"), None);
+        assert_eq!(parse_pieces("{#Shift_l(Left}"), None);
+        assert_eq!(parse_pieces("{#Hyper_l(Left)}"), None);
+    }
 }

@@ -886,6 +886,34 @@ mod tests {
     }
 
     #[test]
+    fn number_key_with_nothing_before_it_types_nothing() {
+        let mut t = translator(r#"{"KAT": "cat"}"#);
+        assert_eq!(t.stroke(NUMBER_BIT), None);
+        // The `#` stays available to start a proper-noun outline after it
+        assert_eq!(t.stroke(stroke("KAT")), Some(StenoOutput::Type("cat".into())));
+    }
+
+    #[test]
+    fn number_key_repeats_a_word_typed_before_it() {
+        let mut t = translator(r#"{"KAT": "cat"}"#);
+        t.stroke(stroke("KAT"));
+        // Repeating "cat" from a fresh sentence puts a space in front of it
+        assert_eq!(t.stroke(NUMBER_BIT), Some(StenoOutput::Type(" cat".into())));
+        assert_eq!(t.text(), "cat cat");
+    }
+
+    #[test]
+    fn newline_text_passes_through_to_the_screen() {
+        let mut t = translator(r#"{"KAT": "cat", "R-R": "{^~|\n^}"}"#);
+        t.stroke(stroke("KAT"));
+        assert_eq!(
+            t.stroke(stroke("R-R")),
+            Some(StenoOutput::Type("\n".into()))
+        );
+        assert_eq!(t.text(), "cat\n");
+    }
+
+    #[test]
     fn unknown_commands_are_not_typed_as_text() {
         assert_eq!(parse_pieces("{:stitch:Z}"), None);
         assert_eq!(parse_pieces("{PLOVER:FOCUS}"), None);
