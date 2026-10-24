@@ -19,13 +19,12 @@ fn git(args: &[&str]) -> Option<String> {
 }
 
 fn git_version() -> Option<String> {
-    // `v1.10.0-8-g0587d41` or `v1.10.0-8-g0587d41-dirty`
-    let described = git(&["describe", "--tags", "--long", "--dirty", "--match", "v[0-9]*"])?;
-    let (body, dirty) = match described.strip_suffix("-dirty") {
-        Some(body) => (body, true),
-        None => (described.as_str(), false),
-    };
-    let mut parts = body.rsplitn(3, '-');
+    // `v1.10.0-8-g0587d41`
+    let described = git(&["describe", "--tags", "--long", "--match", "v[0-9]*"])?;
+    // `status` refreshes the index first, so a file that was edited and then restored reads as clean.
+    // (`describe --dirty` can report stale results for that case.)
+    let dirty = git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty());
+    let mut parts = described.rsplitn(3, '-');
     let hash = parts.next()?;
     let count: u32 = parts.next()?.parse().ok()?;
     let tag = parts.next()?.strip_prefix('v')?;
@@ -47,9 +46,13 @@ fn untagged_version() -> String {
     }
 }
 
-/// Re-run this script when the checked-out commit, its branch, tags or the index change.
+/// Re-run this script when the checked-out commit, its branch, tags, or any tracked file change
+/// (`dirty` depends on the contents of tracked files, not just on commits).
 fn watch_git() {
     let mut paths = vec!["HEAD".to_string(), "packed-refs".to_string(), "index".to_string(), "refs/tags".to_string()];
+    if let Some(files) = git(&["ls-files"]) {
+        paths.extend(files.lines().map(str::to_string));
+    }
     if let Some(branch_ref) = git(&["symbolic-ref", "-q", "HEAD"]) {
         paths.push(branch_ref);
     }
