@@ -84,7 +84,6 @@ fn keys_session(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, show_keys
         if text.is_empty() {
             break;
         }
-        println!();
         print_table(&chord_rows(dict.clone(), keys_by_bit, text, fast), show_keys);
         println!();
     }
