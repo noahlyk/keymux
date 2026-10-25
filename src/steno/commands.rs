@@ -28,7 +28,7 @@ pub fn load_dictionary(config_dir: &Path) -> Dictionary {
 /// Print the stroke(s) that type `word`.
 pub fn lookup(config_dir: &Path, word: &str) {
     let dict = load_dictionary(config_dir);
-    let found = dict.strokes_for(word);
+    let found = proper_outlines(&dict, word);
     if found.is_empty() {
         println!("No stroke for \"{word}\"");
         return;
@@ -339,6 +339,17 @@ fn chars_as_spans(text: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
     text[start..end]
         .char_indices()
         .map(|(i, c)| (start + i, start + i + c.len_utf8()))
+        .collect()
+}
+
+/// The outlines that type `word` properly in a sentence, fewest strokes first. Prefixes and
+/// suffixes that glue to a neighbouring word (`{under^}`, `{^under}`) are left out.
+#[must_use]
+pub fn proper_outlines(dict: &Dictionary, word: &str) -> Vec<Vec<u32>> {
+    let base = Translator::new(dict.clone());
+    ranked_strokes(dict, word)
+        .into_iter()
+        .filter(|outline| types_in_context(&base, word, outline))
         .collect()
 }
 
@@ -742,6 +753,13 @@ mod tests {
         assert_eq!(outlines.iter().filter(|&&o| o == "UPBD").count(), 1);
         assert!(outlines.contains(&"UPB/TK*ER"));
         assert_eq!(outlines.last(), Some(&"SKEUPB"));
+    }
+
+    #[test]
+    fn lookup_leaves_out_glued_outlines_too() {
+        let mut dict = Dictionary::default();
+        dict.merge_json(r#"{"-T": "the", "UPBD": "under", "UPB/TKER": "{under^}"}"#).unwrap();
+        assert_eq!(proper_outlines(&dict, "under"), vec![vec![parse_stroke("UPBD").unwrap()]]);
     }
 
     #[test]
