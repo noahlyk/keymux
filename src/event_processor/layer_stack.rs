@@ -1,6 +1,7 @@
 use crate::config::{Config, KeyAction, Layer, LayerConfig};
 use crate::keycode::KeyCode;
 use std::collections::HashMap;
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 pub struct LayerStack {
@@ -18,8 +19,19 @@ impl LayerStack {
             layer_configs.insert(layer.clone(), layer_config.clone());
         }
 
+        // The base layer, then the default layer on top of it if one is set. A default layer
+        // that isn't defined is ignored, so a typo can't leave the keyboard with no layer to type on.
+        let mut layers = vec![Layer::base()];
+        if let Some(layer) = &config.default_layer {
+            if layer_configs.contains_key(layer) {
+                layers.push(layer.clone());
+            } else {
+                warn!("default_layer \"{}\" is not defined in layers; using base", layer.0);
+            }
+        }
+
         Self {
-            layers: vec![Layer::base()],
+            layers,
             layer_configs,
             base_remaps: config.remaps.clone(),
             game_mode_active: false,
@@ -73,5 +85,39 @@ impl LayerStack {
 
     pub const fn layer_configs(&self) -> &HashMap<Layer, LayerConfig> {
         &self.layer_configs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(extra: &str) -> Config {
+        ron::from_str(&format!(
+            r#"(
+                layers: {{ "steno": (kind: Remap, remaps: {{}}) }},
+                {extra}
+            )"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn starts_on_the_base_layer_without_a_default_layer() {
+        let stack = LayerStack::new(&config(""));
+        assert_eq!(stack.layers(), [Layer::base()]);
+    }
+
+    #[test]
+    fn a_default_layer_is_on_from_the_start() {
+        let stack = LayerStack::new(&config(r#"default_layer: Some("steno"),"#));
+        assert_eq!(stack.layers(), [Layer::base(), Layer::new("steno")]);
+        assert_eq!(stack.current_layer(), Layer::new("steno"));
+    }
+
+    #[test]
+    fn an_undefined_default_layer_is_ignored() {
+        let stack = LayerStack::new(&config(r#"default_layer: Some("nope"),"#));
+        assert_eq!(stack.layers(), [Layer::base()]);
     }
 }
