@@ -53,6 +53,12 @@ impl LayerStack {
         }
     }
 
+    /// Turn every layer off, back to the base layer. Used by `TO("base")`, the way to leave
+    /// a layer that was switched into, such as steno.
+    pub fn leave_to_base(&mut self) {
+        self.layers = vec![Layer::base()];
+    }
+
     pub fn deactivate_layer(&mut self, layer: &Layer) {
         if !layer.is_base() {
             self.layers.retain(|l| l != layer);
