@@ -114,7 +114,7 @@ impl StenoEngine {
     /// Whether a live lookup is open. While it is, the layer's keys are plain QWERTY input to
     /// it (see [`Self::lookup_key`]) and nothing reaches the application.
     #[must_use]
-    pub fn lookup_active(&self) -> bool {
+    pub const fn lookup_active(&self) -> bool {
         self.lookup.is_some()
     }
 
@@ -149,7 +149,7 @@ impl StenoEngine {
 
     /// Publish to `hub` instead of the daemon's. Tests use this so they don't share state.
     #[cfg(test)]
-    pub fn set_hub(&mut self, hub: &'static OverlayHub) {
+    pub const fn set_hub(&mut self, hub: &'static OverlayHub) {
         self.hub = hub;
     }
 
@@ -217,7 +217,7 @@ impl StenoEngine {
     /// held-back lookup stroke counts as something: Backspace must not delete text that comes
     /// before it, and the stroke is not on screen to take back.
     #[must_use]
-    pub fn tape_is_empty(&self) -> bool {
+    pub const fn tape_is_empty(&self) -> bool {
         self.trigger_held.is_empty() && self.translator.tape_is_empty()
     }
 

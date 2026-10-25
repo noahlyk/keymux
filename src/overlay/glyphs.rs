@@ -95,7 +95,7 @@ impl GlyphCache {
 
     /// The size this cache draws at, in pixels.
     #[must_use]
-    pub fn pixel_size(&self) -> f32 {
+    pub const fn pixel_size(&self) -> f32 {
         self.scale.y
     }
 

@@ -1,32 +1,6 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
-/// Get keyboard IDs and names for shell completions
-pub fn get_keyboard_completions() -> Vec<String> {
-    use keymux::keyboard_id::find_all_keyboards;
-
-    let mut completions = vec!["*".to_string()];
-
-    for (id, kb) in find_all_keyboards() {
-        completions.push(id.to_string());
-        let base_id = id
-            .to_string()
-            .split('@')
-            .next()
-            .unwrap_or(&id.to_string())
-            .to_string();
-        if !completions.contains(&base_id) {
-            completions.push(base_id);
-        }
-        if !completions.contains(&kb.name) {
-            completions.push(kb.name);
-        }
-    }
-
-    completions.sort();
-    completions
-}
-
 /// Shell completion generator
 pub fn generate_completions(shell: Shell) {
     use clap::builder::styling::{AnsiColor, Styles};

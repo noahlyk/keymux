@@ -150,10 +150,9 @@ impl OverlayHub {
         timeout: Duration,
         cancel: &AtomicBool,
     ) -> Option<OverlaySnapshot> {
-        let state = lock(&self.state);
         let (state, _) = self
             .changed
-            .wait_timeout_while(state, timeout, |state| {
+            .wait_timeout_while(lock(&self.state), timeout, |state| {
                 state.generation == seen && !cancel.load(Ordering::Acquire)
             })
             .unwrap_or_else(std::sync::PoisonError::into_inner);

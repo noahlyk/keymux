@@ -50,6 +50,41 @@ fn is_visible(config: &OverlayConfig, always: bool, layer: Option<&str>) -> bool
             }))
 }
 
+fn config_path() -> Option<std::path::PathBuf> {
+    Config::default_path().ok()
+}
+
+/// The overlay section of the user's config, or the defaults if it can't be read. A broken
+/// config shouldn't keep the overlay from showing; the daemon reports config errors.
+fn load_config() -> OverlayConfig {
+    config_path()
+        .ok_or_else(|| anyhow::anyhow!("no config path"))
+        .and_then(|path| Config::load_or_hint(&path))
+        .map(|config| config.overlay)
+        .unwrap_or_else(|e| {
+            tracing::warn!("using default overlay settings: {e:#}");
+            OverlayConfig::default()
+        })
+}
+
+/// `keymux overlay --dump`: print each frame, to check the daemon side without Wayland.
+fn dump_frames() -> Result<()> {
+    for frame in crate::ipc::subscribe_overlay()? {
+        let last = frame.tape.back();
+        println!(
+            "gen {:>5}  layer {:<12} chord {:<14} held {:<14} last {:<12} {}",
+            frame.generation,
+            frame.layer.as_deref().unwrap_or("-"),
+            render_stroke(frame.chord),
+            render_stroke(frame.held),
+            last.map_or(String::new(), |entry| render_stroke(entry.stroke)),
+            last.map_or("", |entry| entry.text.as_str()),
+        );
+    }
+    println!("daemon closed the connection");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,39 +120,4 @@ mod tests {
         };
         assert!(!is_visible(&config, true, Some("steno")));
     }
-}
-
-fn config_path() -> Option<std::path::PathBuf> {
-    Config::default_path().ok()
-}
-
-/// The overlay section of the user's config, or the defaults if it can't be read. A broken
-/// config shouldn't keep the overlay from showing; the daemon reports config errors.
-fn load_config() -> OverlayConfig {
-    config_path()
-        .ok_or_else(|| anyhow::anyhow!("no config path"))
-        .and_then(|path| Config::load_or_hint(&path))
-        .map(|config| config.overlay)
-        .unwrap_or_else(|e| {
-            tracing::warn!("using default overlay settings: {e:#}");
-            OverlayConfig::default()
-        })
-}
-
-/// `keymux overlay --dump`: print each frame, to check the daemon side without Wayland.
-fn dump_frames() -> Result<()> {
-    for frame in crate::ipc::subscribe_overlay()? {
-        let last = frame.tape.back();
-        println!(
-            "gen {:>5}  layer {:<12} chord {:<14} held {:<14} last {:<12} {}",
-            frame.generation,
-            frame.layer.as_deref().unwrap_or("-"),
-            render_stroke(frame.chord),
-            render_stroke(frame.held),
-            last.map_or(String::new(), |entry| render_stroke(entry.stroke)),
-            last.map_or("", |entry| entry.text.as_str()),
-        );
-    }
-    println!("daemon closed the connection");
-    Ok(())
 }

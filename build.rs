@@ -40,10 +40,8 @@ fn git_version() -> Option<String> {
 }
 
 fn untagged_version() -> String {
-    match git(&["rev-parse", "--short", "HEAD"]) {
-        Some(hash) => format!("0.0.0+g{hash}"),
-        None => "0.0.0".to_string(),
-    }
+    git(&["rev-parse", "--short", "HEAD"])
+        .map_or_else(|| "0.0.0".to_string(), |hash| format!("0.0.0+g{hash}"))
 }
 
 /// Re-run this script when the checked-out commit, its branch, tags, or any tracked file change

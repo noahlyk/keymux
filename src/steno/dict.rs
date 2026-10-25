@@ -261,6 +261,10 @@ mod tests {
     const TKAOEU: u32 = (1 << 1) | (1 << 2) | (1 << 7) | (1 << 8) | (1 << 10) | (1 << 11);
 
     #[test]
+    #[allow(
+        clippy::literal_string_with_formatting_args,
+        reason = "the JSON holds Plover commands in braces, not a format string"
+    )]
     fn loads_entries_and_counts_the_rest() {
         let json = r#"{
             "KAT": "cat",

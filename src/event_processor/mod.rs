@@ -351,76 +351,6 @@ impl AltF12 {
     }
 }
 
-#[cfg(test)]
-mod alt_f12_tests {
-    use super::*;
-
-    /// Whether the chord fires for these events, in order, starting from a freshly attached keyboard.
-    fn fires(events: &[(Key, i32)]) -> bool {
-        let mut chord = AltF12::default();
-        events.iter().any(|&(key, value)| chord.feed(key, value))
-    }
-
-    #[test]
-    fn left_alt_then_f12_fires() {
-        assert!(fires(&[(Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
-    }
-
-    #[test]
-    fn right_alt_then_f12_fires() {
-        assert!(fires(&[(Key::KEY_RIGHTALT, 1), (Key::KEY_F12, 1)]));
-    }
-
-    #[test]
-    fn f12_alone_does_not_fire() {
-        assert!(!fires(&[(Key::KEY_F12, 1)]));
-    }
-
-    #[test]
-    fn alt_released_before_f12_does_not_fire() {
-        assert!(!fires(&[(Key::KEY_LEFTALT, 1), (Key::KEY_LEFTALT, 0), (Key::KEY_F12, 1)]));
-    }
-
-    #[test]
-    fn holding_one_alt_while_pressing_the_other_keeps_it_held() {
-        // Left alt down, right alt down, left alt up: right alt still holds, so F12 fires
-        assert!(fires(&[
-            (Key::KEY_LEFTALT, 1),
-            (Key::KEY_RIGHTALT, 1),
-            (Key::KEY_LEFTALT, 0),
-            (Key::KEY_F12, 1),
-        ]));
-    }
-
-    #[test]
-    fn f12_repeat_and_release_do_not_fire() {
-        assert!(!fires(&[(Key::KEY_LEFTALT, 1), (Key::KEY_F12, 2)]));
-        assert!(!fires(&[(Key::KEY_LEFTALT, 1), (Key::KEY_F12, 0)]));
-    }
-
-    #[test]
-    fn alt_f12_after_another_key_press_does_not_fire() {
-        assert!(!fires(&[(Key::KEY_A, 1), (Key::KEY_A, 0), (Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
-    }
-
-    #[test]
-    fn alt_f12_after_a_modifier_press_does_not_fire() {
-        // Ctrl+Alt+F12 is not the escape: Ctrl was the first press
-        assert!(!fires(&[(Key::KEY_LEFTCTRL, 1), (Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
-    }
-
-    #[test]
-    fn alt_f12_after_a_long_gap_still_needs_to_be_first() {
-        // Any press in between disarms it, even after the keyboard has been quiet
-        assert!(!fires(&[(Key::KEY_LEFTSHIFT, 1), (Key::KEY_LEFTSHIFT, 0), (Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
-    }
-
-    #[test]
-    fn a_release_before_the_chord_does_not_disarm_it() {
-        assert!(fires(&[(Key::KEY_A, 0), (Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
-    }
-}
-
 /// Create a virtual uinput device that mimics the physical keyboard
 fn create_virtual_device(physical_device: &Device, keyboard_name: &str) -> Result<VirtualDevice> {
     let mut keys = AttributeSet::<Key>::new();
@@ -769,5 +699,75 @@ const fn char_to_key(ch: char) -> (Option<Key>, bool) {
         '~' => (Some(Key::KEY_GRAVE), true),
 
         _ => (None, false),
+    }
+}
+
+#[cfg(test)]
+mod alt_f12_tests {
+    use super::*;
+
+    /// Whether the chord fires for these events, in order, starting from a freshly attached keyboard.
+    fn fires(events: &[(Key, i32)]) -> bool {
+        let mut chord = AltF12::default();
+        events.iter().any(|&(key, value)| chord.feed(key, value))
+    }
+
+    #[test]
+    fn left_alt_then_f12_fires() {
+        assert!(fires(&[(Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
+    }
+
+    #[test]
+    fn right_alt_then_f12_fires() {
+        assert!(fires(&[(Key::KEY_RIGHTALT, 1), (Key::KEY_F12, 1)]));
+    }
+
+    #[test]
+    fn f12_alone_does_not_fire() {
+        assert!(!fires(&[(Key::KEY_F12, 1)]));
+    }
+
+    #[test]
+    fn alt_released_before_f12_does_not_fire() {
+        assert!(!fires(&[(Key::KEY_LEFTALT, 1), (Key::KEY_LEFTALT, 0), (Key::KEY_F12, 1)]));
+    }
+
+    #[test]
+    fn holding_one_alt_while_pressing_the_other_keeps_it_held() {
+        // Left alt down, right alt down, left alt up: right alt still holds, so F12 fires
+        assert!(fires(&[
+            (Key::KEY_LEFTALT, 1),
+            (Key::KEY_RIGHTALT, 1),
+            (Key::KEY_LEFTALT, 0),
+            (Key::KEY_F12, 1),
+        ]));
+    }
+
+    #[test]
+    fn f12_repeat_and_release_do_not_fire() {
+        assert!(!fires(&[(Key::KEY_LEFTALT, 1), (Key::KEY_F12, 2)]));
+        assert!(!fires(&[(Key::KEY_LEFTALT, 1), (Key::KEY_F12, 0)]));
+    }
+
+    #[test]
+    fn alt_f12_after_another_key_press_does_not_fire() {
+        assert!(!fires(&[(Key::KEY_A, 1), (Key::KEY_A, 0), (Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
+    }
+
+    #[test]
+    fn alt_f12_after_a_modifier_press_does_not_fire() {
+        // Ctrl+Alt+F12 is not the escape: Ctrl was the first press
+        assert!(!fires(&[(Key::KEY_LEFTCTRL, 1), (Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
+    }
+
+    #[test]
+    fn alt_f12_after_a_long_gap_still_needs_to_be_first() {
+        // Any press in between disarms it, even after the keyboard has been quiet
+        assert!(!fires(&[(Key::KEY_LEFTSHIFT, 1), (Key::KEY_LEFTSHIFT, 0), (Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
+    }
+
+    #[test]
+    fn a_release_before_the_chord_does_not_disarm_it() {
+        assert!(fires(&[(Key::KEY_A, 0), (Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
     }
 }

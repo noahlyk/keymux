@@ -893,27 +893,16 @@ impl Config {
 
                     let normalized_pattern = pattern.strip_prefix("/dev/input/").unwrap_or(pattern);
 
-                    let matches = if let Some(event) = normalized_event {
-                        // Check event path match (e.g., "event17" or "/dev/input/event17")
-                        pattern == event
-                            || normalized_pattern == event
-                            || keyboard_id.contains(pattern)
-                            || keyboard_id.contains(normalized_pattern)
-                            || keyboard_id.starts_with(pattern)
-                            || keyboard_id.starts_with(normalized_pattern)
-                            || keyboard_name
-                                .map(|name| name.contains(pattern))
-                                .unwrap_or(false)
-                    } else {
-                        // Just check ID match or name match
-                        keyboard_id.contains(pattern)
-                            || keyboard_id.contains(normalized_pattern)
-                            || keyboard_id.starts_with(pattern)
-                            || keyboard_id.starts_with(normalized_pattern)
-                            || keyboard_name
-                                .map(|name| name.contains(pattern))
-                                .unwrap_or(false)
-                    };
+                    // Event path match (e.g., "event17" or "/dev/input/event17")
+                    let by_event = normalized_event
+                        .is_some_and(|event| pattern == event || normalized_pattern == event);
+                    // ID match or name match
+                    let by_id_or_name = keyboard_id.contains(pattern)
+                        || keyboard_id.contains(normalized_pattern)
+                        || keyboard_id.starts_with(pattern)
+                        || keyboard_id.starts_with(normalized_pattern)
+                        || keyboard_name.is_some_and(|name| name.contains(pattern));
+                    let matches = by_event || by_id_or_name;
 
                     if matches {
                         final_action = Some(action);

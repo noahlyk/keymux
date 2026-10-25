@@ -161,9 +161,10 @@ fn write_frame(stream: &mut impl Write, value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
-/// Daemon side of [`IpcRequest::SubscribeOverlay`]: send the current state, then every newer
-/// one, until the subscriber goes away. Run on its own thread; it never touches the key path
-/// except through the hub's lock.
+/// Daemon side of [`IpcRequest::SubscribeOverlay`]: send the current state, then every newer one.
+///
+/// Runs on its own thread until the subscriber goes away, and never touches the key path except
+/// through the hub's lock.
 ///
 /// The subscriber never sends anything after subscribing, so a second thread blocks reading
 /// the socket: it returns the moment the overlay closes its end, and wakes the writer. That

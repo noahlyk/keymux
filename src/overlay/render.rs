@@ -1,6 +1,8 @@
-//! Draws a snapshot into pixels: the tape running down the screen and the steno keyboard at
-//! the bottom, on a fully transparent background (unless `background` is set). A pure
-//! function of (snapshot, config, scale, height), so it is testable without a compositor.
+//! Draws a snapshot into pixels: the tape and the steno keyboard, on a transparent background.
+//!
+//! The tape runs down the screen with the keyboard at the bottom, on a fully transparent
+//! background (unless `background` is set). It is a pure function of (snapshot, config, scale,
+//! height), so it is testable without a compositor.
 //!
 //! Everything that depends only on size (key shapes, glyph masks, column positions, how many
 //! tape lines fit) is built once in [`Renderer::new`]. A frame is a handful of fills and mask
@@ -96,7 +98,7 @@ impl Default for Theme {
 
 impl Theme {
     /// The colour a lit key in `group` is drawn in.
-    fn accent(&self, group: KeyGroup) -> [u8; 4] {
+    const fn accent(&self, group: KeyGroup) -> [u8; 4] {
         match group {
             KeyGroup::LeftHand => self.left,
             KeyGroup::Vowel => self.vowel,
@@ -150,7 +152,7 @@ impl Renderer {
         let width = (config.width as f32 * scale).ceil();
         let height = (height.max(1) as f32 * scale).ceil();
         let (pad_x, pad_y) = (PAD_X * scale, PAD_Y * scale);
-        let inner = width - 2.0 * pad_x;
+        let inner = 2.0f32.mul_add(-pad_x, width);
         let text_scale = config.text_scale.clamp(0.5, 3.0);
 
         // The keyboard sits at the bottom. Laying it out once at the origin gives its height.
@@ -193,10 +195,9 @@ impl Renderer {
         let words_right = width - pad_x;
 
         let line_height = (words.line_height() * LINE_SPACING).ceil();
-        let tape_bottom = match &keyboard {
-            Some(k) => k.keys[NUMBER_SLOT].y - SECTION_GAP * scale,
-            None => height - pad_y,
-        };
+        let tape_bottom = keyboard.as_ref().map_or(height - pad_y, |k| {
+            SECTION_GAP.mul_add(-scale, k.keys[NUMBER_SLOT].y)
+        });
         let fits = ((tape_bottom - pad_y) / line_height).floor().max(0.0) as usize;
         let tape_lines = if config.tape {
             fits.min(config.tape_lines.unwrap_or(usize::MAX))
@@ -258,13 +259,13 @@ impl Renderer {
 
     /// Buffer size in physical pixels.
     #[must_use]
-    pub fn size(&self) -> (u32, u32) {
+    pub const fn size(&self) -> (u32, u32) {
         self.size
     }
 
     /// How many tape lines fit above the keyboard.
     #[must_use]
-    pub fn tape_lines(&self) -> usize {
+    pub const fn tape_lines(&self) -> usize {
         self.tape_lines
     }
 
@@ -294,7 +295,8 @@ impl Renderer {
             (self.line_height - self.words.line_height()) / 2.0 + self.words.ascent();
         // Copies, so the closure doesn't hold `self` while text is being drawn with its fonts
         let (bottom, pitch) = (self.tape_bottom, self.line_height);
-        let baseline_of = move |age: usize| bottom - (age + 1) as f32 * pitch + baseline_in_line;
+        let baseline_of =
+            move |age: usize| ((age + 1) as f32).mul_add(-pitch, bottom) + baseline_in_line;
         let paper_right = {
             let last = self.columns[self.columns.len() - 1];
             self.paper_left + last.x + last.width
@@ -312,7 +314,7 @@ impl Renderer {
             self.theme.vowel,
             self.scale,
         );
-        let room = self.words_right - self.words_left - 4.0 * self.scale;
+        let room = 4.0f32.mul_add(-self.scale, self.words_right - self.words_left);
         let shown = tail_that_fits(&mut self.words, &view.query, room);
         draw_text_clipped(
             pixmap,
@@ -324,14 +326,14 @@ impl Renderer {
             self.theme.words,
             self.scale,
         );
-        let caret_x = self.words_left + self.words.measure(shown) + 2.0 * self.scale;
+        let caret_x = 2.0f32.mul_add(self.scale, self.words_left + self.words.measure(shown));
         let caret_height = self.words.ascent() * 0.95;
         if let Some(caret) = rounded_rect(
             Rect {
                 x: caret_x,
                 y: baseline - caret_height,
                 w: 2.0 * self.scale,
-                h: caret_height + self.words.ascent() * 0.2,
+                h: self.words.ascent().mul_add(0.2, caret_height),
             },
             0.0,
             0.0,
@@ -420,7 +422,7 @@ impl Renderer {
             let rect = keyboard.keys[slot];
             let label = Keyboard::label(slot);
             let glyph_width = self.labels.get(label).advance;
-            let baseline = rect.y + (rect.h + self.labels.ascent() * 0.72) / 2.0;
+            let baseline = rect.y + self.labels.ascent().mul_add(0.72, rect.h) / 2.0;
             draw_char(
                 pixmap,
                 &mut self.labels,
@@ -441,7 +443,7 @@ impl Renderer {
 
         // Newest at the bottom, just above the keyboard
         for (age, entry) in snapshot.tape.iter().rev().take(lines).enumerate() {
-            let row_top = self.tape_bottom - (age + 1) as f32 * self.line_height;
+            let row_top = ((age + 1) as f32).mul_add(-self.line_height, self.tape_bottom);
             let fade = line_fade(lines - 1 - age);
             self.draw_tape_line(pixmap, entry, row_top + baseline_in_line, fade);
         }
@@ -496,14 +498,16 @@ impl Renderer {
 /// is being typed. Drops characters from the front.
 fn tail_that_fits<'a>(glyphs: &mut GlyphCache, text: &'a str, max: f32) -> &'a str {
     let mut rest = text;
-    while glyphs.measure(rest) > max {
+    loop {
+        if glyphs.measure(rest) <= max {
+            return rest;
+        }
         let mut chars = rest.chars();
         if chars.next().is_none() {
-            break;
+            return rest;
         }
         rest = chars.as_str();
     }
-    rest
 }
 
 /// How strong a tape line is, by how far it is from the top of the tape (`0` is the topmost).
@@ -772,7 +776,7 @@ mod tests {
         assert!(short.tape_lines() > 5);
 
         // Every line, and the keyboard below it, stays inside the surface
-        let top = tall.tape_bottom - tall.tape_lines() as f32 * tall.line_height;
+        let top = (tall.tape_lines() as f32).mul_add(-tall.line_height, tall.tape_bottom);
         assert!(top >= 0.0, "tape starts at {top}");
         let keys = tall.keyboard.as_ref().unwrap();
         assert!(keys.keys.iter().map(Rect::bottom).fold(0.0, f32::max) <= 1900.0);
@@ -890,7 +894,7 @@ mod tests {
             renderer.strokes.pixel_size()
         );
         let paper: f32 = renderer.columns.iter().map(|column| column.width).sum();
-        let inner = renderer.size().0 as f32 - 2.0 * PAD_X;
+        let inner = 2.0f32.mul_add(-PAD_X, renderer.size().0 as f32);
         assert!(
             (paper / (PAPER_SHARE * inner) - 1.0).abs() < 0.1,
             "paper is {paper}, wanted about {}",
@@ -1042,7 +1046,7 @@ mod tests {
         let mut pixmap = Pixmap::new(w, h).unwrap();
         renderer.draw(&snapshot, &mut pixmap.as_mut());
         let mut out = format!("P6 {w} {h} 255\n").into_bytes();
-        for (i, px) in pixmap.data().chunks_exact(4).enumerate() {
+        for (i, px) in pixmap.data().as_chunks::<4>().0.iter().enumerate() {
             // Premultiplied over a wallpaper-like gradient
             let row = i as u32 / w;
             let col = i as u32 % w;
@@ -1172,7 +1176,7 @@ mod tests {
         let mut pixmap = Pixmap::new(w, h).unwrap();
         renderer.draw(&snapshot, &mut pixmap.as_mut());
         let mut out = format!("P6 {w} {h} 255\n").into_bytes();
-        for (i, px) in pixmap.data().chunks_exact(4).enumerate() {
+        for (i, px) in pixmap.data().as_chunks::<4>().0.iter().enumerate() {
             let (row, col) = (i as u32 / w, i as u32 % w);
             let backdrop = [70 + row * 50 / h, 60 + col * 40 / w, 100 + row * 60 / h];
             for (c, back) in px[..3].iter().zip(backdrop) {

@@ -49,7 +49,7 @@ struct Emitted {
     /// Spacing and capitalization after this translation, so restoring it restores them
     state_after: FormatState,
     /// Earlier translations this one replaced. Restored on undo, in order.
-    consumed: Vec<Emitted>,
+    consumed: Vec<Self>,
     /// A key press rather than text. Undo consumes it without retyping anything.
     presses: bool,
     /// The placeholder for an incomplete stroke, see [`PENDING_MARK`]
@@ -120,7 +120,7 @@ impl Translator {
 
     /// Nothing typed on this layer is left to undo.
     #[must_use]
-    pub fn tape_is_empty(&self) -> bool {
+    pub const fn tape_is_empty(&self) -> bool {
         self.history.is_empty()
     }
 
@@ -559,7 +559,7 @@ fn keys_of(pieces: &[Piece]) -> Vec<KeyPress> {
 }
 
 /// Whether a translation is one of the retro space commands (`{*?}` and `{*!}`).
-fn is_retro_space(pieces: &[Piece]) -> bool {
+const fn is_retro_space(pieces: &[Piece]) -> bool {
     matches!(
         pieces.first(),
         Some(Piece::RetroInsertSpace | Piece::RetroDeleteSpace)

@@ -91,7 +91,7 @@ const LOOKUP_WORDS: [(&str, &str); 5] = [
 /// Open a lookup, type a word into it one letter at a time, then close it. Returns `false`
 /// when the overlay has gone.
 fn lookup(frames: &Sender<OverlaySnapshot>, snapshot: &mut OverlaySnapshot) -> bool {
-    let mut show = |snapshot: &mut OverlaySnapshot, view: Option<LookupView>| {
+    let show = |snapshot: &mut OverlaySnapshot, view: Option<LookupView>| {
         snapshot.generation += 1;
         snapshot.lookup = view;
         frames.send(snapshot.clone()).is_ok()

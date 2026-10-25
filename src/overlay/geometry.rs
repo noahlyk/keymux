@@ -82,7 +82,7 @@ impl Keyboard {
     /// Lay the keys out to fill `width` pixels, with the top-left corner at `(x, y)`.
     #[must_use]
     pub fn new(x: f32, y: f32, width: f32) -> Self {
-        let unit = width / (COLUMNS + GAP * (COLUMNS - 1.0));
+        let unit = width / GAP.mul_add(COLUMNS - 1.0, COLUMNS);
         let gap = unit * GAP;
         let step = unit + gap;
         let key_h = unit * KEY_ASPECT;
@@ -106,11 +106,11 @@ impl Keyboard {
                 Row::Thumb => (thumb, thumb_h),
             };
             Rect {
-                x: x + column * step,
+                x: column.mul_add(step, x),
                 y: row_y,
                 w: unit,
                 // A tall key covers both finger rows and the gap between them
-                h: height * rows + gap * (rows - 1.0),
+                h: height.mul_add(rows, gap * (rows - 1.0)),
             }
         });
         let height = thumb + thumb_h - y;
@@ -122,13 +122,13 @@ impl Keyboard {
 
     /// The letter printed on a slot's key.
     #[must_use]
-    pub fn label(slot: usize) -> char {
+    pub const fn label(slot: usize) -> char {
         SLOTS[slot].0
     }
 
     /// Which part of the keyboard a slot is on, which decides its colour.
     #[must_use]
-    pub fn group(slot: usize) -> KeyGroup {
+    pub const fn group(slot: usize) -> KeyGroup {
         match slot {
             0..=6 => KeyGroup::LeftHand,        // S T K P W H R
             7 | 8 | 10 | 11 => KeyGroup::Vowel, // A O E U
