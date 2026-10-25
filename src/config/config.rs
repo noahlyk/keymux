@@ -193,6 +193,9 @@ pub enum KeyAction {
     TO(Layer),
     /// Toggle layer (press to activate, press again to deactivate)
     TG(Layer),
+    /// Turn a layer on and keep it on, like TO without the hold. Pressing it again does
+    /// nothing; leave with TO("base"). Example: F1: LATCH("steno") turns steno on, from anywhere
+    LATCH(Layer),
     /// Momentary layer - hold for layer
     MO(Layer),
     /// SOCD (Simultaneous Opposite Cardinal Direction) - fully generic
@@ -1159,7 +1162,7 @@ impl Config {
         let extract_layer_refs = |remaps: &HashMap<KeyCode, KeyAction>| {
             let mut refs = Vec::new();
             for action in remaps.values() {
-                if let KeyAction::TO(layer) = action {
+                if let KeyAction::TO(layer) | KeyAction::LATCH(layer) = action {
                     refs.push(layer.0.clone());
                 }
             }
