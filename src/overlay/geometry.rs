@@ -126,11 +126,27 @@ impl Keyboard {
         SLOTS[slot].0
     }
 
-    /// Vowel keys and `*` get the vowel accent, like the mockup's yellow thumbs.
+    /// Which part of the keyboard a slot is on, which decides its colour.
     #[must_use]
-    pub fn is_vowel(slot: usize) -> bool {
-        (7..=11).contains(&slot)
+    pub fn group(slot: usize) -> KeyGroup {
+        match slot {
+            0..=6 => KeyGroup::LeftHand,        // S T K P W H R
+            7 | 8 | 10 | 11 => KeyGroup::Vowel, // A O E U
+            9 | 22 => KeyGroup::Misc,           // * and #
+            _ => KeyGroup::RightHand,           // F R P B L G T S D Z
+        }
     }
+}
+
+/// A part of the steno keyboard, coloured as one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyGroup {
+    LeftHand,
+    /// The thumb keys: `A O` and `E U`
+    Vowel,
+    RightHand,
+    /// `*` and `#`
+    Misc,
 }
 
 #[cfg(test)]
@@ -152,6 +168,19 @@ mod tests {
             for (j, b) in keyboard.keys.iter().enumerate().skip(i + 1) {
                 assert!(!overlaps(a, b), "slots {i} and {j} overlap");
             }
+        }
+    }
+
+    #[test]
+    fn every_key_is_in_the_group_its_name_says() {
+        for (slot, (_, name)) in SLOTS.iter().enumerate() {
+            let expected = match *name {
+                "A-" | "O-" | "-E" | "-U" => KeyGroup::Vowel,
+                "*" | "#" => KeyGroup::Misc,
+                name if name.ends_with('-') => KeyGroup::LeftHand,
+                _ => KeyGroup::RightHand,
+            };
+            assert_eq!(Keyboard::group(slot), expected, "slot {slot} ({name})");
         }
     }
 

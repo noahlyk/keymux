@@ -9,7 +9,7 @@
 //! All text sizes are derived from the overlay's `width`, so one number scales the whole thing,
 //! and `text_scale` nudges the text alone.
 
-use super::geometry::{Keyboard, Rect};
+use super::geometry::{KeyGroup, Keyboard, Rect};
 use super::glyphs::{self, GlyphCache};
 use crate::config::OverlayConfig;
 use crate::steno::overlay::{OverlaySnapshot, TapeEntry, TAPE_CAPACITY};
@@ -59,8 +59,12 @@ pub struct Theme {
     pub outline: [u8; 4],
     pub label: [u8; 4],
     pub label_lit: [u8; 4],
-    pub consonant: [u8; 4],
+    /// Lit-key colours by part of the keyboard: left hand green, thumb vowels yellow, right
+    /// hand red, and `*` and `#` light blue
+    pub left: [u8; 4],
     pub vowel: [u8; 4],
+    pub right: [u8; 4],
+    pub misc: [u8; 4],
     /// The steno letters on the tape: secondary to the words
     pub strokes: [u8; 4],
     /// What each stroke typed: the main thing to read
@@ -76,11 +80,25 @@ impl Default for Theme {
             outline: [214, 224, 238, 80],
             label: [226, 232, 242, 245],
             label_lit: [8, 12, 16, 255],
-            consonant: [45, 212, 170, 255],
+            left: [45, 212, 170, 255],
             vowel: [232, 226, 150, 255],
+            right: [244, 118, 124, 255],
+            misc: [136, 196, 255, 255],
             strokes: [192, 201, 216, 255],
             words: [248, 250, 253, 255],
             unmatched: [255, 120, 120, 255],
+        }
+    }
+}
+
+impl Theme {
+    /// The colour a lit key in `group` is drawn in.
+    fn accent(&self, group: KeyGroup) -> [u8; 4] {
+        match group {
+            KeyGroup::LeftHand => self.left,
+            KeyGroup::Vowel => self.vowel,
+            KeyGroup::RightHand => self.right,
+            KeyGroup::Misc => self.misc,
         }
     }
 }
@@ -263,11 +281,7 @@ impl Renderer {
         };
         for (slot, shape) in self.key_shapes.iter().enumerate() {
             let bit = 1u32 << slot;
-            let accent = if Keyboard::is_vowel(slot) {
-                self.theme.vowel
-            } else {
-                self.theme.consonant
-            };
+            let accent = self.theme.accent(Keyboard::group(slot));
             // Held keys full strength; keys already let go but still in the stroke dimmer,
             // so you can watch the stroke build up
             let label_color = if snapshot.held & bit != 0 {
@@ -648,6 +662,46 @@ mod tests {
         let (t, w) = (Keyboard::label(1), Keyboard::label(4));
         assert_eq!((t, w), ('T', 'W'));
         assert!(renderer.columns[5].width > renderer.columns[2].width);
+    }
+
+    #[test]
+    fn each_part_of_the_keyboard_lights_in_its_own_colour() {
+        let theme = Theme::default();
+        // One key from each part: T- (left hand), A- (vowel), -F (right hand), `*`
+        let cases = [
+            (1, theme.left),
+            (7, theme.vowel),
+            (12, theme.right),
+            (9, theme.misc),
+        ];
+        // They are four different colours, so the check below can tell them apart
+        for (i, (_, a)) in cases.iter().enumerate() {
+            for (_, b) in &cases[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let (w, h) = renderer.size();
+        for (slot, color) in cases {
+            let mut pixmap = Pixmap::new(w, h).unwrap();
+            let snapshot = OverlaySnapshot {
+                held: 1 << slot,
+                chord: 1 << slot,
+                ..OverlaySnapshot::default()
+            };
+            renderer.draw(&snapshot, &mut pixmap.as_mut());
+            // The key's left edge, mid-height: clear of the round end and the label
+            let key = renderer.keyboard.as_ref().unwrap().keys[slot];
+            let pixel = pixmap
+                .pixel((key.x + 2.0) as u32, (key.y + key.h / 2.0) as u32)
+                .unwrap()
+                .demultiply();
+            assert_eq!(
+                [pixel.red(), pixel.green(), pixel.blue()],
+                [color[0], color[1], color[2]],
+                "slot {slot}"
+            );
+        }
     }
 
     #[test]
