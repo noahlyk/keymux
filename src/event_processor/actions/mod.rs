@@ -238,7 +238,7 @@ impl KeyAction {
                 }
             }
             Self::MT(..) => emit_mt(self, keycode, ctx),
-            Self::TO(..) | Self::TG(..) | Self::MO(..) | Self::LATCH(..) | Self::SWITCH(..) => {
+            Self::TO(..) | Self::TG(..) | Self::LATCH(..) | Self::SWITCH(..) => {
                 emit_layer(self, keycode, ctx.layer_stack)
             }
             Self::MULTI(children) => emit_multi(children, keycode, ctx),
@@ -273,7 +273,7 @@ impl KeyAction {
     ) -> EmitResult {
         match (&self, action.clone()) {
             (_, HeldAction::RegularKey(key)) => EmitResult::EmitKey(key, false),
-            (Self::TO(..) | Self::TG(..) | Self::MO(..), HeldAction::Layer(_)) => {
+            (Self::TO(..) | Self::TG(..), HeldAction::Layer(_)) => {
                 unemit_layer(self, action, keycode, ctx.layer_stack)
             }
             (Self::MT(..), HeldAction::MtManaged) => unemit_mt(self, action, keycode, ctx),

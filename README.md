@@ -258,7 +258,6 @@ All MT features are configurable via `mt_config` (see Behavior Settings section)
 Layers are named in quotes. Layers stack: a key falls through the layers that are on until something remaps it. See [Layer switching](#layer-switching) in ARCHITECTURE.md for the full rules.
 
 - `TO("nav")` — hold: the layer is on while the key is held
-- `MO("nav")` — the same as `TO`, kept for QMK users
 - `TG("nav")` — toggle: press to turn on, press again to turn off
 - `LATCH("steno")` — turn on and keep on; pressing again does nothing. Turn it off with `TO("base")` or `TG`
 - `SWITCH("steno")` — exclusive: turns every other layer off, then turns this one on and keeps it on (QMK's `TO`)

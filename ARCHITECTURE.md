@@ -265,7 +265,7 @@ remaps: {
 
 | Action | Behavior |
 |---|---|
-| `TO("layer")` / `MO("layer")` | Hold: the layer is on while the key is held, then turns off. The two are identical; both names are kept for QMK familiarity |
+| `TO("layer")` | Hold: the layer is on while the key is held, then turns off |
 | `TG("layer")` | Toggle: press to turn on, press again to turn off. Nothing is held |
 | `LATCH("layer")` | Turn on and keep on. Pressing it again does nothing. Only `TO("base")` or `TG` turns it off |
 | `SWITCH("layer")` | Exclusive, like QMK's `TO`: turns every other layer off, then turns this one on and keeps it on |
@@ -537,7 +537,7 @@ Steno is a layer kind: `kind: Steno((...))`. A steno layer captures its stroke k
     ├─ MT(tap, hold) → Mod-Tap logic with roll/chord detection
     ├─ OSM(modifier) → OneShot Modifier
     ├─ DT(tap, dtap) → Double-Tap / Tap Dance
-    ├─ TO/TG/MO(layer) → Layer switch/toggle/momentary
+    ├─ TO/TG/LATCH/SWITCH(layer) → Layer hold/toggle/latch/exclusive switch
     ├─ Transparent → Fall through to lower layer
     ├─ SOCD() → SOCD resolution
     └─ CMD(command) → Execute shell command

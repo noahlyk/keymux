@@ -199,8 +199,6 @@ pub enum KeyAction {
     /// Exclusive switch, like QMK's TO: turns every other layer off, then turns this one on
     /// and keeps it on. Example: F9: SWITCH("nohrm") leaves steno for nohrm
     SWITCH(Layer),
-    /// Momentary layer - hold for layer
-    MO(Layer),
     /// Run several actions together, as if each were pressed at once, and release them together.
     /// Example: MULTI([KC_LSFT, KC_A]) holds shift while A is pressed
     MULTI(Vec<Self>),
@@ -235,8 +233,7 @@ impl KeyAction {
             Self::TO(layer)
             | Self::TG(layer)
             | Self::LATCH(layer)
-            | Self::SWITCH(layer)
-            | Self::MO(layer) => out.push(layer.0.clone()),
+            | Self::SWITCH(layer) => out.push(layer.0.clone()),
             Self::MT(a, b) | Self::DT(a, b) => {
                 a.layer_refs(out);
                 b.layer_refs(out);
@@ -262,15 +259,15 @@ impl KeyAction {
         matches!(self, Self::Transparent)
     }
 
-    /// Check if this action is a layer switch (To, Tg, Mo)
+    /// Check if this action is a layer switch (To, Tg)
     pub const fn is_layer_action(&self) -> bool {
-        matches!(self, Self::TO(_) | Self::TG(_) | Self::MO(_))
+        matches!(self, Self::TO(_) | Self::TG(_))
     }
 
     /// Extract layer from layer actions
     pub const fn get_layer(&self) -> Option<&Layer> {
         match self {
-            Self::TO(layer) | Self::TG(layer) | Self::MO(layer) => Some(layer),
+            Self::TO(layer) | Self::TG(layer) => Some(layer),
             _ => None,
         }
     }

@@ -41,13 +41,6 @@ pub fn emit_layer(
             }
             (EmitResult::LayerAction(layer.clone()), None)
         }
-        KeyAction::MO(layer) => {
-            layer_stack.activate_layer(layer.clone());
-            (
-                EmitResult::LayerAction(layer.clone()),
-                Some(HeldAction::Layer(layer.clone())),
-            )
-        }
         _ => (EmitResult::None, None),
     }
 }
