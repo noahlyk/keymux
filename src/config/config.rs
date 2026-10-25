@@ -591,16 +591,17 @@ pub struct OverlayConfig {
     pub enabled: bool,
     /// Monitor to draw on, such as `Some("DP-1")`. `None` lets the compositor pick.
     pub output: Option<String>,
-    /// Gap between the panel and the right screen edge, in logical pixels
+    /// Gap between the overlay and the right screen edge, in logical pixels
     pub margin: u32,
-    /// Panel width in logical pixels. Height follows from the content.
+    /// Overlay width in logical pixels. It is as tall as the screen.
     pub width: u32,
-    /// Panel background alpha, 0.0 to 1.0
-    pub opacity: f32,
+    /// Opacity of a dark panel behind everything, 0.0 to 1.0. Zero is fully transparent:
+    /// just the keys and the tape.
+    pub background: f32,
     pub keyboard: bool,
     pub tape: bool,
-    /// Tape strokes shown, newest at the bottom
-    pub tape_lines: usize,
+    /// Most tape strokes to show, newest at the bottom. `None` fills the screen height.
+    pub tape_lines: Option<usize>,
     /// A .ttf/.otf to use instead of the embedded Atkinson Hyperlegible
     pub font: Option<String>,
     /// Steno layers that show the overlay. Empty means every steno layer.
@@ -612,12 +613,12 @@ impl Default for OverlayConfig {
         Self {
             enabled: true,
             output: None,
-            margin: 16,
+            margin: 0,
             width: 280,
-            opacity: 0.72,
+            background: 0.0,
             keyboard: true,
             tape: true,
-            tape_lines: 18,
+            tape_lines: None,
             font: None,
             layers: Vec::new(),
         }

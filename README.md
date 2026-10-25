@@ -555,11 +555,13 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
 
 ### On-screen overlay
 
-`keymux overlay` shows the steno keyboard and a tape on the right edge of the screen while a
-steno layer is on, and goes away when you leave it. Keys light up as you press them (keys
-you've let go of but are still part of the stroke are dimmer), and each finished stroke
-lands on the tape with what it typed. The panel is translucent, never takes clicks or
-focus, and costs next to nothing: it only redraws when a key or the tape changes.
+`keymux overlay` shows the steno keyboard and a tape down the right edge of the screen while a
+steno layer is on, and goes away when you leave it. The tape runs the full screen height with
+the keyboard at the bottom. Keys are steno pads (tall pills) that light up as you press them
+(keys you've let go of but are still part of the stroke are dimmer), and each finished stroke
+lands on the tape with what it typed. There is no background by default, only the keys and
+text, and it never takes clicks or focus. It costs next to nothing: it only redraws when a
+key or the tape changes.
 
 ![overlay](docs/overlay-preview.png)
 
@@ -572,12 +574,12 @@ doesn't.
 overlay: (
     enabled: true,
     output: None,        // Some("DP-1") to pin a monitor; None lets the compositor pick
-    margin: 16,          // gap from the right edge, in pixels
-    width: 280,
-    opacity: 0.72,       // panel background, 0.0 to 1.0
+    margin: 0,           // gap from the right edge, in pixels
+    width: 280,          // as tall as the screen
+    background: 0.0,     // opacity of a dark panel behind it all; 0.0 is fully transparent
     keyboard: true,
     tape: true,
-    tape_lines: 18,
+    tape_lines: None,    // Some(20) caps the tape; None fills the screen height
     font: None,          // path to a .ttf/.otf; None uses the bundled Atkinson Hyperlegible
     layers: [],          // steno layers that show it; empty means all of them
 ),

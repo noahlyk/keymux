@@ -28,7 +28,17 @@ pub fn spawn(frames: Sender<OverlaySnapshot>) {
             layer: Some("demo".into()),
             ..OverlaySnapshot::default()
         };
+        // Start with a full tape, so the whole-screen layout shows straight away
         let mut seq = 0;
+        for (stroke, text) in STROKES.iter().cycle().take(TAPE_CAPACITY) {
+            seq += 1;
+            snapshot.tape.push_back(TapeEntry {
+                seq,
+                stroke: parse_stroke(stroke).expect("demo strokes are valid"),
+                text: (*text).into(),
+                unmatched: text.is_empty(),
+            });
+        }
         loop {
             for (stroke, text) in STROKES {
                 let bits = parse_stroke(stroke).expect("demo strokes are valid");

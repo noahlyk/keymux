@@ -58,12 +58,16 @@ const PLACES: [(f32, Row, f32); 23] = [
 ];
 
 const COLUMNS: f32 = 10.0;
-/// Height of the `#` bar relative to a key
-const NUMBER_BAR: f32 = 0.42;
-/// Gap between keys relative to a key
-const GAP: f32 = 0.14;
-/// Extra space above the thumb row relative to a key
-const THUMB_DROP: f32 = 0.3;
+/// Key height relative to its width. Steno keys are tall pads, not squares.
+const KEY_ASPECT: f32 = 1.75;
+/// Height of the `#` bar relative to a key's width
+const NUMBER_BAR: f32 = 0.5;
+/// Gap between keys relative to a key's width
+const GAP: f32 = 0.16;
+/// Thumb key height relative to a key's width
+const THUMB_ASPECT: f32 = 1.35;
+/// Extra space above the thumb row relative to a key's width
+const THUMB_DROP: f32 = 0.35;
 
 /// The keyboard's key rectangles at one size.
 #[derive(Debug, Clone)]
@@ -81,30 +85,35 @@ impl Keyboard {
         let unit = width / (COLUMNS + GAP * (COLUMNS - 1.0));
         let gap = unit * GAP;
         let step = unit + gap;
-        let row_y = |row: Row| match row {
-            Row::Number => y,
-            Row::Top => y + unit * NUMBER_BAR + gap,
-            Row::Bottom => y + unit * NUMBER_BAR + gap + step,
-            Row::Thumb => y + unit * NUMBER_BAR + gap + 2.0 * step + unit * THUMB_DROP,
-        };
+        let key_h = unit * KEY_ASPECT;
+        let thumb_h = unit * THUMB_ASPECT;
+        let top = y + unit * NUMBER_BAR + gap;
+        let bottom = top + key_h + gap;
+        let thumb = bottom + key_h + gap + unit * THUMB_DROP;
         let keys = std::array::from_fn(|slot| {
             let (column, row, rows) = PLACES[slot];
-            if let Row::Number = row {
-                return Rect {
-                    x,
-                    y,
-                    w: width,
-                    h: unit * NUMBER_BAR,
-                };
-            }
+            let (row_y, height) = match row {
+                Row::Number => {
+                    return Rect {
+                        x,
+                        y,
+                        w: width,
+                        h: unit * NUMBER_BAR,
+                    }
+                }
+                Row::Top => (top, key_h),
+                Row::Bottom => (bottom, key_h),
+                Row::Thumb => (thumb, thumb_h),
+            };
             Rect {
                 x: x + column * step,
-                y: row_y(row),
+                y: row_y,
                 w: unit,
-                h: unit * rows + gap * (rows - 1.0),
+                // A tall key covers both finger rows and the gap between them
+                h: height * rows + gap * (rows - 1.0),
             }
         });
-        let height = row_y(Row::Thumb) + unit - y;
+        let height = thumb + thumb_h - y;
         Self {
             keys,
             size: (width, height),
@@ -144,6 +153,14 @@ mod tests {
                 assert!(!overlaps(a, b), "slots {i} and {j} overlap");
             }
         }
+    }
+
+    #[test]
+    fn keys_are_tall_pads() {
+        let keyboard = Keyboard::new(0.0, 0.0, 250.0);
+        // T- is a single finger key: clearly taller than wide
+        let t = keyboard.keys[1];
+        assert!(t.h > t.w * 1.5, "{t:?}");
     }
 
     #[test]

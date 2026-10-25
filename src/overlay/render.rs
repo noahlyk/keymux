@@ -1,38 +1,44 @@
-//! Draws a snapshot into pixels: a translucent rounded panel with the tape on top and the
-//! steno keyboard below it. A pure function of (snapshot, config, scale), so it is testable
-//! without a compositor.
+//! Draws a snapshot into pixels: the tape running down the screen and the steno keyboard at
+//! the bottom, on a fully transparent background (unless `background` is set). A pure
+//! function of (snapshot, config, scale, height), so it is testable without a compositor.
 //!
-//! Everything that depends only on size (key shapes, the panel shape, glyph masks) is built
-//! once in [`Renderer::new`]. A frame is a handful of fills and mask copies.
+//! Everything that depends only on size (key shapes, glyph masks, how many tape lines fit) is
+//! built once in [`Renderer::new`]. A frame is a handful of fills and mask copies.
 
 use super::geometry::{Keyboard, Rect};
-use super::glyphs::{self, GlyphCache};
+use super::glyphs::{self, Glyph, GlyphCache};
 use crate::config::OverlayConfig;
-use crate::steno::overlay::{OverlaySnapshot, TapeEntry};
+use crate::steno::overlay::{OverlaySnapshot, TapeEntry, TAPE_CAPACITY};
 use anyhow::Result;
 use std::borrow::Cow;
-use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, PixmapMut, Transform};
+use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, PixmapMut, Stroke, Transform};
 
-/// Space inside the panel edge, logical px
-const PADDING: f32 = 14.0;
+/// Space between the content and the left/right edge of the overlay, logical px
+const PAD_X: f32 = 8.0;
+/// Space above the tape and below the keyboard, logical px
+const PAD_Y: f32 = 12.0;
 /// Space between the tape and the keyboard, logical px
-const SECTION_GAP: f32 = 14.0;
-const PANEL_RADIUS: f32 = 14.0;
-const KEY_RADIUS: f32 = 6.0;
+const SECTION_GAP: f32 = 18.0;
 const LABEL_PX: f32 = 13.0;
 const TAPE_PX: f32 = 14.0;
+/// Outline of an unlit key, logical px
+const OUTLINE: f32 = 1.4;
 /// Share of the tape width given to the steno columns; the translation gets the rest
 const PAPER_SHARE: f32 = 0.62;
+/// Oldest tape line's strength, so the tape fades out towards the top of the screen
+const OLDEST_FADE: f32 = 0.18;
 /// Plover paper tape order: `#` first, then the slots in stroke order
 const PAPER_ORDER: [usize; 23] = [
     22, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
 ];
 
-/// Colours, as in the mockup: near-black glass, slate keys, teal consonants, pale-yellow vowels.
+/// Colours. With no background, everything has to read over any wallpaper: unlit keys are
+/// a faint dark glass pad with a light outline, and all text gets a soft drop shadow.
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
     pub panel: [u8; 3],
     pub key: [u8; 4],
+    pub outline: [u8; 4],
     pub label: [u8; 4],
     pub label_lit: [u8; 4],
     pub consonant: [u8; 4],
@@ -46,12 +52,13 @@ impl Default for Theme {
     fn default() -> Self {
         Self {
             panel: [10, 12, 16],
-            key: [38, 44, 56, 235],
-            label: [150, 160, 176, 255],
-            label_lit: [12, 16, 20, 255],
+            key: [14, 18, 26, 120],
+            outline: [214, 224, 238, 95],
+            label: [214, 222, 236, 240],
+            label_lit: [10, 14, 18, 255],
             consonant: [45, 212, 170, 255],
             vowel: [232, 226, 150, 255],
-            tape: [205, 212, 222, 255],
+            tape: [226, 232, 242, 255],
             translation: [45, 212, 170, 255],
             unmatched: [240, 96, 96, 255],
         }
@@ -64,74 +71,83 @@ pub struct Renderer {
     scale: f32,
     /// Buffer size in physical pixels
     size: (u32, u32),
-    panel: Path,
+    /// Only when `background` is above zero
+    panel: Option<Path>,
     keyboard: Option<Keyboard>,
-    /// One shape per key, indexed by slot, built once
+    /// One pill per key, indexed by slot, built once
     key_shapes: Vec<Path>,
-    /// Top of the tape area and its line pitch, physical px
-    tape_top: f32,
+    /// Bottom of the tape area, line pitch and how many lines fit, physical px
+    tape_bottom: f32,
     line_height: f32,
+    tape_lines: usize,
     labels: GlyphCache,
     tape: GlyphCache,
 }
 
 impl Renderer {
-    /// Lay out the panel for `config` at an integer output `scale`.
-    pub fn new(config: &OverlayConfig, scale: u32) -> Result<Self> {
+    /// Lay the overlay out for `config` on a surface `height` logical pixels tall, at an
+    /// integer output `scale`. The tape takes all the height the keyboard leaves.
+    pub fn new(config: &OverlayConfig, scale: u32, height: u32) -> Result<Self> {
         let scale = scale.max(1) as f32;
         let font = config.font.as_deref();
         let labels = GlyphCache::new(glyphs::load_font(font, glyphs::BOLD)?, LABEL_PX * scale);
         let tape = GlyphCache::new(glyphs::load_font(font, glyphs::REGULAR)?, TAPE_PX * scale);
 
-        let width = config.width as f32 * scale;
-        let pad = PADDING * scale;
+        let width = (config.width as f32 * scale).ceil();
+        let height = (height.max(1) as f32 * scale).ceil();
+        let (pad_x, pad_y) = (PAD_X * scale, PAD_Y * scale);
         let line_height = tape.line_height().ceil();
-        let tape_height = if config.tape {
-            line_height * config.tape_lines as f32
-        } else {
-            0.0
-        };
-        let tape_top = pad;
-        let keyboard = config.keyboard.then(|| {
-            let gap = if config.tape {
-                SECTION_GAP * scale
-            } else {
-                0.0
-            };
-            Keyboard::new(pad, tape_top + tape_height + gap, width - 2.0 * pad)
-        });
-        let content_bottom = keyboard.as_ref().map_or(tape_top + tape_height, |k| {
-            k.keys.iter().map(Rect::bottom).fold(0.0, f32::max)
-        });
-        let height = (content_bottom + pad).ceil();
 
+        // The keyboard sits at the bottom. Laying it out once at the origin gives its height.
+        let keyboard = config.keyboard.then(|| {
+            let keys_width = width - 2.0 * pad_x;
+            let keys_height = Keyboard::new(0.0, 0.0, keys_width).size.1;
+            Keyboard::new(pad_x, height - pad_y - keys_height, keys_width)
+        });
+        let tape_bottom = match &keyboard {
+            Some(k) => k.keys[22].y - SECTION_GAP * scale,
+            None => height - pad_y,
+        };
+        let fits = ((tape_bottom - pad_y) / line_height).floor().max(0.0) as usize;
+        let tape_lines = if config.tape {
+            fits.min(config.tape_lines.unwrap_or(usize::MAX))
+                .min(TAPE_CAPACITY)
+        } else {
+            0
+        };
+
+        // Pills: the radius is clamped to half the shorter side, so this is a full round end
         let key_shapes = keyboard.as_ref().map_or_else(Vec::new, |k| {
             k.keys
                 .iter()
-                .filter_map(|r| rounded_rect(*r, KEY_RADIUS * scale))
+                .filter_map(|r| rounded_rect(*r, f32::MAX))
                 .collect()
         });
-        let panel = rounded_rect(
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                w: width,
-                h: height,
-            },
-            PANEL_RADIUS * scale,
-        )
-        .expect("panel has a size");
+        let panel = (config.background > 0.0)
+            .then(|| {
+                rounded_rect(
+                    Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: width,
+                        h: height,
+                    },
+                    0.0,
+                )
+            })
+            .flatten();
 
         Ok(Self {
             config: config.clone(),
             theme: Theme::default(),
             scale,
-            size: (width.ceil() as u32, height as u32),
+            size: (width as u32, height as u32),
             panel,
             keyboard,
             key_shapes,
-            tape_top,
+            tape_bottom,
             line_height,
+            tape_lines,
             labels,
             tape,
         })
@@ -143,28 +159,21 @@ impl Renderer {
         self.size
     }
 
-    /// Surface size in logical pixels, for `layer_surface.set_size`.
+    /// How many tape lines fit above the keyboard.
     #[must_use]
-    pub fn logical_size(&self) -> (u32, u32) {
-        let (w, h) = self.size;
-        (
-            (w as f32 / self.scale) as u32,
-            (h as f32 / self.scale) as u32,
-        )
+    pub fn tape_lines(&self) -> usize {
+        self.tape_lines
     }
 
-    /// Draw the whole panel. `pixmap` must be [`Self::size`].
-    ///
-    /// TODO(overlay): partial redraw. Compare with the last drawn snapshot and repaint only
-    /// the keyboard when only keys changed (the common case while writing a stroke), and
-    /// return the rect to `damage_buffer`.
+    /// Draw everything. `pixmap` must be [`Self::size`].
     pub fn draw(&mut self, snapshot: &OverlaySnapshot, pixmap: &mut PixmapMut) {
         pixmap.fill(Color::TRANSPARENT);
-        let [r, g, b] = self.theme.panel;
-        let alpha = (self.config.opacity.clamp(0.0, 1.0) * 255.0) as u8;
-        fill(pixmap, &self.panel, [r, g, b, alpha]);
-
-        if self.config.tape {
+        if let Some(panel) = &self.panel {
+            let [r, g, b] = self.theme.panel;
+            let alpha = (self.config.background.clamp(0.0, 1.0) * 255.0) as u8;
+            fill(pixmap, panel, [r, g, b, alpha]);
+        }
+        if self.tape_lines > 0 {
             self.draw_tape(snapshot, pixmap);
         }
         if self.keyboard.is_some() {
@@ -176,6 +185,10 @@ impl Renderer {
         let Some(keyboard) = &self.keyboard else {
             return;
         };
+        let outline = Stroke {
+            width: OUTLINE * self.scale,
+            ..Stroke::default()
+        };
         for (slot, shape) in self.key_shapes.iter().enumerate() {
             let bit = 1u32 << slot;
             let accent = if Keyboard::is_vowel(slot) {
@@ -185,14 +198,17 @@ impl Renderer {
             };
             // Held keys full strength; keys already let go but still in the stroke dimmer,
             // so you can watch the stroke build up
-            let (fill_color, label_color) = if snapshot.held & bit != 0 {
-                (accent, self.theme.label_lit)
+            let label_color = if snapshot.held & bit != 0 {
+                fill(pixmap, shape, accent);
+                self.theme.label_lit
             } else if snapshot.chord & bit != 0 {
-                (with_alpha(accent, 150), self.theme.label_lit)
+                fill(pixmap, shape, with_alpha(accent, 150));
+                self.theme.label_lit
             } else {
-                (self.theme.key, self.theme.label)
+                fill(pixmap, shape, self.theme.key);
+                stroke(pixmap, shape, self.theme.outline, &outline);
+                self.theme.label
             };
-            fill(pixmap, shape, fill_color);
 
             let rect = keyboard.keys[slot];
             let label = Keyboard::label(slot);
@@ -205,54 +221,71 @@ impl Renderer {
                 rect.x + (rect.w - glyph_width) / 2.0,
                 baseline,
                 label_color,
+                self.scale,
             );
         }
     }
 
     fn draw_tape(&mut self, snapshot: &OverlaySnapshot, pixmap: &mut PixmapMut) {
-        let pad = PADDING * self.scale;
+        let pad = PAD_X * self.scale;
         let inner = self.size.0 as f32 - 2.0 * pad;
         let paper = inner * PAPER_SHARE;
         let column = paper / 23.0;
-        let lines = self.config.tape_lines;
-        let shown: Vec<&TapeEntry> = snapshot.tape.iter().rev().take(lines).collect();
+        let lines = self.tape_lines;
         let ascent = self.tape.ascent();
 
-        // Newest at the bottom; older lines fade out towards the top
-        for (age, entry) in shown.iter().enumerate() {
-            let row = lines - 1 - age;
-            let baseline = self.tape_top + row as f32 * self.line_height + ascent;
-            let fade = 1.0 - age as f32 / lines as f32 * 0.75;
+        // Newest at the bottom, just above the keyboard; older lines fade out upwards
+        for (age, entry) in snapshot.tape.iter().rev().take(lines).enumerate() {
+            let baseline = self.tape_bottom - (age + 1) as f32 * self.line_height + ascent;
+            let fade = 1.0 - (1.0 - OLDEST_FADE) * age as f32 / lines as f32;
+            self.draw_tape_line(pixmap, entry, (pad, baseline), (column, paper, inner), fade);
+        }
+    }
 
-            // Steno columns: every slot has its own column, so lines stay aligned even
-            // though Atkinson Hyperlegible is proportional
-            for (column_index, &slot) in PAPER_ORDER.iter().enumerate() {
-                if entry.stroke & (1 << slot) == 0 {
-                    continue;
-                }
-                let letter = Keyboard::label(slot);
-                let x = pad + column * column_index as f32;
-                let centred = x + (column - self.tape.get(letter).advance) / 2.0;
-                let color = fade_color(self.theme.tape, fade);
-                draw_char(pixmap, &mut self.tape, letter, centred, baseline, color);
+    fn draw_tape_line(
+        &mut self,
+        pixmap: &mut PixmapMut,
+        entry: &TapeEntry,
+        (pad, baseline): (f32, f32),
+        (column, paper, inner): (f32, f32, f32),
+        fade: f32,
+    ) {
+        // Steno columns: every slot has its own column, so lines stay aligned even though
+        // Atkinson Hyperlegible is proportional
+        for (column_index, &slot) in PAPER_ORDER.iter().enumerate() {
+            if entry.stroke & (1 << slot) == 0 {
+                continue;
             }
-
-            let (text, color) = if entry.unmatched {
-                (Cow::Borrowed("?"), self.theme.unmatched)
-            } else {
-                (display_text(&entry.text), self.theme.translation)
-            };
-            let x = pad + paper + 6.0 * self.scale;
-            draw_text_clipped(
+            let letter = Keyboard::label(slot);
+            let x = pad + column * column_index as f32;
+            let centred = x + (column - self.tape.get(letter).advance) / 2.0;
+            let color = fade_color(self.theme.tape, fade);
+            draw_char(
                 pixmap,
                 &mut self.tape,
-                &text,
-                x,
+                letter,
+                centred,
                 baseline,
-                pad + inner,
-                fade_color(color, fade),
+                color,
+                self.scale,
             );
         }
+
+        let (text, color) = if entry.unmatched {
+            (Cow::Borrowed("?"), self.theme.unmatched)
+        } else {
+            (display_text(&entry.text), self.theme.translation)
+        };
+        draw_text_clipped(
+            pixmap,
+            &mut self.tape,
+            &text,
+            pad + paper + 6.0 * self.scale,
+            baseline,
+            pad + inner,
+            fade_color(color, fade),
+            self.scale,
+        );
     }
 }
 
@@ -283,14 +316,29 @@ fn fade_color(color: [u8; 4], fade: f32) -> [u8; 4] {
     with_alpha(color, (fade.clamp(0.0, 1.0) * 255.0) as u8)
 }
 
-fn fill(pixmap: &mut PixmapMut, path: &Path, [r, g, b, a]: [u8; 4]) {
+fn paint([r, g, b, a]: [u8; 4]) -> Paint<'static> {
     let mut paint = Paint::default();
     paint.set_color_rgba8(r, g, b, a);
     paint.anti_alias = true;
-    pixmap.fill_path(path, &paint, FillRule::Winding, Transform::identity(), None);
+    paint
 }
 
-/// A rectangle with circular corners (cubic approximation).
+fn fill(pixmap: &mut PixmapMut, path: &Path, color: [u8; 4]) {
+    pixmap.fill_path(
+        path,
+        &paint(color),
+        FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
+}
+
+fn stroke(pixmap: &mut PixmapMut, path: &Path, color: [u8; 4], style: &Stroke) {
+    pixmap.stroke_path(path, &paint(color), style, Transform::identity(), None);
+}
+
+/// A rectangle with circular corners (cubic approximation). A radius of half the shorter side
+/// or more makes a pill: straight sides with fully round ends.
 fn rounded_rect(r: Rect, radius: f32) -> Option<Path> {
     const K: f32 = 0.552_284_8; // control point distance for a quarter circle
     let rad = radius.min(r.w / 2.0).min(r.h / 2.0);
@@ -311,6 +359,7 @@ fn rounded_rect(r: Rect, radius: f32) -> Option<Path> {
 }
 
 /// Draw `text` from `x`, stopping with an ellipsis before it would pass `right`.
+#[allow(clippy::too_many_arguments)]
 fn draw_text_clipped(
     pixmap: &mut PixmapMut,
     glyphs: &mut GlyphCache,
@@ -319,33 +368,54 @@ fn draw_text_clipped(
     baseline: f32,
     right: f32,
     color: [u8; 4],
+    scale: f32,
 ) {
     let ellipsis = glyphs.get('…').advance;
     let fits = glyphs.measure(text) <= right - x;
     for c in text.chars() {
         let advance = glyphs.get(c).advance;
         if !fits && x + advance > right - ellipsis {
-            draw_char(pixmap, glyphs, '…', x, baseline, color);
+            draw_char(pixmap, glyphs, '…', x, baseline, color, scale);
             return;
         }
-        draw_char(pixmap, glyphs, c, x, baseline, color);
+        draw_char(pixmap, glyphs, c, x, baseline, color, scale);
         x += advance;
     }
 }
 
-/// Composite one glyph mask onto the pixmap (source-over, premultiplied RGBA).
+/// Draw one character with a soft drop shadow, so it reads over any wallpaper.
 fn draw_char(
     pixmap: &mut PixmapMut,
     glyphs: &mut GlyphCache,
     c: char,
     x: f32,
     baseline: f32,
-    [r, g, b, a]: [u8; 4],
+    color: [u8; 4],
+    scale: f32,
 ) {
     let glyph = glyphs.get(c);
+    let (x0, y0) = (
+        x.round() as i32 + glyph.left,
+        baseline.round() as i32 + glyph.top,
+    );
+    // Light text needs the shadow to stay readable on a light wallpaper. Dark text sits on a
+    // lit key already, where a black shadow would only smudge it.
+    let light = u32::from(color[0]) + u32::from(color[1]) + u32::from(color[2]) > 330;
+    if light {
+        let shift = scale.round().max(1.0) as i32;
+        blend_glyph(
+            pixmap,
+            glyph,
+            (x0 + shift, y0 + shift),
+            [0, 0, 0, (u16::from(color[3]) * 7 / 10) as u8],
+        );
+    }
+    blend_glyph(pixmap, glyph, (x0, y0), color);
+}
+
+/// Composite one glyph mask onto the pixmap (source-over, premultiplied RGBA).
+fn blend_glyph(pixmap: &mut PixmapMut, glyph: &Glyph, (x0, y0): (i32, i32), [r, g, b, a]: [u8; 4]) {
     let (width, height) = (pixmap.width() as i32, pixmap.height() as i32);
-    let x0 = x.round() as i32 + glyph.left;
-    let y0 = baseline.round() as i32 + glyph.top;
     let data = pixmap.data_mut();
     for gy in 0..glyph.height as i32 {
         let py = y0 + gy;
@@ -378,12 +448,21 @@ mod tests {
     use super::*;
     use tiny_skia::Pixmap;
 
+    fn tape_entry(seq: u64, stroke: &str, text: &str) -> TapeEntry {
+        TapeEntry {
+            seq,
+            stroke: crate::steno::layout::parse_stroke(stroke).unwrap(),
+            text: text.into(),
+            unmatched: text.is_empty(),
+        }
+    }
+
     #[test]
     fn a_frame_draws_without_wayland_and_lights_held_keys() {
         let config = OverlayConfig::default();
-        let mut renderer = Renderer::new(&config, 1).unwrap();
+        let mut renderer = Renderer::new(&config, 1, 900).unwrap();
         let (w, h) = renderer.size();
-        assert_eq!(w, config.width);
+        assert_eq!((w, h), (config.width, 900));
         let mut pixmap = Pixmap::new(w, h).unwrap();
         let mut snapshot = OverlaySnapshot {
             layer: Some("steno".into()),
@@ -391,16 +470,11 @@ mod tests {
             chord: 1 << 1,
             ..OverlaySnapshot::default()
         };
-        snapshot.tape.push_back(TapeEntry {
-            seq: 1,
-            stroke: 0b11,
-            text: "\"test\"".into(),
-            unmatched: false,
-        });
+        snapshot.tape.push_back(tape_entry(1, "KAT", "\"cat\""));
         renderer.draw(&snapshot, &mut pixmap.as_mut());
 
         // T- is the consonant accent: sampled at its left edge, mid-height, clear of the
-        // rounded corners and the centred label
+        // round ends and the centred label
         let t = renderer.keyboard.as_ref().unwrap().keys[1];
         let pixel = pixmap
             .pixel((t.x + 2.0) as u32, (t.y + t.h / 2.0) as u32)
@@ -409,14 +483,82 @@ mod tests {
         assert_eq!([pixel.red(), pixel.green(), pixel.blue()], [45, 212, 170]);
     }
 
-    /// Writes a sample frame as a PPM over a mid-grey backdrop, to look at the design:
+    #[test]
+    fn there_is_no_background_unless_asked_for() {
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let (w, h) = renderer.size();
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        renderer.draw(&OverlaySnapshot::default(), &mut pixmap.as_mut());
+        // The top-right corner, far from any content, is fully transparent
+        assert_eq!(pixmap.pixel(w - 1, 0).unwrap().alpha(), 0);
+
+        let config = OverlayConfig {
+            background: 0.5,
+            ..OverlayConfig::default()
+        };
+        let mut renderer = Renderer::new(&config, 1, 900).unwrap();
+        renderer.draw(&OverlaySnapshot::default(), &mut pixmap.as_mut());
+        let alpha = pixmap.pixel(w - 1, 0).unwrap().alpha();
+        assert!((126..=129).contains(&alpha), "{alpha}");
+    }
+
+    #[test]
+    fn the_tape_runs_the_screen_height_above_the_keyboard() {
+        let config = OverlayConfig::default();
+        let short = Renderer::new(&config, 1, 600).unwrap();
+        let tall = Renderer::new(&config, 1, 1900).unwrap();
+        assert!(tall.tape_lines() > short.tape_lines() * 2);
+        assert!(short.tape_lines() > 10);
+
+        // Every line, and the keyboard below it, stays inside the surface
+        let top = tall.tape_bottom - tall.tape_lines() as f32 * tall.line_height;
+        assert!(top >= 0.0, "tape starts at {top}");
+        let keys = tall.keyboard.as_ref().unwrap();
+        assert!(keys.keys.iter().map(Rect::bottom).fold(0.0, f32::max) <= 1900.0);
+        assert!(
+            keys.keys[22].y > tall.tape_bottom,
+            "keyboard is below the tape"
+        );
+
+        // `tape_lines` caps it; zero is allowed
+        let capped = OverlayConfig {
+            tape_lines: Some(5),
+            ..OverlayConfig::default()
+        };
+        assert_eq!(Renderer::new(&capped, 1, 1900).unwrap().tape_lines(), 5);
+        let off = OverlayConfig {
+            tape: false,
+            ..OverlayConfig::default()
+        };
+        assert_eq!(Renderer::new(&off, 1, 1900).unwrap().tape_lines(), 0);
+    }
+
+    #[test]
+    fn keys_are_pills_with_round_ends() {
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let (w, h) = renderer.size();
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        renderer.draw(&OverlaySnapshot::default(), &mut pixmap.as_mut());
+        // The corner of T-'s bounding box is empty (round end); its middle is not
+        let t = renderer.keyboard.as_ref().unwrap().keys[1];
+        let corner = pixmap
+            .pixel((t.x + 1.0) as u32, (t.y + 1.0) as u32)
+            .unwrap();
+        let middle = pixmap
+            .pixel((t.x + 2.0) as u32, (t.y + t.h / 2.0) as u32)
+            .unwrap();
+        assert_eq!(corner.alpha(), 0, "square corner");
+        assert!(middle.alpha() > 0, "body of the pad");
+    }
+
+    /// Writes a sample frame as a PPM over a backdrop, to look at the design:
     /// `OVERLAY_PREVIEW=/tmp/overlay.ppm cargo test preview -- --ignored`
     #[test]
     #[ignore = "writes an image for eyeballing"]
     fn preview() {
         use crate::steno::layout::parse_stroke;
         let path = std::env::var("OVERLAY_PREVIEW").expect("set OVERLAY_PREVIEW");
-        let mut renderer = Renderer::new(&OverlayConfig::default(), 2).unwrap();
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 1080).unwrap();
         let (w, h) = renderer.size();
         let mut snapshot = OverlaySnapshot {
             layer: Some("steno".into()),
@@ -424,7 +566,7 @@ mod tests {
             held: parse_stroke("PH").unwrap(),
             ..OverlaySnapshot::default()
         };
-        let lines = [
+        let words = [
             ("TH", "\"this\""),
             ("S", "\"is\""),
             ("A", "\"a\""),
@@ -433,33 +575,27 @@ mod tests {
             ("-T", "\"the\""),
             ("STEPB", "\"steno\""),
             ("OEFR", "\"over\""),
-            ("HRAEU", "\"lay\""),
             ("STKPWHR", ""),
             ("PWEUG", "\"big\""),
             ("TKPWAEUPL", "\"game\""),
             ("KWRAOU", "\"you\""),
-            ("KAPB", "\"can\""),
-            ("SAOE", "\"see\""),
-            ("-PBT", "\"in\""),
-            ("TPAOEL", "\"feel\""),
-            ("TKPWAOD", "\"good\""),
         ];
-        for (i, (stroke, text)) in lines.iter().enumerate() {
-            snapshot.tape.push_back(TapeEntry {
-                seq: i as u64 + 1,
-                stroke: parse_stroke(stroke).unwrap(),
-                text: (*text).into(),
-                unmatched: text.is_empty(),
-            });
+        for i in 0..renderer.tape_lines() {
+            let (stroke, text) = words[i % words.len()];
+            snapshot
+                .tape
+                .push_back(tape_entry(i as u64 + 1, stroke, text));
         }
         let mut pixmap = Pixmap::new(w, h).unwrap();
         renderer.draw(&snapshot, &mut pixmap.as_mut());
         let mut out = format!("P6 {w} {h} 255\n").into_bytes();
         for (i, px) in pixmap.data().chunks_exact(4).enumerate() {
-            // Premultiplied over a backdrop gradient, like a wallpaper behind the glass
-            let shade = 70 + ((i as u32 / w) * 60 / h) as u8;
-            for c in &px[..3] {
-                out.push(c + (u32::from(shade) * (255 - u32::from(px[3])) / 255) as u8);
+            // Premultiplied over a wallpaper-like gradient
+            let row = i as u32 / w;
+            let col = i as u32 % w;
+            let backdrop = [70 + row * 50 / h, 60 + col * 40 / w, 100 + row * 60 / h];
+            for (c, back) in px[..3].iter().zip(backdrop) {
+                out.push(c + (back * (255 - u32::from(px[3])) / 255) as u8);
             }
         }
         std::fs::write(path, out).unwrap();

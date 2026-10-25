@@ -486,12 +486,12 @@
     // overlay: (
     //     enabled: true,
     //     output: None,       // Some("DP-1") to pin a monitor
-    //     margin: 16,         // gap from the right edge, in pixels
-    //     width: 280,
-    //     opacity: 0.72,      // panel background, 0.0 to 1.0
+    //     margin: 0,          // gap from the right edge, in pixels
+    //     width: 280,         // as tall as the screen
+    //     background: 0.0,    // dark panel behind it all, 0.0 (none) to 1.0
     //     keyboard: true,
     //     tape: true,
-    //     tape_lines: 18,
+    //     tape_lines: None,   // Some(20) caps the tape; None fills the screen height
     //     font: None,         // None = bundled Atkinson Hyperlegible
     //     layers: [],         // empty = every steno layer
     // ),

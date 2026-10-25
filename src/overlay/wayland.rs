@@ -43,6 +43,10 @@ use tiny_skia::PixmapMut;
 /// (niri: `layer-rule { match namespace="^keymux-steno$" }`).
 const NAMESPACE: &str = "keymux-steno";
 
+/// Surface height, in logical px, to lay out for before the compositor says how tall the
+/// output is.
+const FALLBACK_HEIGHT: u32 = 1080;
+
 pub fn run(config: OverlayConfig, source: Source) -> Result<()> {
     let conn = Connection::connect_to_env().context("no Wayland session to draw on")?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
@@ -53,7 +57,8 @@ pub fn run(config: OverlayConfig, source: Source) -> Result<()> {
         .context("this compositor has no layer-shell, which the overlay needs (GNOME?)")?;
     let shm = Shm::bind(&globals, &qh).context("wl_shm missing")?;
 
-    let renderer = Renderer::new(&config, 1)?;
+    // The real height arrives with the first configure; this is only until then
+    let renderer = Renderer::new(&config, 1, FALLBACK_HEIGHT)?;
     let (width, height) = renderer.size();
     // Room for two buffers: one the compositor holds, one being drawn
     let pool = SlotPool::new((width * height * 4 * 2) as usize, &shm)?;
@@ -100,6 +105,7 @@ pub fn run(config: OverlayConfig, source: Source) -> Result<()> {
         renderer,
         config,
         scale: 1,
+        height: FALLBACK_HEIGHT,
         surface: None,
         configured: false,
         frame_pending: false,
@@ -125,6 +131,8 @@ struct Overlay {
     config: OverlayConfig,
     /// Integer scale of the output the panel is on. The renderer draws at this scale.
     scale: i32,
+    /// Height of the surface in logical px, as the compositor last configured it
+    height: u32,
     /// Present only while a steno layer is on
     surface: Option<LayerSurface>,
     /// The compositor has sent the first configure, so the surface may be drawn
@@ -166,7 +174,7 @@ impl Overlay {
         if config == self.config {
             return;
         }
-        match Renderer::new(&config, self.scale as u32) {
+        match Renderer::new(&config, self.scale as u32, self.height) {
             Ok(renderer) => self.renderer = renderer,
             Err(e) => {
                 tracing::warn!("keeping the old overlay settings: {e:#}");
@@ -199,12 +207,14 @@ impl Overlay {
             Some(NAMESPACE),
             output.as_ref(),
         );
-        let (width, height) = self.renderer.logical_size();
-        layer.set_anchor(Anchor::RIGHT);
+        // Pinned to the right edge and stretched top to bottom: a height of 0 asks the
+        // compositor for the full output height, which the renderer lays the tape out to fill
+        layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::RIGHT);
         layer.set_margin(0, self.config.margin as i32, 0, 0);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-        layer.set_exclusive_zone(0);
-        layer.set_size(width, height);
+        // -1: ignore other surfaces' exclusive zones (a bar), so it spans the whole screen
+        layer.set_exclusive_zone(-1);
+        layer.set_size(self.config.width, 0);
         // The first commit has no buffer; drawing waits for the compositor's configure
         layer.commit();
         self.surface = Some(layer);
@@ -300,7 +310,7 @@ impl CompositorHandler for Overlay {
             return;
         }
         self.scale = new_factor;
-        match Renderer::new(&self.config, new_factor as u32) {
+        match Renderer::new(&self.config, new_factor as u32, self.height) {
             Ok(renderer) => self.renderer = renderer,
             Err(e) => return tracing::warn!("overlay scale {new_factor}: {e:#}"),
         }
@@ -357,10 +367,20 @@ impl LayerShellHandler for Overlay {
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &LayerSurface,
-        _: LayerSurfaceConfigure,
+        configure: LayerSurfaceConfigure,
         _: u32,
     ) {
-        // The panel asks for a fixed size and ignores the suggestion
+        // The compositor picks the height (the output's); lay the tape out to fill it
+        let height = configure.new_size.1;
+        if height > 0 && height != self.height {
+            match Renderer::new(&self.config, self.scale as u32, height) {
+                Ok(renderer) => {
+                    self.renderer = renderer;
+                    self.height = height;
+                }
+                Err(e) => tracing::warn!("overlay layout for height {height}: {e:#}"),
+            }
+        }
         self.configured = true;
         self.dirty = true;
         self.draw();

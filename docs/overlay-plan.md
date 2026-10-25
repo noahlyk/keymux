@@ -94,8 +94,9 @@ press, not at daemon start, because only key events publish the layer.
   daemon's main loop never sees it.
 - That thread writes `OverlayFrame` messages: `u32 LE length + bincode`, same framing as
   responses. It exits on the first write error (overlay closed).
-- `OverlayFrame = OverlaySnapshot` for now. Small enough that diffs aren't worth it
-  (≤ 24 tape lines × ~30 B). If the tape grows, send `tape_since(seq)` instead.
+- `OverlayFrame = OverlaySnapshot` for now. The tape holds up to 160 lines (enough for a
+  tall screen), so a full frame is a few KB: still cheap to serialize on every key event.
+  If that ever matters, send only `tape_since(seq)` instead.
 
 ## 3. Overlay process — `src/overlay/` [done; checked live on niri with `--demo`]
 
@@ -103,9 +104,9 @@ press, not at daemon start, because only key events publish the layer.
 |---------------|-----|
 | `mod.rs`      | `run()`: load config, start subscriber, run the Wayland loop |
 | `client.rs`   | subscriber thread: connect, read frames, forward to the loop via a `calloop::channel`. Reconnects with backoff when the daemon restarts |
-| `wayland.rs`  | sctk: one `LayerSurface` on `Layer::Overlay`, anchored `RIGHT` (vertically centred), `KeyboardInteractivity::None`, `exclusive_zone(0)` (doesn't push windows), empty input region (clicks fall through). Mapped when `layer.is_some()`, unmapped (buffer detached) when not |
-| `render.rs`   | `Scene` → pixels with `tiny-skia`: rounded translucent panel, the keyboard, the tape. Pure function of `(snapshot, theme, size)`, unit-testable without Wayland |
-| `geometry.rs` | Steno key rectangles, computed once per size: 23 slots laid out like the mockup (two rows per hand, `#` bar on top, `A O` / `E U` thumbs) |
+| `wayland.rs`  | sctk: one `LayerSurface` on `Layer::Overlay`, anchored `TOP \| BOTTOM \| RIGHT` with height 0 (the compositor makes it the output's height), `KeyboardInteractivity::None`, `exclusive_zone(-1)` (ignores bars, pushes nothing), empty input region (clicks fall through). Created when a steno layer turns on, destroyed when it turns off. The layout is rebuilt from the height in each configure |
+| `render.rs`   | pixels with `tiny-skia`: the tape down the screen and the keyboard at the bottom, no background by default. Pure function of `(snapshot, config, scale, height)`, unit-testable without Wayland |
+| `geometry.rs` | Steno key rectangles, computed once per size: 23 slots as tall pads (two rows per hand, `#` bar on top, `A O` / `E U` thumbs) |
 | `glyphs.rs`   | `ab_glyph` rasterizer with a coverage cache: `[Option<Glyph>; 128]` for ASCII (array index, no hashing), `FxHashMap<char, Glyph>` for the rest. Each glyph is rasterized once per size |
 
 ### Font
@@ -125,28 +126,35 @@ x-position and its letter is centred in that column. Steno lines still align.
   Zero CPU while idle, zero while steno is off (surface unmapped).
 - **Redraw only on a change.** A frame identical on screen (same layer, keys and newest
   tape line) is skipped. Layer changes create or destroy the surface.
-- **Whole-panel redraw, no partial damage.** Measured in a release build with the demo
-  redrawing ~10 times a second for 23 s: 90 ms of CPU in total (≈0.4% of a core), 8.4 MB
-  RSS. A frame costs well under a millisecond, so tracking dirty rectangles would add code
-  for nothing measurable. Revisit only if frames get much more expensive.
+- **Whole-surface redraw, no partial damage.** Measured in a release build with the demo
+  redrawing ~10 times a second on a full-height (280 × 1080) overlay for 18 s: 120 ms of CPU
+  in total (≈0.7% of a core), 10 MB RSS. That includes startup and works out to under a
+  millisecond per frame on average, so tracking dirty rectangles would add code for nothing
+  measurable. Revisit only if frames get much more expensive (a 4K screen is ~4x the pixels).
 - **Frame callbacks**: at most one pending frame. A burst of strokes between vblanks is
   drawn once with the latest state.
 - **Buffers**: sctk `SlotPool` (shm). It hands back a slot the compositor has released.
 - **Pixel format**: `wl_shm::Format::Abgr8888` = tiny-skia's RGBA premultiplied byte order
   on little-endian, so tiny-skia draws straight into the shm buffer. Falls back to
   `Argb8888` with an R/B swap if a compositor doesn't offer it.
-- Panel size ≈ 280 × 600 logical px; drawn at the output's integer scale.
+- Size: `width` (280) × the output's height, logical px; drawn at the output's integer scale.
 
 ### Look (from the mockups)
 
-- Panel: near-black, ~70% alpha, 14 px radius, no border.
-- Keys: dark slate, rounded 6 px. Lit in the stroke accent (teal for consonants,
-  pale yellow for vowels, as in the mockup). Keys in `chord` but no longer in `held`
-  are drawn at reduced intensity, so you see the stroke building.
-- Tape above the keyboard: Atkinson Hyperlegible, one stroke per line in steno order
-  with gaps (`TP   H    E` style, every slot has a fixed column), newest at the bottom,
-  older lines fade out. The translation sits to the right in the accent colour,
-  unmatched strokes as `?` in red.
+- No background by default (`background: 0.0`): only the keys and the text are drawn, so
+  everything must read over any wallpaper. Text gets a soft drop shadow (light text only;
+  dark text on a lit key doesn't, since the shadow would smudge it).
+- Keys are steno pads: tall pills (1.75× as tall as wide) with fully round ends. `S-` and
+  `*` are double height, `#` is a thin pill across the top, thumbs sit below. Unlit keys
+  are a faint dark glass fill with a light outline. Lit keys use the stroke accent (teal for
+  consonants, pale yellow for vowels). Keys in `chord` but no longer in `held` are dimmer,
+  so you see the stroke building.
+- The overlay is as tall as the screen, pinned to the right edge. The keyboard sits at the
+  bottom; the tape fills everything above it: Atkinson Hyperlegible, one stroke per line in
+  steno order with gaps (`TP   H    E` style, every slot has a fixed column), newest at the
+  bottom, older lines fading out towards the top. The translation sits to the right in the
+  accent colour, unmatched strokes as `?` in red. How many lines fit is worked out from the
+  height the compositor configures.
 
 ## 4. Config — `src/config/config.rs` [done, hot reload checked live]
 
@@ -154,12 +162,12 @@ x-position and its letter is centred in that column. Steno lines still align.
 overlay: (
     enabled: true,
     output: None,          // Some("DP-1") to pin a monitor; None = compositor's choice
-    margin: 16,            // gap from the screen edge, logical px
-    width: 280,
-    opacity: 0.72,         // panel background alpha
+    margin: 0,             // gap from the right screen edge, logical px
+    width: 280,            // as tall as the screen
+    background: 0.0,       // dark panel behind it all; 0.0 is fully transparent
     keyboard: true,
     tape: true,
-    tape_lines: 18,
+    tape_lines: None,      // Some(20) caps it; None fills the screen height
     font: None,            // path to a .ttf/.otf; None = embedded Atkinson Hyperlegible
     layers: [],            // steno layers that show it; empty = every steno layer
 ),
@@ -189,8 +197,11 @@ surface gone when the process stops.
 
 ## Risks / open questions
 
-- Clicks falling through the panel: the empty input region is set, and niri reports
+- Clicks falling through the overlay: the empty input region is set, and niri reports
   keyboard interactivity none, but a real click hasn't been tried.
+- It covers the whole right edge, including the top-right corner of a bar (DMS's bar items
+  there, such as a power button). With no background only the faded top tape lines overlap
+  it, and clicks pass through, but they are drawn over it. `margin` or `tape_lines` moves it.
 - Fullscreen windows: `Layer::Overlay` sits above them. Maybe hide in game mode
   (the hub already knows `disabled_in_game_mode` layers aren't capturing).
 - Fractional scale: integer scales are handled (the panel redraws at the output's scale).

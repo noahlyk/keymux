@@ -10,8 +10,9 @@ use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
-/// Tape entries kept for the overlay. More than any panel shows; the overlay picks its own count.
-pub const TAPE_CAPACITY: usize = 32;
+/// Tape entries kept for the overlay: enough to fill a tall screen, since the tape runs the
+/// whole screen height. The overlay shows as many as fit.
+pub const TAPE_CAPACITY: usize = 160;
 
 /// One stroke on the on-screen tape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
