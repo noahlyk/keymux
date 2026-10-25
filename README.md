@@ -559,8 +559,11 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
 steno layer is on, and goes away when you leave it. The tape runs the full screen height with
 the keyboard at the bottom. Keys are steno pads (round at the bottom, nearly square at the top) that light up as you press them
 (keys you've let go of but are still part of the stroke are dimmer), and each finished stroke
-lands on the tape with what it typed. There is no background by default, only the keys and
-text, and it never takes clicks or focus. It costs next to nothing: it only redraws when a
+lands on the tape with what it typed: the steno letters in their own columns, and the word in
+larger white text. Every tape line is at full strength; only the top three fade out. There is
+no background by default, only the keys and text (the text has a dark halo to read over any
+wallpaper; set `background` for a panel if your wallpaper is very busy), and it never takes
+clicks or focus. It costs next to nothing: it only redraws when a
 key or the tape changes.
 
 ![overlay](docs/overlay-preview.png)
@@ -575,7 +578,8 @@ overlay: (
     enabled: true,
     output: None,        // Some("DP-1") to pin a monitor; None lets the compositor pick
     margin: 0,           // gap from the right edge, in pixels
-    width: 280,          // as tall as the screen
+    width: 400,          // as tall as the screen; text and keys are sized from this
+    text_scale: 1.0,     // 1.2 makes the text a fifth bigger, on top of what width gives
     background: 0.0,     // opacity of a dark panel behind it all; 0.0 is fully transparent
     keyboard: true,
     tape: true,

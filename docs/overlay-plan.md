@@ -122,8 +122,8 @@ Regular + Bold are embedded with `include_bytes!` from `assets/fonts/` (≈110 K
 1.1, `assets/fonts/OFL.txt` ships beside them). Embedded means no fontconfig lookup and
 the same look on every machine. `font: Some(path)` in config overrides it.
 
-It's proportional, so the tape doesn't rely on monospace: every slot has a fixed column
-x-position and its letter is centred in that column. Steno lines still align.
+It's proportional, so the tape doesn't rely on monospace: every slot has its own column,
+sized to its letter, and the letter is centred in it. Steno lines still align.
 
 ### Drawing cost
 
@@ -132,23 +132,25 @@ x-position and its letter is centred in that column. Steno lines still align.
 - **Redraw only on a change.** A frame identical on screen (same layer, keys and newest
   tape line) is skipped. Layer changes create or destroy the surface.
 - **Whole-surface redraw, no partial damage.** Measured in a release build with the demo
-  redrawing ~10 times a second on a full-height (280 × 1080) overlay for 18 s: 120 ms of CPU
-  in total (≈0.7% of a core), 10 MB RSS. That includes startup and works out to under a
-  millisecond per frame on average, so tracking dirty rectangles would add code for nothing
-  measurable. Revisit only if frames get much more expensive (a 4K screen is ~4x the pixels).
+  redrawing several times a second on a full-height (400 × 1080) overlay for 21 s: 210 ms of
+  CPU in total (≈1% of a core), 11 MB RSS. That includes startup and a 5-pass text halo, and
+  works out to roughly a millisecond per frame, so tracking dirty rectangles would add code
+  for nothing measurable. Revisit only if frames get much more expensive (a 4K screen is ~4x
+  the pixels).
 - **Frame callbacks**: at most one pending frame. A burst of strokes between vblanks is
   drawn once with the latest state.
 - **Buffers**: sctk `SlotPool` (shm). It hands back a slot the compositor has released.
 - **Pixel format**: `wl_shm::Format::Abgr8888` = tiny-skia's RGBA premultiplied byte order
   on little-endian, so tiny-skia draws straight into the shm buffer. Falls back to
   `Argb8888` with an R/B swap if a compositor doesn't offer it.
-- Size: `width` (280) × the output's height, logical px; drawn at the output's integer scale.
+- Size: `width` (400) × the output's height, logical px; drawn at the output's integer scale.
 
 ### Look (from the mockups)
 
 - No background by default (`background: 0.0`): only the keys and the text are drawn, so
-  everything must read over any wallpaper. Text gets a soft drop shadow (light text only;
-  dark text on a lit key doesn't, since the shadow would smudge it).
+  everything must read over any wallpaper. Light text gets a dark halo (a copy one pixel out
+  on every side plus one dropped down-right); a one-sided shadow smeared. Dark text on a lit
+  key gets none, since a halo would smudge it.
 - Keys are steno pads, 1.75× as tall as wide: a squarish top with slightly softened corners
   (radius 0.2× the width) and a fully round bottom. `S-` and `*` are double height, `#` is a
   thin pill across the top, thumbs sit below. Unlit keys
@@ -156,11 +158,20 @@ x-position and its letter is centred in that column. Steno lines still align.
   consonants, pale yellow for vowels). Keys in `chord` but no longer in `held` are dimmer,
   so you see the stroke building.
 - The overlay is as tall as the screen, pinned to the right edge. The keyboard sits at the
-  bottom; the tape fills everything above it: Atkinson Hyperlegible, one stroke per line in
-  steno order with gaps (`TP   H    E` style, every slot has a fixed column), newest at the
-  bottom, older lines fading out towards the top. The translation sits to the right in the
-  accent colour, unmatched strokes as `?` in red. How many lines fit is worked out from the
-  height the compositor configures.
+  bottom; the tape fills everything above it, newest line at the bottom. How many lines fit
+  is worked out from the height the compositor configures.
+- Tape lines are Atkinson Hyperlegible Bold throughout. The strokes are the steno letters in
+  soft light grey (not green: it fought the wallpaper), each slot in its own column (so strokes line up from line to line, as on a paper
+  tape). The column widths are not a uniform grid: each is as wide as its own letter plus a
+  22% gap, so `W` gets more room than `T` and nothing overlaps. The words (what the stroke
+  typed) are set 1.3× larger in near-white, since that is what you read. Unmatched strokes
+  show a red `?`.
+- Every tape line is full strength. Only the top three lines fade (25%, 50%, 75%), so the tape
+  stays easy to read all the way up.
+- All sizes come from `width` (letters are sized so the 23 columns fill 60% of it; key labels
+  are 56% of a key's width), and `text_scale` multiplies the text on top.
+- Glyphs are rasterized at quarter-pixel horizontal offsets and cached per offset. Snapping
+  each letter to a whole pixel made the spacing uneven ("thi s").
 
 ## 4. Config — `src/config/config.rs` [done, hot reload checked live]
 
@@ -169,7 +180,8 @@ overlay: (
     enabled: true,
     output: None,          // Some("DP-1") to pin a monitor; None = compositor's choice
     margin: 0,             // gap from the right screen edge, logical px
-    width: 280,            // as tall as the screen
+    width: 400,            // as tall as the screen; text and keys are sized from this
+    text_scale: 1.0,       // multiplies the text size on top of what width gives
     background: 0.0,       // dark panel behind it all; 0.0 is fully transparent
     keyboard: true,
     tape: true,

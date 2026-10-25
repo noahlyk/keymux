@@ -2,11 +2,15 @@
 //! the bottom, on a fully transparent background (unless `background` is set). A pure
 //! function of (snapshot, config, scale, height), so it is testable without a compositor.
 //!
-//! Everything that depends only on size (key shapes, glyph masks, how many tape lines fit) is
-//! built once in [`Renderer::new`]. A frame is a handful of fills and mask copies.
+//! Everything that depends only on size (key shapes, glyph masks, column positions, how many
+//! tape lines fit) is built once in [`Renderer::new`]. A frame is a handful of fills and mask
+//! copies.
+//!
+//! All text sizes are derived from the overlay's `width`, so one number scales the whole thing,
+//! and `text_scale` nudges the text alone.
 
 use super::geometry::{Keyboard, Rect};
-use super::glyphs::{self, Glyph, GlyphCache};
+use super::glyphs::{self, GlyphCache};
 use crate::config::OverlayConfig;
 use crate::steno::overlay::{OverlaySnapshot, TapeEntry, TAPE_CAPACITY};
 use anyhow::Result;
@@ -14,30 +18,40 @@ use std::borrow::Cow;
 use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, PixmapMut, Stroke, Transform};
 
 /// Space between the content and the left/right edge of the overlay, logical px
-const PAD_X: f32 = 8.0;
+const PAD_X: f32 = 10.0;
 /// Space above the tape and below the keyboard, logical px
-const PAD_Y: f32 = 12.0;
+const PAD_Y: f32 = 14.0;
 /// Space between the tape and the keyboard, logical px
-const SECTION_GAP: f32 = 18.0;
-const LABEL_PX: f32 = 13.0;
-const TAPE_PX: f32 = 14.0;
+const SECTION_GAP: f32 = 20.0;
 /// Outline of an unlit key, logical px
-const OUTLINE: f32 = 1.4;
+const OUTLINE: f32 = 1.5;
 /// Radius of a pad's top corners relative to its width. The bottom is fully round.
 const PAD_TOP_ROUND: f32 = 0.2;
 /// Slot of the `#` number bar
 const NUMBER_SLOT: usize = 22;
-/// Share of the tape width given to the steno columns; the translation gets the rest
-const PAPER_SHARE: f32 = 0.62;
-/// Oldest tape line's strength, so the tape fades out towards the top of the screen
-const OLDEST_FADE: f32 = 0.18;
+/// Share of the width inside the padding given to the steno letters; the words get the rest
+const PAPER_SHARE: f32 = 0.60;
+/// Space after each steno letter's own width, as a share of the letter, so neighbouring
+/// columns never touch: `W` gets more room than `T`
+const SLOT_GAP: f32 = 0.22;
+/// The translated words are the thing you read, so they are set larger than the strokes
+const WORDS_RATIO: f32 = 1.3;
+/// Line pitch relative to the words' own height
+const LINE_SPACING: f32 = 1.12;
+/// A key's label is this share of the key's width
+const LABEL_RATIO: f32 = 0.56;
+/// Text size the column widths are measured at; they scale linearly from here
+const PROBE_PX: f32 = 32.0;
+/// The oldest tape lines, at the top of the screen, fade out: this many of them, the topmost
+/// faintest. Every other line is at full strength.
+const FADE_LINES: usize = 3;
 /// Plover paper tape order: `#` first, then the slots in stroke order
 const PAPER_ORDER: [usize; 23] = [
     22, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
 ];
 
-/// Colours. With no background, everything has to read over any wallpaper: unlit keys are
-/// a faint dark glass pad with a light outline, and all text gets a soft drop shadow.
+/// Colours. With no background, everything has to read over any wallpaper: text is bright with
+/// a dark halo, and unlit keys are a faint dark glass pad with a light outline.
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
     pub panel: [u8; 3],
@@ -47,8 +61,10 @@ pub struct Theme {
     pub label_lit: [u8; 4],
     pub consonant: [u8; 4],
     pub vowel: [u8; 4],
-    pub tape: [u8; 4],
-    pub translation: [u8; 4],
+    /// The steno letters on the tape: secondary to the words
+    pub strokes: [u8; 4],
+    /// What each stroke typed: the main thing to read
+    pub words: [u8; 4],
     pub unmatched: [u8; 4],
 }
 
@@ -57,16 +73,23 @@ impl Default for Theme {
         Self {
             panel: [10, 12, 16],
             key: [14, 18, 26, 120],
-            outline: [214, 224, 238, 95],
-            label: [214, 222, 236, 240],
-            label_lit: [10, 14, 18, 255],
+            outline: [214, 224, 238, 105],
+            label: [226, 232, 242, 245],
+            label_lit: [8, 12, 16, 255],
             consonant: [45, 212, 170, 255],
             vowel: [232, 226, 150, 255],
-            tape: [226, 232, 242, 255],
-            translation: [45, 212, 170, 255],
-            unmatched: [240, 96, 96, 255],
+            strokes: [192, 201, 216, 255],
+            words: [248, 250, 253, 255],
+            unmatched: [255, 120, 120, 255],
         }
     }
+}
+
+/// Where one steno letter sits on a tape line, relative to the left edge of the letters.
+#[derive(Debug, Clone, Copy)]
+struct Column {
+    x: f32,
+    width: f32,
 }
 
 pub struct Renderer {
@@ -78,14 +101,22 @@ pub struct Renderer {
     /// Only when `background` is above zero
     panel: Option<Path>,
     keyboard: Option<Keyboard>,
-    /// One pill per key, indexed by slot, built once
+    /// One pad per key, indexed by slot, built once
     key_shapes: Vec<Path>,
     /// Bottom of the tape area, line pitch and how many lines fit, physical px
     tape_bottom: f32,
     line_height: f32,
     tape_lines: usize,
+    /// One per tape slot in [`PAPER_ORDER`] order
+    columns: Vec<Column>,
+    /// Left edge of the steno letters, and where the words start, physical px
+    paper_left: f32,
+    words_left: f32,
+    /// The right edge words are clipped at
+    words_right: f32,
     labels: GlyphCache,
-    tape: GlyphCache,
+    strokes: GlyphCache,
+    words: GlyphCache,
 }
 
 impl Renderer {
@@ -93,23 +124,46 @@ impl Renderer {
     /// integer output `scale`. The tape takes all the height the keyboard leaves.
     pub fn new(config: &OverlayConfig, scale: u32, height: u32) -> Result<Self> {
         let scale = scale.max(1) as f32;
-        let font = config.font.as_deref();
-        let labels = GlyphCache::new(glyphs::load_font(font, glyphs::BOLD)?, LABEL_PX * scale);
-        let tape = GlyphCache::new(glyphs::load_font(font, glyphs::REGULAR)?, TAPE_PX * scale);
+        let bold = glyphs::load_font(config.font.as_deref(), glyphs::BOLD)?;
 
         let width = (config.width as f32 * scale).ceil();
         let height = (height.max(1) as f32 * scale).ceil();
         let (pad_x, pad_y) = (PAD_X * scale, PAD_Y * scale);
-        let line_height = tape.line_height().ceil();
+        let inner = width - 2.0 * pad_x;
+        let text_scale = config.text_scale.clamp(0.5, 3.0);
 
         // The keyboard sits at the bottom. Laying it out once at the origin gives its height.
-        let keyboard = config.keyboard.then(|| {
-            let keys_width = width - 2.0 * pad_x;
-            let keys_height = Keyboard::new(0.0, 0.0, keys_width).size.1;
-            Keyboard::new(pad_x, height - pad_y - keys_height, keys_width)
-        });
+        let keys_height = Keyboard::new(0.0, 0.0, inner).size.1;
+        let keyboard = config
+            .keyboard
+            .then(|| Keyboard::new(pad_x, height - pad_y - keys_height, inner));
+        let key_width = Keyboard::new(0.0, 0.0, inner).keys[1].w;
+        let labels = GlyphCache::new(bold.clone(), key_width * LABEL_RATIO * text_scale);
+
+        // Size the steno letters so that all 23 columns, each as wide as its own letter plus a
+        // gap, fill `PAPER_SHARE` of the width. Column widths scale linearly with the size.
+        let mut probe = GlyphCache::new(bold.clone(), PROBE_PX);
+        let probe_total: f32 = PAPER_ORDER
+            .iter()
+            .map(|&slot| probe.get(Keyboard::label(slot)).advance * (1.0 + SLOT_GAP))
+            .sum();
+        let stroke_px = PROBE_PX * (PAPER_SHARE * inner) / probe_total * text_scale;
+        let mut strokes = GlyphCache::new(bold.clone(), stroke_px);
+        let words = GlyphCache::new(bold, stroke_px * WORDS_RATIO);
+
+        let mut columns = Vec::with_capacity(PAPER_ORDER.len());
+        let mut x = 0.0;
+        for &slot in &PAPER_ORDER {
+            let width = strokes.get(Keyboard::label(slot)).advance * (1.0 + SLOT_GAP);
+            columns.push(Column { x, width });
+            x += width;
+        }
+        let words_left = pad_x + x + stroke_px * 0.6;
+        let words_right = width - pad_x;
+
+        let line_height = (words.line_height() * LINE_SPACING).ceil();
         let tape_bottom = match &keyboard {
-            Some(k) => k.keys[22].y - SECTION_GAP * scale,
+            Some(k) => k.keys[NUMBER_SLOT].y - SECTION_GAP * scale,
             None => height - pad_y,
         };
         let fits = ((tape_bottom - pad_y) / line_height).floor().max(0.0) as usize;
@@ -161,8 +215,13 @@ impl Renderer {
             tape_bottom,
             line_height,
             tape_lines,
+            columns,
+            paper_left: pad_x,
+            words_left,
+            words_right,
             labels,
-            tape,
+            strokes,
+            words,
         })
     }
 
@@ -240,18 +299,16 @@ impl Renderer {
     }
 
     fn draw_tape(&mut self, snapshot: &OverlaySnapshot, pixmap: &mut PixmapMut) {
-        let pad = PAD_X * self.scale;
-        let inner = self.size.0 as f32 - 2.0 * pad;
-        let paper = inner * PAPER_SHARE;
-        let column = paper / 23.0;
         let lines = self.tape_lines;
-        let ascent = self.tape.ascent();
+        // Centre the smaller stroke letters and the words on one baseline within the line
+        let baseline_in_line =
+            (self.line_height - self.words.line_height()) / 2.0 + self.words.ascent();
 
-        // Newest at the bottom, just above the keyboard; older lines fade out upwards
+        // Newest at the bottom, just above the keyboard
         for (age, entry) in snapshot.tape.iter().rev().take(lines).enumerate() {
-            let baseline = self.tape_bottom - (age + 1) as f32 * self.line_height + ascent;
-            let fade = 1.0 - (1.0 - OLDEST_FADE) * age as f32 / lines as f32;
-            self.draw_tape_line(pixmap, entry, (pad, baseline), (column, paper, inner), fade);
+            let row_top = self.tape_bottom - (age + 1) as f32 * self.line_height;
+            let fade = line_fade(lines - 1 - age);
+            self.draw_tape_line(pixmap, entry, row_top + baseline_in_line, fade);
         }
     }
 
@@ -259,27 +316,25 @@ impl Renderer {
         &mut self,
         pixmap: &mut PixmapMut,
         entry: &TapeEntry,
-        (pad, baseline): (f32, f32),
-        (column, paper, inner): (f32, f32, f32),
+        baseline: f32,
         fade: f32,
     ) {
-        // Steno columns: every slot has its own column, so lines stay aligned even though
-        // Atkinson Hyperlegible is proportional
-        for (column_index, &slot) in PAPER_ORDER.iter().enumerate() {
+        // Every slot has its own column, as wide as its letter, so strokes line up from line
+        // to line and nothing overlaps
+        for (index, &slot) in PAPER_ORDER.iter().enumerate() {
             if entry.stroke & (1 << slot) == 0 {
                 continue;
             }
             let letter = Keyboard::label(slot);
-            let x = pad + column * column_index as f32;
-            let centred = x + (column - self.tape.get(letter).advance) / 2.0;
-            let color = fade_color(self.theme.tape, fade);
+            let column = self.columns[index];
+            let advance = self.strokes.get(letter).advance;
             draw_char(
                 pixmap,
-                &mut self.tape,
+                &mut self.strokes,
                 letter,
-                centred,
+                self.paper_left + column.x + (column.width - advance) / 2.0,
                 baseline,
-                color,
+                fade_color(self.theme.strokes, fade),
                 self.scale,
             );
         }
@@ -287,18 +342,29 @@ impl Renderer {
         let (text, color) = if entry.unmatched {
             (Cow::Borrowed("?"), self.theme.unmatched)
         } else {
-            (display_text(&entry.text), self.theme.translation)
+            (display_text(&entry.text), self.theme.words)
         };
         draw_text_clipped(
             pixmap,
-            &mut self.tape,
+            &mut self.words,
             &text,
-            pad + paper + 6.0 * self.scale,
+            self.words_left,
             baseline,
-            pad + inner,
+            self.words_right,
             fade_color(color, fade),
             self.scale,
         );
+    }
+}
+
+/// How strong a tape line is, by how far it is from the top of the tape (`0` is the topmost).
+/// Only the top few lines fade; every other line is at full strength, so the tape stays easy
+/// to read all the way up.
+fn line_fade(row_from_top: usize) -> f32 {
+    if row_from_top >= FADE_LINES {
+        1.0
+    } else {
+        (row_from_top + 1) as f32 / (FADE_LINES + 1) as f32
     }
 }
 
@@ -399,7 +465,7 @@ fn draw_text_clipped(
     }
 }
 
-/// Draw one character with a soft drop shadow, so it reads over any wallpaper.
+/// Draw one character, with its pen at `x`, with a dark halo so it reads over any wallpaper.
 fn draw_char(
     pixmap: &mut PixmapMut,
     glyphs: &mut GlyphCache,
@@ -409,28 +475,29 @@ fn draw_char(
     color: [u8; 4],
     scale: f32,
 ) {
-    let glyph = glyphs.get(c);
-    let (x0, y0) = (
-        x.round() as i32 + glyph.left,
-        baseline.round() as i32 + glyph.top,
-    );
-    // Light text needs the shadow to stay readable on a light wallpaper. Dark text sits on a
-    // lit key already, where a black shadow would only smudge it.
+    let (glyph, pen) = glyphs.place(c, x);
+    let (x0, y0) = (pen + glyph.left, baseline.round() as i32 + glyph.top);
+    // Light text gets a halo: a dark copy one pixel out on every side, plus one dropped
+    // down-right. A one-sided shadow smears; this reads as a clean edge on light and busy
+    // backgrounds. Dark text on a lit key gets none: it would only smudge it.
     let light = u32::from(color[0]) + u32::from(color[1]) + u32::from(color[2]) > 330;
     if light {
-        let shift = scale.round().max(1.0) as i32;
-        blend_glyph(
-            pixmap,
-            glyph,
-            (x0 + shift, y0 + shift),
-            [0, 0, 0, (u16::from(color[3]) * 7 / 10) as u8],
-        );
+        let step = scale.round().max(1.0) as i32;
+        let halo = [0, 0, 0, (u16::from(color[3]) * 11 / 20) as u8];
+        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1), (1, 1)] {
+            blend_glyph(pixmap, glyph, (x0 + dx * step, y0 + dy * step), halo);
+        }
     }
     blend_glyph(pixmap, glyph, (x0, y0), color);
 }
 
 /// Composite one glyph mask onto the pixmap (source-over, premultiplied RGBA).
-fn blend_glyph(pixmap: &mut PixmapMut, glyph: &Glyph, (x0, y0): (i32, i32), [r, g, b, a]: [u8; 4]) {
+fn blend_glyph(
+    pixmap: &mut PixmapMut,
+    glyph: &glyphs::Glyph,
+    (x0, y0): (i32, i32),
+    [r, g, b, a]: [u8; 4],
+) {
     let (width, height) = (pixmap.width() as i32, pixmap.height() as i32);
     let data = pixmap.data_mut();
     for gy in 0..glyph.height as i32 {
@@ -524,7 +591,7 @@ mod tests {
         let short = Renderer::new(&config, 1, 600).unwrap();
         let tall = Renderer::new(&config, 1, 1900).unwrap();
         assert!(tall.tape_lines() > short.tape_lines() * 2);
-        assert!(short.tape_lines() > 10);
+        assert!(short.tape_lines() > 5);
 
         // Every line, and the keyboard below it, stays inside the surface
         let top = tall.tape_bottom - tall.tape_lines() as f32 * tall.line_height;
@@ -547,6 +614,64 @@ mod tests {
             ..OverlayConfig::default()
         };
         assert_eq!(Renderer::new(&off, 1, 1900).unwrap().tape_lines(), 0);
+    }
+
+    #[test]
+    fn only_the_top_few_lines_fade_and_every_other_line_is_full_strength() {
+        // Rows 0.. are counted from the top of the tape
+        let faded: Vec<f32> = (0..FADE_LINES).map(line_fade).collect();
+        assert!(faded.windows(2).all(|pair| pair[0] < pair[1]), "{faded:?}");
+        assert!(faded[0] > 0.0 && faded[FADE_LINES - 1] < 1.0, "{faded:?}");
+        for row in FADE_LINES..200 {
+            assert_eq!(line_fade(row), 1.0, "row {row}");
+        }
+    }
+
+    #[test]
+    fn steno_letters_never_overlap_their_neighbours() {
+        let renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let mut strokes = GlyphCache::new(
+            glyphs::load_font(None, glyphs::BOLD).unwrap(),
+            renderer.strokes.pixel_size(),
+        );
+        for (pair, columns) in PAPER_ORDER.windows(2).zip(renderer.columns.windows(2)) {
+            // Each column starts where the previous one ends
+            assert!((columns[0].x + columns[0].width - columns[1].x).abs() < 0.01);
+            // And the letter fits inside its own column
+            let letter = Keyboard::label(pair[0]);
+            assert!(
+                strokes.get(letter).advance <= columns[0].width,
+                "{letter:?} is wider than its column"
+            );
+        }
+        // W needs more room than T: the columns are not a uniform grid
+        let (t, w) = (Keyboard::label(1), Keyboard::label(4));
+        assert_eq!((t, w), ('T', 'W'));
+        assert!(renderer.columns[5].width > renderer.columns[2].width);
+    }
+
+    #[test]
+    fn the_words_are_set_larger_than_the_strokes() {
+        let renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        assert!(renderer.words.pixel_size() > renderer.strokes.pixel_size() * 1.2);
+    }
+
+    #[test]
+    fn text_scale_scales_the_text_and_keeps_the_width() {
+        let normal = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let big = Renderer::new(
+            &OverlayConfig {
+                text_scale: 1.25,
+                ..OverlayConfig::default()
+            },
+            1,
+            900,
+        )
+        .unwrap();
+        assert!(big.strokes.pixel_size() > normal.strokes.pixel_size() * 1.2);
+        assert_eq!(big.size().0, normal.size().0);
+        // Bigger text means fewer lines fit
+        assert!(big.tape_lines() < normal.tape_lines());
     }
 
     #[test]

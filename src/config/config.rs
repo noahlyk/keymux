@@ -593,8 +593,12 @@ pub struct OverlayConfig {
     pub output: Option<String>,
     /// Gap between the overlay and the right screen edge, in logical pixels
     pub margin: u32,
-    /// Overlay width in logical pixels. It is as tall as the screen.
+    /// Overlay width in logical pixels. It is as tall as the screen. The text and the keys
+    /// are sized from this, so a wider overlay has bigger text.
     pub width: u32,
+    /// Multiplies the text size on top of what `width` gives: 1.2 is a fifth bigger. Bigger
+    /// text means fewer tape lines fit and the words get less room.
+    pub text_scale: f32,
     /// Opacity of a dark panel behind everything, 0.0 to 1.0. Zero is fully transparent:
     /// just the keys and the tape.
     pub background: f32,
@@ -614,7 +618,8 @@ impl Default for OverlayConfig {
             enabled: true,
             output: None,
             margin: 0,
-            width: 280,
+            width: 400,
+            text_scale: 1.0,
             background: 0.0,
             keyboard: true,
             tape: true,

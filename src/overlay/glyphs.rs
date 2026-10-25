@@ -36,13 +36,18 @@ pub struct Glyph {
     pub mask: Box<[u8]>,
 }
 
-/// A font at one pixel size, with every character drawn so far.
+/// How many horizontal sub-pixel positions each glyph is drawn at. Snapping every letter to a
+/// whole pixel makes spacing visibly uneven at small sizes ("thi s"); quarter-pixel steps are
+/// below what the eye sees.
+const SUBPIXELS: usize = 4;
+
+/// A font at one pixel size, with every character drawn so far at each sub-pixel offset.
 pub struct GlyphCache {
     font: FontArc,
     scale: PxScale,
-    /// ASCII by index: no hashing for the characters steno actually uses
-    ascii: [Option<Glyph>; 128],
-    other: FxHashMap<char, Glyph>,
+    /// ASCII by `bucket * 128 + char`: no hashing for the characters steno actually uses
+    ascii: Vec<Option<Glyph>>,
+    other: FxHashMap<(char, usize), Glyph>,
 }
 
 impl GlyphCache {
@@ -51,9 +56,15 @@ impl GlyphCache {
         Self {
             font,
             scale: PxScale::from(px),
-            ascii: std::array::from_fn(|_| None),
+            ascii: (0..128 * SUBPIXELS).map(|_| None).collect(),
             other: FxHashMap::default(),
         }
+    }
+
+    /// The size this cache draws at, in pixels.
+    #[must_use]
+    pub fn pixel_size(&self) -> f32 {
+        self.scale.y
     }
 
     /// Distance from the top of a line to its baseline.
@@ -69,15 +80,37 @@ impl GlyphCache {
         scaled.height() + scaled.line_gap()
     }
 
-    /// The glyph for `c`, rasterizing it the first time.
+    /// The glyph for `c` on a whole-pixel position, rasterizing it the first time. Use this to
+    /// measure; to draw, use [`Self::place`].
     pub fn get(&mut self, c: char) -> &Glyph {
+        self.bucket(c, 0)
+    }
+
+    /// The glyph for `c` drawn with its pen at horizontal position `x`, and the whole-pixel x
+    /// to put its mask at (add `glyph.left`). The fractional part of `x` picks one of
+    /// [`SUBPIXELS`] pre-drawn variants.
+    pub fn place(&mut self, c: char, x: f32) -> (&Glyph, i32) {
+        let whole = x.floor();
+        let mut bucket = ((x - whole) * SUBPIXELS as f32).round() as usize;
+        let mut whole = whole as i32;
+        if bucket == SUBPIXELS {
+            bucket = 0;
+            whole += 1;
+        }
+        (self.bucket(c, bucket), whole)
+    }
+
+    fn bucket(&mut self, c: char, bucket: usize) -> &Glyph {
         let (font, scale) = (&self.font, self.scale);
+        let shift = bucket as f32 / SUBPIXELS as f32;
         match usize::try_from(u32::from(c)).ok().filter(|&i| i < 128) {
-            Some(i) => self.ascii[i].get_or_insert_with(|| rasterize(font, scale, c)),
+            Some(i) => {
+                self.ascii[bucket * 128 + i].get_or_insert_with(|| rasterize(font, scale, c, shift))
+            }
             None => self
                 .other
-                .entry(c)
-                .or_insert_with(|| rasterize(font, scale, c)),
+                .entry((c, bucket))
+                .or_insert_with(|| rasterize(font, scale, c, shift)),
         }
     }
 
@@ -87,10 +120,11 @@ impl GlyphCache {
     }
 }
 
-fn rasterize(font: &FontArc, scale: PxScale, c: char) -> Glyph {
+/// Draw `c` with its pen `shift` pixels (0 to under 1) to the right of a whole-pixel position.
+fn rasterize(font: &FontArc, scale: PxScale, c: char, shift: f32) -> Glyph {
     let id = font.glyph_id(c);
     let advance = font.as_scaled(scale).h_advance(id);
-    let Some(outline) = font.outline_glyph(id.with_scale_and_position(scale, point(0.0, 0.0)))
+    let Some(outline) = font.outline_glyph(id.with_scale_and_position(scale, point(shift, 0.0)))
     else {
         // Space and other blank characters: nothing to draw, only the advance
         return Glyph {
@@ -134,5 +168,26 @@ mod tests {
             assert_eq!(cache.get(' ').width, 0);
             assert!(cache.measure("STKPW") > 0.0);
         }
+    }
+
+    #[test]
+    fn a_glyph_drawn_at_a_fractional_position_differs_from_the_whole_pixel_one() {
+        let mut cache = GlyphCache::new(load_font(None, REGULAR).unwrap(), 16.0);
+        let whole = cache.place('l', 10.0).0.mask.to_vec();
+        let (half, x) = cache.place('l', 10.5);
+        assert_eq!(x, 10, "the pen is still in pixel 10");
+        assert_ne!(
+            whole,
+            half.mask.to_vec(),
+            "half a pixel to the right looks different"
+        );
+    }
+
+    #[test]
+    fn rounding_up_to_the_next_pixel_carries_into_the_whole_part() {
+        let mut cache = GlyphCache::new(load_font(None, REGULAR).unwrap(), 16.0);
+        // 10.9 is closer to 11.0 than to 10.75, so it is pixel 11 with no sub-pixel offset
+        assert_eq!(cache.place('l', 10.9).1, 11);
+        assert_eq!(cache.place('l', 10.76).1, 10);
     }
 }
