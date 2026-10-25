@@ -161,6 +161,13 @@ pub enum Commands {
     #[command(hide = true)]
     NiriDaemon,
 
+    /// Show the steno keyboard and tape on screen while a steno layer is on
+    Overlay {
+        /// Print what the daemon sends instead of drawing it
+        #[arg(long)]
+        dump: bool,
+    },
+
     /// Run the hyprland window watcher daemon
     #[command(hide = true)]
     HyprlandDaemon,

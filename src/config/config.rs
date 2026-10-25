@@ -577,6 +577,51 @@ pub struct Config {
     /// layer. Per-keyboard `default_layer` overrides this for that keyboard.
     #[serde(default)]
     pub default_layer: Option<Layer>,
+
+    /// The on-screen steno keyboard and tape drawn by `keymux overlay`.
+    /// Read by the overlay process; the daemon ignores it.
+    #[serde(default)]
+    pub overlay: OverlayConfig,
+}
+
+/// How `keymux overlay` looks. Every field has a default, so `overlay: ()` is enough.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OverlayConfig {
+    pub enabled: bool,
+    /// Monitor to draw on, such as `Some("DP-1")`. `None` lets the compositor pick.
+    pub output: Option<String>,
+    /// Gap between the panel and the right screen edge, in logical pixels
+    pub margin: u32,
+    /// Panel width in logical pixels. Height follows from the content.
+    pub width: u32,
+    /// Panel background alpha, 0.0 to 1.0
+    pub opacity: f32,
+    pub keyboard: bool,
+    pub tape: bool,
+    /// Tape strokes shown, newest at the bottom
+    pub tape_lines: usize,
+    /// A .ttf/.otf to use instead of the embedded Atkinson Hyperlegible
+    pub font: Option<String>,
+    /// Steno layers that show the overlay. Empty means every steno layer.
+    pub layers: Vec<Layer>,
+}
+
+impl Default for OverlayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            output: None,
+            margin: 16,
+            width: 280,
+            opacity: 0.72,
+            keyboard: true,
+            tape: true,
+            tape_lines: 18,
+            font: None,
+            layers: Vec::new(),
+        }
+    }
 }
 
 const fn default_tapping_term() -> u32 {
@@ -955,6 +1000,7 @@ impl Config {
                     hot_config_reload: self.hot_config_reload, // Keep global hot reload setting
                     per_keyboard_inherits_global_layout: self.per_keyboard_inherits_global_layout, // Keep global setting
                     default_layer: override_cfg.default_layer.clone(),
+                    overlay: self.overlay.clone(), // The overlay is one per screen, not per keyboard
                 }
             }
         } else {

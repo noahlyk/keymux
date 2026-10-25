@@ -5,6 +5,7 @@ use super::chord::ChordState;
 use super::dict::Dictionary;
 use super::format::KeyPress;
 use super::layout::{build_key_map, preset};
+use super::overlay::OverlayHub;
 use super::setup::default_dictionaries;
 use super::tape;
 use super::translate::{StenoOutput, Translator};
@@ -104,7 +105,13 @@ impl StenoEngine {
         if let Some(&bit) = self.keys.get(&key) {
             self.held_keys.insert(key);
             self.chord.press(bit, now);
+            self.publish_keys();
         }
+    }
+
+    /// Show the stroke in progress on the overlay.
+    fn publish_keys(&self) {
+        OverlayHub::global().set_keys(self.chord.pending(), self.chord.held());
     }
 
     /// A stroke key came up. Returns output if this completed a stroke.
@@ -118,7 +125,10 @@ impl StenoEngine {
             .iter()
             .filter_map(|other| self.keys.get(other))
             .fold(0, |bits, &other| bits | other);
-        let stroke = self.chord.release(bit & !still_held)?;
+        let Some(stroke) = self.chord.release(bit & !still_held) else {
+            self.publish_keys();
+            return None;
+        };
         self.on_stroke(stroke)
     }
 
@@ -173,6 +183,7 @@ impl StenoEngine {
     fn on_stroke(&mut self, stroke: u32) -> Option<StenoOutput> {
         if self.loading.is_some() {
             self.backlog.push(stroke);
+            self.publish_keys();
             return None;
         }
         self.translate(stroke)
@@ -180,13 +191,13 @@ impl StenoEngine {
 
     fn translate(&mut self, stroke: u32) -> Option<StenoOutput> {
         let output = self.translator.stroke(stroke);
+        let unmatched = self.translator.was_unmatched();
+        let description = tape::describe(output.as_ref(), unmatched);
         if let Some(path) = &self.tape {
-            tape::append(
-                path,
-                stroke,
-                &tape::describe(output.as_ref(), self.translator.was_unmatched()),
-            );
+            tape::append(path, stroke, &description);
         }
+        // Same description as the tape file, so the overlay and `keymux steno tape` agree
+        OverlayHub::global().push_stroke(stroke, description, unmatched);
         output
     }
 

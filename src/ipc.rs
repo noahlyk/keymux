@@ -1,12 +1,14 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use crate::gamemode_state::{GlobalOverride, WindowOverride};
+use crate::steno::overlay::{OverlayHub, OverlaySnapshot};
 use crate::window_manager::WindowInfo;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// IPC message from client to daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +56,9 @@ pub enum IpcRequest {
     SetGlobalOverride(GlobalOverride),
     /// Get the current global override
     GetGlobalOverride,
+    /// Keep the connection open and stream [`OverlaySnapshot`] frames on every change.
+    /// Handled by the IPC thread itself, never reaches the daemon's main loop.
+    SubscribeOverlay,
 }
 
 /// IPC response from daemon to client
@@ -144,4 +149,51 @@ pub fn send_request(request: &IpcRequest) -> Result<IpcResponse> {
     let response: IpcResponse = bincode::deserialize(&response_buf)?;
 
     Ok(response)
+}
+
+/// Write one length-prefixed bincode frame, the same framing as requests and responses.
+fn write_frame(stream: &mut impl Write, value: &impl Serialize) -> Result<()> {
+    let encoded = bincode::serialize(value)?;
+    stream.write_all(&(encoded.len() as u32).to_le_bytes())?;
+    stream.write_all(&encoded)?;
+    stream.flush()?;
+    Ok(())
+}
+
+/// Daemon side of [`IpcRequest::SubscribeOverlay`]: send the current state, then every newer
+/// one, until the subscriber goes away. Run on its own thread; it never touches the key path
+/// except through the hub's lock.
+pub fn serve_overlay(mut stream: UnixStream, hub: &OverlayHub) {
+    let mut state = hub.snapshot();
+    loop {
+        if write_frame(&mut stream, &state).is_err() {
+            return; // overlay closed
+        }
+        // Wake up now and then with nothing new, to notice a subscriber that went away
+        // TODO(overlay): detect a closed peer without writing (poll for POLLHUP) instead
+        loop {
+            if let Some(newer) = hub.wait_newer(state.generation, Duration::from_secs(30)) {
+                state = newer;
+                break;
+            }
+            if write_frame(&mut stream, &state).is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// Overlay side: connect, subscribe, and return the frames as they arrive. The iterator
+/// ends when the daemon goes away; the caller reconnects.
+pub fn subscribe_overlay() -> Result<impl Iterator<Item = OverlaySnapshot>> {
+    let mut stream = UnixStream::connect(get_socket_path())
+        .context("Failed to connect to daemon. Is it running?")?;
+    write_frame(&mut stream, &IpcRequest::SubscribeOverlay)?;
+    Ok(std::iter::from_fn(move || {
+        let mut len = [0u8; 4];
+        stream.read_exact(&mut len).ok()?;
+        let mut frame = vec![0u8; u32::from_le_bytes(len) as usize];
+        stream.read_exact(&mut frame).ok()?;
+        bincode::deserialize(&frame).ok()
+    }))
 }

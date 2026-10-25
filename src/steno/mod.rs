@@ -12,6 +12,7 @@ pub mod format;
 pub mod layout;
 pub mod numbers;
 pub mod orthography;
+pub mod overlay;
 pub mod setup;
 pub mod shortest;
 pub mod tape;

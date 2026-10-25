@@ -38,6 +38,15 @@ crossbeam-channel = "0.5"
 crossterm = "0.28"
 sha2 = "0.10"
 
+# `keymux overlay`: on-screen steno keyboard and tape (Wayland layer-shell)
+smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"], optional = true }
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"], optional = true }
+ab_glyph = { version = "0.2", optional = true }
+
+[features]
+default = ["overlay"]
+overlay = ["dep:smithay-client-toolkit", "dep:tiny-skia", "dep:ab_glyph"]
+
 [profile.release]
 opt-level = 3
 lto = "fat"

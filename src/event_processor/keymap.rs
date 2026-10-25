@@ -6,6 +6,7 @@ use crate::event_processor::actions::{
 use crate::event_processor::layer_stack::LayerStack;
 use crate::keycode::KeyCode;
 use crate::steno::translate::StenoOutput;
+use crate::steno::overlay::OverlayHub;
 use crate::steno::setup::Cooldown;
 use crate::steno::{self, StenoEngine};
 use std::collections::HashMap;
@@ -70,6 +71,8 @@ pub struct KeymapProcessor {
     steno_engines: HashMap<Layer, StenoEngine>,
     /// The steno layer that was on top at the last key press, if any
     steno_active: Option<Layer>,
+    /// The steno layer the overlay was last told about
+    overlay_layer: Option<Layer>,
     /// Limits the "steno isn't set up" notification
     setup_hint: Cooldown,
     config_dir: PathBuf,
@@ -114,6 +117,7 @@ impl KeymapProcessor {
             adaptive_processor: AdaptiveProcessor::new(),
             steno_engines,
             steno_active: None,
+            overlay_layer: None,
             setup_hint: Cooldown::new(Duration::from_secs(3)),
             config_dir,
             user_id,
@@ -172,7 +176,24 @@ impl KeymapProcessor {
         if pressed {
             self.steno_setup_hint();
         }
+        self.publish_overlay_layer();
         result
+    }
+
+    /// Tell the overlay when the steno layer on top changes, so it shows on the press that
+    /// switched into steno rather than on the next stroke. Compares by reference first, so
+    /// the common case (no change) neither allocates nor locks.
+    fn publish_overlay_layer(&mut self) {
+        let game_mode = self.layer_stack.is_game_mode_active();
+        let top = self.layer_stack.layers().last().filter(|layer| {
+            self.steno_engines
+                .get(*layer)
+                .is_some_and(|engine| !(game_mode && engine.disabled_in_game_mode))
+        });
+        if top != self.overlay_layer.as_ref() {
+            self.overlay_layer = top.cloned();
+            OverlayHub::global().set_layer(top.map(|layer| layer.0.as_str()));
+        }
     }
 
     /// On a steno layer that has no dictionary yet, point the user at setup.

@@ -47,6 +47,14 @@ fn main() -> Result<()> {
         Some(cli::Commands::NiriDaemon) => {
             keymux::niri::run_niri_daemon()?;
         }
+        #[cfg(feature = "overlay")]
+        Some(cli::Commands::Overlay { dump }) => {
+            keymux::overlay::run(*dump)?;
+        }
+        #[cfg(not(feature = "overlay"))]
+        Some(cli::Commands::Overlay { .. }) => {
+            anyhow::bail!("this keymux was built without the overlay feature");
+        }
         Some(cli::Commands::HyprlandDaemon) => {
             keymux::hyprland::run_hyprland_daemon()?;
         }

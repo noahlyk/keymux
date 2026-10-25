@@ -871,6 +871,17 @@ impl AsyncDaemon {
                         match stream.read_exact(&mut buffer) {
                             Ok(()) => {
                                 if let Ok(request) = bincode::deserialize::<IpcRequest>(&buffer) {
+                                    // A subscription keeps its connection, so it gets its own
+                                    // thread and this loop goes back to accepting
+                                    if matches!(request, IpcRequest::SubscribeOverlay) {
+                                        thread::spawn(move || {
+                                            crate::ipc::serve_overlay(
+                                                stream,
+                                                crate::steno::overlay::OverlayHub::global(),
+                                            );
+                                        });
+                                        continue;
+                                    }
                                     // Create response channel
                                     let (resp_tx, resp_rx) = mpsc::channel();
 
@@ -1558,6 +1569,10 @@ impl AsyncDaemon {
                     std::process::exit(0);
                 });
                 IpcResponse::Ok
+            }
+            // The IPC thread hands subscriptions to their own thread before they get here
+            IpcRequest::SubscribeOverlay => {
+                IpcResponse::Error("overlay subscriptions are streamed, not answered".into())
             }
         }
     }
