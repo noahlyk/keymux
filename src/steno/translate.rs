@@ -330,11 +330,22 @@ impl Translator {
         // Keeping them (rather than dropping them) means their strokes can still join and
         // undo still restores them.
         let mut covered = Vec::new();
-        while self
-            .history
-            .last()
-            .is_some_and(|entry| entry.start >= start)
-        {
+        // Where the text of the entry being looked at ends: the end of the text, then the start
+        // of the entry after it
+        let mut end = self.output.len();
+        while let Some(entry) = self.history.last() {
+            if entry.start < start {
+                break;
+            }
+            // An entry that typed nothing and sits exactly where the edit begins, such as a
+            // stroke that matched nothing, has no text for the edit to rewrite. Covering it
+            // would fold its stroke into this translation's strokes, so a later stroke could
+            // never combine with this one (`HRAOEUP`, `PER`, `TPEBGT` would give `per effect`,
+            // not `perfect`): the lookup would be for HRAOEUP/PER/TPEBGT.
+            if entry.start == start && entry.start == end {
+                break;
+            }
+            end = entry.start;
             covered.extend(self.history.pop());
         }
         covered.reverse();
@@ -895,6 +906,63 @@ mod tests {
                 text: "andum".into(),
             })
         );
+    }
+
+    /// PER and TPEBGT each have an entry, and together are "perfect". PUR is another word.
+    const PERFECT: &str = r#"{"PER": "per", "TPEBGT": "effect", "PER/TPEBGT": "perfect", "PUR": "purr"}"#;
+
+    #[test]
+    fn a_stroke_that_matched_nothing_does_not_stop_the_next_entry_combining() {
+        let mut t = translator(PERFECT);
+        // HRAOEUP has no entry. It types nothing, so the text is still empty and the next
+        // word starts in the same place: that must not fold HRAOEUP into the word's strokes
+        assert_eq!(t.stroke(stroke("HRAOEUP")), None);
+        assert!(t.was_unmatched());
+        assert_eq!(t.stroke(stroke("PER")), Some(StenoOutput::Type("per".into())));
+        // PER/TPEBGT is "perfect", so this adds "fect", not " effect"
+        assert_eq!(
+            t.stroke(stroke("TPEBGT")),
+            Some(StenoOutput::Type("fect".into()))
+        );
+    }
+
+    #[test]
+    fn an_unmatched_stroke_then_an_undo_that_empties_the_text_still_combines_after() {
+        // The sequence from a real tape: an unmatched stroke, a word taken back with `*`, and
+        // then a two-stroke word, with nothing on screen in between
+        let mut t = translator(PERFECT);
+        let mut typed = String::new();
+        for text in ["HRAOEUP", "PUR", "*", "PER", "TPEBGT"] {
+            apply(&mut typed, t.stroke(stroke(text)));
+        }
+        assert_eq!(typed, "perfect");
+    }
+
+    #[test]
+    fn an_unmatched_stroke_before_a_word_does_not_change_what_undo_takes_back() {
+        let mut t = translator(PERFECT);
+        let mut typed = String::new();
+        for text in ["HRAOEUP", "PER", "TPEBGT"] {
+            apply(&mut typed, t.stroke(stroke(text)));
+        }
+        assert_eq!(typed, "perfect");
+        // `*` takes "perfect" back to "per", then "per" away, as it does with no stroke before
+        assert_eq!(
+            t.stroke(UNDO_STROKE),
+            Some(StenoOutput::Retype {
+                backspaces: 7,
+                text: "per".into(),
+            })
+        );
+        assert_eq!(
+            t.stroke(UNDO_STROKE),
+            Some(StenoOutput::Retype {
+                backspaces: 3,
+                text: String::new(),
+            })
+        );
+        // Nothing but the unmatched stroke is left, and it has nothing to take back
+        assert_eq!(t.stroke(UNDO_STROKE), None);
     }
 
     #[test]

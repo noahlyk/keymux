@@ -654,6 +654,39 @@ fn backspace_does_not_delete_text_before_a_held_back_stroke() {
 }
 
 #[test]
+fn a_two_stroke_word_still_combines_after_a_stroke_that_matched_nothing() {
+    // From a real tape: a stroke that is in no dictionary, then a two-stroke word (here
+    // PER/TPEBGT, "perfect") typed on an empty line, used to come out as "per effect" until
+    // you left and rejoined steno. On this layout PER is E N J and TPEBGT is W E N K L P.
+    let fixture = Fixture::new("unmatched-then-two-stroke");
+    let mut p = fixture.processor_with(
+        CONFIG,
+        r#"{"PER": "per", "TPEBGT": "effect", "PER/TPEBGT": "perfect"}"#,
+    );
+    enter_steno(&mut p);
+
+    // A stroke with no entry (just K-): it types nothing
+    assert_eq!(chord(&mut p, &[KeyCode::KC_S]), ProcessResult::None);
+    assert_eq!(
+        chord(&mut p, &[KeyCode::KC_E, KeyCode::KC_N, KeyCode::KC_J]),
+        ProcessResult::TypeString("per".to_string(), false)
+    );
+    let tpebgt = [
+        KeyCode::KC_W,
+        KeyCode::KC_E,
+        KeyCode::KC_N,
+        KeyCode::KC_K,
+        KeyCode::KC_L,
+        KeyCode::KC_P,
+    ];
+    // The second stroke finishes the word: "fect" goes after "per", not " effect"
+    assert_eq!(
+        chord(&mut p, &tpebgt),
+        ProcessResult::TypeString("fect".to_string(), false)
+    );
+}
+
+#[test]
 fn half_a_trigger_is_dropped_when_you_leave_the_layer() {
     let fixture = Fixture::new("lookup-leave-half");
     let mut p = lookup_trigger_processor(&fixture, "KAT/-T");
