@@ -63,9 +63,10 @@ impl StenoEngine {
                 .collect()
         };
         let (sender, loading) = mpsc::channel();
+        let cache = super::setup::cache_dir(config_dir);
         std::thread::spawn(move || {
             // The engine may be dropped before this finishes; nothing to do then
-            let _ = sender.send(Dictionary::load(&paths));
+            let _ = sender.send(Dictionary::load_cached(&paths, &cache));
         });
 
         Ok(Self {
