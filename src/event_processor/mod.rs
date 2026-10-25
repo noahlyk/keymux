@@ -75,24 +75,6 @@ fn run_event_processor(
         libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
 
-    // Escape hatch: if Escape is held down when the keyboard is attached, leave it alone, so a
-    // bad layer or config can't lock you out of typing. Plug it in again without Escape to attach.
-    if device
-        .get_key_state()
-        .is_ok_and(|keys| keys.contains(Key::KEY_ESC))
-    {
-        warn!(
-            "Escape held while attaching {}; leaving it ungrabbed. Replug it without Escape to use keymux",
-            keyboard_name
-        );
-        crate::steno::setup::notify_user(
-            user_id,
-            "keymux skipped a keyboard",
-            &format!("Escape was held while attaching {keyboard_name}. Replug it without Escape to use keymux."),
-        );
-        return Ok(());
-    }
-
     // Grab the device for exclusive access
     device.grab().context("Failed to grab device")?;
     info!("Grabbed device: {}", keyboard_name);
@@ -107,6 +89,7 @@ fn run_event_processor(
     info!("Released all keys on startup for safety: {}", keyboard_name);
 
     // Track last save time for periodic stats saving
+    let mut alt_f12 = AltF12::default();
     let mut last_stats_save = std::time::Instant::now();
     const STATS_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -182,9 +165,21 @@ fn run_event_processor(
         }
 
         // Read events from physical keyboard (non-blocking)
+        let mut escaped = false;
         match device.fetch_events() {
             Ok(events) => {
                 for ev in events {
+                    // Alt+F12 releases this keyboard from keymux. It's checked on the raw key,
+                    // before the keymap, so no layer or remap can swallow it.
+                    if ev.event_type() == EventType::KEY && alt_f12.feed(Key::new(ev.code()), ev.value()) {
+                        // Let go of anything keymux is holding down before the keyboard is given back
+                        warn!("Alt+F12 pressed on {}; releasing it from keymux", keyboard_name);
+                        let _ = keymap.save_adaptive_stats(user_id);
+                        release_all_keys(&mut virtual_device, &keymap);
+                        escaped = true;
+                        break;
+                    }
+
                     // Process key events through keymap
                     if ev.event_type() == evdev::EventType::KEY {
                         // Convert evdev key code to our KeyCode enum
@@ -257,6 +252,7 @@ fn run_event_processor(
                         virtual_device.emit(&[ev])?;
                     }
                 }
+
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // No events available - check for DT timeouts
@@ -299,6 +295,129 @@ fn run_event_processor(
             }
             Err(e) => return Err(e.into()),
         }
+
+        if escaped {
+            // Give the keyboard back to the system
+            let _ = device.ungrab();
+            crate::steno::setup::notify_user(
+                user_id,
+                "keymux released a keyboard",
+                &format!("Alt+F12 released {keyboard_name} from keymux. Replug it to use keymux again."),
+            );
+            return Ok(());
+        }
+    }
+}
+
+/// Watches one keyboard's raw key events for Alt+F12, the chord that releases it from keymux.
+/// It only counts as the very first key press after the keyboard is attached: the first press
+/// decides, and anything other than Alt+F12 disarms the chord for good. Either Alt counts.
+#[derive(Debug)]
+struct AltF12 {
+    left: bool,
+    right: bool,
+    armed: bool,
+}
+
+impl Default for AltF12 {
+    fn default() -> Self {
+        Self {
+            left: false,
+            right: false,
+            armed: true,
+        }
+    }
+}
+
+impl AltF12 {
+    /// Feed one raw key event, where `value` is 1 for press, 0 for release, 2 for repeat.
+    /// True when Alt+F12 is the first key press: the keyboard should be released.
+    fn feed(&mut self, key: Key, value: i32) -> bool {
+        if key == Key::KEY_LEFTALT {
+            self.left = value != 0;
+            return false;
+        }
+        if key == Key::KEY_RIGHTALT {
+            self.right = value != 0;
+            return false;
+        }
+        // Releases and repeats aren't presses, so they don't decide anything
+        if value != 1 {
+            return false;
+        }
+        let escape = self.armed && key == Key::KEY_F12 && (self.left || self.right);
+        self.armed = false;
+        escape
+    }
+}
+
+#[cfg(test)]
+mod alt_f12_tests {
+    use super::*;
+
+    /// Whether the chord fires for these events, in order, starting from a freshly attached keyboard.
+    fn fires(events: &[(Key, i32)]) -> bool {
+        let mut chord = AltF12::default();
+        events.iter().any(|&(key, value)| chord.feed(key, value))
+    }
+
+    #[test]
+    fn left_alt_then_f12_fires() {
+        assert!(fires(&[(Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
+    }
+
+    #[test]
+    fn right_alt_then_f12_fires() {
+        assert!(fires(&[(Key::KEY_RIGHTALT, 1), (Key::KEY_F12, 1)]));
+    }
+
+    #[test]
+    fn f12_alone_does_not_fire() {
+        assert!(!fires(&[(Key::KEY_F12, 1)]));
+    }
+
+    #[test]
+    fn alt_released_before_f12_does_not_fire() {
+        assert!(!fires(&[(Key::KEY_LEFTALT, 1), (Key::KEY_LEFTALT, 0), (Key::KEY_F12, 1)]));
+    }
+
+    #[test]
+    fn holding_one_alt_while_pressing_the_other_keeps_it_held() {
+        // Left alt down, right alt down, left alt up: right alt still holds, so F12 fires
+        assert!(fires(&[
+            (Key::KEY_LEFTALT, 1),
+            (Key::KEY_RIGHTALT, 1),
+            (Key::KEY_LEFTALT, 0),
+            (Key::KEY_F12, 1),
+        ]));
+    }
+
+    #[test]
+    fn f12_repeat_and_release_do_not_fire() {
+        assert!(!fires(&[(Key::KEY_LEFTALT, 1), (Key::KEY_F12, 2)]));
+        assert!(!fires(&[(Key::KEY_LEFTALT, 1), (Key::KEY_F12, 0)]));
+    }
+
+    #[test]
+    fn alt_f12_after_another_key_press_does_not_fire() {
+        assert!(!fires(&[(Key::KEY_A, 1), (Key::KEY_A, 0), (Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
+    }
+
+    #[test]
+    fn alt_f12_after_a_modifier_press_does_not_fire() {
+        // Ctrl+Alt+F12 is not the escape: Ctrl was the first press
+        assert!(!fires(&[(Key::KEY_LEFTCTRL, 1), (Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
+    }
+
+    #[test]
+    fn alt_f12_after_a_long_gap_still_needs_to_be_first() {
+        // Any press in between disarms it, even after the keyboard has been quiet
+        assert!(!fires(&[(Key::KEY_LEFTSHIFT, 1), (Key::KEY_LEFTSHIFT, 0), (Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
+    }
+
+    #[test]
+    fn a_release_before_the_chord_does_not_disarm_it() {
+        assert!(fires(&[(Key::KEY_A, 0), (Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
     }
 }
 
