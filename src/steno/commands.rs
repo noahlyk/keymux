@@ -1,7 +1,7 @@
 //! `keymux steno` commands that read or edit dictionaries, and show the tape.
 
 use super::dict::Dictionary;
-use super::format::{parse_pieces, render, FormatState};
+use super::format::{parse_pieces, render, FormatState, Piece};
 use super::layout::{
     build_key_map, extra_keys, parse_stroke, preset, render_stroke, without_extra_keys, SLOTS, SLOT_SOUNDS,
 };
@@ -320,9 +320,16 @@ fn chars_as_spans(text: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// Every stroke sequence that translates `word`, fewest strokes first, then fewest keys.
+/// Every stroke sequence that translates `word` on its own, fewest strokes first, then fewest keys.
+/// An entry that glues to the next word (`{be^}`, a prefix) is left out: it types `be`, but
+/// the next word would attach to it, so it doesn't type `be` as a word.
 fn ranked_strokes(dict: &Dictionary, word: &str) -> Vec<Vec<u32>> {
     let mut found = dict.strokes_for(word);
+    found.retain(|strokes| {
+        !dict
+            .get(strokes)
+            .is_some_and(|pieces| pieces.iter().any(|piece| matches!(piece, Piece::TextAttach(_))))
+    });
     found.sort_by_key(|strokes| {
         (strokes.len(), strokes.iter().map(|s| s.count_ones()).sum::<u32>())
     });
@@ -676,6 +683,16 @@ mod tests {
         // Only the first outline of a word carries the word
         let words: Vec<&str> = rows.iter().map(|row| row.word.as_str()).collect();
         assert_eq!(words, ["jumped", ""]);
+    }
+
+    #[test]
+    fn a_prefix_that_glues_to_the_next_word_is_not_listed_as_the_word() {
+        // `{be^}` types "be" but attaches the word after it, so only the plain "be" is an outline
+        let mut dict = Dictionary::default();
+        dict.merge_json(r#"{"-B": "be", "PWE": "{be^}"}"#).unwrap();
+        let rows = chord_rows(dict, &qwerty_keys_by_bit(), "be", false);
+        let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
+        assert_eq!(outlines, ["-B"]);
     }
 
     #[test]
