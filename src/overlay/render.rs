@@ -24,7 +24,7 @@ const PAD_Y: f32 = 14.0;
 /// Space between the tape and the keyboard, logical px
 const SECTION_GAP: f32 = 20.0;
 /// Outline of an unlit key, logical px
-const OUTLINE: f32 = 1.5;
+const OUTLINE: f32 = 1.0;
 /// Radius of a pad's top corners relative to its width. The bottom is fully round.
 const PAD_TOP_ROUND: f32 = 0.2;
 /// Slot of the `#` number bar
@@ -72,8 +72,8 @@ impl Default for Theme {
     fn default() -> Self {
         Self {
             panel: [10, 12, 16],
-            key: [14, 18, 26, 120],
-            outline: [214, 224, 238, 105],
+            key: [14, 18, 26, 38],
+            outline: [214, 224, 238, 80],
             label: [226, 232, 242, 245],
             label_lit: [8, 12, 16, 255],
             consonant: [45, 212, 170, 255],
