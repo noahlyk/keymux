@@ -170,6 +170,10 @@ pub enum Commands {
         /// Draw made-up strokes without the daemon, to check how it looks
         #[arg(long, conflicts_with = "dump")]
         demo: bool,
+
+        /// Show the overlay all the time, not only while a steno layer is on
+        #[arg(long, conflicts_with = "dump")]
+        always: bool,
     },
 
     /// Run the hyprland window watcher daemon

@@ -587,8 +587,10 @@ overlay: (
 
 Every field is optional, and edits to the config file apply without restarting the overlay.
 In niri, style it with `layer-rule { match namespace="^keymux-steno$" }`.
-`keymux overlay --demo` draws made-up strokes to try the look without the daemon, and
-`keymux overlay --dump` prints what the daemon sends. With several keyboards, it follows the
+`keymux overlay --always` keeps it on screen on every layer, not only steno ones (the
+`layers` list is ignored too; `enabled: false` still turns it off). `keymux overlay --demo`
+draws made-up strokes to try the look without the daemon, and `keymux overlay --dump`
+prints what the daemon sends. With several keyboards, it follows the
 one you last pressed a key on.
 
 ## 🎮 Usage

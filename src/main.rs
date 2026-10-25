@@ -48,8 +48,8 @@ fn main() -> Result<()> {
             keymux::niri::run_niri_daemon()?;
         }
         #[cfg(feature = "overlay")]
-        Some(cli::Commands::Overlay { dump, demo }) => {
-            keymux::overlay::run(*dump, *demo)?;
+        Some(cli::Commands::Overlay { dump, demo, always }) => {
+            keymux::overlay::run(*dump, *demo, *always)?;
         }
         #[cfg(not(feature = "overlay"))]
         Some(cli::Commands::Overlay { .. }) => {

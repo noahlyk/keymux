@@ -47,7 +47,7 @@ const NAMESPACE: &str = "keymux-steno";
 /// output is.
 const FALLBACK_HEIGHT: u32 = 1080;
 
-pub fn run(config: OverlayConfig, source: Source) -> Result<()> {
+pub fn run(config: OverlayConfig, source: Source, always: bool) -> Result<()> {
     let conn = Connection::connect_to_env().context("no Wayland session to draw on")?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
     let qh = event_queue.handle();
@@ -112,7 +112,12 @@ pub fn run(config: OverlayConfig, source: Source) -> Result<()> {
         dirty: false,
         latest: OverlaySnapshot::default(),
         exit: false,
+        always,
     };
+    // With `--always` it shows right away, without waiting for the daemon's first frame
+    if always {
+        overlay.on_snapshot(OverlaySnapshot::default());
+    }
     while !overlay.exit {
         event_loop.dispatch(None, &mut overlay)?;
     }
@@ -143,14 +148,13 @@ struct Overlay {
     dirty: bool,
     latest: OverlaySnapshot,
     exit: bool,
+    /// `--always`: show on every layer, not only steno ones
+    always: bool,
 }
 
 impl Overlay {
     fn on_snapshot(&mut self, snapshot: OverlaySnapshot) {
-        let visible = self.config.enabled
-            && snapshot.layer.as_deref().is_some_and(|layer| {
-                self.config.layers.is_empty() || self.config.layers.iter().any(|l| l.0 == layer)
-            });
+        let visible = super::is_visible(&self.config, self.always, snapshot.layer.as_deref());
         // Skip frames that change nothing on screen, such as a repeat after a reconnect
         let unchanged = self.latest.layer == snapshot.layer
             && self.latest.chord == snapshot.chord

@@ -25,7 +25,7 @@ pub enum Source {
     Demo,
 }
 
-pub fn run(dump: bool, demo: bool) -> Result<()> {
+pub fn run(dump: bool, demo: bool, always: bool) -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
     if dump {
         return dump_frames();
@@ -35,7 +35,56 @@ pub fn run(dump: bool, demo: bool) -> Result<()> {
         tracing::info!("overlay is disabled in config (overlay: (enabled: false))");
         return Ok(());
     }
-    wayland::run(config, if demo { Source::Demo } else { Source::Daemon })
+    let source = if demo { Source::Demo } else { Source::Daemon };
+    wayland::run(config, source, always)
+}
+
+/// Whether the overlay should be on screen for a snapshot on `layer`. `always` (the
+/// `--always` flag) shows it on every layer; otherwise it follows the steno layers allowed by
+/// the config's `layers` list, where an empty list allows them all.
+fn is_visible(config: &OverlayConfig, always: bool, layer: Option<&str>) -> bool {
+    config.enabled
+        && (always
+            || layer.is_some_and(|layer| {
+                config.layers.is_empty() || config.layers.iter().any(|l| l.0 == layer)
+            }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Layer;
+
+    #[test]
+    fn it_shows_only_on_steno_layers_unless_always_is_set() {
+        let config = OverlayConfig::default();
+        assert!(is_visible(&config, false, Some("steno")));
+        assert!(!is_visible(&config, false, None));
+        // `--always` shows it off steno too
+        assert!(is_visible(&config, true, None));
+        assert!(is_visible(&config, true, Some("steno")));
+    }
+
+    #[test]
+    fn the_layers_list_limits_which_steno_layers_show_it() {
+        let config = OverlayConfig {
+            layers: vec![Layer::new("steno")],
+            ..OverlayConfig::default()
+        };
+        assert!(is_visible(&config, false, Some("steno")));
+        assert!(!is_visible(&config, false, Some("practice")));
+        // `--always` overrides the list as well
+        assert!(is_visible(&config, true, Some("practice")));
+    }
+
+    #[test]
+    fn disabled_in_config_wins_over_always() {
+        let config = OverlayConfig {
+            enabled: false,
+            ..OverlayConfig::default()
+        };
+        assert!(!is_visible(&config, true, Some("steno")));
+    }
 }
 
 fn config_path() -> Option<std::path::PathBuf> {
