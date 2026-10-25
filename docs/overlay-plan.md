@@ -3,9 +3,9 @@
 An on-screen steno keyboard and tape, drawn on the right edge of the screen while a
 steno layer is active. Transparent, never takes clicks or focus, gone when steno is off.
 
-Status: skeleton on the `steno-overlay` branch. It builds, the tests pass, and every
-piece below exists, but nothing has run against the real daemon or niri yet. Open work is
-marked `TODO(overlay)` in the code and listed under **Steps**.
+Status: built on the `steno-overlay` branch. The tests pass and `keymux overlay --demo` has
+been run on niri (surface accepted, translucent, hot reload works). **Not yet run against the
+installed daemon**: that needs `make install` and a daemon restart. See **Steps**.
 
 ![preview](overlay-preview.png)
 
@@ -62,7 +62,7 @@ struct TapeEntry { seq: u64, stroke: u32, text: String, unmatched: bool }
 Bits are Plover slot order (`steno::layout::SLOTS`), so the overlay needs no dictionary
 or layout knowledge, only the 23-slot geometry.
 
-### Publish points — `steno/engine.rs`, `event_processor/keymap.rs` [wired, untested]
+### Publish points — `steno/engine.rs`, `event_processor/keymap.rs` [done, tested]
 
 | Event                                   | Call                               |
 |-----------------------------------------|------------------------------------|
@@ -87,7 +87,7 @@ back.
 Known gap: with `default_layer: Some("steno")` the overlay appears on the first key
 press, not at daemon start, because only key events publish the layer.
 
-## 2. Wire protocol — `src/ipc.rs` [written, untested]
+## 2. Wire protocol — `src/ipc.rs` [done, tested over a socket pair]
 
 - New `IpcRequest::SubscribeOverlay`. The IPC accept loop handles it **before** the main
   loop: it hands the `UnixStream` to a new thread and goes back to accepting. The
@@ -97,7 +97,7 @@ press, not at daemon start, because only key events publish the layer.
 - `OverlayFrame = OverlaySnapshot` for now. Small enough that diffs aren't worth it
   (≤ 24 tape lines × ~30 B). If the tape grows, send `tape_since(seq)` instead.
 
-## 3. Overlay process — `src/overlay/` [written; render/geometry/glyphs tested offscreen]
+## 3. Overlay process — `src/overlay/` [done; checked live on niri with `--demo`]
 
 | File          | Job |
 |---------------|-----|
@@ -123,17 +123,19 @@ x-position and its letter is centred in that column. Steno lines still align.
 
 - **No timers.** The loop sleeps in `calloop` until a frame or a Wayland event arrives.
   Zero CPU while idle, zero while steno is off (surface unmapped).
-- **Redraw only on a new generation.** Compare the new snapshot with the drawn one:
-  - keys changed only → repaint the keyboard rect, `damage_buffer` that rect.
-  - tape changed → repaint the tape rect.
-  - layer changed → map/unmap.
+- **Redraw only on a change.** A frame identical on screen (same layer, keys and newest
+  tape line) is skipped. Layer changes create or destroy the surface.
+- **Whole-panel redraw, no partial damage.** Measured in a release build with the demo
+  redrawing ~10 times a second for 23 s: 90 ms of CPU in total (≈0.4% of a core), 8.4 MB
+  RSS. A frame costs well under a millisecond, so tracking dirty rectangles would add code
+  for nothing measurable. Revisit only if frames get much more expensive.
 - **Frame callbacks**: at most one pending frame. A burst of strokes between vblanks is
   drawn once with the latest state.
-- **Buffers**: sctk `SlotPool` (shm), two buffers, reuse when the compositor released.
-- **Pixel format**: prefer `wl_shm::Format::Abgr8888` = tiny-skia's RGBA premultiplied
-  byte order on little-endian, so tiny-skia draws straight into the shm buffer. Fall
-  back to `Argb8888` with an in-place R/B swap of the damaged rect only.
-- Panel size ≈ 280 × 700 logical px; scaled by the output's integer scale.
+- **Buffers**: sctk `SlotPool` (shm). It hands back a slot the compositor has released.
+- **Pixel format**: `wl_shm::Format::Abgr8888` = tiny-skia's RGBA premultiplied byte order
+  on little-endian, so tiny-skia draws straight into the shm buffer. Falls back to
+  `Argb8888` with an R/B swap if a compositor doesn't offer it.
+- Panel size ≈ 280 × 600 logical px; drawn at the output's integer scale.
 
 ### Look (from the mockups)
 
@@ -146,7 +148,7 @@ x-position and its letter is centred in that column. Steno lines still align.
   older lines fade out. The translation sits to the right in the accent colour,
   unmatched strokes as `?` in red.
 
-## 4. Config — `src/config/config.rs` [done; hot reload todo]
+## 4. Config — `src/config/config.rs` [done, hot reload checked live]
 
 ```ron
 overlay: (
@@ -165,29 +167,34 @@ overlay: (
 
 The overlay process reads this itself (the user can read their own config). The daemon
 doesn't need it. Visibility rules stay in the overlay, so changing look/size never
-touches the daemon. Hot reload: watch the config file with `notify` (already a dep).
+touches the daemon. Hot reload: a thread watches the config directory with `notify`,
+reparses on a save, and the overlay rebuilds its layout and recreates the surface.
 
 ## 5. Steps
 
-1. **Hub + tests**: done.
-2. **IPC subscribe + stream thread**: written. Todo: a socket-pair test, and noticing a
-   closed subscriber without the 30 s heartbeat write.
-3. **Publish points**: wired. Todo: tests in `steno_tests.rs` asserting the hub
-   (tests share the global hub, so give the hub a test hook or inject it).
-4. **`keymux overlay --dump`**: written. Next step: `make install`, restart the daemon,
-   run `keymux overlay --dump`, write a few strokes. Proves 1–3 on the real daemon.
-5. **Wayland surface**: written. Check on niri: no focus steal, clicks pass through,
-   above fullscreen, `layer-rule` namespace works.
-6. **Render**: full redraw written. Todo: partial damage, two reused buffers, output
-   scale, prettier retype/key-press text on the tape.
-7. **Todo**: config hot reload, `systemd/keymux-overlay.service`, README section,
-   `config.example.ron` entry.
+Done and tested: hub, publish points (`steno_tests.rs` drives a real `KeymapProcessor` into a
+private hub), IPC stream (socket-pair test), drawing, config and hot reload, systemd unit,
+README, example config.
+
+Done by hand on niri with `keymux overlay --demo`: surface accepted on the Overlay layer with
+keyboard interactivity none; panel translucent over windows; config edits applied live;
+surface gone when the process stops.
+
+**Still to do, needs your machine:**
+1. `make install`, restart the daemon, run `keymux overlay --dump`, write some strokes.
+   Proves the daemon-to-overlay path with real keyboard input.
+2. `keymux overlay`, then switch into steno: the panel should appear on that key press.
+3. Click on the panel's area: the click should reach the window underneath. Not tested yet.
+4. `systemctl --user enable --now keymux-overlay.service`.
 
 ## Risks / open questions
 
-- niri and empty input regions: supported (smithay honours `set_input_region`), verify.
+- Clicks falling through the panel: the empty input region is set, and niri reports
+  keyboard interactivity none, but a real click hasn't been tried.
 - Fullscreen windows: `Layer::Overlay` sits above them. Maybe hide in game mode
   (the hub already knows `disabled_in_game_mode` layers aren't capturing).
-- Fractional scale: start with integer `wl_output` scale; add `wp_fractional_scale`
-  + viewporter only if it looks soft on your monitor.
+- Fractional scale: integer scales are handled (the panel redraws at the output's scale).
+  A fractional scale gets the next integer up, which the compositor shrinks. Add
+  `wp_fractional_scale` + viewporter only if it looks soft. All three of your monitors are
+  at scale 1, so this is untested on a scaled output.
 - GNOME has no layer-shell: the overlay logs and exits there. Not a target.

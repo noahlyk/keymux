@@ -415,3 +415,59 @@ fn newline_and_tab_have_keys_to_type() {
     assert_eq!(super::char_to_key('\n').0, Some(evdev::Key::KEY_ENTER));
     assert_eq!(super::char_to_key('\t').0, Some(evdev::Key::KEY_TAB));
 }
+
+/// A hub of its own, so these tests don't see strokes from other tests through the global one.
+fn private_hub() -> &'static crate::steno::overlay::OverlayHub {
+    Box::leak(Box::default())
+}
+
+#[test]
+fn the_overlay_follows_the_layer_the_held_keys_and_each_finished_stroke() {
+    use crate::steno::layout::parse_stroke;
+
+    let fixture = Fixture::new("overlay");
+    let mut p = fixture.processor();
+    let hub = private_hub();
+    p.set_overlay_hub(hub);
+    assert_eq!(hub.snapshot().layer, None);
+
+    // Switching into steno shows the overlay on that very press
+    enter_steno(&mut p);
+    assert_eq!(hub.snapshot().layer.as_deref(), Some("chords"));
+
+    // K- A- -T, pressed one key at a time: each key lights up as it goes down
+    let (k, a, t) = (KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P);
+    p.process_key(k, true);
+    assert_eq!(hub.snapshot().held, parse_stroke("K").unwrap());
+    p.process_key(a, true);
+    p.process_key(t, true);
+    let lit = hub.snapshot();
+    assert_eq!(lit.chord, parse_stroke("KAT").unwrap());
+    assert_eq!(lit.held, lit.chord);
+
+    // Letting go of K keeps it in the stroke (dimmer) but no longer held
+    p.process_key(k, false);
+    let released = hub.snapshot();
+    assert_eq!(released.chord, parse_stroke("KAT").unwrap());
+    assert_eq!(released.held, parse_stroke("AT").unwrap());
+    assert!(released.tape.is_empty(), "the stroke isn't finished yet");
+
+    // The last release finishes it: on the tape, keys cleared
+    p.process_key(a, false);
+    p.process_key(t, false);
+    let done = hub.snapshot();
+    assert_eq!((done.chord, done.held), (0, 0));
+    assert_eq!(done.tape.len(), 1);
+    assert_eq!(done.tape[0].stroke, parse_stroke("KAT").unwrap());
+    assert_eq!(done.tape[0].text, "\"cat\"");
+    assert!(!done.tape[0].unmatched);
+
+    // A stroke the dictionary doesn't have is marked, not silently dropped
+    chord(&mut p, &[KeyCode::KC_Q]);
+    let last = hub.snapshot().tape.back().cloned().unwrap();
+    assert!(last.unmatched);
+
+    // Leaving steno hides the overlay
+    p.process_key(KeyCode::KC_TAB, false);
+    assert_eq!(hub.snapshot().layer, None);
+}

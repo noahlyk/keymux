@@ -61,6 +61,8 @@ package() {
     # Install systemd services (if systemd is detected)
     if [ -d "/run/systemd/system" ]; then
         install -Dm644 "systemd/keymux.service" "$pkgdir/usr/lib/systemd/system/keymux.service"
+        # On-screen steno overlay: any Wayland compositor with layer-shell, so not tied to one
+        install -Dm644 "systemd/keymux-overlay.service" "$pkgdir/usr/lib/systemd/user/keymux-overlay.service"
 
         if pacman -Qq niri &>/dev/null; then
             install -Dm644 "systemd/keymux-niri.service" "$pkgdir/usr/lib/systemd/user/keymux-niri.service"

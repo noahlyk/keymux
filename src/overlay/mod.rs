@@ -6,6 +6,7 @@
 //! on. The panel takes no input and no focus. See `docs/overlay-plan.md`.
 
 mod client;
+mod demo;
 pub mod geometry;
 pub mod glyphs;
 pub mod render;
@@ -15,7 +16,16 @@ use crate::config::{Config, OverlayConfig};
 use crate::steno::layout::render_stroke;
 use anyhow::Result;
 
-pub fn run(dump: bool) -> Result<()> {
+/// Where the overlay gets its frames from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// The daemon
+    Daemon,
+    /// Made-up strokes, to check the drawing alone
+    Demo,
+}
+
+pub fn run(dump: bool, demo: bool) -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
     if dump {
         return dump_frames();
@@ -25,13 +35,18 @@ pub fn run(dump: bool) -> Result<()> {
         tracing::info!("overlay is disabled in config (overlay: (enabled: false))");
         return Ok(());
     }
-    wayland::run(config)
+    wayland::run(config, if demo { Source::Demo } else { Source::Daemon })
+}
+
+fn config_path() -> Option<std::path::PathBuf> {
+    Config::default_path().ok()
 }
 
 /// The overlay section of the user's config, or the defaults if it can't be read. A broken
 /// config shouldn't keep the overlay from showing; the daemon reports config errors.
 fn load_config() -> OverlayConfig {
-    Config::default_path()
+    config_path()
+        .ok_or_else(|| anyhow::anyhow!("no config path"))
         .and_then(|path| Config::load_or_hint(&path))
         .map(|config| config.overlay)
         .unwrap_or_else(|e| {

@@ -189,11 +189,52 @@ pub fn subscribe_overlay() -> Result<impl Iterator<Item = OverlaySnapshot>> {
     let mut stream = UnixStream::connect(get_socket_path())
         .context("Failed to connect to daemon. Is it running?")?;
     write_frame(&mut stream, &IpcRequest::SubscribeOverlay)?;
-    Ok(std::iter::from_fn(move || {
-        let mut len = [0u8; 4];
-        stream.read_exact(&mut len).ok()?;
-        let mut frame = vec![0u8; u32::from_le_bytes(len) as usize];
-        stream.read_exact(&mut frame).ok()?;
-        bincode::deserialize(&frame).ok()
-    }))
+    Ok(std::iter::from_fn(move || read_frame(&mut stream)))
+}
+
+/// The next length-prefixed frame, or `None` when the stream ends or breaks.
+fn read_frame<T: serde::de::DeserializeOwned>(stream: &mut impl Read) -> Option<T> {
+    let mut len = [0u8; 4];
+    stream.read_exact(&mut len).ok()?;
+    let mut frame = vec![0u8; u32::from_le_bytes(len) as usize];
+    stream.read_exact(&mut frame).ok()?;
+    bincode::deserialize(&frame).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_subscriber_gets_the_current_state_then_each_change() {
+        let hub = OverlayHub::default();
+        hub.set_layer(Some("steno"));
+        let (mut client, server) = UnixStream::pair().unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| serve_overlay(server, &hub));
+
+            let first: OverlaySnapshot = read_frame(&mut client).unwrap();
+            assert_eq!(first.layer.as_deref(), Some("steno"));
+
+            hub.set_keys(0b11, 0b11);
+            let next: OverlaySnapshot = read_frame(&mut client).unwrap();
+            assert_eq!((next.chord, next.held), (0b11, 0b11));
+            assert!(next.generation > first.generation);
+
+            // Closing our end must stop the stream thread, so the scope can end. It notices
+            // on its next write, which this change triggers.
+            drop(client);
+            hub.set_keys(0, 0);
+        });
+    }
+
+    #[test]
+    fn the_request_round_trips_in_the_same_framing() {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+        write_frame(&mut a, &IpcRequest::SubscribeOverlay).unwrap();
+        assert!(matches!(
+            read_frame::<IpcRequest>(&mut b),
+            Some(IpcRequest::SubscribeOverlay)
+        ));
+    }
 }

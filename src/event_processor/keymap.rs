@@ -73,6 +73,8 @@ pub struct KeymapProcessor {
     steno_active: Option<Layer>,
     /// The steno layer the overlay was last told about
     overlay_layer: Option<Layer>,
+    /// Where layer changes are published for the overlay
+    overlay_hub: &'static OverlayHub,
     /// Limits the "steno isn't set up" notification
     setup_hint: Cooldown,
     config_dir: PathBuf,
@@ -107,7 +109,7 @@ impl KeymapProcessor {
             }
         }
 
-        Self {
+        let mut processor = Self {
             held_keys: HashMap::new(),
             layer_stack: LayerStack::new(config),
             mt_processor: crate::event_processor::actions::MtProcessor::new(config),
@@ -118,10 +120,28 @@ impl KeymapProcessor {
             steno_engines,
             steno_active: None,
             overlay_layer: None,
+            overlay_hub: OverlayHub::global(),
             setup_hint: Cooldown::new(Duration::from_secs(3)),
             config_dir,
             user_id,
+        };
+        // A keyboard that starts on a steno layer (`default_layer`) shows the overlay now,
+        // not on its first key press. One that starts on base changes nothing, so it can't
+        // hide the overlay for a steno keyboard that started first.
+        processor.publish_overlay_layer();
+        processor
+    }
+
+    /// Publish to `hub` instead of the daemon's, from here on. Tests use this so they
+    /// don't share state through the global hub.
+    #[cfg(test)]
+    pub(crate) fn set_overlay_hub(&mut self, hub: &'static OverlayHub) {
+        self.overlay_hub = hub;
+        self.overlay_layer = None;
+        for engine in self.steno_engines.values_mut() {
+            engine.set_hub(hub);
         }
+        self.publish_overlay_layer();
     }
 
     pub fn set_game_mode(&mut self, active: bool) {
@@ -192,7 +212,8 @@ impl KeymapProcessor {
         });
         if top != self.overlay_layer.as_ref() {
             self.overlay_layer = top.cloned();
-            OverlayHub::global().set_layer(top.map(|layer| layer.0.as_str()));
+            self.overlay_hub
+                .set_layer(top.map(|layer| layer.0.as_str()));
         }
     }
 

@@ -166,6 +166,10 @@ pub enum Commands {
         /// Print what the daemon sends instead of drawing it
         #[arg(long)]
         dump: bool,
+
+        /// Draw made-up strokes without the daemon, to check how it looks
+        #[arg(long, conflicts_with = "dump")]
+        demo: bool,
     },
 
     /// Run the hyprland window watcher daemon

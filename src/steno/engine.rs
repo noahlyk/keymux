@@ -31,6 +31,8 @@ pub struct StenoEngine {
     /// Where each stroke is recorded. `None` when the home directory is unknown.
     tape: Option<PathBuf>,
     pub disabled_in_game_mode: bool,
+    /// Where strokes are published for the on-screen overlay
+    hub: &'static OverlayHub,
 }
 
 impl StenoEngine {
@@ -79,7 +81,14 @@ impl StenoEngine {
             backlog: Vec::new(),
             tape: home.map(tape::default_path),
             disabled_in_game_mode,
+            hub: OverlayHub::global(),
         })
+    }
+
+    /// Publish to `hub` instead of the daemon's. Tests use this so they don't share state.
+    #[cfg(test)]
+    pub fn set_hub(&mut self, hub: &'static OverlayHub) {
+        self.hub = hub;
     }
 
     /// Whether dictionaries are loaded. False means `keymux steno setup` hasn't run.
@@ -111,7 +120,7 @@ impl StenoEngine {
 
     /// Show the stroke in progress on the overlay.
     fn publish_keys(&self) {
-        OverlayHub::global().set_keys(self.chord.pending(), self.chord.held());
+        self.hub.set_keys(self.chord.pending(), self.chord.held());
     }
 
     /// A stroke key came up. Returns output if this completed a stroke.
@@ -197,7 +206,7 @@ impl StenoEngine {
             tape::append(path, stroke, &description);
         }
         // Same description as the tape file, so the overlay and `keymux steno tape` agree
-        OverlayHub::global().push_stroke(stroke, description, unmatched);
+        self.hub.push_stroke(stroke, description, unmatched);
         output
     }
 
@@ -290,6 +299,7 @@ mod tests {
             backlog: Vec::new(),
             tape: None,
             disabled_in_game_mode: true,
+            hub: OverlayHub::global(),
         }
     }
 

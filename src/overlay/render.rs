@@ -10,6 +10,7 @@ use super::glyphs::{self, GlyphCache};
 use crate::config::OverlayConfig;
 use crate::steno::overlay::{OverlaySnapshot, TapeEntry};
 use anyhow::Result;
+use std::borrow::Cow;
 use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, PixmapMut, Transform};
 
 /// Space inside the panel edge, logical px
@@ -237,7 +238,7 @@ impl Renderer {
             }
 
             let (text, color) = if entry.unmatched {
-                ("?", self.theme.unmatched)
+                (Cow::Borrowed("?"), self.theme.unmatched)
             } else {
                 (display_text(&entry.text), self.theme.translation)
             };
@@ -245,7 +246,7 @@ impl Renderer {
             draw_text_clipped(
                 pixmap,
                 &mut self.tape,
-                text,
+                &text,
                 x,
                 baseline,
                 pad + inner,
@@ -255,13 +256,23 @@ impl Renderer {
     }
 }
 
-/// The tape file writes translations as Rust string literals (`"the"`); show them bare.
-///
-/// TODO(overlay): show retypes (`-3 "the"`) and key presses more readably.
-fn display_text(text: &str) -> &str {
-    text.strip_prefix('"')
-        .and_then(|t| t.strip_suffix('"'))
-        .unwrap_or(text)
+/// The tape file writes translations as Rust string literals (`"the"`, or `-3 "the"` when a
+/// stroke took back three characters first); show them without the quotes.
+fn display_text(text: &str) -> Cow<'_, str> {
+    let unquote = |t: &str| {
+        t.strip_prefix('"')
+            .and_then(|t| t.strip_suffix('"'))
+            .map(str::to_owned)
+    };
+    if let Some((back, rest)) = text.split_once(' ') {
+        let is_count = back
+            .strip_prefix('-')
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+        if let (true, Some(typed)) = (is_count, unquote(rest)) {
+            return Cow::Owned(format!("{back} {typed}"));
+        }
+    }
+    unquote(text).map_or(Cow::Borrowed(text), Cow::Owned)
 }
 
 fn with_alpha([r, g, b, a]: [u8; 4], alpha: u8) -> [u8; 4] {
@@ -457,6 +468,7 @@ mod tests {
     #[test]
     fn translations_drop_the_tape_quotes() {
         assert_eq!(display_text("\"the\""), "the");
-        assert_eq!(display_text("-3 \"the\""), "-3 \"the\"");
+        assert_eq!(display_text("-3 \"the\""), "-3 the");
+        assert_eq!(display_text("KC_A KC_B"), "KC_A KC_B");
     }
 }

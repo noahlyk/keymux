@@ -8,8 +8,8 @@
 //! - Event-driven: the loop sleeps until a frame from the daemon or a Wayland event. At
 //!   most one frame callback is pending, so a burst of strokes draws once.
 
-use super::client;
 use super::render::Renderer;
+use super::{client, Source};
 use crate::config::OverlayConfig;
 use crate::steno::overlay::OverlaySnapshot;
 use anyhow::{anyhow, Context, Result};
@@ -43,7 +43,7 @@ use tiny_skia::PixmapMut;
 /// (niri: `layer-rule { match namespace="^keymux-steno$" }`).
 const NAMESPACE: &str = "keymux-steno";
 
-pub fn run(config: OverlayConfig) -> Result<()> {
+pub fn run(config: OverlayConfig, source: Source) -> Result<()> {
     let conn = Connection::connect_to_env().context("no Wayland session to draw on")?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
     let qh = event_queue.handle();
@@ -72,7 +72,22 @@ pub fn run(config: OverlayConfig) -> Result<()> {
             }
         })
         .map_err(|e| anyhow!("overlay frame source: {e}"))?;
-    client::spawn(frames);
+    match source {
+        Source::Daemon => client::spawn(frames),
+        Source::Demo => super::demo::spawn(frames),
+    }
+
+    // Edits to the config file arrive here, already parsed
+    let (config_updates, config_source) = channel::channel::<OverlayConfig>();
+    event_loop
+        .handle()
+        .insert_source(config_source, |event, (), overlay| {
+            if let channel::Event::Msg(config) = event {
+                overlay.on_config(config);
+            }
+        })
+        .map_err(|e| anyhow!("overlay config source: {e}"))?;
+    client::watch_config(config_updates);
 
     let mut overlay = Overlay {
         registry: RegistryState::new(&globals),
@@ -84,6 +99,7 @@ pub fn run(config: OverlayConfig) -> Result<()> {
         qh,
         renderer,
         config,
+        scale: 1,
         surface: None,
         configured: false,
         frame_pending: false,
@@ -107,6 +123,8 @@ struct Overlay {
     qh: QueueHandle<Self>,
     renderer: Renderer,
     config: OverlayConfig,
+    /// Integer scale of the output the panel is on. The renderer draws at this scale.
+    scale: i32,
     /// Present only while a steno layer is on
     surface: Option<LayerSurface>,
     /// The compositor has sent the first configure, so the surface may be drawn
@@ -121,9 +139,10 @@ struct Overlay {
 
 impl Overlay {
     fn on_snapshot(&mut self, snapshot: OverlaySnapshot) {
-        let visible = snapshot.layer.as_deref().is_some_and(|layer| {
-            self.config.layers.is_empty() || self.config.layers.iter().any(|l| l.0 == layer)
-        });
+        let visible = self.config.enabled
+            && snapshot.layer.as_deref().is_some_and(|layer| {
+                self.config.layers.is_empty() || self.config.layers.iter().any(|l| l.0 == layer)
+            });
         // Skip frames that change nothing on screen, such as a repeat after a reconnect
         let unchanged = self.latest.layer == snapshot.layer
             && self.latest.chord == snapshot.chord
@@ -141,9 +160,32 @@ impl Overlay {
         }
     }
 
+    /// The config file changed. Layout, size and visibility rules may all differ, so rebuild
+    /// the renderer and recreate the surface if it's showing.
+    fn on_config(&mut self, config: OverlayConfig) {
+        if config == self.config {
+            return;
+        }
+        match Renderer::new(&config, self.scale as u32) {
+            Ok(renderer) => self.renderer = renderer,
+            Err(e) => {
+                tracing::warn!("keeping the old overlay settings: {e:#}");
+                return;
+            }
+        }
+        self.config = config;
+        let showing = self.surface.is_some();
+        self.hide();
+        if showing {
+            // No surface now, so this shows a fresh one at the new size
+            self.on_snapshot(self.latest.clone());
+        }
+    }
+
     fn show(&mut self) {
         let qh = &self.qh;
         let surface = self.compositor.create_surface(qh);
+        surface.set_buffer_scale(self.scale);
         // An empty input region: the panel never takes a click
         match Region::new(&self.compositor) {
             Ok(region) => surface.set_input_region(Some(region.wl_region())),
@@ -207,8 +249,7 @@ impl Overlay {
         } else {
             wl_shm::Format::Argb8888
         };
-        // TODO(overlay): keep two buffers and reuse whichever the compositor released,
-        // instead of a new slot per frame.
+        // The pool hands back a slot the compositor has released, so this doesn't grow
         let (buffer, canvas) =
             match self
                 .pool
@@ -252,9 +293,22 @@ impl CompositorHandler for Overlay {
         _: &wl_surface::WlSurface,
         new_factor: i32,
     ) {
-        // TODO(overlay): rebuild the renderer at `new_factor`, set_buffer_scale, redraw.
-        // Fractional scales need wp_fractional_scale + viewporter on top of this.
-        tracing::debug!("overlay output scale {new_factor} (drawing at 1 for now)");
+        // Integer scales only: draw at that many pixels per logical pixel so the panel is
+        // sharp. A fractional scale gets the next integer up, which the compositor shrinks.
+        // TODO(overlay): wp_fractional_scale + viewporter for exact fractional sizes.
+        if new_factor == self.scale || new_factor < 1 {
+            return;
+        }
+        self.scale = new_factor;
+        match Renderer::new(&self.config, new_factor as u32) {
+            Ok(renderer) => self.renderer = renderer,
+            Err(e) => return tracing::warn!("overlay scale {new_factor}: {e:#}"),
+        }
+        if let Some(layer) = &self.surface {
+            layer.wl_surface().set_buffer_scale(new_factor);
+            self.dirty = true;
+            self.draw();
+        }
     }
 
     fn transform_changed(

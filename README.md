@@ -126,6 +126,12 @@ install the one matching your compositor/WM.
 - Enable: `systemctl --user enable --now keymux-niri.service` (or
   `-hyprland`/`-sway`/`-i3`/`-bspwm`)
 
+**Steno overlay (optional):** `keymux overlay` draws the steno keyboard and tape on
+screen while a steno layer is on. Needs a Wayland compositor with layer-shell (niri,
+Hyprland, Sway; not GNOME). See [On-screen overlay](#on-screen-overlay).
+- Path: `/usr/lib/systemd/user/keymux-overlay.service`
+- Enable: `systemctl --user enable --now keymux-overlay.service`
+
 ## 📖 Configuration Guide
 
 ### Configuration File Location
@@ -546,6 +552,42 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
 | `keymux steno stroke "KPA/TKAOEU"` | Show what a stroke types. Use `/` between strokes of one word |
 | `keymux steno add KAT "cat"` | Add or replace an entry in `user.json` |
 | `keymux steno tape` | Show what each recent stroke typed. `-f` keeps printing new strokes, `-n N` sets how many lines to start with |
+
+### On-screen overlay
+
+`keymux overlay` shows the steno keyboard and a tape on the right edge of the screen while a
+steno layer is on, and goes away when you leave it. Keys light up as you press them (keys
+you've let go of but are still part of the stroke are dimmer), and each finished stroke
+lands on the tape with what it typed. The panel is translucent, never takes clicks or
+focus, and costs next to nothing: it only redraws when a key or the tape changes.
+
+![overlay](docs/overlay-preview.png)
+
+It runs as your user, since the daemon runs as root and can't draw on your screen. Start it
+with `systemctl --user enable --now keymux-overlay.service`, or run `keymux overlay` by hand.
+It needs a Wayland compositor with `wlr-layer-shell`: niri, Hyprland and Sway have it, GNOME
+doesn't.
+
+```ron
+overlay: (
+    enabled: true,
+    output: None,        // Some("DP-1") to pin a monitor; None lets the compositor pick
+    margin: 16,          // gap from the right edge, in pixels
+    width: 280,
+    opacity: 0.72,       // panel background, 0.0 to 1.0
+    keyboard: true,
+    tape: true,
+    tape_lines: 18,
+    font: None,          // path to a .ttf/.otf; None uses the bundled Atkinson Hyperlegible
+    layers: [],          // steno layers that show it; empty means all of them
+),
+```
+
+Every field is optional, and edits to the config file apply without restarting the overlay.
+In niri, style it with `layer-rule { match namespace="^keymux-steno$" }`.
+`keymux overlay --demo` draws made-up strokes to try the look without the daemon, and
+`keymux overlay --dump` prints what the daemon sends. With several keyboards, it follows the
+one you last pressed a key on.
 
 ## 🎮 Usage
 

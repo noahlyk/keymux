@@ -476,6 +476,27 @@
     // this keyboard only. Top-level default_layer does the same for every keyboard.
     // ============================================================================
 
+    // ============================================================================
+    // STENO OVERLAY (read by `keymux overlay`, not by the daemon)
+    // ============================================================================
+    // The steno keyboard and tape drawn on the right edge of the screen while a steno
+    // layer is on. Needs a Wayland compositor with layer-shell. Every field is optional;
+    // the values below are the defaults. Edits apply without restarting the overlay.
+    //
+    // overlay: (
+    //     enabled: true,
+    //     output: None,       // Some("DP-1") to pin a monitor
+    //     margin: 16,         // gap from the right edge, in pixels
+    //     width: 280,
+    //     opacity: 0.72,      // panel background, 0.0 to 1.0
+    //     keyboard: true,
+    //     tape: true,
+    //     tape_lines: 18,
+    //     font: None,         // None = bundled Atkinson Hyperlegible
+    //     layers: [],         // empty = every steno layer
+    // ),
+    // ============================================================================
+
     per_keyboard_overrides: {
         // ========================================================================
         // INHERITING MODE EXAMPLES (per_keyboard_inherits_global_layout: true)
