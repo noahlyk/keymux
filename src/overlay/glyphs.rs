@@ -39,9 +39,34 @@ pub struct Glyph {
     pub halo: Box<[u8]>,
 }
 
-/// How far the soft shadow reaches past the glyph, in pixels. Two passes of a 3-wide blur
-/// spread coverage two pixels out.
-pub const HALO_PAD: u32 = 2;
+/// How far the soft shadow reaches past the glyph, in pixels. One pass of a 3-wide blur spreads
+/// coverage one pixel out: a tight shadow, so the letter itself stays crisp.
+pub const HALO_PAD: u32 = 1;
+
+/// The pixel size nearest `px` at which the height of `reference` is a whole number of pixels.
+///
+/// The text isn't hinted, so a letter's flat top and bottom (`E`, `T`, `x`) only land cleanly on
+/// pixel rows when its height is a whole number of pixels. At an arbitrary size such as 12.6
+/// they straddle two rows and each edge smears into a soft grey line. Use `H` for capitals and
+/// `x` for lowercase. Draw at a whole-pixel baseline.
+#[must_use]
+pub fn crisp_size(font: &FontArc, px: f32, reference: char) -> f32 {
+    // Measure at a large size, where the whole-pixel bounds the library reports are accurate
+    // to a fraction of a percent
+    const PROBE: f32 = 1000.0;
+    let id = font.glyph_id(reference);
+    let Some(outline) =
+        font.outline_glyph(id.with_scale_and_position(PxScale::from(PROBE), point(0.0, 0.0)))
+    else {
+        return px;
+    };
+    let ratio = outline.px_bounds().height() / PROBE;
+    if ratio <= 0.0 {
+        return px;
+    }
+    let rows = (ratio * px).round().max(1.0);
+    rows / ratio
+}
 
 /// How many horizontal sub-pixel positions each glyph is drawn at. Snapping every letter to a
 /// whole pixel makes spacing visibly uneven at small sizes ("thi s"); quarter-pixel steps are
@@ -160,9 +185,10 @@ fn rasterize(font: &FontArc, scale: PxScale, c: char, shift: f32) -> Glyph {
 }
 
 /// A soft shadow for a coverage mask: the mask padded by [`HALO_PAD`] on every side and blurred
-/// with two passes of a 3 x 3 box (close to a Gaussian), then strengthened so the glow stays
-/// dark right next to the letter. A hard shadow made of offset copies looks blocky; a blur
-/// reads as a gentle edge on any background.
+/// with a single pass of a 3 x 3 box, then strengthened so the glow stays dark right next to
+/// the letter. A hard shadow made of offset copies looks blocky; a blur reads as a gentle edge
+/// on any background. It reaches only one pixel, because a wide dark haze makes small text look
+/// fuzzy.
 fn blur(mask: &[u8], width: u32, height: u32) -> Box<[u8]> {
     let pad = HALO_PAD as usize;
     let (w, h) = (width as usize + 2 * pad, height as usize + 2 * pad);
@@ -173,7 +199,7 @@ fn blur(mask: &[u8], width: u32, height: u32) -> Box<[u8]> {
         }
     }
     let mut next = vec![0f32; w * h];
-    for _ in 0..2 {
+    for _ in 0..1 {
         // Horizontal then vertical: a 3 x 3 box is the two 3-wide averages one after the other
         for y in 0..h {
             for x in 0..w {
@@ -210,7 +236,7 @@ fn blur(mask: &[u8], width: u32, height: u32) -> Box<[u8]> {
 
 /// How much the blurred mask is boosted. A plain blur is too faint to separate text from a busy
 /// background; this keeps it dark next to the glyph while still fading smoothly outward.
-const HALO_STRENGTH: f32 = 2.4;
+const HALO_STRENGTH: f32 = 1.7;
 
 #[cfg(test)]
 mod tests {
@@ -243,18 +269,83 @@ mod tests {
         );
         assert_eq!(glyph.halo.len(), w * h);
 
-        // Soft, not a hard copy: pixels just outside the glyph are partly covered...
-        let outside = &glyph.halo[(h / 2) * w + (pad - 1)];
-        assert!(*outside > 0 && *outside < 255, "{outside}");
-        // ...strongest at the letter and fading outwards
+        // Soft, not a hard copy: the ring of pixels just outside the glyph is partly covered...
+        let ring = glyph.halo[(h / 2) * w];
+        assert!(ring > 0 && ring < 255, "{ring}");
+        // ...strongest at the letter, fading outwards
         let at_stem = glyph.halo[(h / 2) * w + w / 2];
-        let edge = glyph.halo[(h / 2) * w];
-        assert!(
-            at_stem > *outside && *outside > edge,
-            "{at_stem} {outside} {edge}"
-        );
+        assert!(at_stem > ring, "{at_stem} {ring}");
+        // It reaches only one pixel: a wide dark haze makes small text look fuzzy
+        assert_eq!(HALO_PAD, 1);
         // A blank glyph has no halo to draw
         assert!(cache.get(' ').halo.is_empty());
+    }
+
+    #[test]
+    fn a_crisp_size_gives_the_reference_letter_a_whole_number_of_pixel_rows() {
+        let font = load_font(None, BOLD).unwrap();
+        for (reference, wanted) in [('H', 12.6), ('H', 15.2), ('x', 16.8), ('x', 13.1)] {
+            let px = crisp_size(&font, wanted, reference);
+            // Close to what was asked for: a fraction of a pixel of cap height at most
+            assert!(
+                (px - wanted).abs() < 1.2,
+                "{reference}: {wanted} became {px}"
+            );
+            // The reference letter's height at that size is a whole number of pixels
+            let id = font.glyph_id(reference);
+            let outline = font
+                .outline_glyph(id.with_scale_and_position(PxScale::from(1000.0), point(0.0, 0.0)))
+                .unwrap();
+            let rows = outline.px_bounds().height() / 1000.0 * px;
+            assert!(
+                (rows - rows.round()).abs() < 0.02,
+                "{reference} at {px}: {rows} rows"
+            );
+        }
+    }
+
+    #[test]
+    fn at_a_crisp_size_the_flat_edges_of_capitals_are_solid_pixel_rows() {
+        let font = load_font(None, BOLD).unwrap();
+        let mut cache = GlyphCache::new(font.clone(), crisp_size(&font, 15.0, 'H'));
+        for letter in ['E', 'T', 'H'] {
+            let glyph = cache.get(letter);
+            let width = glyph.width as usize;
+            let row_max = |row: usize| {
+                *glyph.mask[row * width..(row + 1) * width]
+                    .iter()
+                    .max()
+                    .unwrap()
+            };
+            let last = glyph.height as usize - 1;
+            // The first and last rows of the flat letters are fully covered, not a faint
+            // smear over two rows
+            assert!(row_max(0) >= 240, "{letter}: top row {}", row_max(0));
+            assert!(
+                row_max(last) >= 240,
+                "{letter}: bottom row {}",
+                row_max(last)
+            );
+        }
+
+        // Control: at an arbitrary size the same edges are smeared, so this test can fail
+        let mut arbitrary = GlyphCache::new(font, 12.6);
+        let smeared = ['E', 'T', 'H'].into_iter().any(|letter| {
+            let glyph = arbitrary.get(letter);
+            let width = glyph.width as usize;
+            let last = glyph.height as usize - 1;
+            let row_max = |row: usize| {
+                *glyph.mask[row * width..(row + 1) * width]
+                    .iter()
+                    .max()
+                    .unwrap()
+            };
+            row_max(0) < 240 || row_max(last) < 240
+        });
+        assert!(
+            smeared,
+            "12.6 px should not be crisp: the test would prove nothing"
+        );
     }
 
     #[test]

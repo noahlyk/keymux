@@ -149,10 +149,11 @@ sized to its letter, and the letter is centred in it. Steno lines still align.
 
 - No background by default (`background: 0.0`): only the keys and the text are drawn, so
   everything must read over any wallpaper. Light text gets a soft shadow: the glyph blurred
-  (two passes of a 3 × 3 box, computed once per glyph and cached with it), drawn once
-  underneath and a pixel lower. Earlier versions stamped copies of the glyph at whole-pixel
-  offsets, which looked blocky ("Minecraft text"). Dark text on a lit key gets no shadow,
-  since it would only smudge it.
+  (one pass of a 3 × 3 box, so it reaches one pixel; computed once per glyph and cached with
+  it), drawn once underneath. Earlier versions stamped copies of the glyph at whole-pixel
+  offsets, which looked blocky ("Minecraft text"), and then used a wider blur, which made
+  small text look fuzzy. Dark text on a lit key gets no shadow (the key is its own
+  background, and a shadow would only soften it); a test covers this.
 - Keys are steno pads, 1.75× as tall as wide: a squarish top with slightly softened corners
   (radius 0.2× the width) and a fully round bottom. `S-` and `*` are double height, `#` is a
   thin pill across the top, thumbs sit below. Unlit keys are a faint glass fill with a thin
@@ -169,17 +170,23 @@ sized to its letter, and the letter is centred in it. Steno lines still align.
   grid: each is as wide as its own letter plus a 4% gap (`SLOT_GAP`), so `W` gets more room
   than `T`, nothing overlaps, and neighbouring letters sit as tight as ordinary text. That
   spacing applies to the steno letters only; the words are set with normal spacing. The words
-  (what the stroke typed) are set 1.2× larger in near-white, since that is what you read.
-  Unmatched strokes show a red `?`.
+  (what the stroke typed) are near-white and at least as big as the strokes (1.06×), since
+  that is what you read. Unmatched strokes show a red `?`.
 - Every tape line is full strength. Only the top three lines fade (25%, 50%, 75%), so the tape
   stays easy to read all the way up.
-- All sizes come from `width` (letters are sized as if the 23 columns had a 22% gap
-  (`SIZING_GAP`) and filled 60% of it, so tightening `SLOT_GAP` brings the letters closer
-  without making them smaller; key labels are 56% of a key's width), and `text_scale`
-  multiplies the text on top. At the default width of 340 that is about 14 px strokes and
-  17 px words. Widths of 400 and up were tried and read as too big.
-- Glyphs are rasterized at quarter-pixel horizontal offsets and cached per offset. Snapping
-  each letter to a whole pixel made the spacing uneven ("thi s").
+- All sizes come from `width`: the steno letters are sized so the 23 columns (each its
+  letter plus the 4% gap) fill 68% of the width inside the padding, which at the default
+  width of 340 makes them about 11 px tall (they were 9 px when they filled less and had
+  looser columns, and read as too small); key labels are 56% of a key's width. `text_scale`
+  multiplies the text on top. Widths of 400 and up were tried and read as too big.
+- **Sharpness.** The text is not hinted, so it is made sharp by construction:
+  - Every size is snapped (`glyphs::crisp_size`) so the height of `H` (capitals) or `x`
+    (lowercase words) is a whole number of pixels. Otherwise flat tops and bottoms (`E`, `T`,
+    `H`) straddle two pixel rows and smear into soft grey lines. A test checks the edges are
+    solid rows at the snapped size and smeared at an arbitrary one (12.6 px).
+  - Every letter is placed on a whole pixel, and words advance by whole pixels, so vertical
+    stems sit on one pixel column. The cost is letter gaps that are off by up to half a
+    pixel. (Quarter-pixel placement was tried first, for even spacing, and looked soft.)
 
 ## 4. Config — `src/config/config.rs` [done, hot reload checked live]
 

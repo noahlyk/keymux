@@ -29,18 +29,16 @@ const OUTLINE: f32 = 1.0;
 const PAD_TOP_ROUND: f32 = 0.2;
 /// Slot of the `#` number bar
 const NUMBER_SLOT: usize = 22;
-/// Share of the width inside the padding given to the steno letters; the words get the rest
-const PAPER_SHARE: f32 = 0.60;
+/// Share of the width inside the padding given to the steno letters; the words get the rest.
+/// The letters are sized to fill this, so a bigger share means bigger steno letters.
+const PAPER_SHARE: f32 = 0.68;
 /// Space after each steno letter's own width, as a share of the letter: the letter spacing of
 /// the tape's steno letters, and nothing else (the words on the right are set normally). Small
 /// so strokes read as tight as text; each column is as wide as its own letter, so `W` gets
 /// more room than `T` and nothing ever overlaps.
 const SLOT_GAP: f32 = 0.04;
-/// The gap the letter size is worked out with, so tightening `SLOT_GAP` makes the letters
-/// closer, not smaller: the paper is sized as if it had this much space between columns.
-const SIZING_GAP: f32 = 0.22;
-/// The translated words are the thing you read, so they are set larger than the strokes
-const WORDS_RATIO: f32 = 1.2;
+/// The words are what you read, so they are at least as big as the strokes
+const WORDS_RATIO: f32 = 1.06;
 /// Line pitch relative to the words' own height
 const LINE_SPACING: f32 = 1.12;
 /// A key's label is this share of the key's width
@@ -161,20 +159,28 @@ impl Renderer {
             .keyboard
             .then(|| Keyboard::new(pad_x, height - pad_y - keys_height, inner));
         let key_width = Keyboard::new(0.0, 0.0, inner).keys[1].w;
-        let labels = GlyphCache::new(bold.clone(), key_width * LABEL_RATIO * text_scale);
+        // Every size is nudged to where the letters' flat tops and bottoms land on whole pixel
+        // rows (`crisp_size`); at an arbitrary size they smear over two rows and the text looks
+        // soft. Capitals (key labels, steno letters) snap on `H`, lowercase words on `x`.
+        let label_px = glyphs::crisp_size(&bold, key_width * LABEL_RATIO * text_scale, 'H');
+        let labels = GlyphCache::new(bold.clone(), label_px);
 
         // Size the steno letters so that all 23 columns, each as wide as its own letter plus
-        // `SIZING_GAP`, would fill `PAPER_SHARE` of the width. Column widths scale linearly with
-        // the size. The columns are then laid out with the tighter `SLOT_GAP`, so the paper
-        // ends up narrower than that share and the words start sooner.
+        // `SLOT_GAP`, fill `PAPER_SHARE` of the width. Column widths scale linearly with the
+        // size, so measure once at a probe size.
         let mut probe = GlyphCache::new(bold.clone(), PROBE_PX);
         let probe_total: f32 = PAPER_ORDER
             .iter()
-            .map(|&slot| probe.get(Keyboard::label(slot)).advance * (1.0 + SIZING_GAP))
+            .map(|&slot| probe.get(Keyboard::label(slot)).advance * (1.0 + SLOT_GAP))
             .sum();
-        let stroke_px = PROBE_PX * (PAPER_SHARE * inner) / probe_total * text_scale;
+        let stroke_px = glyphs::crisp_size(
+            &bold,
+            PROBE_PX * (PAPER_SHARE * inner) / probe_total * text_scale,
+            'H',
+        );
         let mut strokes = GlyphCache::new(bold.clone(), stroke_px);
-        let words = GlyphCache::new(bold, stroke_px * WORDS_RATIO);
+        let words_px = glyphs::crisp_size(&bold, stroke_px * WORDS_RATIO, 'x');
+        let words = GlyphCache::new(bold, words_px);
 
         let mut columns = Vec::with_capacity(PAPER_ORDER.len());
         let mut x = 0.0;
@@ -584,21 +590,28 @@ fn rounded_rect(r: Rect, top_radius: f32, bottom_radius: f32) -> Option<Path> {
 }
 
 /// Draw `text` from `x`, stopping with an ellipsis before it would pass `right`.
+///
+/// Every letter lands on a whole pixel, and the pen moves by whole pixels (each advance
+/// rounded), the way a hinted bitmap font is set. Letters at fractional positions put their
+/// vertical stems across two pixel columns and look soft; whole-pixel positions keep them
+/// sharp, at the cost of letter gaps that are off by up to half a pixel.
 #[allow(clippy::too_many_arguments)]
 fn draw_text_clipped(
     pixmap: &mut PixmapMut,
     glyphs: &mut GlyphCache,
     text: &str,
-    mut x: f32,
+    x: f32,
     baseline: f32,
     right: f32,
     color: [u8; 4],
     scale: f32,
 ) {
-    let ellipsis = glyphs.get('…').advance;
-    let fits = glyphs.measure(text) <= right - x;
+    let mut x = x.round();
+    let ellipsis = glyphs.get('…').advance.round();
+    let width: f32 = text.chars().map(|c| glyphs.get(c).advance.round()).sum();
+    let fits = width <= right - x;
     for c in text.chars() {
-        let advance = glyphs.get(c).advance;
+        let advance = glyphs.get(c).advance.round();
         if !fits && x + advance > right - ellipsis {
             draw_char(pixmap, glyphs, '…', x, baseline, color, scale);
             return;
@@ -608,7 +621,8 @@ fn draw_text_clipped(
     }
 }
 
-/// Draw one character, with its pen at `x`, with a dark halo so it reads over any wallpaper.
+/// Draw one character, with its pen at `x` (rounded to a whole pixel, so it is sharp), with a
+/// soft shadow on light text so it reads over any wallpaper.
 fn draw_char(
     pixmap: &mut PixmapMut,
     glyphs: &mut GlyphCache,
@@ -618,12 +632,12 @@ fn draw_char(
     color: [u8; 4],
     scale: f32,
 ) {
-    let (glyph, pen) = glyphs.place(c, x);
+    let (glyph, pen) = glyphs.place(c, x.round());
     let (x0, y0) = (pen + glyph.left, baseline.round() as i32 + glyph.top);
-    // Light text gets a soft shadow: the glyph blurred, drawn once underneath and a touch
-    // lower. That reads as a gentle edge on light and busy backgrounds; copies of the glyph
-    // stamped at whole-pixel offsets looked blocky. Dark text on a lit key gets none, since a
-    // shadow there would only smudge it.
+    // Light text gets a soft shadow: the glyph blurred, drawn once underneath. That reads as a
+    // gentle edge on light and busy backgrounds; copies of the glyph stamped at whole-pixel
+    // offsets looked blocky. Dark text, which is only ever on a lit key, gets none: the key is
+    // its own background, and a shadow there would only make it softer.
     let light = u32::from(color[0]) + u32::from(color[1]) + u32::from(color[2]) > 330;
     if light && !glyph.halo.is_empty() {
         let pad = glyphs::HALO_PAD as i32;
@@ -868,14 +882,20 @@ mod tests {
             assert!(gap > 0.0, "{slot}: columns must not touch");
             assert!(gap < advance * 0.1, "{slot}: gap {gap} is not tight");
         }
-        // ...but the letters are still as big as they were with the loose spacing, since
-        // the size comes from the sizing gap, not the spacing
-        let loose: f32 = PAPER_ORDER
-            .iter()
-            .map(|&slot| strokes.get(Keyboard::label(slot)).advance * (1.0 + SIZING_GAP))
-            .sum();
+        // ...and the letters are big enough to read, with the paper filling about its share of
+        // the width (a little under or over, since the size snaps to whole pixel rows)
+        assert!(
+            renderer.strokes.pixel_size() >= 14.0,
+            "steno letters are {} px, too small",
+            renderer.strokes.pixel_size()
+        );
+        let paper: f32 = renderer.columns.iter().map(|column| column.width).sum();
         let inner = renderer.size().0 as f32 - 2.0 * PAD_X;
-        assert!((loose - PAPER_SHARE * inner).abs() < 1.0, "{loose}");
+        assert!(
+            (paper / (PAPER_SHARE * inner) - 1.0).abs() < 0.1,
+            "paper is {paper}, wanted about {}",
+            PAPER_SHARE * inner
+        );
         // The words are not letter-spaced: they advance by each glyph's own advance
         let mut words = GlyphCache::new(
             glyphs::load_font(None, glyphs::BOLD).unwrap(),
@@ -885,10 +905,49 @@ mod tests {
         assert_eq!(words.measure("steno"), expected);
     }
 
+    /// Whether any pixel outside the letter itself got drawn on (a shadow), for `H` in `color`.
+    fn shadow_drawn_around_h(color: [u8; 4]) -> bool {
+        let mut glyphs = GlyphCache::new(glyphs::load_font(None, glyphs::BOLD).unwrap(), 16.0);
+        let mut pixmap = Pixmap::new(40, 40).unwrap();
+        draw_char(
+            &mut pixmap.as_mut(),
+            &mut glyphs,
+            'H',
+            10.0,
+            28.0,
+            color,
+            1.0,
+        );
+        let glyph = glyphs.get('H');
+        // Where the letter's own pixels are, in pixmap coordinates
+        let (x0, y0) = (10 + glyph.left, 28 + glyph.top);
+        let covered = |x: i32, y: i32| {
+            let (gx, gy) = (x - x0, y - y0);
+            gx >= 0
+                && gy >= 0
+                && (gx as u32) < glyph.width
+                && (gy as u32) < glyph.height
+                && glyph.mask[(gy as u32 * glyph.width + gx as u32) as usize] > 0
+        };
+        (0..40).any(|y| {
+            (0..40).any(|x| pixmap.pixel(x as u32, y as u32).unwrap().alpha() > 0 && !covered(x, y))
+        })
+    }
+
     #[test]
-    fn the_words_are_set_larger_than_the_strokes() {
+    fn text_on_a_lit_key_has_no_shadow_and_text_on_the_tape_does() {
+        // Dark text, which only ever sits on a lit key: just the letter, so it is as sharp
+        // as it can be
+        assert!(!shadow_drawn_around_h(Theme::default().label_lit));
+        // Light text over the wallpaper gets its soft shadow
+        assert!(shadow_drawn_around_h(Theme::default().words));
+        assert!(shadow_drawn_around_h(Theme::default().label));
+    }
+
+    #[test]
+    fn the_words_are_at_least_as_big_as_the_strokes() {
         let renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
-        assert!(renderer.words.pixel_size() > renderer.strokes.pixel_size() * 1.1);
+        assert!(renderer.words.pixel_size() >= renderer.strokes.pixel_size());
     }
 
     #[test]
