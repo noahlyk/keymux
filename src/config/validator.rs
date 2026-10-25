@@ -138,9 +138,7 @@ pub fn validate_config(config_path: Option<&std::path::Path>) -> Result<()> {
     let extract_layer_refs = |remaps: &HashMap<KeyCode, KeyAction>| {
         let mut refs = Vec::new();
         for action in remaps.values() {
-            if let KeyAction::TO(layer) | KeyAction::LATCH(layer) = action {
-                refs.push(layer.0.clone());
-            }
+            action.layer_refs(&mut refs);
         }
         refs
     };

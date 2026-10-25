@@ -14,6 +14,12 @@ pub fn emit_layer(
             layer_stack.leave_to_base();
             (EmitResult::LayerAction(layer.clone()), None)
         }
+        // Exclusive, like QMK's TO: every other layer goes, and this one stays on
+        KeyAction::SWITCH(layer) => {
+            layer_stack.leave_to_base();
+            layer_stack.activate_layer(layer.clone());
+            (EmitResult::LayerAction(layer.clone()), None)
+        }
         // Stays on after the key is released; only TO("base") or another TG turns it off
         KeyAction::LATCH(layer) => {
             layer_stack.activate_layer(layer.clone());
@@ -80,6 +86,17 @@ mod tests {
         assert!(matches!(result, EmitResult::LayerAction(_)));
         assert!(held.is_none());
         assert_eq!(stack.layers(), [Layer::base()]);
+    }
+
+    #[test]
+    fn switch_turns_off_every_other_layer_and_stays_on() {
+        let mut stack = stack();
+        stack.activate_layer(Layer::new("steno"));
+        let (result, held) =
+            emit_layer(&KeyAction::SWITCH(Layer::new("nohrm")), KeyCode::KC_F9, &mut stack);
+        assert!(matches!(result, EmitResult::LayerAction(_)));
+        assert!(held.is_none(), "releasing F9 must not turn nohrm off");
+        assert_eq!(stack.layers(), [Layer::base(), Layer::new("nohrm")]);
     }
 
     #[test]

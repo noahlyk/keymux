@@ -95,6 +95,8 @@ pub enum HeldAction {
     /// A key pressed on a steno layer that isn't a stroke key or a remap. Its press
     /// was swallowed, so its release is swallowed too.
     SwallowedBySteno,
+    /// The children of a MULTI, each with the held action its press left, if any
+    MultiManaged(Vec<(KeyAction, Option<HeldAction>)>),
 }
 
 pub struct HandleContext<'a> {
@@ -140,7 +142,61 @@ pub fn handle_action_release(
         }
         // Steno releases are intercepted by KeymapProcessor before reaching here
         HeldAction::StenoManaged(_) | HeldAction::SwallowedBySteno => ProcessResult::None,
+        HeldAction::MultiManaged(children) => {
+            let mut ctx = ctx;
+            unemit_multi(children, keycode, &mut ctx).to_process_result()
+        }
     }
+}
+
+/// Press each child of a MULTI, in order, and report their events as one output.
+fn emit_multi(
+    children: &[KeyAction],
+    keycode: KeyCode,
+    ctx: &mut HandleContext<'_>,
+) -> (EmitResult, Option<HeldAction>) {
+    let mut results = Vec::new();
+    let mut held = Vec::new();
+    for child in children {
+        let (result, child_held) = child.emit(keycode, ctx);
+        results.push(result);
+        held.push((child.clone(), child_held));
+    }
+    (
+        merge_results(results),
+        Some(HeldAction::MultiManaged(held)),
+    )
+}
+
+/// Release each child of a MULTI that still holds something, in the order it was pressed.
+fn unemit_multi(
+    children: Vec<(KeyAction, Option<HeldAction>)>,
+    keycode: KeyCode,
+    ctx: &mut HandleContext<'_>,
+) -> EmitResult {
+    let results = children
+        .into_iter()
+        .filter_map(|(child, held)| held.map(|held| child.unemit(held, keycode, ctx)))
+        .collect();
+    merge_results(results)
+}
+
+/// Combine several children's results into one, keeping every key event in order.
+/// Layer changes have already happened by now, so they produce no key events.
+fn merge_results(results: Vec<EmitResult>) -> EmitResult {
+    let mut events = Vec::new();
+    for result in results {
+        match result {
+            EmitResult::EmitKey(key, pressed) => events.push((key, pressed)),
+            EmitResult::EmitKeys(more) => events.extend(more),
+            EmitResult::TapKey(key) => {
+                events.push((key, true));
+                events.push((key, false));
+            }
+            EmitResult::LayerAction(_) | EmitResult::None => {}
+        }
+    }
+    EmitResult::EmitKeys(events)
 }
 
 fn apply_mt_resolution_to_process_result(resolution: MtResolution) -> ProcessResult {
@@ -182,9 +238,10 @@ impl KeyAction {
                 }
             }
             Self::MT(..) => emit_mt(self, keycode, ctx),
-            Self::TO(..) | Self::TG(..) | Self::MO(..) | Self::LATCH(..) => {
+            Self::TO(..) | Self::TG(..) | Self::MO(..) | Self::LATCH(..) | Self::SWITCH(..) => {
                 emit_layer(self, keycode, ctx.layer_stack)
             }
+            Self::MULTI(children) => emit_multi(children, keycode, ctx),
             Self::SOCD(..) => emit_socd(self, keycode, ctx),
             Self::CMD(..) => emit_cmd(self, keycode, ctx),
             Self::OSM(..) => emit_osm(self, keycode, ctx),
@@ -224,6 +281,9 @@ impl KeyAction {
             (Self::DT(..), HeldAction::DtManaged { .. }) => unemit_dt(self, action, keycode, ctx),
             (Self::OSM(..), HeldAction::OsmManaged) => unemit_osm(self, action, keycode, ctx),
             (Self::CMD(..), _) => unemit_cmd(self, action, keycode, ctx),
+            (Self::MULTI(..), HeldAction::MultiManaged(children)) => {
+                unemit_multi(children, keycode, ctx)
+            }
             _ => EmitResult::None,
         }
     }
@@ -245,3 +305,59 @@ pub use mt::{
 };
 pub use osm::{emit_osm, handle_osm_action, handle_osm_release, unemit_osm, OsmProcessor};
 pub use socd::{emit_socd, handle_socd_action, unemit_socd, SocdProcessor, SocdResolution};
+
+#[cfg(test)]
+mod multi_tests {
+    use crate::config::Config;
+    use crate::event_processor::{KeymapProcessor, ProcessResult};
+    use crate::keycode::KeyCode;
+    use std::path::PathBuf;
+
+    fn processor() -> KeymapProcessor {
+        let config: Config = ron::from_str(
+            r#"(
+                remaps: {
+                    KC_F1: MULTI([Key(KC_LSFT), Key(KC_A)]),
+                    KC_F2: MULTI([Key(KC_B), TO("nav")]),
+                },
+                layers: { "nav": (kind: Remap, remaps: {}) },
+            )"#,
+        )
+        .unwrap();
+        KeymapProcessor::new(&config, PathBuf::from("config.ron"), 0)
+    }
+
+    #[test]
+    fn multi_presses_every_child_and_releases_them_together() {
+        let mut p = processor();
+        assert_eq!(
+            p.process_key(KeyCode::KC_F1, true),
+            ProcessResult::MultipleEvents(vec![
+                (KeyCode::KC_LSFT, true),
+                (KeyCode::KC_A, true),
+            ])
+        );
+        assert_eq!(
+            p.process_key(KeyCode::KC_F1, false),
+            ProcessResult::MultipleEvents(vec![
+                (KeyCode::KC_LSFT, false),
+                (KeyCode::KC_A, false),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_layer_inside_multi_is_held_until_the_multi_is_released() {
+        let mut p = processor();
+        assert_eq!(
+            p.process_key(KeyCode::KC_F2, true),
+            ProcessResult::EmitKey(KeyCode::KC_B, true)
+        );
+        assert_eq!(p.current_layer_name(), "nav");
+        assert_eq!(
+            p.process_key(KeyCode::KC_F2, false),
+            ProcessResult::EmitKey(KeyCode::KC_B, false)
+        );
+        assert_eq!(p.current_layer_name(), "base");
+    }
+}
