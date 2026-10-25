@@ -75,6 +75,24 @@ fn run_event_processor(
         libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
 
+    // Escape hatch: if Escape is held down when the keyboard is attached, leave it alone, so a
+    // bad layer or config can't lock you out of typing. Plug it in again without Escape to attach.
+    if device
+        .get_key_state()
+        .is_ok_and(|keys| keys.contains(Key::KEY_ESC))
+    {
+        warn!(
+            "Escape held while attaching {}; leaving it ungrabbed. Replug it without Escape to use keymux",
+            keyboard_name
+        );
+        crate::steno::setup::notify_user(
+            user_id,
+            "keymux skipped a keyboard",
+            &format!("Escape was held while attaching {keyboard_name}. Replug it without Escape to use keymux."),
+        );
+        return Ok(());
+    }
+
     // Grab the device for exclusive access
     device.grab().context("Failed to grab device")?;
     info!("Grabbed device: {}", keyboard_name);
