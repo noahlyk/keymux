@@ -267,7 +267,6 @@ remaps: {
 |---|---|
 | `MO("layer")` | Momentary, like QMK's `MO`: the layer is on while the key is held, then turns off |
 | `TG("layer")` | Toggle: press to turn on, press again to turn off. Nothing is held |
-| `LATCH("layer")` | Turn on and keep on. Pressing it again does nothing. Only `TO("base")` or `TG` turns it off |
 | `TO("layer")` | Exclusive, like QMK's `TO`: turns every other layer off, then turns this one on and keeps it on. `TO("base")` leaves every layer and returns to the base layer |
 
 > **Breaking change:** `TO` used to be a hold action. Hold layers now need `MO`. `SWITCH` was removed; `TO` does its job.
@@ -278,7 +277,6 @@ remaps: {
 remaps: {
     KC_LALT: MO("nav"),              // Hold Left Alt → nav layer
     KC_F9: TG("nohrm"),              // Toggle nohrm on and off
-    KC_F1: LATCH("steno"),           // Steno on, and stays on
     KC_F10: TO("base"),              // Leave steno
     KC_F8: TO("stenopractice"),  // Only stenopractice is on afterwards
 }
@@ -538,7 +536,7 @@ Steno is a layer kind: `kind: Steno((...))`. A steno layer captures its stroke k
     ├─ MT(tap, hold) → Mod-Tap logic with roll/chord detection
     ├─ OSM(modifier) → OneShot Modifier
     ├─ DT(tap, dtap) → Double-Tap / Tap Dance
-    ├─ MO/TG/LATCH/TO(layer) → Layer momentary/toggle/latch/exclusive switch
+    ├─ MO/TG/TO(layer) → Layer momentary/toggle/exclusive switch
     ├─ Transparent → Fall through to lower layer
     ├─ SOCD() → SOCD resolution
     └─ CMD(command) → Execute shell command

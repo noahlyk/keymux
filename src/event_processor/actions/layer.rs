@@ -24,11 +24,6 @@ pub fn emit_layer(
                 Some(HeldAction::Layer(layer.clone())),
             )
         }
-        // Stays on after the key is released, and turning it on again changes nothing
-        KeyAction::LATCH(layer) => {
-            layer_stack.activate_layer(layer.clone());
-            (EmitResult::LayerAction(layer.clone()), None)
-        }
         KeyAction::TG(layer) => {
             // Toggles on press and latches: nothing is held, so release doesn't undo it
             if layer_stack.layers().contains(layer) {
@@ -99,15 +94,4 @@ mod tests {
         assert_eq!(stack.layers(), [Layer::base()]);
     }
 
-    #[test]
-    fn latch_turns_a_layer_on_and_nothing_holds_it() {
-        let mut stack = stack();
-        let (_, held) = emit_layer(&KeyAction::LATCH(Layer::new("steno")), KeyCode::KC_F1, &mut stack);
-        assert!(held.is_none(), "releasing F1 must not turn steno off");
-        assert_eq!(stack.current_layer(), Layer::new("steno"));
-        // Pressing it again keeps it on, unlike TG
-        emit_layer(&KeyAction::LATCH(Layer::new("steno")), KeyCode::KC_F1, &mut stack);
-        assert_eq!(stack.current_layer(), Layer::new("steno"));
-        assert_eq!(stack.layers(), [Layer::base(), Layer::new("steno")]);
-    }
 }

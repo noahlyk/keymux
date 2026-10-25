@@ -259,7 +259,6 @@ Layers are named in quotes. Layers stack: a key falls through the layers that ar
 
 - `MO("nav")` — momentary (QMK's `MO`): the layer is on while the key is held, off when released
 - `TG("nav")` — toggle: press to turn on, press again to turn off
-- `LATCH("steno")` — turn on and keep on; pressing again does nothing. Turn it off with `TO("base")` or `TG`
 - `TO("steno")` — exclusive (QMK's `TO`): turns every other layer off, then turns this one on and keeps it on. `TO("base")` leaves every layer and returns to base
 
 > **Breaking change:** `TO` used to be the hold action. It now switches exclusively, the way QMK's `TO` does. Change every hold `TO("layer")` to `MO("layer")`. `SWITCH` was removed, since `TO` does the same thing.
@@ -268,7 +267,7 @@ Layers are named in quotes. Layers stack: a key falls through the layers that ar
 ```ron
 KC_LALT: MO("nav"),                // Hold Alt for nav
 KC_F9: TG("nohrm"),                // Toggle nohrm on and off
-KC_F1: LATCH("steno"),             // Steno stays on until F10
+KC_F1: TO("steno"),                 // Steno stays on until F10
 KC_F10: TO("base"),                // Leave steno
 KC_F8: TO("stenopractice"),    // Only stenopractice is on afterwards
 ```
@@ -523,7 +522,7 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
 - If `dictionaries` is empty, keymux uses `user.json` and then `main.json` (or the Lapwing files, with the Lapwing theory).
 - `keymux steno layout` shows every stroke key and the key that presses it. `layout_overrides` keys are those slot names (`S-`, `A-`, `-E`, `-U`, ...).
 - On a steno layer, keys that are neither stroke keys nor remapped are swallowed, so an accidental press types nothing. Delete always passes through.
-- Turn the layer on with `LATCH("steno")` (stays on) or `TG("steno")` (toggle), and leave with `TO("base")`. A keyboard can also start in steno with `default_layer`.
+- Turn the layer on with `TO("steno")` (stays on, exclusive) or `TG("steno")` (toggle), and leave with `TO("base")`. A keyboard can also start in steno with `default_layer`.
 
 ### Typing
 

@@ -186,7 +186,6 @@
         // Example: Hold Left Alt for navigation keys
         KC_LALT: MO("nav"),           // momentary: on while held, off on release
         // KC_F9: TG("nohrm"),        // toggle: press on, press again off
-        // KC_F1: LATCH("steno"),     // on and stays on; TO("base") or TG turns it off
         // KC_F8: TO("steno"),        // exclusive (like QMK's TO): turns every other layer off first
         // KC_F10: TO("base"),        // leave every layer, back to base
         //
@@ -347,8 +346,8 @@
         // types the dictionary text for each stroke. The name doesn't matter;
         // `kind` is what makes it a steno layer.
         //
-        // Turn it on with LATCH (stays on) or TG (toggle), and leave with TO("base"):
-        //   KC_F1: LATCH("steno"),  KC_F10: TO("base"),
+        // Turn it on with TO (exclusive, stays on) or TG (toggle), and leave with TO("base"):
+        //   KC_F1: TO("steno"),  KC_F10: TO("base"),
         // Other keys that aren't stroke keys and have no remap here are swallowed
         // while it's active. Delete always passes through.
         //

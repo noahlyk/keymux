@@ -198,9 +198,6 @@ pub enum KeyAction {
     MO(Layer),
     /// Toggle layer (press to activate, press again to deactivate)
     TG(Layer),
-    /// Turn a layer on and keep it on, like TO without the hold. Pressing it again does
-    /// nothing; leave with TO("base"). Example: F1: LATCH("steno") turns steno on, from anywhere
-    LATCH(Layer),
     /// Run several actions together, as if each were pressed at once, and release them together.
     /// Example: MULTI([KC_LSFT, KC_A]) holds shift while A is pressed
     MULTI(Vec<Self>),
@@ -232,7 +229,7 @@ impl KeyAction {
     /// Add the name of every layer this action switches to, including inside nested actions
     pub fn layer_refs(&self, out: &mut Vec<String>) {
         match self {
-            Self::TO(layer) | Self::TG(layer) | Self::LATCH(layer) | Self::MO(layer) => {
+            Self::TO(layer) | Self::TG(layer) | Self::MO(layer) => {
                 out.push(layer.0.clone());
             }
             Self::MT(a, b) | Self::DT(a, b) => {

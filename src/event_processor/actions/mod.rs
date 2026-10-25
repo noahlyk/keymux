@@ -238,7 +238,7 @@ impl KeyAction {
                 }
             }
             Self::MT(..) => emit_mt(self, keycode, ctx),
-            Self::TO(..) | Self::TG(..) | Self::MO(..) | Self::LATCH(..) => {
+            Self::TO(..) | Self::TG(..) | Self::MO(..) => {
                 emit_layer(self, keycode, ctx.layer_stack)
             }
             Self::MULTI(children) => emit_multi(children, keycode, ctx),
