@@ -247,12 +247,15 @@ pub fn chord_rows(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &
 /// Every outline of each word, fewest strokes first. A word with no entry gets its shortest
 /// outline, or "no stroke". Only the first row of a word carries the word.
 fn all_outline_rows(dict: &Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &str) -> Vec<ChordRow> {
+    let base = Translator::new(dict.clone());
     let mut rows = Vec::new();
     for (start, end) in word_spans(text) {
         let word = &text[start..end];
-        let mut outlines = ranked_strokes(dict, word);
+        // Only outlines that type the word properly after a space, as in a sentence
+        let proper = |outline: &Vec<u32>| types_in_context(&base, word, outline);
+        let mut outlines: Vec<Vec<u32>> = ranked_strokes(dict, word).into_iter().filter(proper).collect();
         if outlines.is_empty() {
-            outlines.extend(shortest_outline(dict, word));
+            outlines.extend(shortest_outline(dict, word).filter(proper));
         }
         if outlines.is_empty() {
             rows.push(ChordRow { word: word.to_string(), outline: "no stroke".to_string(), keys: String::new() });
@@ -267,6 +270,25 @@ fn all_outline_rows(dict: &Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text
         }
     }
     rows
+}
+
+/// Whether `outline` types `word` properly in a sentence: after "the" it gives " word", and the
+/// next word still gets its space, so no glued prefix or suffix. Punctuation is left alone,
+/// since it attaches to the word before it.
+fn types_in_context(base: &Translator, word: &str, outline: &[u32]) -> bool {
+    if !word.chars().any(char::is_alphanumeric) {
+        return true;
+    }
+    let Some(the) = parse_stroke("-T") else {
+        return false;
+    };
+    let mut translator = base.clone();
+    translator.stroke(the);
+    for &bits in outline {
+        translator.stroke(bits);
+    }
+    translator.stroke(the);
+    translator.text() == format!("the {word} the")
 }
 
 /// The physical keys that press each stroke, one group per stroke. Keys within a stroke run
@@ -689,10 +711,37 @@ mod tests {
     fn a_prefix_that_glues_to_the_next_word_is_not_listed_as_the_word() {
         // `{be^}` types "be" but attaches the word after it, so only the plain "be" is an outline
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"-B": "be", "PWE": "{be^}"}"#).unwrap();
+        dict.merge_json(r#"{"-T": "the", "-B": "be", "PWE": "{be^}"}"#).unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "be", false);
         let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
         assert_eq!(outlines, ["-B"]);
+    }
+
+    #[test]
+    fn an_outline_that_attaches_to_the_word_before_is_not_listed() {
+        // `{^under}` glues onto "the", so "the under" would type "theunder"
+        let mut dict = Dictionary::default();
+        dict.merge_json(r#"{"-T": "the", "UPBD": "under", "TPH-PB": "{^under}"}"#).unwrap();
+        let rows = chord_rows(dict, &qwerty_keys_by_bit(), "under", false);
+        let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
+        assert_eq!(outlines, ["UPBD"]);
+    }
+
+    #[test]
+    fn under_your_skin_lists_only_outlines_that_type_under_properly() {
+        // UPB/TKER is `{under^}`, which would type "underyour"; UPB/TK*ER and the rest are plain
+        let mut dict = Dictionary::default();
+        dict.merge_json(
+            r#"{"-T": "the", "UPBD": "under", "TPH-PB": "under", "*URPBD": "under",
+                "UPB/TK*ER": "under", "UPB/TKER": "{under^}", "KWHUR": "your", "SKEUPB": "skin"}"#,
+        )
+        .unwrap();
+        let rows = chord_rows(dict, &qwerty_keys_by_bit(), "under your skin", false);
+        let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
+        assert!(!outlines.contains(&"UPB/TKER"));
+        assert_eq!(outlines.iter().filter(|&&o| o == "UPBD").count(), 1);
+        assert!(outlines.contains(&"UPB/TK*ER"));
+        assert_eq!(outlines.last(), Some(&"SKEUPB"));
     }
 
     #[test]
@@ -705,7 +754,7 @@ mod tests {
     #[test]
     fn unknown_word_is_fingerspelled_one_letter_per_stroke() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"TPH": "{&n}", "SRA": "{&v}", "EU": "{&i}", "PL": "{&m}", "SREUPL": "vim"}"#)
+        dict.merge_json(r#"{"-T": "the", "TPH": "{&n}", "SRA": "{&v}", "EU": "{&i}", "PL": "{&m}", "SREUPL": "vim"}"#)
             .unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "nvim vim", false);
         assert_eq!(rows[0].word, "nvim");
