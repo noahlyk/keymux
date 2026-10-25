@@ -40,10 +40,19 @@ impl Fixture {
     }
 
     fn processor(&self) -> KeymapProcessor {
+        self.processor_from(CONFIG)
+    }
+
+    /// A keyboard that starts on the steno layer, like a steno-only board with `default_layer`.
+    fn steno_processor(&self) -> KeymapProcessor {
+        self.processor_from(&CONFIG.replacen("(\n", "(\n    default_layer: Some(\"chords\"),\n", 1))
+    }
+
+    fn processor_from(&self, config_text: &str) -> KeymapProcessor {
         let dict = self.dir.join("main.json");
         std::fs::write(&dict, r#"{"KAT": "cat", "-PB": "and"}"#).unwrap();
         let config_path = self.dir.join("config.ron");
-        std::fs::write(&config_path, CONFIG.replace("DICT", &path_str(&dict))).unwrap();
+        std::fs::write(&config_path, config_text.replace("DICT", &path_str(&dict))).unwrap();
         let config = Config::load(&config_path).unwrap();
         let mut keymap = KeymapProcessor::new(&config, config_path, 0);
         keymap.wait_for_steno_dictionaries();
@@ -419,6 +428,47 @@ fn newline_and_tab_have_keys_to_type() {
 /// A hub of its own, so these tests don't see strokes from other tests through the global one.
 fn private_hub() -> &'static crate::steno::overlay::OverlayHub {
     Box::leak(Box::default())
+}
+
+/// Press and release one key on a keyboard.
+fn touch(p: &mut KeymapProcessor, key: KeyCode) {
+    p.process_key(key, true);
+    p.process_key(key, false);
+}
+
+#[test]
+fn the_overlay_follows_whichever_keyboard_was_touched_last() {
+    let fixture = Fixture::new("two-keyboards");
+    let hub = private_hub();
+    // One keyboard is steno all the time, the other is a plain keyboard on the base layer
+    let mut steno_board = fixture.steno_processor();
+    let mut plain_board = fixture.processor();
+    steno_board.set_overlay_hub(hub);
+    plain_board.set_overlay_hub(hub);
+
+    // The steno keyboard shows it from the start; the plain one, starting later, doesn't hide it
+    assert_eq!(hub.snapshot().layer.as_deref(), Some("chords"));
+
+    // Touching the plain keyboard makes it the current one, and it isn't in steno
+    touch(&mut plain_board, KeyCode::KC_A);
+    assert_eq!(hub.snapshot().layer, None);
+
+    // Touching the steno keyboard brings it back, and a stroke lands on the tape
+    touch(&mut steno_board, KeyCode::KC_S);
+    assert_eq!(hub.snapshot().layer.as_deref(), Some("chords"));
+    assert_eq!(hub.snapshot().tape.len(), 1);
+
+    // And back and forth, every time
+    touch(&mut plain_board, KeyCode::KC_B);
+    assert_eq!(hub.snapshot().layer, None);
+    touch(&mut steno_board, KeyCode::KC_S);
+    assert_eq!(hub.snapshot().layer.as_deref(), Some("chords"));
+
+    // A plain keyboard that switches into steno itself shows it, and leaving hides it again
+    plain_board.process_key(KeyCode::KC_TAB, true);
+    assert_eq!(hub.snapshot().layer.as_deref(), Some("chords"));
+    plain_board.process_key(KeyCode::KC_TAB, false);
+    assert_eq!(hub.snapshot().layer, None);
 }
 
 #[test]

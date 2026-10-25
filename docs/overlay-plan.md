@@ -80,12 +80,17 @@ Layer detection today only happens on the next key press (`steno_active`). For t
 overlay, compare `layer_stack.current_layer()` before/after each `process_key` and
 publish on change. This makes `TO("steno")` show the overlay on the press itself.
 
-Multiple keyboards: one hub, last writer wins, so the overlay follows the keyboard you
-last pressed a key on. Typing on the laptop board hides it; a key on the Glove80 brings it
-back.
+Multiple keyboards: one hub shared by every keyboard, and every key event (press or
+release) publishes *that keyboard's* steno layer, which the hub ignores when it is
+unchanged. So the overlay follows whichever keyboard you touched last, re-evaluated on every
+key: a key on a steno keyboard shows it, a key on one that is on base hides it. With a
+steno-only Glove80 and a laptop keyboard, typing on the laptop hides the overlay and
+touching the Glove80 brings it back. Stroke keys and the tape are shared state, so a stroke
+mid-way when you switch keyboards is dropped from the display (the layer change clears it).
 
-Known gap: with `default_layer: Some("steno")` the overlay appears on the first key
-press, not at daemon start, because only key events publish the layer.
+At daemon start a keyboard on a steno `default_layer` shows the overlay straight away. One
+starting on base publishes nothing, so it can't hide the overlay for a steno keyboard that
+started first; it takes over on its first key.
 
 ## 2. Wire protocol — `src/ipc.rs` [done, tested over a socket pair]
 

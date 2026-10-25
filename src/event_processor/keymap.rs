@@ -71,9 +71,8 @@ pub struct KeymapProcessor {
     steno_engines: HashMap<Layer, StenoEngine>,
     /// The steno layer that was on top at the last key press, if any
     steno_active: Option<Layer>,
-    /// The steno layer the overlay was last told about
-    overlay_layer: Option<Layer>,
-    /// Where layer changes are published for the overlay
+    /// Where this keyboard's steno state is published for the overlay. One hub is shared by
+    /// every keyboard: the overlay follows whichever was touched last.
     overlay_hub: &'static OverlayHub,
     /// Limits the "steno isn't set up" notification
     setup_hint: Cooldown,
@@ -109,7 +108,7 @@ impl KeymapProcessor {
             }
         }
 
-        let mut processor = Self {
+        let processor = Self {
             held_keys: HashMap::new(),
             layer_stack: LayerStack::new(config),
             mt_processor: crate::event_processor::actions::MtProcessor::new(config),
@@ -119,16 +118,18 @@ impl KeymapProcessor {
             adaptive_processor: AdaptiveProcessor::new(),
             steno_engines,
             steno_active: None,
-            overlay_layer: None,
             overlay_hub: OverlayHub::global(),
             setup_hint: Cooldown::new(Duration::from_secs(3)),
             config_dir,
             user_id,
         };
         // A keyboard that starts on a steno layer (`default_layer`) shows the overlay now,
-        // not on its first key press. One that starts on base changes nothing, so it can't
-        // hide the overlay for a steno keyboard that started first.
-        processor.publish_overlay_layer();
+        // not on its first key press. One that starts on base publishes nothing yet, so it
+        // can't hide the overlay for a steno keyboard that started first; it takes over
+        // when its first key is touched.
+        if processor.overlay_layer_name().is_some() {
+            processor.publish_overlay_layer();
+        }
         processor
     }
 
@@ -137,11 +138,12 @@ impl KeymapProcessor {
     #[cfg(test)]
     pub(crate) fn set_overlay_hub(&mut self, hub: &'static OverlayHub) {
         self.overlay_hub = hub;
-        self.overlay_layer = None;
         for engine in self.steno_engines.values_mut() {
             engine.set_hub(hub);
         }
-        self.publish_overlay_layer();
+        if self.overlay_layer_name().is_some() {
+            self.publish_overlay_layer();
+        }
     }
 
     pub fn set_game_mode(&mut self, active: bool) {
@@ -200,21 +202,27 @@ impl KeymapProcessor {
         result
     }
 
-    /// Tell the overlay when the steno layer on top changes, so it shows on the press that
-    /// switched into steno rather than on the next stroke. Compares by reference first, so
-    /// the common case (no change) neither allocates nor locks.
-    fn publish_overlay_layer(&mut self) {
+    /// The steno layer that is on top for this keyboard, if any: what the overlay should show.
+    fn overlay_layer_name(&self) -> Option<&str> {
         let game_mode = self.layer_stack.is_game_mode_active();
-        let top = self.layer_stack.layers().last().filter(|layer| {
-            self.steno_engines
-                .get(*layer)
-                .is_some_and(|engine| !(game_mode && engine.disabled_in_game_mode))
-        });
-        if top != self.overlay_layer.as_ref() {
-            self.overlay_layer = top.cloned();
-            self.overlay_hub
-                .set_layer(top.map(|layer| layer.0.as_str()));
-        }
+        self.layer_stack
+            .layers()
+            .last()
+            .filter(|layer| {
+                self.steno_engines
+                    .get(*layer)
+                    .is_some_and(|engine| !(game_mode && engine.disabled_in_game_mode))
+            })
+            .map(|layer| layer.0.as_str())
+    }
+
+    /// Tell the overlay about this keyboard's steno state. It runs on every key event, so
+    /// whichever keyboard was touched last decides what the overlay shows: a steno keyboard
+    /// shows it, and touching one that isn't in steno hides it. This also shows it on the
+    /// press that switches into steno, not on the next stroke. The hub ignores a repeat of
+    /// what it already has, so the common case is one uncontended lock and a comparison.
+    fn publish_overlay_layer(&self) {
+        self.overlay_hub.set_layer(self.overlay_layer_name());
     }
 
     /// On a steno layer that has no dictionary yet, point the user at setup.
