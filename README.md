@@ -254,10 +254,44 @@ KC_SPC: MT(KC_SPC, KC_LCTL),  // Tap Space, hold Ctrl
 
 All MT features are configurable via `mt_config` (see Behavior Settings section).
 
-#### TO(Layer)
-Switch to a different layer while held.
+#### Layer actions
+Layers are named in quotes. Layers stack: a key falls through the layers that are on until something remaps it. See [Layer switching](#layer-switching) in ARCHITECTURE.md for the full rules.
+
+- `TO("nav")` — hold: the layer is on while the key is held
+- `MO("nav")` — the same as `TO`, kept for QMK users
+- `TG("nav")` — toggle: press to turn on, press again to turn off
+- `LATCH("steno")` — turn on and keep on; pressing again does nothing. Turn it off with `TO("base")` or `TG`
+- `SWITCH("steno")` — exclusive: turns every other layer off, then turns this one on and keeps it on (QMK's `TO`)
+- `TO("base")` — leave every layer and return to base
+- `Transparent` — look this key up on the layer below
+
 ```ron
-KC_LALT: TO("nav"),  // Hold Left Alt to activate navigation layer
+KC_LALT: TO("nav"),                // Hold Alt for nav
+KC_F9: TG("nohrm"),                // Toggle nohrm on and off
+KC_F1: LATCH("steno"),             // Steno stays on until F10
+KC_F10: TO("base"),                // Leave steno
+KC_F8: SWITCH("stenopractice"),    // Only stenopractice is on afterwards
+```
+
+A keyboard can start with a layer already on, with `default_layer: Some("steno")` in `per_keyboard_overrides` (or globally at the top level).
+
+#### MULTI([...])
+Press several actions at once, and release them together.
+```ron
+KC_F1: MULTI([KC_LSFT, KC_A]),     // Holds Shift while A is pressed: types a capital A
+KC_F2: MULTI([KC_B, TO("nav")]),   // Types b and holds the nav layer until F2 is released
+```
+
+#### OSM(KeyCode)
+One-shot modifier: tap once, and the modifier applies to the next key only. It expires after `oneshot_timeout_ms` (default 5000).
+```ron
+KC_LSFT: OSM(KC_LSFT),
+```
+
+#### DT(single_tap, double_tap)
+Tap dance: a single tap does the first action, and a double tap within `double_tap_window_ms` (default 250) does the second.
+```ron
+KC_LALT: DT(KC_LALT, TO("nav")),   // Tap for Alt, double-tap for nav
 ```
 
 #### SOCD(key, [opposing_keys...])
@@ -452,6 +486,68 @@ are **session-only**: overrides live in the running daemon's memory and
 reset to automatic detection on every daemon restart - they're meant for
 quick corrections, not a permanent rule change.
 
+## 🎹 Steno
+
+keymux can turn a layer into a stenography (steno) machine that types Plover-format dictionaries. Chords are pressed on the stroke keys of your keyboard, and each stroke is translated as soon as its keys come up.
+
+### Setup
+
+```sh
+keymux steno setup             # download Plover's main.json into ~/.config/keymux/steno
+keymux steno theory lapwing    # optional: use Lapwing (downloads its dictionaries)
+keymux steno theory            # show the current theory (plover or lapwing)
+```
+
+Lapwing dictionaries are used automatically when the theory is `lapwing`. Entries you add with `keymux steno add` go into `user.json`, which has the highest priority.
+
+### Config
+
+Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno layer:
+
+```ron
+"steno": (
+    kind: Steno((
+        layout: "qwerty",
+        layout_overrides: { "S-": Key(KC_Q) },   // optional: change individual stroke keys
+        dictionaries: [                          // optional: highest priority first
+            "~/.config/keymux/steno/user.json",
+            "~/.config/keymux/steno/main.json",
+        ],
+        stroke_timeout_ms: 5000,                 // completes a stroke whose key never comes up
+    )),
+    remaps: { KC_F10: TO("base") },              // non-stroke keys: remaps still work
+    disabled_in_game_mode: true,
+),
+```
+
+- If `dictionaries` is empty, keymux uses `user.json` and then `main.json` (or the Lapwing files, with the Lapwing theory).
+- `keymux steno layout` shows every stroke key and the key that presses it. `layout_overrides` keys are those slot names (`S-`, `A-`, `-E`, `-U`, ...).
+- On a steno layer, keys that are neither stroke keys nor remapped are swallowed, so an accidental press types nothing. Delete always passes through.
+- Turn the layer on with `LATCH("steno")` (stays on) or `TG("steno")` (toggle), and leave with `TO("base")`. A keyboard can also start in steno with `default_layer`.
+
+### Typing
+
+- Press a stroke's keys together. The stroke is translated when they come up.
+- `*` undoes the last translation, including corrections that rewrote earlier text.
+- Space and Backspace are used for undo while there is text to undo. Once nothing is left, they act normally.
+- `#` repeats the last stroke.
+- A stroke that matches nothing on its own, but starts a longer entry, types a `_` placeholder. The next stroke completes the entry and replaces the `_`, or the `_` is removed.
+- A stroke that matches nothing types nothing, and is marked `?` on the tape.
+
+### Steno commands
+
+| Command | What it does |
+|---|---|
+| `keymux steno layout` | Show every stroke key, the key that presses it, and its sound |
+| `keymux steno keys "candy"` | Show every outline that types a word properly. Words are split on spaces |
+| `keymux steno keys "candy" --fast` | Show only the fewest-stroke outline for each word |
+| `keymux steno keys "candy" --show-keys` | Also show the physical keys that press each stroke |
+| `keymux steno keys` | With no text, an interactive session: type strings one after another |
+| `keymux steno lookup cat` | Show the strokes that type a word (case-sensitive, as the dictionary spells it) |
+| `keymux steno stroke "KPA/TKAOEU"` | Show what a stroke types. Use `/` between strokes of one word |
+| `keymux steno add KAT "cat"` | Add or replace an entry in `user.json` |
+| `keymux steno tape` | Show what each recent stroke typed. `-f` keeps printing new strokes, `-n N` sets how many lines to start with |
+
 ## 🎮 Usage
 
 ### Daemon Management
@@ -527,6 +623,14 @@ keymux completion zsh | sudo tee /usr/share/zsh/site-functions/_keymux
 # Fish
 keymux completion fish > ~/.config/fish/completions/keymux.fish
 ```
+
+## 🚪 Releasing a keyboard from keymux
+
+Press **Alt+F12** as the very first key after a keyboard attaches to release it. keymux stops handling that keyboard, and you get a notification. Replug the keyboard to use keymux with it again.
+
+Only the first key press counts. If any other key is pressed first, the chord no longer works until the keyboard is replugged. This keeps a stray Alt+F12 in the middle of typing from releasing the keyboard.
+
+Use this if a bad config or a stuck layer leaves the keyboard unusable: release it, fix the config, and replug.
 
 ## 🐛 Troubleshooting
 

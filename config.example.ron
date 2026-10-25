@@ -136,6 +136,9 @@
         // ("6789", "Disable"),     // disable this partial ID (tuple syntax)
     ],
     
+    // Escape hatch: pressing Alt+F12 as the very first key after a keyboard attaches
+    // releases it from keymux (you get a notification). Replug it to use keymux again.
+    //
     // Which keyboards to process:
     // - absent: Enable all keyboards (equivalent to ["*"])
     // - None: Disable all (no keyboards enabled)
@@ -181,7 +184,17 @@
         // Great for navigation, symbols, numpad, etc.
         //
         // Example: Hold Left Alt for navigation keys
-        KC_LALT: TO("nav"),
+        KC_LALT: TO("nav"),           // hold: on while held (MO is the same)
+        // KC_F9: TG("nohrm"),        // toggle: press on, press again off
+        // KC_F1: LATCH("steno"),     // on and stays on; TO("base") or TG turns it off
+        // KC_F8: SWITCH("steno"),    // exclusive: turns every other layer off first
+        // KC_F10: TO("base"),        // leave every layer, back to base
+        //
+        // Layers stack. A key falls through the layers that are on until one remaps it.
+        // Steno only captures strokes when its layer is the top layer.
+
+        // === MULTI: several actions at once, released together ===
+        // KC_F2: MULTI([KC_LSFT, KC_A]),   // types a capital A
 
         // === MOD-TAP (MT) - QMK-Style Home Row Mods ===
         //
@@ -333,26 +346,29 @@
         // types the dictionary text for each stroke. The name doesn't matter;
         // `kind` is what makes it a steno layer.
         //
-        // Switch to it with TO/TG/MO, like any other layer. Space types a space.
+        // Turn it on with LATCH (stays on) or TG (toggle), and leave with TO("base"):
+        //   KC_F1: LATCH("steno"),  KC_F10: TO("base"),
         // Other keys that aren't stroke keys and have no remap here are swallowed
-        // while it's active.
+        // while it's active. Delete always passes through.
         //
         // Dictionaries are Plover JSON files, highest priority first.
         // Multi-stroke entries (KPA/TKAOEU) and the formatting commands {^}, {^text},
         // {text^} and {-|} are supported. Entries using any other command are skipped.
-        // Bare * undoes the last translation.
+        // Bare * undoes the last translation. Space and Backspace are undo keys too
+        // while there is text to undo, and act normally once nothing is left.
+        // A stroke that starts a longer entry types _ until the next stroke settles it.
         "steno": (
             kind: Steno((
                 layout: "qwerty",
-                // The default layout also presses S- on Q, * on G, and # on the whole
-                // number row 1 to 0, on top of the main keys (see `keymux steno layout`).
+                // Run `keymux steno layout` to see every stroke key and the key that presses it.
                 // Change individual stroke keys, e.g. { "S-": Key(KC_Q) }
                 layout_overrides: {},
                 dictionaries: [
                     "~/.config/keymux/steno/user.json",
                     "~/.config/keymux/steno/main.json",
                 ],
-                // A stroke is flushed after this long even if keys are still held
+                // A stroke is completed after this long, even if a key is still held down.
+                // Normally strokes complete on release, so this is only a safety net.
                 stroke_timeout_ms: 1000,
             )),
             // Non-stroke keys listed here still work while steno is active,
@@ -455,6 +471,9 @@
     // Behavior depends on per_keyboard_inherits_global_layout:
     //   - true: Merges with global config (override specific fields)
     //   - false: Replaces global config (build from scratch)
+    //
+    // default_layer: Some("steno") in an override turns that layer on at startup for
+    // this keyboard only. Top-level default_layer does the same for every keyboard.
     // ============================================================================
 
     per_keyboard_overrides: {

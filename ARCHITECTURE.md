@@ -261,30 +261,38 @@ remaps: {
 
 #### 7. **Layer Switching**
 
-**Switch to any named layer while key is held, toggled, or momentary**
+**Layer keys** (each takes a layer name in quotes):
 
-**Syntax:** 
-- `TO("layer_name")` - Hold to switch, release to return to base
-- `MO("layer_name")` - Alias for TO (momentary)
-- `TG("layer_name")` - Toggle: press to activate, press again to deactivate
-- `Transparent` - Fall through to lower layer (ignore this key on current layer)
+| Action | Behavior |
+|---|---|
+| `TO("layer")` / `MO("layer")` | Hold: the layer is on while the key is held, then turns off. The two are identical; both names are kept for QMK familiarity |
+| `TG("layer")` | Toggle: press to turn on, press again to turn off. Nothing is held |
+| `LATCH("layer")` | Turn on and keep on. Pressing it again does nothing. Only `TO("base")` or `TG` turns it off |
+| `SWITCH("layer")` | Exclusive, like QMK's `TO`: turns every other layer off, then turns this one on and keeps it on |
+| `TO("base")` | Leave every layer and return to the base layer |
+| `Transparent` | Fall through: look this key up on the layers below |
 
 **Example:**
 ```ron
 remaps: {
-    KC_CAPS: TO("nav"),      // Hold Caps Lock → Nav layer
-    KC_TAB: TO("symbols"),   // Hold Tab → Symbol layer  
-    KC_LSFT: MO("num"),      // Hold Shift → Number layer
-    KC_SCRL: TG("game_mode"), // Scroll Lock toggle → Game mode
+    KC_LALT: TO("nav"),              // Hold Left Alt → nav layer
+    KC_F9: TG("nohrm"),              // Toggle nohrm on and off
+    KC_F1: LATCH("steno"),           // Steno on, and stays on
+    KC_F10: TO("base"),              // Leave steno
+    KC_F8: SWITCH("stenopractice"),  // Only stenopractice is on afterwards
 }
 ```
 
-**How it works:**
-1. **TO/MO**: Press layer switch key → switch to that layer. Release → return to base layer
-2. **TG**: Press to toggle layer on/off. Press again to deactivate
-3. All key lookups check: Game Mode → Active Layer → Base
-4. Layers can be nested (layer key in another layer)
-5. **Transparent**: Looks up the key on the next lower layer instead
+**How the layer stack works:**
+1. Active layers form a stack. The top one is the current layer. Only the current layer's steno engine captures strokes.
+2. A key lookup walks the stack from the top down and uses the first remap it finds. A layer that doesn't remap a key lets it fall through to the layers below.
+3. When nothing on the stack remaps the key, game-mode remaps apply (if game mode is on), then the base `remaps`.
+4. Turning on a layer that is already on does nothing. It is not added to the stack twice.
+5. Layer keys don't turn each other off. Stacking `TG("nohrm")` on top of steno leaves steno underneath, but steno is no longer the current layer, so its strokes stop being captured. Use `SWITCH` or `TO("base")` to reset the stack.
+6. A held `TO`/`MO` key only removes its own layer when released. Anything switched on underneath it stays on.
+7. `default_layer` (global, or per keyboard) puts one layer on the stack at startup, above base.
+
+Layer actions also work inside `MULTI`, `DT`, `MT` and `SOCD`, so a layer can be held as part of a combined action.
 
 ---
 
@@ -438,6 +446,22 @@ keyboard_overrides: {
 - **130-150ms**: Aggressive (fast typers, gaming keyboards)
 - **175-200ms**: Balanced (most users)
 - **200-250ms**: Conservative (slow/deliberate typers)
+
+---
+
+### Steno (Plover-compatible)
+
+Steno is a layer kind: `kind: Steno((...))`. A steno layer captures its stroke keys instead of remapping them, groups them into strokes, and types the Plover dictionary text for each stroke.
+
+**Mechanics:**
+- **Strokes**: a stroke is the set of stroke keys pressed together. It completes when the keys come up. `stroke_timeout_ms` (default 5000) completes a stroke whose key never comes up.
+- **Translation**: each completed stroke is translated immediately. A multi-stroke entry such as `KPA/TKAOEU` replaces the text of the earlier strokes when it matches, so text already typed can be rewritten (retro-correction).
+- **Undo**: the stroke `*` reverses the last translation, including any retro-correction. Space and Backspace are swallowed while there is text to undo, and act normally once nothing is left.
+- **Placeholder**: a stroke that matches nothing on its own but starts a longer entry types `_`. The next stroke either completes the entry and replaces the `_`, or doesn't and the `_` is removed. Space and undo also remove it.
+- **Unmatched strokes**: type nothing, and appear as `?` on the tape.
+- **Delete** always reaches the screen, even on a steno layer.
+- **Dictionaries**: Plover JSON files, highest priority first. They are parsed once and cached as a binary file in `steno/cache`, keyed by the sha256 of each source file, so a changed dictionary is re-parsed automatically.
+- **Tape**: every stroke is logged to `~/.local/state/keymux/steno-tape.txt`. `keymux steno tape -f` follows it live.
 
 ---
 
@@ -768,83 +792,41 @@ Config Change → Analyze Changes → Restart ONLY Affected Threads
 
 ## Component Details
 
-### Session Manager (`session_manager.rs`)
+### Session Manager (`src/session_manager.rs`)
 
-**Purpose**: Manage multi-user keyboard ownership
+**Purpose**: Track which users are logged in, so each keyboard belongs to an active session.
 
-**Key Features**:
-- Monitor active user sessions via `loginctl`
-- Track keyboard ownership per user
-- Handle session changes (login/logout)
-- First-come-first-serve assignment
+- Reads `loginctl` every 5 seconds (`refresh_sessions`).
+- `is_user_active(uid)` and `get_active_uids()` answer ownership questions.
 
-**API**:
-```rust
-pub async fn request_keyboard(&self, keyboard_id: KeyboardId, uid: u32) -> Result<bool>
-pub async fn release_keyboard(&self, keyboard_id: &KeyboardId) -> Result<()>
-pub async fn get_keyboard_owner(&self, keyboard_id: &KeyboardId) -> Option<u32>
-pub async fn get_user_keyboards(&self, uid: u32) -> Vec<KeyboardId>
-```
+### Daemon (`src/daemon/daemon.rs`, `AsyncDaemon`)
 
-### Async Daemon (`async_daemon.rs`)
+**Purpose**: Orchestrate devices, configuration and processors.
 
-**Purpose**: Main orchestrator with async management layer
+- `run()` loops with `tokio::select!` over hotplug events (debounced), IPC commands, config changes, the 5-second session check, and reports from processor threads that have exited.
+- Each enabled keyboard gets its own event-processor thread. If one exits, the daemon cleans up that keyboard so it can be attached again.
 
-**Key Features**:
-- `tokio::select!` for efficient event handling
-- Background sync services (hotplug, IPC, niri, config watcher)
-- Smart hot-reload without service interruption
-- Thread pool management with proper cleanup
+### Event Processor (`src/event_processor/`)
 
-**Event Loop**:
-```rust
-tokio::select! {
-    _ = tokio::time::sleep(Duration::from_millis(10)) => {
-        // Check hotplug events
-    }
-    _ = tokio::time::sleep(Duration::from_millis(10)) => {
-        // Check IPC commands  
-    }
-    _ = tokio::time::sleep(Duration::from_millis(10)) => {
-        // Check niri events
-    }
-    _ = tokio::time::sleep(Duration::from_millis(100)) => {
-        // Check config changes
-    }
-    _ = tokio::time::sleep(Duration::from_secs(30)) => {
-        // Periodic cleanup
-    }
-}
-```
+**Purpose**: Turn physical key events into output keys, synchronously.
 
-### Event Processor (`event_processor.rs`)
+- `run_processor` starts one thread per keyboard, grabs its device, and writes the results to a virtual keyboard created with uinput.
+- `KeymapProcessor` (`keymap.rs`) holds the layer stack, the state of every held key, the MT/DT/OSM/SOCD processors and the steno engines. Each key press is resolved when it goes down and remembered until it comes up.
+- `LayerStack` (`layer_stack.rs`) is the ordered list of active layers described under Layer Switching.
+- `AltF12` (`mod.rs`) watches the first key press after a keyboard attaches for the Alt+F12 release chord.
+- Key handling is synchronous: no async work happens per key press.
 
-**Purpose**: High-performance synchronous key processing
+### Config (`src/config/`)
 
-**Hot Path Optimizations**:
-- **Synchronous only**: No async overhead in key processing
-- **Zero allocation**: Reuse buffers and minimize allocations
-- **Direct evdev**: Direct device access without abstractions
-- **Non-blocking**: Check for commands without blocking
+- `config.rs`: the RON schema, its defaults, and `for_keyboard`, which merges per-keyboard overrides into the global config.
+- `validator.rs`: what `keymux validate` checks: SOCD pairs, timing ranges, layer references (including nested ones), steno layouts and dictionary paths.
+- `config_manager.rs`: loads the config file for the daemon.
 
-**Command Interface**:
-```rust
-enum ProcessorCommand {
-    ReloadConfig(Config),
-    SetGameMode(bool),
-    Shutdown,
-}
-```
+### Steno (`src/steno/`)
 
-### Config Manager
+See the Steno section above.
 
-**Purpose**: Smart configuration handling
-
-**Features**:
-- **Atomic reload**: Update specific sections without full restart
-- **Validation**: Verify config before applying
-- **Rollback**: Revert on invalid configurations
-- **User-specific**: Per-keyboard overrides
+---
 
 ## Performance Characteristics
 
