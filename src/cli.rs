@@ -284,6 +284,9 @@ pub enum StenoAction {
         /// Also show the physical keys that press each stroke
         #[arg(long)]
         show_keys: bool,
+        /// Show only the fastest outline for each word, not every outline
+        #[arg(long)]
+        fast: bool,
     },
     /// Show the stroke that types a word, e.g. `keymux steno lookup cat`
     Lookup {
