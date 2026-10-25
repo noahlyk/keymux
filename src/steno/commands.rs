@@ -6,7 +6,7 @@ use super::layout::{
     build_key_map, extra_keys, parse_stroke, preset, render_stroke, without_extra_keys, SLOTS, SLOT_SOUNDS,
 };
 use super::numbers::number_text;
-use super::setup::{default_dictionaries, steno_dir};
+use super::setup::{cache_dir, default_dictionaries, steno_dir};
 use super::shortest::shortest_outline;
 use super::tape;
 use super::translate::Translator;
@@ -22,7 +22,7 @@ use std::time::Duration;
 /// Every dictionary a layer would use with the default config.
 #[must_use]
 pub fn load_dictionary(config_dir: &Path) -> Dictionary {
-    Dictionary::load(&default_dictionaries(config_dir))
+    Dictionary::load_cached(&default_dictionaries(config_dir), &cache_dir(config_dir))
 }
 
 /// Print the stroke(s) that type `word`.

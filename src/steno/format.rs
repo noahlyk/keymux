@@ -18,9 +18,10 @@
 //! an unknown command never gets typed out as literal text.
 
 use crate::keycode::KeyCode;
+use serde::{Deserialize, Serialize};
 
 /// One parsed piece of a dictionary entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Piece {
     /// A word, spaced from the previous word
     Text(String),
@@ -51,7 +52,7 @@ pub enum Piece {
 }
 
 /// One key press, with any modifiers held down while it is pressed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyPress {
     pub modifiers: Vec<KeyCode>,
     pub key: KeyCode,
