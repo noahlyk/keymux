@@ -7,7 +7,7 @@
 use super::format::{parse_pieces, render, FormatState, Piece};
 use super::layout::parse_stroke;
 use anyhow::{Context, Result};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::hash_map::Entry;
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 /// Bumped when the cached layout changes, so older cache files are ignored.
-const CACHE_LAYOUT: u32 = 1;
+const CACHE_LAYOUT: u32 = 2;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Dictionary {
@@ -24,6 +24,9 @@ pub struct Dictionary {
     /// Stroke sequences grouped by the text they type, for reverse lookup
     by_text: FxHashMap<String, Vec<Vec<u32>>>,
     max_len: usize,
+    /// The first stroke of every entry longer than one stroke. A stroke in this set
+    /// is incomplete on its own: more strokes may still finish an entry it starts.
+    openers: FxHashSet<u32>,
 }
 
 /// The file a cache was built from: its path, and the sha256 of its contents when it was read.
@@ -99,7 +102,12 @@ impl Dictionary {
             };
             if let Entry::Vacant(slot) = self.entries.entry(strokes.clone()) {
                 self.max_len = self.max_len.max(strokes.len());
-                let text = render(&pieces, &mut FormatState::default()).trim_start().to_string();
+                if strokes.len() > 1 {
+                    self.openers.insert(strokes[0]);
+                }
+                let text = render(&pieces, &mut FormatState::default())
+                    .trim_start()
+                    .to_string();
                 self.by_text.entry(text).or_default().push(strokes);
                 slot.insert(pieces);
                 stats.loaded += 1;
@@ -112,6 +120,12 @@ impl Dictionary {
     #[must_use]
     pub fn get(&self, strokes: &[u32]) -> Option<&[Piece]> {
         self.entries.get(strokes).map(Vec::as_slice)
+    }
+
+    /// Whether some entry longer than one stroke starts with `stroke`.
+    #[must_use]
+    pub fn opens_longer_entry(&self, stroke: u32) -> bool {
+        self.openers.contains(&stroke)
     }
 
     /// Every stroke sequence whose translation is exactly `text`, ignoring the
@@ -192,7 +206,11 @@ fn read_cache(file: &Path, sources: &[Source]) -> Option<Dictionary> {
 /// start, so failures are logged and not returned.
 fn write_cache(file: &Path, sources: &[Source], dict: &Dictionary) {
     let version = cache_version();
-    let bytes = match bincode::serialize(&CacheOut { version: &version, sources, dict }) {
+    let bytes = match bincode::serialize(&CacheOut {
+        version: &version,
+        sources,
+        dict,
+    }) {
         Ok(bytes) => bytes,
         Err(e) => return warn!("steno cache not saved: {e}"),
     };
@@ -284,14 +302,22 @@ mod tests {
         // Unchanged file: the cache is used, so the same answer comes back
         let restored = Dictionary::load_cached(&[&file], &cache);
         assert_eq!(restored.strokes_for("cat"), vec![vec![KAT]]);
-        assert_eq!(cache_files(&cache), 1, "the cache is reused, not duplicated");
+        assert_eq!(
+            cache_files(&cache),
+            1,
+            "the cache is reused, not duplicated"
+        );
 
         // Changed file: the fingerprint no longer matches, so the JSON is read again
         fs::write(&file, r#"{"KAT": "dog"}"#).unwrap();
         let changed = Dictionary::load_cached(&[&file], &cache);
         assert_eq!(changed.strokes_for("dog"), vec![vec![KAT]]);
         assert!(changed.strokes_for("cat").is_empty());
-        assert_eq!(cache_files(&cache), 1, "the changed file overwrites its cache");
+        assert_eq!(
+            cache_files(&cache),
+            1,
+            "the changed file overwrites its cache"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -310,7 +336,8 @@ mod tests {
     #[test]
     fn strokes_for_finds_every_outline_through_the_word_index() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KAT": "cat", "KAT/-PB": "cat", "KWRAT": "{^}cat"}"#).unwrap();
+        dict.merge_json(r#"{"KAT": "cat", "KAT/-PB": "cat", "KWRAT": "{^}cat"}"#)
+            .unwrap();
         // The leading space that spacing adds is ignored, and the index covers every entry
         assert_eq!(dict.strokes_for("cat").len(), 3);
     }

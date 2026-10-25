@@ -12,6 +12,7 @@ use super::dict::Dictionary;
 use super::format::{capitalize_word, lowercase_word, render, FormatState, KeyPress, Piece};
 use super::numbers::{number_text, NUMBER_BIT};
 use super::orthography;
+use crate::keycode::KeyCode;
 use std::sync::Arc;
 use tracing::info;
 
@@ -20,6 +21,10 @@ pub const UNDO_STROKE: u32 = 1 << 9;
 
 /// How many translations stay undoable. Older output is never touched again.
 const MAX_HISTORY: usize = 4096;
+
+/// Typed for a stroke that is incomplete, so it shows the stroke registered. The next
+/// stroke replaces it or takes it back. ASCII only, since keyboard output can't type more.
+const PENDING_MARK: &str = "_";
 
 /// What the caller should do with the keyboard after a stroke.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +52,8 @@ struct Emitted {
     consumed: Vec<Emitted>,
     /// A key press rather than text. Undo consumes it without retyping anything.
     presses: bool,
+    /// The placeholder for an incomplete stroke, see [`PENDING_MARK`]
+    pending: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +122,8 @@ impl Translator {
     /// The user typed a space on the steno layer. The space goes into the buffer as
     /// its own step, so the next word doesn't add another one. `*` takes it back.
     pub fn space(&mut self) -> StenoOutput {
+        // The stroke this placeholder stood for never finished, so it is taken back first
+        let removed = self.drop_pending();
         let start = self.output.len();
         self.output.push(' ');
         let state_before = self.state;
@@ -127,7 +136,14 @@ impl Translator {
             state_before,
             self.state,
         );
-        StenoOutput::Type(" ".to_string())
+        if removed == 0 {
+            StenoOutput::Type(" ".to_string())
+        } else {
+            StenoOutput::Retype {
+                backspaces: removed,
+                text: " ".to_string(),
+            }
+        }
     }
 
     /// Whether any dictionary entries loaded. False means steno isn't set up yet.
@@ -155,6 +171,31 @@ impl Translator {
         if stroke == NUMBER_BIT && self.best_match(stroke).is_none() {
             return self.repeat_last();
         }
+        // What is on screen before this stroke, placeholder included
+        let screen = self.output.clone();
+        // A placeholder is replaced only by a stroke that joins it. Any other stroke takes it back first.
+        let pending = self.history.last().is_some_and(|entry| entry.pending);
+        let joins = pending && matches!(self.best_match(stroke), Some((consume, _)) if consume > 0);
+        let removed = if joins { 0 } else { self.drop_pending() };
+        let output = self.place(stroke);
+        if removed == 0 {
+            return output;
+        }
+        match output {
+            Some(StenoOutput::Keys(presses)) => {
+                // The placeholder is on screen, so delete it before the keys are pressed
+                let backspaces = (0..removed).map(|_| KeyPress {
+                    modifiers: Vec::new(),
+                    key: KeyCode::KC_BSPC,
+                });
+                Some(StenoOutput::Keys(backspaces.chain(presses).collect()))
+            }
+            _ => diff(&screen, &self.output),
+        }
+    }
+
+    /// Translate a stroke that is neither undo nor a repeat. See [`Translator::stroke`].
+    fn place(&mut self, stroke: u32) -> Option<StenoOutput> {
         // A retro space command acts between two strokes, which a joined entry hides, so
         // split that entry first. The change is reported against the screen before the split.
         let screen = self.output.clone();
@@ -168,6 +209,7 @@ impl Translator {
                 diff(&screen, &self.output)
             }
             Some((consume, pieces)) => self.apply(stroke, consume, &pieces),
+            None if self.dict.opens_longer_entry(stroke) => self.hold(stroke),
             None => {
                 self.unmatched = true;
                 info!("steno stroke {stroke:#x} not in dictionary");
@@ -184,6 +226,44 @@ impl Translator {
                 None
             }
         }
+    }
+
+    /// A stroke that matches nothing alone, but starts a longer entry, so it is incomplete.
+    /// Types a placeholder in its place, which the next stroke replaces or takes back.
+    fn hold(&mut self, stroke: u32) -> Option<StenoOutput> {
+        let start = self.output.len();
+        let state_before = self.state;
+        let mut state = self.state;
+        // Spaced like a word, so it doesn't run into the word before it
+        let text = render(&[Piece::Text(PENDING_MARK.to_string())], &mut state);
+        self.output.push_str(&text);
+        self.state = state;
+        self.record(
+            vec![stroke],
+            start,
+            String::new(),
+            Vec::new(),
+            state_before,
+            self.state,
+        );
+        if let Some(entry) = self.history.last_mut() {
+            entry.pending = true;
+        }
+        Some(StenoOutput::Type(text))
+    }
+
+    /// Take back the placeholder for an incomplete stroke, if it is the last thing typed.
+    /// Returns how many characters were taken back, so the caller can delete them.
+    fn drop_pending(&mut self) -> usize {
+        let Some(entry) = self.history.last().filter(|entry| entry.pending) else {
+            return 0;
+        };
+        let (start, state) = (entry.start, entry.state_before);
+        let removed = self.output[start..].chars().count();
+        self.history.pop();
+        self.output.truncate(start);
+        self.state = state;
+        removed
     }
 
     /// The longest dictionary entry that ends with `stroke`, and how many earlier
@@ -231,7 +311,11 @@ impl Translator {
         // Keeping them (rather than dropping them) means their strokes can still join and
         // undo still restores them.
         let mut covered = Vec::new();
-        while self.history.last().is_some_and(|entry| entry.start >= start) {
+        while self
+            .history
+            .last()
+            .is_some_and(|entry| entry.start >= start)
+        {
             covered.extend(self.history.pop());
         }
         covered.reverse();
@@ -304,6 +388,7 @@ impl Translator {
             state_after,
             consumed,
             presses: false,
+            pending: false,
         });
         self.trim_history();
     }
@@ -592,12 +677,70 @@ mod tests {
     #[test]
     fn multi_stroke_entry_replaces_its_first_stroke() {
         let mut t = translator(r#"{"KPA/TKAOEU": "example"}"#);
-        // KPA has no entry alone, so nothing types yet
-        assert_eq!(t.stroke(stroke("KPA")), None);
-        assert!(t.was_unmatched());
+        // KPA has no entry alone, but starts one, so a placeholder shows it registered
+        assert_eq!(t.stroke(stroke("KPA")), Some(StenoOutput::Type("_".into())));
+        assert!(!t.was_unmatched());
+        // The placeholder is the first thing on screen, so the entry replaces it
         assert_eq!(
             t.stroke(stroke("TKAOEU")),
-            Some(StenoOutput::Type("example".into()))
+            Some(StenoOutput::Retype {
+                backspaces: 1,
+                text: "example".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn an_incomplete_stroke_shows_a_placeholder_until_the_next_one_joins_it() {
+        let json = r#"{"KPA/TKAOEU": "example"}"#;
+        assert_eq!(type_strokes(json, &["KPA"]), "_");
+        assert_eq!(type_strokes(json, &["KPA", "TKAOEU"]), "example");
+    }
+
+    #[test]
+    fn a_stroke_that_stands_alone_takes_back_the_placeholder() {
+        let json = r#"{"KAT": "cat", "KPA/TKAOEU": "example"}"#;
+        assert_eq!(type_strokes(json, &["KPA", "KAT"]), "cat");
+    }
+
+    #[test]
+    fn a_placeholder_after_a_word_is_spaced_and_taken_back_cleanly() {
+        let json = r#"{"KAT": "cat", "KPA/TKAOEU": "example", "SKP": "and"}"#;
+        assert_eq!(type_strokes(json, &["KAT", "KPA"]), "cat _");
+        assert_eq!(type_strokes(json, &["KAT", "KPA", "SKP"]), "cat and");
+    }
+
+    #[test]
+    fn a_space_takes_back_an_incomplete_stroke() {
+        let mut t = translator(r#"{"KAT": "cat", "KPA/TKAOEU": "example"}"#);
+        let mut typed = String::new();
+        for chord in ["KAT", "KPA"] {
+            apply(&mut typed, t.stroke(stroke(chord)));
+        }
+        assert_eq!(typed, "cat _");
+        let space = t.space();
+        assert_eq!(
+            space,
+            StenoOutput::Retype {
+                backspaces: 2,
+                text: " ".into(),
+            }
+        );
+        apply(&mut typed, Some(space));
+        assert_eq!(typed, "cat ");
+    }
+
+    #[test]
+    fn undo_takes_back_an_incomplete_stroke() {
+        let mut t = translator(r#"{"KAT": "cat", "KPA/TKAOEU": "example"}"#);
+        t.stroke(stroke("KAT"));
+        t.stroke(stroke("KPA"));
+        assert_eq!(
+            t.stroke(UNDO_STROKE),
+            Some(StenoOutput::Retype {
+                backspaces: 2,
+                text: String::new(),
+            })
         );
     }
 
@@ -642,10 +785,14 @@ mod tests {
     #[test]
     fn a_stroke_that_does_not_extend_the_prefix_is_translated_alone() {
         let mut t = translator(r#"{"KPA/TKAOEU": "example", "KAT": "cat"}"#);
-        assert_eq!(t.stroke(stroke("KPA")), None);
+        assert_eq!(t.stroke(stroke("KPA")), Some(StenoOutput::Type("_".into())));
+        // KAT takes the placeholder's place rather than joining KPA
         assert_eq!(
             t.stroke(stroke("KAT")),
-            Some(StenoOutput::Type("cat".into()))
+            Some(StenoOutput::Retype {
+                backspaces: 1,
+                text: "cat".into(),
+            })
         );
     }
 
@@ -784,10 +931,7 @@ mod tests {
     fn letter_then_word_is_spaced_without_attach() {
         // Live check: TPH*/SREUPL types "n vim", not "nvim"
         assert_eq!(
-            type_strokes(
-                r#"{"TPH": "{>}{&n}", "SREUPL": "vim"}"#,
-                &["TPH", "SREUPL"]
-            ),
+            type_strokes(r#"{"TPH": "{>}{&n}", "SREUPL": "vim"}"#, &["TPH", "SREUPL"]),
             "n vim"
         );
     }
@@ -890,7 +1034,10 @@ mod tests {
         let mut t = translator(r#"{"KAT": "cat"}"#);
         assert_eq!(t.stroke(NUMBER_BIT), None);
         // The `#` stays available to start a proper-noun outline after it
-        assert_eq!(t.stroke(stroke("KAT")), Some(StenoOutput::Type("cat".into())));
+        assert_eq!(
+            t.stroke(stroke("KAT")),
+            Some(StenoOutput::Type("cat".into()))
+        );
     }
 
     #[test]

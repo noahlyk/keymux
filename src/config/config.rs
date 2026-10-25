@@ -189,15 +189,18 @@ pub enum KeyAction {
     /// Now fully recursive - can nest any actions!
     /// Example: MT(Key(KC_TAB), TO("nav")) - tap for Tab, hold for nav layer
     MT(Box<Self>, Box<Self>),
-    /// Switch to layer
+    /// Exclusive switch, like QMK's TO: turns every other layer off, then turns this one on
+    /// and keeps it on. TO("base") leaves every layer and returns to base.
+    /// Example: F9: TO("nohrm") leaves steno for nohrm
     TO(Layer),
+    /// Momentary layer, like QMK's MO: on while the key is held, off when it is released.
+    /// Example: KC_LALT: MO("nav")
+    MO(Layer),
     /// Toggle layer (press to activate, press again to deactivate)
     TG(Layer),
-    /// Turn a layer on and keep it on, like TO without the hold. Pressing it again does
-    /// nothing; leave with TO("base"). Example: F1: LATCH("steno") turns steno on, from anywhere
-    LATCH(Layer),
-    /// Momentary layer - hold for layer
-    MO(Layer),
+    /// Run several actions together, as if each were pressed at once, and release them together.
+    /// Example: MULTI([KC_LSFT, KC_A]) holds shift while A is pressed
+    MULTI(Vec<Self>),
     /// SOCD (Simultaneous Opposite Cardinal Direction) - fully generic
     /// When this key is pressed, unpress all opposing keys
     /// Format: SOCD(this_action, [opposing_actions...])
@@ -223,6 +226,32 @@ pub enum KeyAction {
 }
 
 impl KeyAction {
+    /// Add the name of every layer this action switches to, including inside nested actions
+    pub fn layer_refs(&self, out: &mut Vec<String>) {
+        match self {
+            Self::TO(layer) | Self::TG(layer) | Self::MO(layer) => {
+                out.push(layer.0.clone());
+            }
+            Self::MT(a, b) | Self::DT(a, b) => {
+                a.layer_refs(out);
+                b.layer_refs(out);
+            }
+            Self::SOCD(a, others) => {
+                a.layer_refs(out);
+                for other in others {
+                    other.layer_refs(out);
+                }
+            }
+            Self::OSM(a) => a.layer_refs(out),
+            Self::MULTI(children) => {
+                for child in children {
+                    child.layer_refs(out);
+                }
+            }
+            Self::Key(_) | Self::CMD(_) | Self::Transparent => {}
+        }
+    }
+
     /// Check if this action is Transparent
     pub const fn is_transparent(&self) -> bool {
         matches!(self, Self::Transparent)
@@ -1162,9 +1191,7 @@ impl Config {
         let extract_layer_refs = |remaps: &HashMap<KeyCode, KeyAction>| {
             let mut refs = Vec::new();
             for action in remaps.values() {
-                if let KeyAction::TO(layer) | KeyAction::LATCH(layer) = action {
-                    refs.push(layer.0.clone());
-                }
+                action.layer_refs(&mut refs);
             }
             refs
         };
