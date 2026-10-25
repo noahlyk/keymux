@@ -238,7 +238,7 @@ impl KeyAction {
                 }
             }
             Self::MT(..) => emit_mt(self, keycode, ctx),
-            Self::TO(..) | Self::TG(..) | Self::LATCH(..) | Self::SWITCH(..) => {
+            Self::TO(..) | Self::TG(..) | Self::MO(..) | Self::LATCH(..) => {
                 emit_layer(self, keycode, ctx.layer_stack)
             }
             Self::MULTI(children) => emit_multi(children, keycode, ctx),
@@ -273,7 +273,7 @@ impl KeyAction {
     ) -> EmitResult {
         match (&self, action.clone()) {
             (_, HeldAction::RegularKey(key)) => EmitResult::EmitKey(key, false),
-            (Self::TO(..) | Self::TG(..), HeldAction::Layer(_)) => {
+            (Self::MO(..), HeldAction::Layer(_)) => {
                 unemit_layer(self, action, keycode, ctx.layer_stack)
             }
             (Self::MT(..), HeldAction::MtManaged) => unemit_mt(self, action, keycode, ctx),
@@ -318,7 +318,7 @@ mod multi_tests {
             r#"(
                 remaps: {
                     KC_F1: MULTI([Key(KC_LSFT), Key(KC_A)]),
-                    KC_F2: MULTI([Key(KC_B), TO("nav")]),
+                    KC_F2: MULTI([Key(KC_B), MO("nav")]),
                 },
                 layers: { "nav": (kind: Remap, remaps: {}) },
             )"#,

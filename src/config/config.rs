@@ -189,16 +189,18 @@ pub enum KeyAction {
     /// Now fully recursive - can nest any actions!
     /// Example: MT(Key(KC_TAB), TO("nav")) - tap for Tab, hold for nav layer
     MT(Box<Self>, Box<Self>),
-    /// Switch to layer
+    /// Exclusive switch, like QMK's TO: turns every other layer off, then turns this one on
+    /// and keeps it on. TO("base") leaves every layer and returns to base.
+    /// Example: F9: TO("nohrm") leaves steno for nohrm
     TO(Layer),
+    /// Momentary layer, like QMK's MO: on while the key is held, off when it is released.
+    /// Example: KC_LALT: MO("nav")
+    MO(Layer),
     /// Toggle layer (press to activate, press again to deactivate)
     TG(Layer),
     /// Turn a layer on and keep it on, like TO without the hold. Pressing it again does
     /// nothing; leave with TO("base"). Example: F1: LATCH("steno") turns steno on, from anywhere
     LATCH(Layer),
-    /// Exclusive switch, like QMK's TO: turns every other layer off, then turns this one on
-    /// and keeps it on. Example: F9: SWITCH("nohrm") leaves steno for nohrm
-    SWITCH(Layer),
     /// Run several actions together, as if each were pressed at once, and release them together.
     /// Example: MULTI([KC_LSFT, KC_A]) holds shift while A is pressed
     MULTI(Vec<Self>),
@@ -230,10 +232,9 @@ impl KeyAction {
     /// Add the name of every layer this action switches to, including inside nested actions
     pub fn layer_refs(&self, out: &mut Vec<String>) {
         match self {
-            Self::TO(layer)
-            | Self::TG(layer)
-            | Self::LATCH(layer)
-            | Self::SWITCH(layer) => out.push(layer.0.clone()),
+            Self::TO(layer) | Self::TG(layer) | Self::LATCH(layer) | Self::MO(layer) => {
+                out.push(layer.0.clone());
+            }
             Self::MT(a, b) | Self::DT(a, b) => {
                 a.layer_refs(out);
                 b.layer_refs(out);
@@ -259,15 +260,15 @@ impl KeyAction {
         matches!(self, Self::Transparent)
     }
 
-    /// Check if this action is a layer switch (To, Tg)
+    /// Check if this action is a layer switch (To, Tg, Mo)
     pub const fn is_layer_action(&self) -> bool {
-        matches!(self, Self::TO(_) | Self::TG(_))
+        matches!(self, Self::TO(_) | Self::TG(_) | Self::MO(_))
     }
 
     /// Extract layer from layer actions
     pub const fn get_layer(&self) -> Option<&Layer> {
         match self {
-            Self::TO(layer) | Self::TG(layer) => Some(layer),
+            Self::TO(layer) | Self::TG(layer) | Self::MO(layer) => Some(layer),
             _ => None,
         }
     }

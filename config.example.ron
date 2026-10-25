@@ -180,14 +180,14 @@
 
         // === LAYER SWITCHING ===
         //
-        // Hold a key to activate a different keymap
+        // Hold a key to activate a different keymap (MO, like QMK)
         // Great for navigation, symbols, numpad, etc.
         //
         // Example: Hold Left Alt for navigation keys
-        KC_LALT: TO("nav"),           // hold: on while held (MO is the same)
+        KC_LALT: MO("nav"),           // momentary: on while held, off on release
         // KC_F9: TG("nohrm"),        // toggle: press on, press again off
         // KC_F1: LATCH("steno"),     // on and stays on; TO("base") or TG turns it off
-        // KC_F8: SWITCH("steno"),    // exclusive: turns every other layer off first
+        // KC_F8: TO("steno"),        // exclusive (like QMK's TO): turns every other layer off first
         // KC_F10: TO("base"),        // leave every layer, back to base
         //
         // Layers stack. A key falls through the layers that are on until one remaps it.
@@ -256,7 +256,8 @@
     // ============================================================================
     //
     // Define custom layers - you can name them ANYTHING you want!
-    // Activate with TO("layer_name") in your keymaps
+    // Hold with MO("layer_name"), or switch exclusively with TO("layer_name").
+    // BREAKING: TO used to be the hold action; hold layers now use MO.
     //
     // Common layer names: "nav", "num", "sym", "media", "coding"
     // But you can use: "gaming", "work", "home", "my_custom_layer_123"

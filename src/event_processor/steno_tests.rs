@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 const CONFIG: &str = r#"(
     remaps: {
-        KC_TAB: TO("chords"),
+        KC_TAB: MO("chords"),
         KC_CAPS: Key(KC_ESC),
     },
     layers: {
@@ -114,7 +114,7 @@ fn path_str(path: &Path) -> String {
     path.display().to_string()
 }
 
-/// Switch to the steno layer. `TO` is momentary here, so the activation key stays held.
+/// Switch to the steno layer. `MO` is momentary here, so the activation key stays held.
 #[test]
 fn stray_space_during_a_chord_does_not_disturb_the_stroke() {
     let fixture = Fixture::new("stray-space");

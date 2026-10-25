@@ -257,19 +257,20 @@ All MT features are configurable via `mt_config` (see Behavior Settings section)
 #### Layer actions
 Layers are named in quotes. Layers stack: a key falls through the layers that are on until something remaps it. See [Layer switching](#layer-switching) in ARCHITECTURE.md for the full rules.
 
-- `TO("nav")` — hold: the layer is on while the key is held
+- `MO("nav")` — momentary (QMK's `MO`): the layer is on while the key is held, off when released
 - `TG("nav")` — toggle: press to turn on, press again to turn off
 - `LATCH("steno")` — turn on and keep on; pressing again does nothing. Turn it off with `TO("base")` or `TG`
-- `SWITCH("steno")` — exclusive: turns every other layer off, then turns this one on and keeps it on (QMK's `TO`)
-- `TO("base")` — leave every layer and return to base
+- `TO("steno")` — exclusive (QMK's `TO`): turns every other layer off, then turns this one on and keeps it on. `TO("base")` leaves every layer and returns to base
+
+> **Breaking change:** `TO` used to be the hold action. It now switches exclusively, the way QMK's `TO` does. Change every hold `TO("layer")` to `MO("layer")`. `SWITCH` was removed, since `TO` does the same thing.
 - `Transparent` — look this key up on the layer below
 
 ```ron
-KC_LALT: TO("nav"),                // Hold Alt for nav
+KC_LALT: MO("nav"),                // Hold Alt for nav
 KC_F9: TG("nohrm"),                // Toggle nohrm on and off
 KC_F1: LATCH("steno"),             // Steno stays on until F10
 KC_F10: TO("base"),                // Leave steno
-KC_F8: SWITCH("stenopractice"),    // Only stenopractice is on afterwards
+KC_F8: TO("stenopractice"),    // Only stenopractice is on afterwards
 ```
 
 A keyboard can start with a layer already on, with `default_layer: Some("steno")` in `per_keyboard_overrides` (or globally at the top level).
@@ -278,7 +279,7 @@ A keyboard can start with a layer already on, with `default_layer: Some("steno")
 Press several actions at once, and release them together.
 ```ron
 KC_F1: MULTI([KC_LSFT, KC_A]),     // Holds Shift while A is pressed: types a capital A
-KC_F2: MULTI([KC_B, TO("nav")]),   // Types b and holds the nav layer until F2 is released
+KC_F2: MULTI([KC_B, MO("nav")]),   // Types b and holds the nav layer until F2 is released
 ```
 
 #### OSM(KeyCode)
@@ -290,7 +291,7 @@ KC_LSFT: OSM(KC_LSFT),
 #### DT(single_tap, double_tap)
 Tap dance: a single tap does the first action, and a double tap within `double_tap_window_ms` (default 250) does the second.
 ```ron
-KC_LALT: DT(KC_LALT, TO("nav")),   // Tap for Alt, double-tap for nav
+KC_LALT: DT(KC_LALT, MO("nav")),   // Tap for Alt, double-tap for nav
 ```
 
 #### SOCD(key, [opposing_keys...])
@@ -353,7 +354,7 @@ KC_F2: CMD("/usr/bin/playerctl play-pause"),
     remaps: {
         KC_CAPS: KC_ESC,
         KC_ESC: KC_GRV,
-        KC_LALT: TO("nav"),
+        KC_LALT: MO("nav"),
 
         KC_A: MT(KC_A, KC_LGUI),
         KC_S: MT(KC_S, KC_LALT),

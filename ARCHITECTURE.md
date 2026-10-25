@@ -80,7 +80,7 @@ remaps: {
     KC_SPC: MT(KC_SPC, KC_LSFT),
     
     // Nested actions - tap for Tab, hold for nav layer
-    KC_TAB: MT(KC_TAB, TO("nav")),
+    KC_TAB: MT(KC_TAB, MO("nav")),
 }
 ```
 
@@ -176,7 +176,7 @@ remaps: {
     // Single tap = Escape, Double tap = Caps Lock (toggle)
     KC_ESC: DT(KC_ESC, TO("game_mode")),
     // Single tap = Alt, Double tap = nav layer
-    KC_LALT: DT(KC_LALT, TO("nav")),
+    KC_LALT: DT(KC_LALT, MO("nav")),
 }
 ```
 
@@ -265,21 +265,22 @@ remaps: {
 
 | Action | Behavior |
 |---|---|
-| `TO("layer")` | Hold: the layer is on while the key is held, then turns off |
+| `MO("layer")` | Momentary, like QMK's `MO`: the layer is on while the key is held, then turns off |
 | `TG("layer")` | Toggle: press to turn on, press again to turn off. Nothing is held |
 | `LATCH("layer")` | Turn on and keep on. Pressing it again does nothing. Only `TO("base")` or `TG` turns it off |
-| `SWITCH("layer")` | Exclusive, like QMK's `TO`: turns every other layer off, then turns this one on and keeps it on |
-| `TO("base")` | Leave every layer and return to the base layer |
+| `TO("layer")` | Exclusive, like QMK's `TO`: turns every other layer off, then turns this one on and keeps it on. `TO("base")` leaves every layer and returns to the base layer |
+
+> **Breaking change:** `TO` used to be a hold action. Hold layers now need `MO`. `SWITCH` was removed; `TO` does its job.
 | `Transparent` | Fall through: look this key up on the layers below |
 
 **Example:**
 ```ron
 remaps: {
-    KC_LALT: TO("nav"),              // Hold Left Alt → nav layer
+    KC_LALT: MO("nav"),              // Hold Left Alt → nav layer
     KC_F9: TG("nohrm"),              // Toggle nohrm on and off
     KC_F1: LATCH("steno"),           // Steno on, and stays on
     KC_F10: TO("base"),              // Leave steno
-    KC_F8: SWITCH("stenopractice"),  // Only stenopractice is on afterwards
+    KC_F8: TO("stenopractice"),  // Only stenopractice is on afterwards
 }
 ```
 
@@ -288,7 +289,7 @@ remaps: {
 2. A key lookup walks the stack from the top down and uses the first remap it finds. A layer that doesn't remap a key lets it fall through to the layers below.
 3. When nothing on the stack remaps the key, game-mode remaps apply (if game mode is on), then the base `remaps`.
 4. Turning on a layer that is already on does nothing. It is not added to the stack twice.
-5. Layer keys don't turn each other off. Stacking `TG("nohrm")` on top of steno leaves steno underneath, but steno is no longer the current layer, so its strokes stop being captured. Use `SWITCH` or `TO("base")` to reset the stack.
+5. Layer keys don't turn each other off. Stacking `TG("nohrm")` on top of steno leaves steno underneath, but steno is no longer the current layer, so its strokes stop being captured. Use `TO` to reset the stack: `TO("base")` clears it.
 6. A held `TO`/`MO` key only removes its own layer when released. Anything switched on underneath it stays on.
 7. `default_layer` (global, or per keyboard) puts one layer on the stack at startup, above base.
 
@@ -537,7 +538,7 @@ Steno is a layer kind: `kind: Steno((...))`. A steno layer captures its stroke k
     ├─ MT(tap, hold) → Mod-Tap logic with roll/chord detection
     ├─ OSM(modifier) → OneShot Modifier
     ├─ DT(tap, dtap) → Double-Tap / Tap Dance
-    ├─ TO/TG/LATCH/SWITCH(layer) → Layer hold/toggle/latch/exclusive switch
+    ├─ MO/TG/LATCH/TO(layer) → Layer momentary/toggle/latch/exclusive switch
     ├─ Transparent → Fall through to lower layer
     ├─ SOCD() → SOCD resolution
     └─ CMD(command) → Execute shell command
@@ -687,7 +688,7 @@ We use **RON (Rusty Object Notation)** - Rust's equivalent to JSON but more ergo
     tapping_term_ms: 175,
     remaps: {
         KC_A: MT(KC_A, KC_LGUI),
-        KC_CAPS: TO("nav"),
+        KC_CAPS: MO("nav"),
     },
     layers: {
         "nav": (
