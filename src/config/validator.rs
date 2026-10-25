@@ -197,10 +197,11 @@ pub fn validate_config(config_path: Option<&std::path::Path>) -> Result<()> {
             }
         }
         if let Some(stroke) = &steno.lookup_stroke {
-            if crate::steno::layout::parse_stroke(stroke).is_none() {
+            if crate::steno::layout::parse_strokes(stroke).is_none() {
                 steno_errors.push(format!(
-                    "steno layer \"{}\": lookup_stroke {:?} is not a single stroke in Plover \
-                     notation (such as \"HRAOUP\"), so lookup would be off",
+                    "steno layer \"{}\": lookup_stroke {:?} is not a stroke in Plover notation \
+                     (such as \"HRAOUP\"), or strokes separated by `/` (such as \
+                     \"HRAOUP/AER\"), so lookup would be off",
                     layer.0, stroke
                 ));
             }

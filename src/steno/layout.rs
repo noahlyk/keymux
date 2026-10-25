@@ -66,6 +66,14 @@ pub fn parse_stroke(text: &str) -> Option<u32> {
     (bits != 0).then_some(bits)
 }
 
+/// Parse one stroke, or several separated by `/` as in a multi-stroke dictionary key
+/// (`"HRAOUP/AER"`). `None` if any part isn't a valid stroke, which includes empty parts such as
+/// a trailing `/`.
+#[must_use]
+pub fn parse_strokes(text: &str) -> Option<Vec<u32>> {
+    text.split('/').map(|part| parse_stroke(part.trim())).collect()
+}
+
 /// Render a stroke bitmask in Plover's canonical notation.
 #[must_use]
 pub fn render_stroke(bits: u32) -> String {
@@ -286,6 +294,23 @@ mod tests {
         assert_eq!(parse_stroke(""), None);
         // Out of order: a left-hand letter can't come after a vowel without a dash
         assert_eq!(parse_stroke("AK"), None);
+    }
+
+    #[test]
+    fn several_strokes_are_separated_by_a_slash() {
+        let one = parse_stroke("HRAOUP").unwrap();
+        let two = parse_stroke("AER").unwrap();
+        assert_eq!(parse_strokes("HRAOUP"), Some(vec![one]));
+        assert_eq!(parse_strokes("HRAOUP/AER"), Some(vec![one, two]));
+        assert_eq!(parse_strokes("HRAOUP/AER/HRAOUP"), Some(vec![one, two, one]));
+        // Spaces around a slash are not part of the stroke
+        assert_eq!(parse_strokes("HRAOUP / AER"), Some(vec![one, two]));
+        // Anything wrong anywhere makes the whole thing invalid, never a shorter trigger
+        assert_eq!(parse_strokes("HRAOUP/"), None);
+        assert_eq!(parse_strokes("/AER"), None);
+        assert_eq!(parse_strokes("HRAOUP//AER"), None);
+        assert_eq!(parse_strokes("HRAOUP/ZZZ"), None);
+        assert_eq!(parse_strokes(""), None);
     }
 
     #[test]

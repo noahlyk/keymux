@@ -4,7 +4,7 @@
 use super::chord::ChordState;
 use super::dict::Dictionary;
 use super::format::KeyPress;
-use super::layout::{build_key_map, parse_stroke, preset};
+use super::layout::{build_key_map, parse_strokes, preset};
 use super::lookup::{classify, Lookup};
 use super::overlay::OverlayHub;
 use super::setup::default_dictionaries;
@@ -35,8 +35,13 @@ pub struct StenoEngine {
     pub disabled_in_game_mode: bool,
     /// Where strokes are published for the on-screen overlay
     hub: &'static OverlayHub,
-    /// The stroke that opens a live lookup, if one is configured
-    lookup_stroke: Option<u32>,
+    /// The strokes that open a live lookup, in order: one stroke, or several (`HRAOUP/AER`).
+    /// Empty when no lookup is configured.
+    lookup_trigger: Vec<u32>,
+    /// The leading strokes of the lookup trigger written so far, held back unspoken: they might
+    /// be the start of the trigger, so they are neither typed nor on the tape until the next
+    /// stroke shows whether they are. Always shorter than `lookup_trigger`.
+    trigger_held: Vec<u32>,
     /// The lookup that is open right now. While it is, keys are QWERTY input to it.
     lookup: Option<Lookup>,
 }
@@ -88,13 +93,20 @@ impl StenoEngine {
             tape: home.map(tape::default_path),
             disabled_in_game_mode,
             hub: OverlayHub::global(),
-            lookup_stroke: config.lookup_stroke.as_deref().and_then(|text| {
-                let stroke = parse_stroke(text);
-                if stroke.is_none() {
-                    warn!("steno lookup_stroke {text:?} is not a single stroke, so lookup is off");
-                }
-                stroke
-            }),
+            lookup_trigger: config
+                .lookup_stroke
+                .as_deref()
+                .map(|text| {
+                    parse_strokes(text).unwrap_or_else(|| {
+                        warn!(
+                            "steno lookup_stroke {text:?} is not a stroke, or strokes separated \
+                             by `/`, in Plover notation, so lookup is off"
+                        );
+                        Vec::new()
+                    })
+                })
+                .unwrap_or_default(),
+            trigger_held: Vec::new(),
             lookup: None,
         })
     }
@@ -159,6 +171,8 @@ impl StenoEngine {
         self.translator.start_fresh();
         // A lookup left open when the layer was left must not still be eating keys
         self.lookup = None;
+        // Half a lookup trigger written before leaving the layer is not carried over
+        self.trigger_held.clear();
     }
 
     /// A stroke key went down.
@@ -199,10 +213,12 @@ impl StenoEngine {
         self.translator.backspace();
     }
 
-    /// Whether there is nothing left to undo. Space and Backspace act as normal keys then.
+    /// Whether there is nothing left to undo. Space and Backspace act as normal keys then. A
+    /// held-back lookup stroke counts as something: Backspace must not delete text that comes
+    /// before it, and the stroke is not on screen to take back.
     #[must_use]
     pub fn tape_is_empty(&self) -> bool {
-        self.translator.tape_is_empty()
+        self.trigger_held.is_empty() && self.translator.tape_is_empty()
     }
 
     /// A space was typed on the steno layer. Returns what to type.
@@ -242,11 +258,52 @@ impl StenoEngine {
     }
 
     fn on_stroke(&mut self, stroke: u32) -> Option<StenoOutput> {
-        // The lookup stroke opens a lookup instead of typing or going on the tape
-        if self.lookup_stroke == Some(stroke) {
-            self.open_lookup();
-            return None;
+        if self.lookup_trigger.is_empty() {
+            return self.type_stroke(stroke);
         }
+        // With a lookup configured the stroke may be (the start of) its trigger. Strokes that
+        // turn out not to be are typed, possibly several at once, so they combine into one edit.
+        let mut merged = Merged::default();
+        self.feed(stroke, &mut merged);
+        merged.finish()
+    }
+
+    /// Match `stroke` against the lookup trigger. The trigger's strokes open a lookup and are
+    /// not typed. A stroke that continues a partial match is held back. Anything else is an
+    /// ordinary stroke: first any held-back strokes (they weren't the trigger after all), then
+    /// this one, each checked again, since the trigger might start part-way through them.
+    fn feed(&mut self, stroke: u32, merged: &mut Merged) {
+        let matched = self.trigger_held.len();
+        if self.lookup_trigger.get(matched) == Some(&stroke) {
+            self.trigger_held.push(stroke);
+            if self.trigger_held.len() == self.lookup_trigger.len() {
+                self.trigger_held.clear();
+                self.open_lookup();
+            }
+            return;
+        }
+        if self.trigger_held.is_empty() {
+            if let Some(output) = self.type_stroke(stroke) {
+                merged.push(output);
+            }
+            return;
+        }
+        // The held strokes weren't the trigger. The oldest is an ordinary stroke; the rest, and
+        // this one, are looked at again from scratch.
+        let mut again = std::mem::take(&mut self.trigger_held);
+        again.push(stroke);
+        let first = again.remove(0);
+        if let Some(output) = self.type_stroke(first) {
+            merged.push(output);
+        }
+        for stroke in again {
+            self.feed(stroke, merged);
+        }
+    }
+
+    /// A stroke that is not part of a lookup trigger: translate it, or queue it until the
+    /// dictionaries have loaded.
+    fn type_stroke(&mut self, stroke: u32) -> Option<StenoOutput> {
         if self.loading.is_some() {
             self.backlog.push(stroke);
             self.publish_keys();
@@ -357,7 +414,8 @@ mod tests {
             tape: None,
             disabled_in_game_mode: true,
             hub: OverlayHub::global(),
-            lookup_stroke: None,
+            lookup_trigger: Vec::new(),
+            trigger_held: Vec::new(),
             lookup: None,
         }
     }

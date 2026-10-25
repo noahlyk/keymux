@@ -557,9 +557,19 @@ hit that stroke:
   lookup behind.
 
 The lookup stroke is used up by this, so it no longer types its dictionary entry; pick one you
-don't write with. `keymux validate` checks that it's a single stroke. It needs the overlay
+don't write with. `keymux steno stroke HRAOUP` shows what a stroke types now, and "has no
+translation" means it's free. `keymux validate` checks the setting. It needs the overlay
 running to show anything (`keymux overlay`), since that is where the query and results appear.
 `keymux steno keys "word"` does the same lookup from a terminal.
+
+**Several strokes.** `lookup_stroke` can be more than one stroke, separated by `/` like a
+multi-stroke dictionary entry: `lookup_stroke: Some("HRAOUP/AER")`. The lookup opens after the
+last stroke. The earlier strokes are held back, typing nothing and not on the tape, until the
+next stroke shows whether it is the rest of the trigger. If it isn't, they're typed as normal,
+in order. That means the first stroke of a multi-stroke trigger is delayed by one stroke
+whenever you write it as an ordinary word, so a first stroke that is a common word makes that
+word feel laggy. A single stroke has no such delay, which is why it's the better default.
+Backspace and Space do nothing while a stroke is held back.
 
 ### Steno commands
 

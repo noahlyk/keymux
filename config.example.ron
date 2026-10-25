@@ -373,7 +373,11 @@
                 // Live lookup: a stroke that opens "I forgot the stroke for a word". The keys go
                 // back to QWERTY and type into a query shown on the overlay, which lists the
                 // strokes that type the word. Esc or Enter closes it. Nothing reaches the app.
-                // The stroke is used up by this, so pick one you don't write with. Off if unset.
+                // The stroke is used up by this, so pick one you don't write with (`keymux steno
+                // stroke HRAOUP` says "has no translation" for a free one). It can be several
+                // strokes separated by `/`, such as "HRAOUP/AER": the earlier ones are held back
+                // until the last arrives, so make the first one a stroke you rarely write alone.
+                // Off if unset.
                 // lookup_stroke: Some("HRAOUP"),
             )),
             // Non-stroke keys listed here still work while steno is active,

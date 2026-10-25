@@ -325,10 +325,13 @@ pub struct StenoConfig {
     /// longer entry matches. Setting it is a validation warning.
     #[serde(default)]
     pub translation_timeout_ms: Option<u32>,
-    /// A stroke, in Plover notation such as `"HRAOUP"`, that opens a live lookup. The steno
-    /// layer stays on but its keys go back to QWERTY and type a word into a query shown on
-    /// the overlay, which lists the strokes that type it. Esc or Enter closes it. The stroke
-    /// is used up by this and no longer types its dictionary entry. Off when unset.
+    /// A stroke, in Plover notation such as `"HRAOUP"`, that opens a live lookup. It can be
+    /// several strokes separated by `/`, such as `"HRAOUP/AER"`: the lookup opens after the
+    /// last one, and the earlier ones are held back (typing nothing) until then. If the next
+    /// stroke isn't the one the trigger expects, the held strokes are typed as normal. The
+    /// steno layer stays on but its keys go back to QWERTY and type a word into a query shown
+    /// on the overlay, which lists the strokes that type it. Esc or Enter closes it. The
+    /// strokes are used up by this and no longer type their dictionary entries. Off when unset.
     #[serde(default)]
     pub lookup_stroke: Option<String>,
 }
