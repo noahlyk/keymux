@@ -193,6 +193,9 @@ pub enum KeyAction {
     TO(Layer),
     /// Toggle layer (press to activate, press again to deactivate)
     TG(Layer),
+    /// Turn a layer on and keep it on, like TO without the hold. Pressing it again does
+    /// nothing; leave with TO("base"). Example: F1: LATCH("steno") turns steno on, from anywhere
+    LATCH(Layer),
     /// Momentary layer - hold for layer
     MO(Layer),
     /// SOCD (Simultaneous Opposite Cardinal Direction) - fully generic
@@ -323,6 +326,9 @@ pub struct PerKeyboardConfig {
     pub remaps: Option<HashMap<KeyCode, KeyAction>>,
     pub layers: Option<HashMap<Layer, LayerConfig>>,
     pub game_mode: Option<GameMode>,
+    /// A layer that is already on when the keyboard starts, e.g. `"steno"` for a keyboard
+    /// that should always be a steno machine
+    pub default_layer: Option<Layer>,
 }
 
 /// MT (Mod-Tap) configuration
@@ -537,6 +543,11 @@ pub struct Config {
     /// - false: per_keyboard_overrides replace global config (build from scratch)
     #[serde(default = "default_true_bool")]
     pub per_keyboard_inherits_global_layout: bool,
+
+    /// A layer that is already on when the daemon starts a keyboard, instead of only the base
+    /// layer. Per-keyboard `default_layer` overrides this for that keyboard.
+    #[serde(default)]
+    pub default_layer: Option<Layer>,
 }
 
 const fn default_tapping_term() -> u32 {
@@ -890,6 +901,10 @@ impl Config {
                     config.game_mode.remaps.extend(game_mode.remaps.clone());
                 }
 
+                if let Some(layer) = &override_cfg.default_layer {
+                    config.default_layer = Some(layer.clone());
+                }
+
                 config
             } else {
                 // NON-INHERITING MODE: Build from scratch with per-keyboard config only
@@ -910,6 +925,7 @@ impl Config {
                     oneshot_timeout_ms: override_cfg.oneshot_timeout_ms.or(self.oneshot_timeout_ms),
                     hot_config_reload: self.hot_config_reload, // Keep global hot reload setting
                     per_keyboard_inherits_global_layout: self.per_keyboard_inherits_global_layout, // Keep global setting
+                    default_layer: override_cfg.default_layer.clone(),
                 }
             }
         } else {
@@ -1146,7 +1162,7 @@ impl Config {
         let extract_layer_refs = |remaps: &HashMap<KeyCode, KeyAction>| {
             let mut refs = Vec::new();
             for action in remaps.values() {
-                if let KeyAction::TO(layer) = action {
+                if let KeyAction::TO(layer) | KeyAction::LATCH(layer) = action {
                     refs.push(layer.0.clone());
                 }
             }
@@ -1198,6 +1214,38 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_layer_applies_only_to_the_keyboard_it_is_set_for() {
+        let config: Config = ron::from_str(
+            r#"(
+                layers: { "steno": (kind: Remap, remaps: {}) },
+                per_keyboard_overrides: {
+                    "16c0:27db:0111:0003": (default_layer: Some("steno")),
+                },
+            )"#,
+        )
+        .unwrap();
+        let glove = config.for_keyboard("16c0:27db:0111:0003@1-3");
+        assert_eq!(glove.default_layer, Some(Layer::new("steno")));
+        // Another keyboard keeps the global setting, which is none
+        assert_eq!(config.for_keyboard("0c45:8092:0110:0003@3-4.3").default_layer, None);
+    }
+
+    #[test]
+    fn default_layer_from_the_global_config_applies_to_every_keyboard() {
+        let config: Config = ron::from_str(
+            r#"(
+                layers: { "steno": (kind: Remap, remaps: {}) },
+                default_layer: Some("steno"),
+            )"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.for_keyboard("0c45:8092:0110:0003@3-4.3").default_layer,
+            Some(Layer::new("steno"))
+        );
+    }
 
     #[test]
     fn existing_layers_default_to_remap() {

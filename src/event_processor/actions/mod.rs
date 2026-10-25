@@ -182,7 +182,7 @@ impl KeyAction {
                 }
             }
             Self::MT(..) => emit_mt(self, keycode, ctx),
-            Self::TO(..) | Self::TG(..) | Self::MO(..) => {
+            Self::TO(..) | Self::TG(..) | Self::MO(..) | Self::LATCH(..) => {
                 emit_layer(self, keycode, ctx.layer_stack)
             }
             Self::SOCD(..) => emit_socd(self, keycode, ctx),

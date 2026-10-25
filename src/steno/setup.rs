@@ -43,6 +43,12 @@ pub fn steno_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("steno")
 }
 
+/// Binary copies of the loaded dictionaries, so starting up doesn't parse the JSON again.
+#[must_use]
+pub fn cache_dir(config_dir: &Path) -> PathBuf {
+    steno_dir(config_dir).join("cache")
+}
+
 /// Lapwing's JSON dictionaries from plover-lapwing-aio, highest priority first. Its
 /// `.modal` and `.py` files need Plover's plugin runtime, so they aren't used here.
 pub const LAPWING_BASE_URL: &str =
