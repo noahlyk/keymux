@@ -492,7 +492,7 @@
     //     enabled: true,
     //     output: None,       // Some("DP-1") to pin a monitor
     //     margin: 0,          // gap from the right edge, in pixels
-    //     width: 400,         // as tall as the screen; text and keys are sized from this
+    //     width: 340,         // as tall as the screen; text and keys are sized from this
     //     text_scale: 1.0,    // 1.2 makes the text a fifth bigger
     //     background: 0.0,    // dark panel behind it all, 0.0 (none) to 1.0
     //     keyboard: true,

@@ -579,14 +579,15 @@ running to show anything (`keymux overlay`), since that is where the query and r
 
 `keymux overlay` shows the steno keyboard and a tape down the right edge of the screen while a
 steno layer is on, and goes away when you leave it. The tape runs the full screen height with
-the keyboard at the bottom. Keys are steno pads (round at the bottom, nearly square at the top) that light up as you press them
-(keys you've let go of but are still part of the stroke are dimmer), and each finished stroke
-lands on the tape with what it typed: the steno letters in their own columns, and the word in
-larger white text. Every tape line is at full strength; only the top three fade out. There is
-no background by default, only the keys and text (the text has a dark halo to read over any
+the keyboard at the bottom. Keys are steno pads (round at the bottom, nearly square at the top)
+that light up as you press them, coloured by part of the keyboard: green for the left hand,
+yellow for the vowels, red for the right hand, light blue for `*` and `#`. Keys you've let go
+of but that are still part of the stroke are dimmer. Each finished stroke lands on the tape
+with what it typed: the steno letters tightly set in their own columns, and the word in larger
+white text. Every tape line is at full strength; only the top three fade out. There is no
+background by default, only the keys and text (the text has a soft shadow to read over any
 wallpaper; set `background` for a panel if your wallpaper is very busy), and it never takes
-clicks or focus. It costs next to nothing: it only redraws when a
-key or the tape changes.
+clicks or focus. It costs next to nothing: it only redraws when a key or the tape changes.
 
 ![overlay](docs/overlay-preview.png)
 
@@ -600,7 +601,7 @@ overlay: (
     enabled: true,
     output: None,        // Some("DP-1") to pin a monitor; None lets the compositor pick
     margin: 0,           // gap from the right edge, in pixels
-    width: 400,          // as tall as the screen; text and keys are sized from this
+    width: 340,          // as tall as the screen; text and keys are sized from this
     text_scale: 1.0,     // 1.2 makes the text a fifth bigger, on top of what width gives
     background: 0.0,     // opacity of a dark panel behind it all; 0.0 is fully transparent
     keyboard: true,

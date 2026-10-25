@@ -132,8 +132,8 @@ sized to its letter, and the letter is centred in it. Steno lines still align.
 - **Redraw only on a change.** A frame identical on screen (same layer, keys and newest
   tape line) is skipped. Layer changes create or destroy the surface.
 - **Whole-surface redraw, no partial damage.** Measured in a release build with the demo
-  redrawing several times a second on a full-height (400 × 1080) overlay for 21 s: 210 ms of
-  CPU in total (≈1% of a core), 11 MB RSS. That includes startup and a 5-pass text halo, and
+  redrawing several times a second on a full-height (340 × 1080) overlay for 21 s: 100 ms of
+  CPU in total (≈0.5% of a core), 10 MB RSS. That includes startup and the soft text shadow, and
   works out to roughly a millisecond per frame, so tracking dirty rectangles would add code
   for nothing measurable. Revisit only if frames get much more expensive (a 4K screen is ~4x
   the pixels).
@@ -143,33 +143,41 @@ sized to its letter, and the letter is centred in it. Steno lines still align.
 - **Pixel format**: `wl_shm::Format::Abgr8888` = tiny-skia's RGBA premultiplied byte order
   on little-endian, so tiny-skia draws straight into the shm buffer. Falls back to
   `Argb8888` with an R/B swap if a compositor doesn't offer it.
-- Size: `width` (400) × the output's height, logical px; drawn at the output's integer scale.
+- Size: `width` (340) × the output's height, logical px; drawn at the output's integer scale.
 
 ### Look (from the mockups)
 
 - No background by default (`background: 0.0`): only the keys and the text are drawn, so
-  everything must read over any wallpaper. Light text gets a dark halo (a copy one pixel out
-  on every side plus one dropped down-right); a one-sided shadow smeared. Dark text on a lit
-  key gets none, since a halo would smudge it.
+  everything must read over any wallpaper. Light text gets a soft shadow: the glyph blurred
+  (two passes of a 3 × 3 box, computed once per glyph and cached with it), drawn once
+  underneath and a pixel lower. Earlier versions stamped copies of the glyph at whole-pixel
+  offsets, which looked blocky ("Minecraft text"). Dark text on a lit key gets no shadow,
+  since it would only smudge it.
 - Keys are steno pads, 1.75× as tall as wide: a squarish top with slightly softened corners
   (radius 0.2× the width) and a fully round bottom. `S-` and `*` are double height, `#` is a
-  thin pill across the top, thumbs sit below. Unlit keys
-  are a faint dark glass fill with a light outline. Lit keys use the stroke accent (teal for
-  consonants, pale yellow for vowels). Keys in `chord` but no longer in `held` are dimmer,
-  so you see the stroke building.
+  thin pill across the top, thumbs sit below. Unlit keys are a faint glass fill with a thin
+  light outline. Keys in `chord` but no longer in `held` are dimmer, so you see the stroke
+  building.
+- Lit keys are coloured by part of the keyboard (`KeyGroup` in `geometry.rs`): left hand
+  green, thumb vowels yellow, right hand a soft red, and `*` and `#` light blue.
 - The overlay is as tall as the screen, pinned to the right edge. The keyboard sits at the
   bottom; the tape fills everything above it, newest line at the bottom. How many lines fit
   is worked out from the height the compositor configures.
 - Tape lines are Atkinson Hyperlegible Bold throughout. The strokes are the steno letters in
-  soft light grey (not green: it fought the wallpaper), each slot in its own column (so strokes line up from line to line, as on a paper
-  tape). The column widths are not a uniform grid: each is as wide as its own letter plus a
-  22% gap, so `W` gets more room than `T` and nothing overlaps. The words (what the stroke
-  typed) are set 1.3× larger in near-white, since that is what you read. Unmatched strokes
-  show a red `?`.
+  soft light grey (not green: it fought the wallpaper), each slot in its own column, so
+  strokes line up from line to line, as on a paper tape. The column widths are not a uniform
+  grid: each is as wide as its own letter plus a 4% gap (`SLOT_GAP`), so `W` gets more room
+  than `T`, nothing overlaps, and neighbouring letters sit as tight as ordinary text. That
+  spacing applies to the steno letters only; the words are set with normal spacing. The words
+  (what the stroke typed) are set 1.2× larger in near-white, since that is what you read.
+  Unmatched strokes show a red `?`.
 - Every tape line is full strength. Only the top three lines fade (25%, 50%, 75%), so the tape
   stays easy to read all the way up.
-- All sizes come from `width` (letters are sized so the 23 columns fill 60% of it; key labels
-  are 56% of a key's width), and `text_scale` multiplies the text on top.
+- All sizes come from `width` (letters are sized as if the 23 columns had a 22% gap
+  (`SIZING_GAP`) and filled 60% of it, so tightening `SLOT_GAP` brings the letters closer
+  without making them smaller; key labels are 56% of a key's width), and `text_scale`
+  multiplies the text on top. At the default width of 340 that is about 14 px strokes and
+  17 px words. Widths of 400 and up were tried and read as too big.
 - Glyphs are rasterized at quarter-pixel horizontal offsets and cached per offset. Snapping
   each letter to a whole pixel made the spacing uneven ("thi s").
 
@@ -180,7 +188,7 @@ overlay: (
     enabled: true,
     output: None,          // Some("DP-1") to pin a monitor; None = compositor's choice
     margin: 0,             // gap from the right screen edge, logical px
-    width: 400,            // as tall as the screen; text and keys are sized from this
+    width: 340,            // as tall as the screen; text and keys are sized from this
     text_scale: 1.0,       // multiplies the text size on top of what width gives
     background: 0.0,       // dark panel behind it all; 0.0 is fully transparent
     keyboard: true,

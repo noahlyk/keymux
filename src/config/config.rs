@@ -624,7 +624,7 @@ impl Default for OverlayConfig {
             enabled: true,
             output: None,
             margin: 0,
-            width: 400,
+            width: 340,
             text_scale: 1.0,
             background: 0.0,
             keyboard: true,

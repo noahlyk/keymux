@@ -34,7 +34,14 @@ pub struct Glyph {
     pub advance: f32,
     /// `width * height` coverage values, row by row
     pub mask: Box<[u8]>,
+    /// A blurred copy of the mask for a soft shadow: `HALO_PAD` pixels bigger on every side, so
+    /// `(width + 2 * HALO_PAD) * (height + 2 * HALO_PAD)` values. Empty for blank glyphs.
+    pub halo: Box<[u8]>,
 }
+
+/// How far the soft shadow reaches past the glyph, in pixels. Two passes of a 3-wide blur
+/// spread coverage two pixels out.
+pub const HALO_PAD: u32 = 2;
 
 /// How many horizontal sub-pixel positions each glyph is drawn at. Snapping every letter to a
 /// whole pixel makes spacing visibly uneven at small sizes ("thi s"); quarter-pixel steps are
@@ -140,6 +147,7 @@ fn rasterize(font: &FontArc, scale: PxScale, c: char, shift: f32) -> Glyph {
             mask[(y * width + x) as usize] = (coverage.clamp(0.0, 1.0) * 255.0) as u8;
         }
     });
+    let halo = blur(&mask, width, height);
     Glyph {
         width,
         height,
@@ -147,8 +155,62 @@ fn rasterize(font: &FontArc, scale: PxScale, c: char, shift: f32) -> Glyph {
         top: bounds.min.y as i32,
         advance,
         mask,
+        halo,
     }
 }
+
+/// A soft shadow for a coverage mask: the mask padded by [`HALO_PAD`] on every side and blurred
+/// with two passes of a 3 x 3 box (close to a Gaussian), then strengthened so the glow stays
+/// dark right next to the letter. A hard shadow made of offset copies looks blocky; a blur
+/// reads as a gentle edge on any background.
+fn blur(mask: &[u8], width: u32, height: u32) -> Box<[u8]> {
+    let pad = HALO_PAD as usize;
+    let (w, h) = (width as usize + 2 * pad, height as usize + 2 * pad);
+    let mut current = vec![0f32; w * h];
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            current[(y + pad) * w + x + pad] = f32::from(mask[y * width as usize + x]);
+        }
+    }
+    let mut next = vec![0f32; w * h];
+    for _ in 0..2 {
+        // Horizontal then vertical: a 3 x 3 box is the two 3-wide averages one after the other
+        for y in 0..h {
+            for x in 0..w {
+                let at = |dx: isize| {
+                    let nx = x as isize + dx;
+                    if nx < 0 || nx >= w as isize {
+                        0.0
+                    } else {
+                        current[y * w + nx as usize]
+                    }
+                };
+                next[y * w + x] = (at(-1) + at(0) + at(1)) / 3.0;
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let at = |dy: isize| {
+                    let ny = y as isize + dy;
+                    if ny < 0 || ny >= h as isize {
+                        0.0
+                    } else {
+                        next[ny as usize * w + x]
+                    }
+                };
+                current[y * w + x] = (at(-1) + at(0) + at(1)) / 3.0;
+            }
+        }
+    }
+    current
+        .iter()
+        .map(|&v| (v * HALO_STRENGTH).min(255.0) as u8)
+        .collect()
+}
+
+/// How much the blurred mask is boosted. A plain blur is too faint to separate text from a busy
+/// background; this keeps it dark next to the glyph while still fading smoothly outward.
+const HALO_STRENGTH: f32 = 2.4;
 
 #[cfg(test)]
 mod tests {
@@ -168,6 +230,31 @@ mod tests {
             assert_eq!(cache.get(' ').width, 0);
             assert!(cache.measure("STKPW") > 0.0);
         }
+    }
+
+    #[test]
+    fn the_halo_is_a_soft_blur_around_the_glyph() {
+        let mut cache = GlyphCache::new(load_font(None, BOLD).unwrap(), 16.0);
+        let glyph = cache.get('l');
+        let pad = HALO_PAD as usize;
+        let (w, h) = (
+            glyph.width as usize + 2 * pad,
+            glyph.height as usize + 2 * pad,
+        );
+        assert_eq!(glyph.halo.len(), w * h);
+
+        // Soft, not a hard copy: pixels just outside the glyph are partly covered...
+        let outside = &glyph.halo[(h / 2) * w + (pad - 1)];
+        assert!(*outside > 0 && *outside < 255, "{outside}");
+        // ...strongest at the letter and fading outwards
+        let at_stem = glyph.halo[(h / 2) * w + w / 2];
+        let edge = glyph.halo[(h / 2) * w];
+        assert!(
+            at_stem > *outside && *outside > edge,
+            "{at_stem} {outside} {edge}"
+        );
+        // A blank glyph has no halo to draw
+        assert!(cache.get(' ').halo.is_empty());
     }
 
     #[test]
