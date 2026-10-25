@@ -49,8 +49,12 @@ impl Fixture {
     }
 
     fn processor_from(&self, config_text: &str) -> KeymapProcessor {
+        self.processor_with(config_text, r#"{"KAT": "cat", "-PB": "and"}"#)
+    }
+
+    fn processor_with(&self, config_text: &str, dictionary: &str) -> KeymapProcessor {
         let dict = self.dir.join("main.json");
-        std::fs::write(&dict, r#"{"KAT": "cat", "-PB": "and"}"#).unwrap();
+        std::fs::write(&dict, dictionary).unwrap();
         let config_path = self.dir.join("config.ron");
         std::fs::write(&config_path, config_text.replace("DICT", &path_str(&dict))).unwrap();
         let config = Config::load(&config_path).unwrap();
@@ -423,6 +427,125 @@ fn enter_outlines_produce_their_output() {
 fn newline_and_tab_have_keys_to_type() {
     assert_eq!(super::char_to_key('\n').0, Some(evdev::Key::KEY_ENTER));
     assert_eq!(super::char_to_key('\t').0, Some(evdev::Key::KEY_TAB));
+}
+
+/// Press and release `keys` one after another, each alone, returning every result. A lookup
+/// uses these as letters, so none of them may produce output.
+fn type_keys(p: &mut KeymapProcessor, keys: &[KeyCode]) -> Vec<ProcessResult> {
+    keys.iter()
+        .flat_map(|&key| [p.process_key(key, true), p.process_key(key, false)])
+        .collect()
+}
+
+#[test]
+fn the_lookup_stroke_turns_the_keys_into_qwerty_input_to_a_query_and_nothing_is_typed() {
+    use crate::steno::layout::parse_stroke;
+
+    let fixture = Fixture::new("lookup");
+    // KAT is both a word and, here, the stroke that opens a lookup: the lookup wins
+    let config = CONFIG.replace(
+        "dictionaries: [\"DICT\"],",
+        "dictionaries: [\"DICT\"], lookup_stroke: Some(\"KAT\"),",
+    );
+    let mut p = fixture.processor_with(
+        &config,
+        r#"{"KAT": "cat", "-T": "the", "KAPB": "can", "KAPBD": "candy", "KAPBL": "candle"}"#,
+    );
+    let hub = private_hub();
+    p.set_overlay_hub(hub);
+    enter_steno(&mut p);
+    assert_eq!(hub.snapshot().lookup, None);
+
+    // The stroke opens the lookup instead of typing "cat", and doesn't go on the tape
+    assert_eq!(
+        chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]),
+        ProcessResult::None
+    );
+    let open = hub.snapshot();
+    assert_eq!(open.lookup.as_ref().map(|l| l.query.as_str()), Some(""));
+    assert!(open.tape.is_empty());
+
+    // Typing is QWERTY: these keys are stroke keys on the steno layer, but now they are letters
+    // (C-A-N-D-Y), and none of it reaches the application
+    let typed = type_keys(
+        &mut p,
+        &[
+            KeyCode::KC_C,
+            KeyCode::KC_A,
+            KeyCode::KC_N,
+            KeyCode::KC_D,
+            KeyCode::KC_Y,
+        ],
+    );
+    assert!(typed.iter().all(|r| *r == ProcessResult::None), "{typed:?}");
+    let found = hub.snapshot().lookup.unwrap();
+    assert_eq!(found.query, "candy");
+    assert_eq!(found.rows[0].text, "candy");
+    assert_eq!(found.rows[0].outline, "KAPBD");
+    // The best stroke is lit on the overlay's keyboard
+    assert_eq!(found.hint, parse_stroke("KAPBD").unwrap());
+    assert!(hub.snapshot().tape.is_empty(), "looking things up types nothing");
+
+    // Backspace edits the query, and now it also suggests longer words
+    type_keys(&mut p, &[KeyCode::KC_BSPC, KeyCode::KC_BSPC]);
+    let found = hub.snapshot().lookup.unwrap();
+    assert_eq!(found.query, "can");
+    let words: Vec<_> = found.rows.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(words, ["can", "candy", "candle"]);
+
+    // Shift capitalizes: lookups are case-sensitive
+    p.process_key(KeyCode::KC_LSFT, true);
+    type_keys(&mut p, &[KeyCode::KC_X]);
+    p.process_key(KeyCode::KC_LSFT, false);
+    assert_eq!(hub.snapshot().lookup.unwrap().query, "canX");
+
+    // Esc closes it, and is swallowed even though this layer remaps Esc
+    assert_eq!(
+        type_keys(&mut p, &[KeyCode::KC_ESC]),
+        vec![ProcessResult::None; 2]
+    );
+    assert_eq!(hub.snapshot().lookup, None);
+
+    // Back to normal steno: the same keys are strokes again, so the stroke reopens it
+    chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]);
+    assert!(hub.snapshot().lookup.is_some());
+}
+
+#[test]
+fn leaving_steno_in_the_middle_of_a_lookup_closes_it_and_does_not_keep_eating_keys() {
+    let fixture = Fixture::new("lookup-leave");
+    let config = CONFIG.replace(
+        "dictionaries: [\"DICT\"],",
+        "dictionaries: [\"DICT\"], lookup_stroke: Some(\"KAT\"),",
+    );
+    let mut p = fixture.processor_with(&config, r#"{"-T": "the", "KAPB": "can"}"#);
+    let hub = private_hub();
+    p.set_overlay_hub(hub);
+    enter_steno(&mut p);
+    chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]);
+    assert!(hub.snapshot().lookup.is_some());
+
+    // Let go of the layer key: the overlay hides, and with it the lookup
+    p.process_key(KeyCode::KC_TAB, false);
+    assert_eq!(hub.snapshot().layer, None);
+    assert_eq!(hub.snapshot().lookup, None);
+
+    // Back on the base layer a letter is just a letter again
+    assert_ne!(
+        p.process_key(KeyCode::KC_A, true),
+        ProcessResult::None,
+        "base layer keys must not be swallowed by a stale lookup"
+    );
+    p.process_key(KeyCode::KC_A, false);
+
+    // Coming back to steno starts clean: the old lookup is gone
+    enter_steno(&mut p);
+    assert_eq!(hub.snapshot().lookup, None);
+    assert_eq!(
+        chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C]),
+        ProcessResult::None,
+        "a stroke, not lookup letters"
+    );
 }
 
 /// A hub of its own, so these tests don't see strokes from other tests through the global one.

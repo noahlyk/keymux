@@ -6,6 +6,7 @@ use crate::event_processor::actions::{
 use crate::event_processor::layer_stack::LayerStack;
 use crate::keycode::KeyCode;
 use crate::steno::translate::StenoOutput;
+use crate::steno::lookup::{classify, LookupKey};
 use crate::steno::overlay::OverlayHub;
 use crate::steno::setup::Cooldown;
 use crate::steno::{self, StenoEngine};
@@ -74,6 +75,8 @@ pub struct KeymapProcessor {
     /// Where this keyboard's steno state is published for the overlay. One hub is shared by
     /// every keyboard: the overlay follows whichever was touched last.
     overlay_hub: &'static OverlayHub,
+    /// Whether a Shift key is down, for the capital letters of a live lookup
+    shift_down: bool,
     /// Limits the "steno isn't set up" notification
     setup_hint: Cooldown,
     config_dir: PathBuf,
@@ -119,6 +122,7 @@ impl KeymapProcessor {
             steno_engines,
             steno_active: None,
             overlay_hub: OverlayHub::global(),
+            shift_down: false,
             setup_hint: Cooldown::new(Duration::from_secs(3)),
             config_dir,
             user_id,
@@ -190,6 +194,10 @@ impl KeymapProcessor {
     }
 
     pub fn process_key(&mut self, keycode: KeyCode, pressed: bool) -> ProcessResult {
+        // A live lookup types capital letters while Shift is down
+        if matches!(keycode, KeyCode::KC_LSFT | KeyCode::KC_RSFT) {
+            self.shift_down = pressed;
+        }
         let result = match self.steno_capture(keycode, pressed) {
             Some(result) => result,
             None if pressed => self.process_key_press(keycode),
@@ -278,6 +286,25 @@ impl KeymapProcessor {
         let engine = self.steno_engines.get_mut(&top)?;
         if game_mode && engine.disabled_in_game_mode {
             return None;
+        }
+
+        // A live lookup is open: every key is QWERTY input to it, and none reaches the
+        // application. Esc and Enter close it even though the layer may remap them. Other
+        // remapped keys (F10 back to base, say) still do their job, and leave it behind.
+        if engine.lookup_active() {
+            let closes = classify(keycode, false) == LookupKey::Close;
+            let remapped = self
+                .layer_stack
+                .layer_configs()
+                .get(&top)
+                .is_some_and(|config| config.remaps.contains_key(&keycode));
+            if closes || !remapped {
+                engine.lookup_key(keycode, self.shift_down);
+                // Swallowed on release too, so it can't leak a stray key event
+                self.held_keys
+                    .insert(keycode, vec![HeldAction::SwallowedBySteno]);
+                return Some(ProcessResult::None);
+            }
         }
 
         if engine.owns(keycode) {

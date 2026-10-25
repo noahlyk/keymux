@@ -10,6 +10,7 @@ pub mod dict;
 pub mod engine;
 pub mod format;
 pub mod layout;
+pub mod lookup;
 pub mod numbers;
 pub mod orthography;
 pub mod overlay;

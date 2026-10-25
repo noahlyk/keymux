@@ -325,6 +325,12 @@ pub struct StenoConfig {
     /// longer entry matches. Setting it is a validation warning.
     #[serde(default)]
     pub translation_timeout_ms: Option<u32>,
+    /// A stroke, in Plover notation such as `"HRAOUP"`, that opens a live lookup. The steno
+    /// layer stays on but its keys go back to QWERTY and type a word into a query shown on
+    /// the overlay, which lists the strokes that type it. Esc or Enter closes it. The stroke
+    /// is used up by this and no longer types its dictionary entry. Off when unset.
+    #[serde(default)]
+    pub lookup_stroke: Option<String>,
 }
 
 fn default_steno_layout() -> String {

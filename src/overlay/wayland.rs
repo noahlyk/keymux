@@ -159,6 +159,7 @@ impl Overlay {
         let unchanged = self.latest.layer == snapshot.layer
             && self.latest.chord == snapshot.chord
             && self.latest.held == snapshot.held
+            && self.latest.lookup == snapshot.lookup
             && self.latest.tape.back().map(|e| e.seq) == snapshot.tape.back().map(|e| e.seq);
         self.latest = snapshot;
         match (visible, self.surface.is_some()) {

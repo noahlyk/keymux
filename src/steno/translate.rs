@@ -93,6 +93,25 @@ impl Translator {
         self.dict = Arc::new(dict);
     }
 
+    /// A translator over the same dictionary with nothing typed. Cheap: the dictionary is
+    /// shared, not copied. Lookups use this to try strokes without touching real typing.
+    #[must_use]
+    pub fn fresh(&self) -> Self {
+        Self {
+            dict: Arc::clone(&self.dict),
+            output: String::new(),
+            history: Vec::new(),
+            state: FormatState::default(),
+            unmatched: false,
+        }
+    }
+
+    /// The dictionary this translator reads.
+    #[must_use]
+    pub fn dictionary(&self) -> &Dictionary {
+        &self.dict
+    }
+
     /// Everything typed so far that can still be retyped.
     #[must_use]
     pub fn text(&self) -> &str {

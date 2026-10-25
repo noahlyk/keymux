@@ -28,6 +28,25 @@ pub struct TapeEntry {
     pub unmatched: bool,
 }
 
+/// One result of a live lookup: a word, and the outline that types it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LookupRow {
+    pub text: String,
+    /// In Plover notation, strokes joined by `/`: `KAPBD` or `KAPB/TKEU`
+    pub outline: String,
+}
+
+/// The live lookup the overlay shows in place of the tape: what is being typed, and what it
+/// found. The daemon has already done the dictionary work, so the overlay only draws.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LookupView {
+    pub query: String,
+    /// Exact matches first, fewest strokes first, then words that start with the query
+    pub rows: Vec<LookupRow>,
+    /// Stroke bits to show on the keyboard: the first stroke of the best result
+    pub hint: u32,
+}
+
 /// Everything the overlay draws. Sent whole on every change: it's a few hundred bytes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverlaySnapshot {
@@ -41,6 +60,8 @@ pub struct OverlaySnapshot {
     pub held: u32,
     /// Recent strokes, oldest first
     pub tape: VecDeque<TapeEntry>,
+    /// Set while a live lookup is open: shown instead of the tape
+    pub lookup: Option<LookupView>,
 }
 
 #[derive(Debug, Default)]
@@ -64,9 +85,21 @@ impl OverlayHub {
                 return false;
             }
             state.layer = layer.map(str::to_owned);
-            // Leaving steno mid-stroke must not leave keys lit for next time
+            // Leaving steno mid-stroke must not leave keys lit for next time, nor a lookup open
             state.chord = 0;
             state.held = 0;
+            state.lookup = None;
+            true
+        });
+    }
+
+    /// A live lookup opened, changed or closed (`None`).
+    pub fn set_lookup(&self, lookup: Option<LookupView>) {
+        self.update(|state| {
+            if state.lookup == lookup {
+                return false;
+            }
+            state.lookup = lookup;
             true
         });
     }
@@ -193,6 +226,27 @@ mod tests {
         assert_eq!(state.tape.len(), TAPE_CAPACITY);
         assert_eq!(state.tape.front().unwrap().seq, 6);
         assert_eq!(state.tape.back().unwrap().seq, TAPE_CAPACITY as u64 + 5);
+    }
+
+    #[test]
+    fn a_lookup_is_shown_changed_and_cleared_and_leaving_steno_closes_it() {
+        let hub = OverlayHub::default();
+        hub.set_layer(Some("steno"));
+        let view = |query: &str| LookupView {
+            query: query.into(),
+            ..LookupView::default()
+        };
+        hub.set_lookup(Some(view("can")));
+        let first = hub.snapshot();
+        assert_eq!(first.lookup, Some(view("can")));
+        // Setting the same thing again changes nothing, so it doesn't wake the overlay
+        hub.set_lookup(Some(view("can")));
+        assert_eq!(hub.snapshot().generation, first.generation);
+        hub.set_lookup(Some(view("candy")));
+        assert!(hub.snapshot().generation > first.generation);
+
+        hub.set_layer(None);
+        assert_eq!(hub.snapshot().lookup, None);
     }
 
     #[test]

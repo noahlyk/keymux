@@ -539,6 +539,28 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
 - A stroke that matches nothing on its own, but starts a longer entry, types a `_` placeholder. The next stroke completes the entry and replaces the `_`, or the `_` is removed.
 - A stroke that matches nothing types nothing, and is marked `?` on the tape.
 
+### Live lookup
+
+Midway through a sentence and can't remember the stroke for a word? Set `lookup_stroke` (a
+stroke in Plover notation, for example `lookup_stroke: Some("HRAOUP")`) on the steno layer and
+hit that stroke:
+
+- You stay on the steno layer, but its keys go back to **QWERTY** for a moment. They type the
+  word you're after into a query, shown as `LOOKUP` on the [overlay](#on-screen-overlay).
+  Nothing you type reaches the application, so your document is untouched.
+- The overlay lists the strokes that type the word, fewest strokes first, with words that
+  start with what you've typed after them. The first stroke of the best one is lit on the
+  overlay's keyboard.
+- Backspace edits the query, Shift capitalizes (lookups are case-sensitive), and **Esc or
+  Enter** closes it. You're straight back in steno, mid-sentence.
+- Other keys your steno layer remaps (such as one that leaves steno) still work, and leave the
+  lookup behind.
+
+The lookup stroke is used up by this, so it no longer types its dictionary entry; pick one you
+don't write with. `keymux validate` checks that it's a single stroke. It needs the overlay
+running to show anything (`keymux overlay`), since that is where the query and results appear.
+`keymux steno keys "word"` does the same lookup from a terminal.
+
 ### Steno commands
 
 | Command | What it does |

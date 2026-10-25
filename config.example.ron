@@ -370,6 +370,11 @@
                 // A stroke is completed after this long, even if a key is still held down.
                 // Normally strokes complete on release, so this is only a safety net.
                 stroke_timeout_ms: 1000,
+                // Live lookup: a stroke that opens "I forgot the stroke for a word". The keys go
+                // back to QWERTY and type into a query shown on the overlay, which lists the
+                // strokes that type the word. Esc or Enter closes it. Nothing reaches the app.
+                // The stroke is used up by this, so pick one you don't write with. Off if unset.
+                // lookup_stroke: Some("HRAOUP"),
             )),
             // Non-stroke keys listed here still work while steno is active,
             // e.g. KC_ESC: TO("base") to leave. Anything else is swallowed.

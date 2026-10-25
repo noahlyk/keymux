@@ -345,10 +345,17 @@ fn chars_as_spans(text: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
 /// suffixes that glue to a neighbouring word (`{under^}`, `{^under}`) are left out.
 #[must_use]
 pub fn proper_outlines(dict: &Dictionary, word: &str) -> Vec<Vec<u32>> {
-    let base = Translator::new(dict.clone());
-    ranked_strokes(dict, word)
+    proper_outlines_in(&Translator::new(dict.clone()), word)
+}
+
+/// Like [`proper_outlines`], but over a translator that already has the dictionary, so nothing
+/// is copied. The live lookup calls this on every key press. `base` must have nothing typed:
+/// use [`Translator::fresh`].
+#[must_use]
+pub fn proper_outlines_in(base: &Translator, word: &str) -> Vec<Vec<u32>> {
+    ranked_strokes(base.dictionary(), word)
         .into_iter()
-        .filter(|outline| types_in_context(&base, word, outline))
+        .filter(|outline| types_in_context(base, word, outline))
         .collect()
 }
 

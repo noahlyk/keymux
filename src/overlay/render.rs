@@ -12,7 +12,7 @@
 use super::geometry::{KeyGroup, Keyboard, Rect};
 use super::glyphs::{self, GlyphCache};
 use crate::config::OverlayConfig;
-use crate::steno::overlay::{OverlaySnapshot, TapeEntry, TAPE_CAPACITY};
+use crate::steno::overlay::{LookupView, OverlaySnapshot, TapeEntry, TAPE_CAPACITY};
 use anyhow::Result;
 use std::borrow::Cow;
 use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, PixmapMut, Stroke, Transform};
@@ -263,11 +263,113 @@ impl Renderer {
             let alpha = (self.config.background.clamp(0.0, 1.0) * 255.0) as u8;
             fill(pixmap, panel, [r, g, b, alpha]);
         }
-        if self.tape_lines > 0 {
-            self.draw_tape(snapshot, pixmap);
+        // An open lookup takes the place of the tape
+        match &snapshot.lookup {
+            Some(lookup) if self.tape_lines > 0 => self.draw_lookup(lookup, pixmap),
+            None if self.tape_lines > 0 => self.draw_tape(snapshot, pixmap),
+            _ => {}
         }
         if self.keyboard.is_some() {
             self.draw_keyboard(snapshot, pixmap);
+        }
+    }
+
+    /// The live lookup, drawn where the tape is and bottom-up like it: the query being typed
+    /// sits just above the keyboard, and the results above it, best one nearest.
+    fn draw_lookup(&mut self, view: &LookupView, pixmap: &mut PixmapMut) {
+        let baseline_in_line =
+            (self.line_height - self.words.line_height()) / 2.0 + self.words.ascent();
+        // Copies, so the closure doesn't hold `self` while text is being drawn with its fonts
+        let (bottom, pitch) = (self.tape_bottom, self.line_height);
+        let baseline_of = move |age: usize| bottom - (age + 1) as f32 * pitch + baseline_in_line;
+        let paper_right = {
+            let last = self.columns[self.columns.len() - 1];
+            self.paper_left + last.x + last.width
+        };
+
+        // The query row: a label where the strokes go, the word with a caret where words go
+        let baseline = baseline_of(0);
+        draw_text_clipped(
+            pixmap,
+            &mut self.strokes,
+            "LOOKUP",
+            self.paper_left,
+            baseline,
+            paper_right,
+            self.theme.vowel,
+            self.scale,
+        );
+        let room = self.words_right - self.words_left - 4.0 * self.scale;
+        let shown = tail_that_fits(&mut self.words, &view.query, room);
+        draw_text_clipped(
+            pixmap,
+            &mut self.words,
+            shown,
+            self.words_left,
+            baseline,
+            self.words_right,
+            self.theme.words,
+            self.scale,
+        );
+        let caret_x = self.words_left + self.words.measure(shown) + 2.0 * self.scale;
+        let caret_height = self.words.ascent() * 0.95;
+        if let Some(caret) = rounded_rect(
+            Rect {
+                x: caret_x,
+                y: baseline - caret_height,
+                w: 2.0 * self.scale,
+                h: caret_height + self.words.ascent() * 0.2,
+            },
+            0.0,
+            0.0,
+        ) {
+            fill(pixmap, &caret, self.theme.vowel);
+        }
+
+        // Results, best nearest the query. A message when there is nothing to list.
+        let room_for = self.tape_lines.saturating_sub(1);
+        if view.rows.is_empty() {
+            let message = if view.query.trim().is_empty() {
+                "Type a word. Esc to close."
+            } else {
+                "No stroke found."
+            };
+            draw_text_clipped(
+                pixmap,
+                &mut self.strokes,
+                message,
+                self.paper_left,
+                baseline_of(1),
+                self.words_right,
+                with_alpha(self.theme.strokes, 170),
+                self.scale,
+            );
+            return;
+        }
+        for (index, row) in view.rows.iter().take(room_for).enumerate() {
+            let baseline = baseline_of(index + 1);
+            // The word as typed is full strength; words that merely start with it a bit less
+            let strength = if row.text == view.query.trim() { 1.0 } else { 0.8 };
+            draw_text_clipped(
+                pixmap,
+                &mut self.strokes,
+                &row.outline,
+                self.paper_left,
+                baseline,
+                paper_right,
+                fade_color(self.theme.strokes, strength),
+                self.scale,
+            );
+            draw_text_clipped(
+                pixmap,
+                &mut self.words,
+                &row.text,
+                self.words_left,
+                baseline,
+                self.words_right,
+                fade_color(self.theme.words, strength),
+                self.scale,
+            );
         }
     }
 
@@ -279,6 +381,8 @@ impl Renderer {
             width: OUTLINE * self.scale,
             ..Stroke::default()
         };
+        // A lookup lights the first stroke of its best result, dimly, like a stroke in progress
+        let hint = snapshot.lookup.as_ref().map_or(0, |lookup| lookup.hint);
         for (slot, shape) in self.key_shapes.iter().enumerate() {
             let bit = 1u32 << slot;
             let accent = self.theme.accent(Keyboard::group(slot));
@@ -287,7 +391,7 @@ impl Renderer {
             let label_color = if snapshot.held & bit != 0 {
                 fill(pixmap, shape, accent);
                 self.theme.label_lit
-            } else if snapshot.chord & bit != 0 {
+            } else if (snapshot.chord | hint) & bit != 0 {
                 fill(pixmap, shape, with_alpha(accent, 150));
                 self.theme.label_lit
             } else {
@@ -369,6 +473,20 @@ impl Renderer {
             self.scale,
         );
     }
+}
+
+/// The end of `text` that fits in `max` pixels, so the caret stays visible while a long query
+/// is being typed. Drops characters from the front.
+fn tail_that_fits<'a>(glyphs: &mut GlyphCache, text: &'a str, max: f32) -> &'a str {
+    let mut rest = text;
+    while glyphs.measure(rest) > max {
+        let mut chars = rest.chars();
+        if chars.next().is_none() {
+            break;
+        }
+        rest = chars.as_str();
+    }
+    rest
 }
 
 /// How strong a tape line is, by how far it is from the top of the tape (`0` is the topmost).
@@ -804,6 +922,123 @@ mod tests {
             // Premultiplied over a wallpaper-like gradient
             let row = i as u32 / w;
             let col = i as u32 % w;
+            let backdrop = [70 + row * 50 / h, 60 + col * 40 / w, 100 + row * 60 / h];
+            for (c, back) in px[..3].iter().zip(backdrop) {
+                out.push(c + (back * (255 - u32::from(px[3])) / 255) as u8);
+            }
+        }
+        std::fs::write(path, out).unwrap();
+    }
+
+    fn lookup_view() -> LookupView {
+        use crate::steno::overlay::LookupRow;
+        LookupView {
+            query: "cand".into(),
+            rows: vec![
+                LookupRow {
+                    text: "candy".into(),
+                    outline: "KAPBD".into(),
+                },
+                LookupRow {
+                    text: "candle".into(),
+                    outline: "KAPBL".into(),
+                },
+            ],
+            hint: crate::steno::layout::parse_stroke("T").unwrap(),
+        }
+    }
+
+    #[test]
+    fn an_open_lookup_replaces_the_tape_and_lights_the_hinted_key() {
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let (w, h) = renderer.size();
+        let mut tape_only = OverlaySnapshot::default();
+        tape_only.tape.push_back(tape_entry(1, "KAT", "\"cat\""));
+        let mut with_lookup = OverlaySnapshot {
+            lookup: Some(lookup_view()),
+            ..tape_only.clone()
+        };
+
+        let mut tape_pixels = Pixmap::new(w, h).unwrap();
+        renderer.draw(&tape_only, &mut tape_pixels.as_mut());
+        let mut lookup_pixels = Pixmap::new(w, h).unwrap();
+        renderer.draw(&with_lookup, &mut lookup_pixels.as_mut());
+        assert_ne!(tape_pixels.data(), lookup_pixels.data(), "the lookup is drawn");
+
+        // The newest tape line sits just above the keyboard; with a lookup open that spot holds
+        // the query row instead, so the tape's own text ("cat") is gone from its usual place
+        let row = (renderer.tape_bottom - renderer.line_height) as u32;
+        let words_x = renderer.words_left as u32;
+        let region = |pixmap: &Pixmap| -> Vec<u8> {
+            (words_x..words_x + 40)
+                .flat_map(|x| {
+                    let p = pixmap.pixel(x, row + 6).unwrap();
+                    [p.red(), p.green(), p.blue(), p.alpha()]
+                })
+                .collect()
+        };
+        assert_ne!(region(&tape_pixels), region(&lookup_pixels));
+
+        // The hinted key (T-) is lit in the accent, dimmer than a held key
+        let t = renderer.keyboard.as_ref().unwrap().keys[1];
+        let pixel = lookup_pixels
+            .pixel((t.x + 2.0) as u32, (t.y + t.h / 2.0) as u32)
+            .unwrap();
+        assert!(pixel.alpha() > 100 && pixel.alpha() < 200, "{}", pixel.alpha());
+        assert!(pixel.green() > pixel.red(), "accent colour, not the unlit key");
+
+        // Closing the lookup brings the tape back exactly as it was
+        with_lookup.lookup = None;
+        let mut after = Pixmap::new(w, h).unwrap();
+        renderer.draw(&with_lookup, &mut after.as_mut());
+        assert_eq!(tape_pixels.data(), after.data());
+    }
+
+    #[test]
+    fn a_long_query_keeps_its_end_visible() {
+        let mut glyphs = GlyphCache::new(glyphs::load_font(None, glyphs::BOLD).unwrap(), 20.0);
+        assert_eq!(tail_that_fits(&mut glyphs, "short", 500.0), "short");
+        let long = "supercalifragilisticexpialidocious";
+        let tail = tail_that_fits(&mut glyphs, long, 120.0);
+        assert!(long.ends_with(tail) && tail.len() < long.len() && !tail.is_empty());
+        assert!(glyphs.measure(tail) <= 120.0);
+        // Nothing fits: no panic, and no endless loop
+        assert_eq!(tail_that_fits(&mut glyphs, "wide", 0.0), "");
+    }
+
+    /// Writes a frame with a lookup open, to look at it:
+    /// `OVERLAY_PREVIEW=/tmp/lookup.ppm cargo test preview_lookup -- --ignored`
+    #[test]
+    #[ignore = "writes an image for eyeballing"]
+    fn preview_lookup() {
+        use crate::steno::overlay::LookupRow;
+        let path = std::env::var("OVERLAY_PREVIEW").expect("set OVERLAY_PREVIEW");
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 1080).unwrap();
+        let (w, h) = renderer.size();
+        let row = |text: &str, outline: &str| LookupRow {
+            text: text.into(),
+            outline: outline.into(),
+        };
+        let snapshot = OverlaySnapshot {
+            layer: Some("steno".into()),
+            lookup: Some(LookupView {
+                query: "cand".into(),
+                rows: vec![
+                    row("candy", "KAPBD"),
+                    row("candle", "KAPBL"),
+                    row("candid", "KAPBD/EUD"),
+                    row("candidate", "KAPBD/TKAEUT"),
+                    row("cane", "KAEUPB"),
+                ],
+                hint: crate::steno::layout::parse_stroke("KAPBD").unwrap(),
+            }),
+            ..OverlaySnapshot::default()
+        };
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        renderer.draw(&snapshot, &mut pixmap.as_mut());
+        let mut out = format!("P6 {w} {h} 255\n").into_bytes();
+        for (i, px) in pixmap.data().chunks_exact(4).enumerate() {
+            let (row, col) = (i as u32 / w, i as u32 % w);
             let backdrop = [70 + row * 50 / h, 60 + col * 40 / w, 100 + row * 60 / h];
             for (c, back) in px[..3].iter().zip(backdrop) {
                 out.push(c + (back * (255 - u32::from(px[3])) / 255) as u8);

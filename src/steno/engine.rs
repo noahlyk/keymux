@@ -4,7 +4,8 @@
 use super::chord::ChordState;
 use super::dict::Dictionary;
 use super::format::KeyPress;
-use super::layout::{build_key_map, preset};
+use super::layout::{build_key_map, parse_stroke, preset};
+use super::lookup::{classify, Lookup};
 use super::overlay::OverlayHub;
 use super::setup::default_dictionaries;
 use super::tape;
@@ -16,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
+use tracing::warn;
 
 #[derive(Debug)]
 pub struct StenoEngine {
@@ -33,6 +35,10 @@ pub struct StenoEngine {
     pub disabled_in_game_mode: bool,
     /// Where strokes are published for the on-screen overlay
     hub: &'static OverlayHub,
+    /// The stroke that opens a live lookup, if one is configured
+    lookup_stroke: Option<u32>,
+    /// The lookup that is open right now. While it is, keys are QWERTY input to it.
+    lookup: Option<Lookup>,
 }
 
 impl StenoEngine {
@@ -82,7 +88,51 @@ impl StenoEngine {
             tape: home.map(tape::default_path),
             disabled_in_game_mode,
             hub: OverlayHub::global(),
+            lookup_stroke: config.lookup_stroke.as_deref().and_then(|text| {
+                let stroke = parse_stroke(text);
+                if stroke.is_none() {
+                    warn!("steno lookup_stroke {text:?} is not a single stroke, so lookup is off");
+                }
+                stroke
+            }),
+            lookup: None,
         })
+    }
+
+    /// Whether a live lookup is open. While it is, the layer's keys are plain QWERTY input to
+    /// it (see [`Self::lookup_key`]) and nothing reaches the application.
+    #[must_use]
+    pub fn lookup_active(&self) -> bool {
+        self.lookup.is_some()
+    }
+
+    /// A key went down during an open lookup. `shift` is whether Shift is held. It types into
+    /// the query, edits it, or closes the lookup, and updates the overlay.
+    pub fn lookup_key(&mut self, key: KeyCode, shift: bool) {
+        let Some(lookup) = self.lookup.as_mut() else {
+            return;
+        };
+        if lookup.apply(classify(key, shift)) {
+            self.publish_lookup();
+        } else {
+            self.lookup = None;
+            self.hub.set_lookup(None);
+        }
+    }
+
+    fn open_lookup(&mut self) {
+        self.lookup = Some(Lookup::default());
+        // The stroke that opened it is done: nothing is lit while you type a word
+        self.hub.set_keys(0, 0);
+        self.publish_lookup();
+    }
+
+    /// Show what the lookup has found so far on the overlay.
+    fn publish_lookup(&self) {
+        if let Some(lookup) = &self.lookup {
+            self.hub
+                .set_lookup(Some(lookup.view(&self.translator.fresh())));
+        }
     }
 
     /// Publish to `hub` instead of the daemon's. Tests use this so they don't share state.
@@ -107,6 +157,8 @@ impl StenoEngine {
     /// Start a fresh sentence, as when the layer is entered. See [`Translator::start_fresh`].
     pub fn start_fresh(&mut self) {
         self.translator.start_fresh();
+        // A lookup left open when the layer was left must not still be eating keys
+        self.lookup = None;
     }
 
     /// A stroke key went down.
@@ -190,6 +242,11 @@ impl StenoEngine {
     }
 
     fn on_stroke(&mut self, stroke: u32) -> Option<StenoOutput> {
+        // The lookup stroke opens a lookup instead of typing or going on the tape
+        if self.lookup_stroke == Some(stroke) {
+            self.open_lookup();
+            return None;
+        }
         if self.loading.is_some() {
             self.backlog.push(stroke);
             self.publish_keys();
@@ -300,6 +357,8 @@ mod tests {
             tape: None,
             disabled_in_game_mode: true,
             hub: OverlayHub::global(),
+            lookup_stroke: None,
+            lookup: None,
         }
     }
 
@@ -416,6 +475,7 @@ mod tests {
             dictionaries: Vec::new(),
             stroke_timeout_ms: 5000,
             translation_timeout_ms: None,
+            lookup_stroke: None,
         };
         let err = StenoEngine::from_config(&config, true, Path::new("."), None).unwrap_err();
         assert!(err.to_string().contains("unknown steno layout preset"));

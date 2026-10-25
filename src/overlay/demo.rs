@@ -2,7 +2,7 @@
 //! checked without the daemon, a steno layer, or a keyboard.
 
 use crate::steno::layout::parse_stroke;
-use crate::steno::overlay::{OverlaySnapshot, TapeEntry, TAPE_CAPACITY};
+use crate::steno::overlay::{LookupRow, LookupView, OverlaySnapshot, TapeEntry, TAPE_CAPACITY};
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
 use std::time::Duration;
 
@@ -72,6 +72,55 @@ pub fn spawn(frames: Sender<OverlaySnapshot>) {
                 }
                 std::thread::sleep(Duration::from_millis(500));
             }
+            if !lookup(&frames, &mut snapshot) {
+                return;
+            }
         }
     });
+}
+
+/// Words the demo lookup "finds": text and its outline.
+const LOOKUP_WORDS: [(&str, &str); 5] = [
+    ("candy", "KAPBD"),
+    ("candle", "KAPBL"),
+    ("candid", "KAPBD/EUD"),
+    ("candidate", "KAPBD/TKAEUT"),
+    ("cane", "KAEUPB"),
+];
+
+/// Open a lookup, type a word into it one letter at a time, then close it. Returns `false`
+/// when the overlay has gone.
+fn lookup(frames: &Sender<OverlaySnapshot>, snapshot: &mut OverlaySnapshot) -> bool {
+    let mut show = |snapshot: &mut OverlaySnapshot, view: Option<LookupView>| {
+        snapshot.generation += 1;
+        snapshot.lookup = view;
+        frames.send(snapshot.clone()).is_ok()
+    };
+    let word = "candy";
+    for end in 0..=word.len() {
+        let query = &word[..end];
+        let rows: Vec<LookupRow> = LOOKUP_WORDS
+            .iter()
+            .filter(|(text, _)| end > 0 && text.starts_with(query))
+            .map(|(text, outline)| LookupRow {
+                text: (*text).into(),
+                outline: (*outline).into(),
+            })
+            .collect();
+        let hint = rows
+            .first()
+            .and_then(|row| parse_stroke(row.outline.split('/').next()?))
+            .unwrap_or(0);
+        let view = LookupView {
+            query: query.into(),
+            rows,
+            hint,
+        };
+        if !show(snapshot, Some(view)) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(700));
+    }
+    std::thread::sleep(Duration::from_millis(1500));
+    show(snapshot, None)
 }

@@ -213,6 +213,38 @@ surface gone when the process stops.
 3. Click on the panel's area: the click should reach the window underneath. Not tested yet.
 4. `systemctl --user enable --now keymux-overlay.service`.
 
+## 6. Live lookup — `src/steno/lookup.rs` [done, tested; not yet tried on real hardware]
+
+"Midway through typing, forgot the stroke for a word." A configured `lookup_stroke` opens a
+submode **inside the steno engine**: the layer doesn't change, but while it is open the layer's
+keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches the app.
+
+- **Trigger.** A stroke in config, not a dictionary entry: the loader skips `{PLOVER:...}`
+  commands, so `{PLOVER:LOOKUP}` can't be used. The engine intercepts it in `on_stroke`, before
+  translating, so it doesn't type or go on the tape (and shadows any entry it had).
+- **Keys.** `keymap.rs` routes every key to the open lookup (`lookup_key`), US QWERTY by
+  keycap, Shift capitalizes (the dictionary is case-sensitive), Backspace edits, Esc/Enter
+  close. Esc and Enter win over the layer's own remaps (a steno layer usually remaps Esc);
+  other remapped keys, such as one that leaves steno, still work and leave the lookup behind.
+  Shift is tracked in `process_key` itself, because its release is swallowed.
+- **Results.** Exact outlines for the word first (fewest strokes first, up to 4, only ones that
+  type it "properly" in a sentence), then words that start with the query, shortest first, each
+  with its best outline (up to 12 rows; completions only from 2 characters). Built in the daemon
+  and sent in the snapshot as `LookupView { query, rows, hint }`, so the overlay needs no
+  dictionary.
+- **Cost.** Per key press: one hash lookup plus a scan of the distinct translations for the
+  completions. `proper_outlines_in` works from the engine's translator, whose dictionary is
+  shared through an `Arc`; the existing `proper_outlines` copied the whole dictionary per call,
+  which is fine for a CLI command and not for every key press.
+- **Overlay.** The lookup replaces the tape, bottom-up like it: a `LOOKUP` label and the query
+  with a caret sit just above the keyboard, the results above them with the best nearest, and
+  the first stroke of the best result is lit dimly on the keyboard. The "has anything changed"
+  check in `wayland.rs` includes the lookup, or typing wouldn't redraw.
+- **Closing.** Esc/Enter, or leaving the steno layer (the hub clears it on a layer change, and
+  the engine on re-entry), so a lookup can never be left eating keys.
+- **Needs the overlay.** The query and results are only drawn there, so without
+  `keymux overlay` running you'd be typing blind. A terminal fallback is `keymux steno keys`.
+
 ## Risks / open questions
 
 - Clicks falling through the overlay: the empty input region is set, and niri reports
