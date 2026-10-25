@@ -557,7 +557,7 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
 
 `keymux overlay` shows the steno keyboard and a tape down the right edge of the screen while a
 steno layer is on, and goes away when you leave it. The tape runs the full screen height with
-the keyboard at the bottom. Keys are steno pads (tall pills) that light up as you press them
+the keyboard at the bottom. Keys are steno pads (round at the bottom, nearly square at the top) that light up as you press them
 (keys you've let go of but are still part of the stroke are dimmer), and each finished stroke
 lands on the tape with what it typed. There is no background by default, only the keys and
 text, and it never takes clicks or focus. It costs next to nothing: it only redraws when a

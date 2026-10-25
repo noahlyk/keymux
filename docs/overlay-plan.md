@@ -144,8 +144,9 @@ x-position and its letter is centred in that column. Steno lines still align.
 - No background by default (`background: 0.0`): only the keys and the text are drawn, so
   everything must read over any wallpaper. Text gets a soft drop shadow (light text only;
   dark text on a lit key doesn't, since the shadow would smudge it).
-- Keys are steno pads: tall pills (1.75× as tall as wide) with fully round ends. `S-` and
-  `*` are double height, `#` is a thin pill across the top, thumbs sit below. Unlit keys
+- Keys are steno pads, 1.75× as tall as wide: a squarish top with slightly softened corners
+  (radius 0.2× the width) and a fully round bottom. `S-` and `*` are double height, `#` is a
+  thin pill across the top, thumbs sit below. Unlit keys
   are a faint dark glass fill with a light outline. Lit keys use the stroke accent (teal for
   consonants, pale yellow for vowels). Keys in `chord` but no longer in `held` are dimmer,
   so you see the stroke building.

@@ -23,6 +23,10 @@ const LABEL_PX: f32 = 13.0;
 const TAPE_PX: f32 = 14.0;
 /// Outline of an unlit key, logical px
 const OUTLINE: f32 = 1.4;
+/// Radius of a pad's top corners relative to its width. The bottom is fully round.
+const PAD_TOP_ROUND: f32 = 0.2;
+/// Slot of the `#` number bar
+const NUMBER_SLOT: usize = 22;
 /// Share of the tape width given to the steno columns; the translation gets the rest
 const PAPER_SHARE: f32 = 0.62;
 /// Oldest tape line's strength, so the tape fades out towards the top of the screen
@@ -116,11 +120,19 @@ impl Renderer {
             0
         };
 
-        // Pills: the radius is clamped to half the shorter side, so this is a full round end
+        // Steno pads: a squarish top with slightly softened corners, and a fully round
+        // bottom. The `#` bar is a plain pill. Radii are clamped to fit by `rounded_rect`.
         let key_shapes = keyboard.as_ref().map_or_else(Vec::new, |k| {
             k.keys
                 .iter()
-                .filter_map(|r| rounded_rect(*r, f32::MAX))
+                .enumerate()
+                .filter_map(|(slot, r)| {
+                    if slot == NUMBER_SLOT {
+                        rounded_rect(*r, f32::MAX, f32::MAX)
+                    } else {
+                        rounded_rect(*r, r.w * PAD_TOP_ROUND, f32::MAX)
+                    }
+                })
                 .collect()
         });
         let panel = (config.background > 0.0)
@@ -132,6 +144,7 @@ impl Renderer {
                         w: width,
                         h: height,
                     },
+                    0.0,
                     0.0,
                 )
             })
@@ -337,23 +350,26 @@ fn stroke(pixmap: &mut PixmapMut, path: &Path, color: [u8; 4], style: &Stroke) {
     pixmap.stroke_path(path, &paint(color), style, Transform::identity(), None);
 }
 
-/// A rectangle with circular corners (cubic approximation). A radius of half the shorter side
-/// or more makes a pill: straight sides with fully round ends.
-fn rounded_rect(r: Rect, radius: f32) -> Option<Path> {
+/// A rectangle whose top corners have radius `top_radius` and bottom corners `bottom_radius`
+/// (cubic approximation of quarter circles). Radii are clamped so they fit: half the width at
+/// most, and the two together within the height. A radius of half the width on both ends
+/// makes a pill.
+fn rounded_rect(r: Rect, top_radius: f32, bottom_radius: f32) -> Option<Path> {
     const K: f32 = 0.552_284_8; // control point distance for a quarter circle
-    let rad = radius.min(r.w / 2.0).min(r.h / 2.0);
-    let c = rad * (1.0 - K);
+    let rt = top_radius.min(r.w / 2.0).min(r.h / 2.0);
+    let rb = bottom_radius.min(r.w / 2.0).min(r.h - rt);
+    let (ct, cb) = (rt * (1.0 - K), rb * (1.0 - K));
     let (left, top, right, bottom) = (r.x, r.y, r.x + r.w, r.y + r.h);
     let mut pb = PathBuilder::new();
-    pb.move_to(left + rad, top);
-    pb.line_to(right - rad, top);
-    pb.cubic_to(right - c, top, right, top + c, right, top + rad);
-    pb.line_to(right, bottom - rad);
-    pb.cubic_to(right, bottom - c, right - c, bottom, right - rad, bottom);
-    pb.line_to(left + rad, bottom);
-    pb.cubic_to(left + c, bottom, left, bottom - c, left, bottom - rad);
-    pb.line_to(left, top + rad);
-    pb.cubic_to(left, top + c, left + c, top, left + rad, top);
+    pb.move_to(left + rt, top);
+    pb.line_to(right - rt, top);
+    pb.cubic_to(right - ct, top, right, top + ct, right, top + rt);
+    pb.line_to(right, bottom - rb);
+    pb.cubic_to(right, bottom - cb, right - cb, bottom, right - rb, bottom);
+    pb.line_to(left + rb, bottom);
+    pb.cubic_to(left + cb, bottom, left, bottom - cb, left, bottom - rb);
+    pb.line_to(left, top + rt);
+    pb.cubic_to(left, top + ct, left + ct, top, left + rt, top);
     pb.close();
     pb.finish()
 }
@@ -534,21 +550,37 @@ mod tests {
     }
 
     #[test]
-    fn keys_are_pills_with_round_ends() {
+    fn keys_are_pads_square_on_top_and_round_at_the_bottom() {
         let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
         let (w, h) = renderer.size();
         let mut pixmap = Pixmap::new(w, h).unwrap();
         renderer.draw(&OverlaySnapshot::default(), &mut pixmap.as_mut());
-        // The corner of T-'s bounding box is empty (round end); its middle is not
         let t = renderer.keyboard.as_ref().unwrap().keys[1];
-        let corner = pixmap
-            .pixel((t.x + 1.0) as u32, (t.y + 1.0) as u32)
-            .unwrap();
-        let middle = pixmap
-            .pixel((t.x + 2.0) as u32, (t.y + t.h / 2.0) as u32)
-            .unwrap();
-        assert_eq!(corner.alpha(), 0, "square corner");
-        assert!(middle.alpha() > 0, "body of the pad");
+        let alpha_at = |dx: f32, y: f32| pixmap.pixel((t.x + dx) as u32, y as u32).unwrap().alpha();
+
+        // Just inside each corner of T-'s bounding box: the top is nearly square, so that
+        // spot is part of the pad; the bottom is fully round, so it is empty
+        let top_corner = alpha_at(2.0, t.y + 2.0);
+        let bottom_corner = alpha_at(2.0, t.bottom() - 3.0);
+        assert!(top_corner > 0, "top corner is only slightly rounded");
+        assert_eq!(bottom_corner, 0, "bottom is a round end");
+        assert!(alpha_at(2.0, t.y + t.h / 2.0) > 0, "body of the pad");
+    }
+
+    #[test]
+    fn the_pad_path_has_the_radii_asked_for() {
+        let r = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 20.0,
+            h: 40.0,
+        };
+        // A pill: both ends are half the width
+        let pill = rounded_rect(r, f32::MAX, f32::MAX).unwrap();
+        assert_eq!(pill.bounds().width(), 20.0);
+        // Radii that don't fit are clamped instead of producing a bad path
+        assert!(rounded_rect(r, 500.0, 500.0).is_some());
+        assert!(rounded_rect(r, 3.0, f32::MAX).is_some());
     }
 
     /// Writes a sample frame as a PPM over a backdrop, to look at the design:
