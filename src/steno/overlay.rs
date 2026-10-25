@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
@@ -107,15 +108,30 @@ impl OverlayHub {
     }
 
     /// Wait until the state differs from generation `seen`, then return it. Returns `None`
-    /// after `timeout` with no change, so a subscriber thread can check its socket.
+    /// after `timeout` with no change, or as soon as `cancel` is set and [`Self::wake`] is
+    /// called, so a subscriber thread can stop waiting when its overlay goes away.
     #[must_use]
-    pub fn wait_newer(&self, seen: u64, timeout: Duration) -> Option<OverlaySnapshot> {
+    pub fn wait_newer(
+        &self,
+        seen: u64,
+        timeout: Duration,
+        cancel: &AtomicBool,
+    ) -> Option<OverlaySnapshot> {
         let state = lock(&self.state);
         let (state, _) = self
             .changed
-            .wait_timeout_while(state, timeout, |state| state.generation == seen)
+            .wait_timeout_while(state, timeout, |state| {
+                state.generation == seen && !cancel.load(Ordering::Acquire)
+            })
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         (state.generation != seen).then(|| state.clone())
+    }
+
+    /// Wake every waiter so it re-checks its `cancel` flag. Taking the lock first means a waiter
+    /// that has already checked the flag is parked by the time the notification is sent.
+    pub fn wake(&self) {
+        drop(lock(&self.state));
+        self.changed.notify_all();
     }
 
     /// Apply `change`, and wake subscribers if it reports that something changed.
@@ -193,7 +209,9 @@ mod tests {
         let hub = Arc::new(OverlayHub::default());
         let waiter = {
             let hub = Arc::clone(&hub);
-            std::thread::spawn(move || hub.wait_newer(0, Duration::from_secs(5)))
+            std::thread::spawn(move || {
+                hub.wait_newer(0, Duration::from_secs(5), &AtomicBool::new(false))
+            })
         };
         hub.set_keys(0b1, 0b1);
         hub.set_keys(0b11, 0b11);
@@ -203,7 +221,7 @@ mod tests {
         let latest = hub.snapshot();
         if seen.generation != latest.generation {
             assert_eq!(
-                hub.wait_newer(seen.generation, Duration::ZERO),
+                hub.wait_newer(seen.generation, Duration::ZERO, &AtomicBool::new(false)),
                 Some(latest)
             );
         }
@@ -212,6 +230,20 @@ mod tests {
     #[test]
     fn waiting_with_nothing_new_times_out() {
         let hub = OverlayHub::default();
-        assert_eq!(hub.wait_newer(0, Duration::from_millis(10)), None);
+        let cancel = AtomicBool::new(false);
+        assert_eq!(hub.wait_newer(0, Duration::from_millis(10), &cancel), None);
+    }
+
+    #[test]
+    fn a_cancelled_wait_returns_at_once_without_a_change() {
+        let hub = OverlayHub::default();
+        let cancel = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            // An hour is far longer than the test: only the cancel can end this wait
+            let waiter = scope.spawn(|| hub.wait_newer(0, Duration::from_secs(3600), &cancel));
+            cancel.store(true, Ordering::Release);
+            hub.wake();
+            assert_eq!(waiter.join().unwrap(), None);
+        });
     }
 }

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// IPC message from client to daemon
@@ -163,24 +164,45 @@ fn write_frame(stream: &mut impl Write, value: &impl Serialize) -> Result<()> {
 /// Daemon side of [`IpcRequest::SubscribeOverlay`]: send the current state, then every newer
 /// one, until the subscriber goes away. Run on its own thread; it never touches the key path
 /// except through the hub's lock.
+///
+/// The subscriber never sends anything after subscribing, so a second thread blocks reading
+/// the socket: it returns the moment the overlay closes its end, and wakes the writer. That
+/// way a closed overlay is noticed at once, not at the next write (which can still succeed
+/// once after the peer has gone) and with no idle wakeups.
 pub fn serve_overlay(mut stream: UnixStream, hub: &OverlayHub) {
-    let mut state = hub.snapshot();
-    loop {
-        if write_frame(&mut stream, &state).is_err() {
-            return; // overlay closed
-        }
-        // Wake up now and then with nothing new, to notice a subscriber that went away
-        // TODO(overlay): detect a closed peer without writing (poll for POLLHUP) instead
-        loop {
-            if let Some(newer) = hub.wait_newer(state.generation, Duration::from_secs(30)) {
-                state = newer;
+    let Ok(mut watcher) = stream.try_clone() else {
+        return;
+    };
+    let gone = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut ignored = [0u8; 64];
+            while matches!(watcher.read(&mut ignored), Ok(n) if n > 0) {}
+            gone.store(true, Ordering::Release);
+            hub.wake();
+        });
+
+        let mut state = hub.snapshot();
+        'serving: loop {
+            if write_frame(&mut stream, &state).is_err() {
                 break;
             }
-            if write_frame(&mut stream, &state).is_err() {
-                return;
+            // Wait for something newer; the long timeout only bounds a single wait
+            loop {
+                if gone.load(Ordering::Acquire) {
+                    break 'serving;
+                }
+                if let Some(newer) =
+                    hub.wait_newer(state.generation, Duration::from_secs(3600), &gone)
+                {
+                    state = newer;
+                    break;
+                }
             }
         }
-    }
+        // Ends the watcher's blocking read too, if it is still running (a failed write)
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+    });
 }
 
 /// Overlay side: connect, subscribe, and return the frames as they arrive. The iterator
@@ -221,11 +243,26 @@ mod tests {
             assert_eq!((next.chord, next.held), (0b11, 0b11));
             assert!(next.generation > first.generation);
 
-            // Closing our end must stop the stream thread, so the scope can end. It notices
-            // on its next write, which this change triggers.
+            // Closing our end must stop the stream thread on its own, with no further change
+            // to wake it, so the scope can end. If it didn't, this test would hang.
             drop(client);
-            hub.set_keys(0, 0);
         });
+    }
+
+    #[test]
+    fn a_subscriber_that_stops_listening_is_noticed_without_any_change() {
+        let hub = OverlayHub::default();
+        let (client, server) = UnixStream::pair().unwrap();
+        let started = std::time::Instant::now();
+        std::thread::scope(|scope| {
+            scope.spawn(|| serve_overlay(server, &hub));
+            // Let it send its first frame and settle into waiting, then hang up
+            let mut client = client;
+            let _: OverlaySnapshot = read_frame(&mut client).unwrap();
+            drop(client);
+        });
+        // A heartbeat design would take its whole interval here; this must be near instant
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
     }
 
     #[test]
