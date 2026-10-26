@@ -545,6 +545,71 @@ impl Default for EnabledKeyboards {
     }
 }
 
+/// Whether `new` is `old` with some layers renamed, and every mention of them renamed too.
+fn renamed_layers_behave_alike(old: &Config, new: &Config) -> bool {
+    use serde_json::Value;
+
+    // More renames than this at once is far more likely to be an editing session than a rename,
+    // and trying every pairing grows quickly
+    const MAX_RENAMES: usize = 4;
+
+    let (Ok(old), Ok(new)) = (serde_json::to_value(old), serde_json::to_value(new)) else {
+        return false;
+    };
+    let names = |config: &Value| -> Vec<String> {
+        let mut names: Vec<String> = config
+            .get("layers")
+            .and_then(Value::as_object)
+            .map(|layers| layers.keys().cloned().collect())
+            .unwrap_or_default();
+        names.sort();
+        names
+    };
+    let (old_names, new_names) = (names(&old), names(&new));
+    let gone: Vec<&String> = old_names.iter().filter(|n| !new_names.contains(n)).collect();
+    let came: Vec<&String> = new_names.iter().filter(|n| !old_names.contains(n)).collect();
+    if gone.is_empty() || gone.len() != came.len() || gone.len() > MAX_RENAMES {
+        return false;
+    }
+
+    fn rename(value: &Value, to: &dyn Fn(&str) -> Option<String>) -> Value {
+        match value {
+            Value::String(text) => Value::String(to(text).unwrap_or_else(|| text.clone())),
+            Value::Array(items) => Value::Array(items.iter().map(|v| rename(v, to)).collect()),
+            Value::Object(map) => Value::Object(
+                map.iter()
+                    .map(|(key, v)| (to(key).unwrap_or_else(|| key.clone()), rename(v, to)))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+
+    // Try each way of pairing the old names with the new ones
+    fn pairings(count: usize) -> Vec<Vec<usize>> {
+        if count == 0 {
+            return vec![Vec::new()];
+        }
+        let mut all = Vec::new();
+        for rest in pairings(count - 1) {
+            for at in 0..=rest.len() {
+                let mut pairing = rest.clone();
+                pairing.insert(at, count - 1);
+                all.push(pairing);
+            }
+        }
+        all
+    }
+    pairings(gone.len()).into_iter().any(|pairing| {
+        let to = |text: &str| {
+            gone.iter()
+                .position(|name| name.as_str() == text)
+                .map(|i| came[pairing[i]].clone())
+        };
+        rename(&old, &to) == new
+    })
+}
+
 /// Main configuration structure
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
@@ -844,15 +909,24 @@ impl Config {
         }
     }
 
-    /// Whether `other` makes the daemon behave exactly as this config does. Comments,
-    /// whitespace, ordering and the like are gone once a file is parsed, so they never differ.
-    /// The `overlay` block is read by the overlay process alone, so it doesn't count either:
-    /// restyling the overlay shouldn't restart every keyboard.
+    /// Whether `other` makes the daemon behave exactly as this config does.
+    ///
+    /// Comments, whitespace and the order of entries in a `{ ... }` map are gone once a file is
+    /// parsed, so they never differ. The order of a `[ ... ]` list is kept, and counts: for
+    /// `enabled_keyboards` the last match wins, and dictionaries are searched in order. The
+    /// `overlay` block is read by the overlay process alone, so it doesn't count: restyling the
+    /// overlay shouldn't restart every keyboard.
+    ///
+    /// Renaming a layer doesn't count either, as long as every use of the name was renamed with
+    /// it (`MO("steno")`, `default_layer`, per-keyboard overrides...): the layers do the same.
     #[must_use]
     pub fn behaves_like(&self, other: &Self) -> bool {
         let mut mine = self.clone();
         mine.overlay = other.overlay.clone();
-        mine == *other
+        if mine == *other {
+            return true;
+        }
+        renamed_layers_behave_alike(&mine, other)
     }
 
     /// Check if a keyboard should be enabled based on the enabled_keyboards config
@@ -1342,6 +1416,84 @@ mod tests {
         let before = parse("(overlay: (width: 340))");
         let after = parse("(overlay: (width: 400, text_scale: 1.2))");
         assert!(before.behaves_like(&after));
+    }
+
+    const WITH_LAYERS: &str = r#"(
+        default_layer: Some("steno"),
+        remaps: { KC_BSLS: TO("steno"), KC_LALT: MO("soundboard") },
+        layers: {
+            "steno": (kind: Remap, remaps: { KC_ESC: TO("soundboard"), KC_A: Key(KC_B) }),
+            "soundboard": (kind: Remap, remaps: { KC_ESC: TO("steno") }),
+        },
+        per_keyboard_overrides: { "16c0:27db:0111:0003": (default_layer: Some("steno")) },
+    )"#;
+
+    #[test]
+    fn renaming_a_layer_everywhere_it_is_used_does_not_change_how_a_config_behaves() {
+        let renamed = WITH_LAYERS.replace("\"steno\"", "\"stenography\"");
+        assert!(parse(WITH_LAYERS).behaves_like(&parse(&renamed)));
+    }
+
+    #[test]
+    fn renaming_two_layers_at_once_does_not_change_how_a_config_behaves() {
+        let renamed = WITH_LAYERS
+            .replace("\"steno\"", "\"stenography\"")
+            .replace("\"soundboard\"", "\"sounds\"");
+        assert!(parse(WITH_LAYERS).behaves_like(&parse(&renamed)));
+    }
+
+    #[test]
+    fn renaming_a_layer_but_not_everything_that_refers_to_it_changes_how_a_config_behaves() {
+        // Only the definition is renamed, so `TO("steno")` points at nothing now
+        let renamed = WITH_LAYERS.replace(
+            "\"steno\": (kind",
+            "\"stenography\": (kind",
+        );
+        assert!(!parse(WITH_LAYERS).behaves_like(&parse(&renamed)));
+    }
+
+    #[test]
+    fn renaming_a_layer_and_changing_a_bind_in_the_same_edit_changes_how_a_config_behaves() {
+        let edited = WITH_LAYERS
+            .replace("\"steno\"", "\"stenography\"")
+            .replace("KC_A: Key(KC_B)", "KC_A: Key(KC_C)");
+        assert!(!parse(WITH_LAYERS).behaves_like(&parse(&edited)));
+    }
+
+    #[test]
+    fn changing_a_keyboard_in_enabled_keyboards_changes_how_a_config_behaves() {
+        let before = parse(r#"(enabled_keyboards: ["0c45:8092:0110:0003"])"#);
+        let after = parse(r#"(enabled_keyboards: ["0c45:8092:0110:0003@1"])"#);
+        assert!(!before.behaves_like(&after));
+    }
+
+    #[test]
+    fn the_order_of_a_list_changes_how_a_config_behaves() {
+        // Later entries win over earlier ones, so the order decides
+        let before = parse(r#"(enabled_keyboards: ["*", ("16c0:27db", "Disable")])"#);
+        let after = parse(r#"(enabled_keyboards: [("16c0:27db", "Disable"), "*"])"#);
+        assert!(!before.behaves_like(&after));
+    }
+
+    #[test]
+    fn the_order_layers_are_written_in_does_not_change_how_a_config_behaves() {
+        // Layers are a map, with no order: nothing depends on which is written first
+        let before = parse(
+            r#"(layers: { "a": (kind: Remap, remaps: {}), "b": (kind: Remap, remaps: {}) })"#,
+        );
+        let after = parse(
+            r#"(layers: { "b": (kind: Remap, remaps: {}), "a": (kind: Remap, remaps: {}) })"#,
+        );
+        assert!(before.behaves_like(&after));
+    }
+
+    #[test]
+    fn changing_any_bind_changes_how_a_config_behaves() {
+        let before = parse(WITH_LAYERS);
+        let after = parse(&WITH_LAYERS.replace("KC_A: Key(KC_B)", "KC_A: Key(KC_C)"));
+        assert!(!before.behaves_like(&after));
+        let after = parse(&WITH_LAYERS.replace("KC_LALT: MO", "KC_RALT: MO"));
+        assert!(!before.behaves_like(&after));
     }
 
     const HE80: &str = "0c45:8092:0110:0003@3-4.3";
