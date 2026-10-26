@@ -18,6 +18,13 @@ use tracing::error;
 /// Keys that always reach the screen on a steno layer, without a remap.
 const STENO_PASSTHROUGH: [KeyCode; 1] = [KeyCode::KC_DEL];
 
+/// Whether a key that reaches the application from a steno layer can change the text or move
+/// the caret without the translator knowing. Modifiers don't, alone. Backspace is not counted
+/// either: the translator already follows it.
+const fn edits_text_behind_steno(key: KeyCode) -> bool {
+    !key.is_modifier() && !matches!(key, KeyCode::KC_BSPC)
+}
+
 fn steno_result(output: Option<StenoOutput>) -> ProcessResult {
     match output {
         None => ProcessResult::None,
@@ -322,16 +329,18 @@ impl KeymapProcessor {
         if keycode == KeyCode::KC_BSPC && tape_empty {
             engine.backspace();
         }
-        if STENO_PASSTHROUGH.contains(&keycode) || (tape_key && tape_empty) {
-            return None;
-        }
-
         let has_remap = self
             .layer_stack
             .layer_configs()
             .get(&top)
             .is_some_and(|config| config.remaps.contains_key(&keycode));
-        if has_remap {
+        if STENO_PASSTHROUGH.contains(&keycode) || (tape_key && tape_empty) || has_remap {
+            // This key reaches the application, and may move the caret or change the text
+            // behind the translator's back (arrows, Enter, Delete, a remapped Space...). What
+            // it remembers of the text is no longer the text at the cursor, so it lets go.
+            if edits_text_behind_steno(keycode) {
+                engine.start_fresh();
+            }
             return None;
         }
 

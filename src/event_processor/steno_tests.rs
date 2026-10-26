@@ -801,3 +801,31 @@ fn the_overlay_follows_the_layer_the_held_keys_and_each_finished_stroke() {
     p.process_key(KeyCode::KC_TAB, false);
     assert_eq!(hub.snapshot().layer, None);
 }
+
+#[test]
+fn a_key_that_reaches_the_screen_makes_the_next_word_start_fresh() {
+    // Delete is not a stroke key: it reaches the application and edits the text at the cursor
+    // behind the translator's back. After it, the translator no longer knows what is before
+    // the cursor, so the next word is not given a leading space as if it followed "cat".
+    let fixture = Fixture::new("edit-key-resets");
+    let mut p = fixture.processor();
+    enter_steno(&mut p);
+
+    let cat = [KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P];
+    assert_eq!(
+        chord(&mut p, &cat),
+        ProcessResult::TypeString("cat".to_string(), false)
+    );
+    // Without anything in between, the second word follows the first
+    assert_eq!(
+        chord(&mut p, &cat),
+        ProcessResult::TypeString(" cat".to_string(), false)
+    );
+
+    p.process_key(KeyCode::KC_DEL, true);
+    p.process_key(KeyCode::KC_DEL, false);
+    assert_eq!(
+        chord(&mut p, &cat),
+        ProcessResult::TypeString("cat".to_string(), false)
+    );
+}
