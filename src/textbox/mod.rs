@@ -47,7 +47,7 @@ fn print_report(report: &TextBoxReport) {
 }
 
 pub fn run(dump: bool) -> Result<()> {
-    tracing_subscriber::fmt().with_target(false).init();
+    let _ = tracing_subscriber::fmt().with_target(false).try_init();
     let conn = Connection::connect_to_env().context("no Wayland session to listen on")?;
     let mut reporter = TextBoxReporter::default();
     tracing::info!("listening for the focused text box");

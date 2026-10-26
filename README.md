@@ -129,8 +129,8 @@ install the one matching your compositor/WM.
 **Steno overlay (optional):** `keymux overlay` draws the steno keyboard and tape on
 screen while a steno layer is on. Needs a Wayland compositor with layer-shell (niri,
 Hyprland, Sway; not GNOME). See [On-screen overlay](#on-screen-overlay).
-- Path: `/usr/lib/systemd/user/keymux-overlay.service`
-- Enable: `systemctl --user enable --now keymux-overlay.service`
+- Path: `/usr/lib/systemd/user/keymux-steno.service`
+- Enable: `systemctl --user enable --now keymux-steno.service`
 
 ## 📖 Configuration Guide
 
@@ -602,7 +602,8 @@ clicks or focus. It costs next to nothing: it only redraws when a key or the tap
 ![overlay](docs/overlay-preview.png)
 
 It runs as your user, since the daemon runs as root and can't draw on your screen. Start it
-with `systemctl --user enable --now keymux-overlay.service`, or run `keymux overlay` by hand.
+with `systemctl --user enable --now keymux-steno.service` (one service for everything steno
+needs from your session, including the text box reader below), or run `keymux overlay` by hand.
 It needs a Wayland compositor with `wlr-layer-shell`: niri, Hyprland and Sway have it, GNOME
 doesn't.
 
@@ -650,8 +651,9 @@ Two things keep it right:
   deletes text steno didn't type. Only the last 64 characters before the cursor are kept, in
   memory, and never logged. Password fields and anything marked sensitive are not read.
 
-Start it with `systemctl --user enable --now keymux-textbox.service`, or run `keymux textbox`
-by hand. `keymux textbox --dump` prints what the focused text box reports, to see which of your
+`keymux-steno.service` runs it alongside the overlay, so there is nothing more to enable; if
+one of the two can't run on your system (no layer-shell, another input method), the other
+carries on. You can also run `keymux textbox` by hand. `keymux textbox --dump` prints what the focused text box reports, to see which of your
 apps support it. It listens only: it never takes keys, never types and has no window, so
 nothing changes for apps that don't support it, which carry on with the record steno keeps (a
 text box has to support `zwp_text_input_v3`: GTK, Qt and Firefox do; many terminals don't).

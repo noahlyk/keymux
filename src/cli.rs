@@ -157,6 +157,10 @@ pub enum Commands {
         dump: bool,
     },
 
+    /// Run everything steno needs from your graphical session: the overlay and the text box
+    /// reader. This is what `keymux-steno.service` runs
+    StenoSession,
+
     /// Run the hyprland window watcher daemon
     #[command(hide = true)]
     HyprlandDaemon,

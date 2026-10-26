@@ -63,6 +63,9 @@ fn main() -> Result<()> {
         Some(cli::Commands::Textbox { .. }) => {
             anyhow::bail!("this keymux was built without the textbox feature");
         }
+        Some(cli::Commands::StenoSession) => {
+            keymux::session::run()?;
+        }
         Some(cli::Commands::HyprlandDaemon) => {
             keymux::hyprland::run_hyprland_daemon()?;
         }
