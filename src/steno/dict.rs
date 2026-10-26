@@ -137,6 +137,28 @@ impl Dictionary {
         found
     }
 
+    /// Words that start with `prefix` but are longer than it, shortest first and then
+    /// alphabetical, at most `limit`. Only plain words count (letters, digits, `'` and `-`), so
+    /// punctuation and command-like entries don't crowd the list. Case matters.
+    ///
+    /// Scans every distinct translation, so keep `prefix` to a couple of characters or more.
+    #[must_use]
+    pub fn completions(&self, prefix: &str, limit: usize) -> Vec<&str> {
+        let mut found: Vec<&str> = self
+            .by_text
+            .keys()
+            .map(String::as_str)
+            .filter(|text| {
+                text.len() > prefix.len()
+                    && text.starts_with(prefix)
+                    && text.chars().all(|c| c.is_alphanumeric() || c == '\'' || c == '-')
+            })
+            .collect();
+        found.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+        found.truncate(limit);
+        found
+    }
+
     /// Like `load`, but restores a binary copy from `cache_dir` when every file still has the
     /// contents it had when the copy was made. Otherwise the JSON is parsed and a new copy saved.
     #[must_use]
@@ -239,6 +261,10 @@ mod tests {
     const TKAOEU: u32 = (1 << 1) | (1 << 2) | (1 << 7) | (1 << 8) | (1 << 10) | (1 << 11);
 
     #[test]
+    #[allow(
+        clippy::literal_string_with_formatting_args,
+        reason = "the JSON holds Plover commands in braces, not a format string"
+    )]
     fn loads_entries_and_counts_the_rest() {
         let json = r#"{
             "KAT": "cat",

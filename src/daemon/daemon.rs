@@ -871,6 +871,26 @@ impl AsyncDaemon {
                         match stream.read_exact(&mut buffer) {
                             Ok(()) => {
                                 if let Ok(request) = bincode::deserialize::<IpcRequest>(&buffer) {
+                                    // A subscription keeps its connection, so it gets its own
+                                    // thread and this loop goes back to accepting
+                                    if matches!(request, IpcRequest::ReportTextBox) {
+                                        thread::spawn(move || {
+                                            crate::ipc::serve_text_box(
+                                                stream,
+                                                crate::steno::textbox::TextBoxHub::global(),
+                                            );
+                                        });
+                                        continue;
+                                    }
+                                    if matches!(request, IpcRequest::SubscribeOverlay) {
+                                        thread::spawn(move || {
+                                            crate::ipc::serve_overlay(
+                                                stream,
+                                                crate::steno::overlay::OverlayHub::global(),
+                                            );
+                                        });
+                                        continue;
+                                    }
                                     // Create response channel
                                     let (resp_tx, resp_rx) = mpsc::channel();
 
@@ -1438,39 +1458,20 @@ impl AsyncDaemon {
                             }
 
                             // Check if this entry matches the keyboard
-                            let matches = if let Some(event) = event_path {
-                                // Check event path match (e.g., "event17")
-                                pattern == event
-                                    || keyboard_id_str.contains(pattern)
-                                    || keyboard_id_str.starts_with(pattern)
-                                    || keyboard_name
-                                        .map(|name| name.contains(pattern))
-                                        .unwrap_or(false)
-                            } else {
-                                // Just check ID match or name match
-                                keyboard_id_str.contains(pattern)
-                                    || keyboard_id_str.starts_with(pattern)
-                                    || keyboard_name
-                                        .map(|name| name.contains(pattern))
-                                        .unwrap_or(false)
-                            };
+                            // Event path match (e.g., "event17"), or ID match or name match
+                            let by_event = event_path.is_some_and(|event| pattern == event);
+                            let by_id_or_name = keyboard_id_str.contains(pattern)
+                                || keyboard_id_str.starts_with(pattern)
+                                || keyboard_name.is_some_and(|name| name.contains(pattern));
 
-                            if matches {
+                            if by_event || by_id_or_name {
                                 matched_rule = Some(pattern.clone());
                                 last_action = Some(*is_enable);
                             }
                         }
 
-                        // Determine implicit vs explicit state
-                        let _effective_enabled = if let Some(action) = last_action {
-                            action
-                        } else if !all_config_entries.is_empty() {
-                            // No rule matched, but there are rules - default to enabled (backward compat)
-                            true
-                        } else {
-                            // No config entries at all - implicit enable (default behavior)
-                            true
-                        };
+                        // With no matching rule the keyboard is implicitly enabled (default
+                        // behavior, and backward compatible when there are rules but none match)
 
                         // Only set matched_rule if the keyboard's state matches the rule
                         // If it's implicit (no rule matched), set to None
@@ -1558,6 +1559,13 @@ impl AsyncDaemon {
                     std::process::exit(0);
                 });
                 IpcResponse::Ok
+            }
+            // The IPC thread hands subscriptions to their own thread before they get here
+            IpcRequest::SubscribeOverlay => {
+                IpcResponse::Error("overlay subscriptions are streamed, not answered".into())
+            }
+            IpcRequest::ReportTextBox => {
+                IpcResponse::Error("text box reports are streamed, not answered".into())
             }
         }
     }

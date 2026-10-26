@@ -70,11 +70,7 @@ fn whole_word_outline(dict: &Dictionary, target: &[char]) -> Option<Vec<u32>> {
 
 /// Keep `candidate` if the slot is empty or it uses fewer strokes.
 fn relax(slot: &mut Option<Vec<u32>>, candidate: Vec<u32>) {
-    let better = match slot {
-        Some(best) => candidate.len() < best.len(),
-        None => true,
-    };
-    if better {
+    if slot.as_ref().is_none_or(|best| candidate.len() < best.len()) {
         *slot = Some(candidate);
     }
 }

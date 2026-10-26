@@ -126,6 +126,12 @@ install the one matching your compositor/WM.
 - Enable: `systemctl --user enable --now keymux-niri.service` (or
   `-hyprland`/`-sway`/`-i3`/`-bspwm`)
 
+**Steno overlay (optional):** `keymux overlay` draws the steno keyboard and tape on
+screen while a steno layer is on. Needs a Wayland compositor with layer-shell (niri,
+Hyprland, Sway; not GNOME). See [On-screen overlay](#on-screen-overlay).
+- Path: `/usr/lib/systemd/user/keymux-steno.service`
+- Enable: `systemctl --user enable --now keymux-steno.service`
+
 ## 📖 Configuration Guide
 
 ### Configuration File Location
@@ -533,6 +539,38 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
 - A stroke that matches nothing on its own, but starts a longer entry, types a `_` placeholder. The next stroke completes the entry and replaces the `_`, or the `_` is removed.
 - A stroke that matches nothing types nothing, and is marked `?` on the tape.
 
+### Live lookup
+
+Midway through a sentence and can't remember the stroke for a word? Set `lookup_stroke` (a
+stroke in Plover notation, for example `lookup_stroke: Some("HRAOUP")`) on the steno layer and
+hit that stroke:
+
+- You stay on the steno layer, but its keys go back to **QWERTY** for a moment. They type the
+  word you're after into a query, shown as `LOOKUP` on the [overlay](#on-screen-overlay).
+  Nothing you type reaches the application, so your document is untouched.
+- The overlay lists the strokes that type the word, fewest strokes first, with words that
+  start with what you've typed after them. The first stroke of the best one is lit on the
+  overlay's keyboard.
+- Backspace edits the query, Shift capitalizes (lookups are case-sensitive), and **Esc or
+  Enter** closes it. You're straight back in steno, mid-sentence.
+- Other keys your steno layer remaps (such as one that leaves steno) still work, and leave the
+  lookup behind.
+
+The lookup stroke is used up by this, so it no longer types its dictionary entry; pick one you
+don't write with. `keymux steno stroke HRAOUP` shows what a stroke types now, and "has no
+translation" means it's free. `keymux validate` checks the setting. It needs the overlay
+running to show anything (`keymux overlay`), since that is where the query and results appear.
+`keymux steno keys "word"` does the same lookup from a terminal.
+
+**Several strokes.** `lookup_stroke` can be more than one stroke, separated by `/` like a
+multi-stroke dictionary entry: `lookup_stroke: Some("HRAOUP/AER")`. The lookup opens after the
+last stroke. The earlier strokes are held back, typing nothing and not on the tape, until the
+next stroke shows whether it is the rest of the trigger. If it isn't, they're typed as normal,
+in order. That means the first stroke of a multi-stroke trigger is delayed by one stroke
+whenever you write it as an ordinary word, so a first stroke that is a common word makes that
+word feel laggy. A single stroke has no such delay, which is why it's the better default.
+Backspace and Space do nothing while a stroke is held back.
+
 ### Steno commands
 
 | Command | What it does |
@@ -546,6 +584,91 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
 | `keymux steno stroke "KPA/TKAOEU"` | Show what a stroke types. Use `/` between strokes of one word |
 | `keymux steno add KAT "cat"` | Add or replace an entry in `user.json` |
 | `keymux steno tape` | Show what each recent stroke typed. `-f` keeps printing new strokes, `-n N` sets how many lines to start with |
+
+### On-screen overlay
+
+`keymux overlay` shows the steno keyboard and a tape down the right edge of the screen while a
+steno layer is on, and goes away when you leave it. The tape runs the full screen height with
+the keyboard at the bottom. Keys are steno pads (round at the bottom, nearly square at the top)
+that light up as you press them, coloured by part of the keyboard: green for the left hand,
+yellow for the vowels, red for the right hand, light blue for `*` and `#`. Keys you've let go
+of but that are still part of the stroke are dimmer. Each finished stroke lands on the tape
+with what it typed: the steno letters tightly set in their own columns, and the word in larger
+white text. Every tape line is at full strength; only the top three fade out. There is no
+background by default, only the keys and text (the text has a soft shadow to read over any
+wallpaper; set `background` for a panel if your wallpaper is very busy), and it never takes
+clicks or focus. It costs next to nothing: it only redraws when a key or the tape changes.
+
+![overlay](docs/overlay-preview.png)
+
+It runs as your user, since the daemon runs as root and can't draw on your screen. Start it
+with `systemctl --user enable --now keymux-steno.service` (one service for everything steno
+needs from your session, including the text box reader below), or run `keymux overlay` by hand.
+It needs a Wayland compositor with `wlr-layer-shell`: niri, Hyprland and Sway have it, GNOME
+doesn't.
+
+```ron
+overlay: (
+    enabled: true,
+    output: None,        // Some("DP-1") to pin a monitor; None lets the compositor pick
+    margin: 0,           // gap from the right edge, in pixels
+    width: 340,          // as tall as the screen; text and keys are sized from this
+    text_scale: 1.0,     // 1.2 makes the text a fifth bigger, on top of what width gives
+    background: 0.0,     // opacity of a dark panel behind it all; 0.0 is fully transparent
+    keyboard: true,
+    tape: true,
+    tape_lines: None,    // Some(20) caps the tape; None fills the screen height
+    font: None,          // path to a .ttf/.otf; None uses the bundled Atkinson Hyperlegible
+    layers: [],          // steno layers that show it; empty means all of them
+),
+```
+
+Every field is optional, and edits to the config file apply without restarting the overlay.
+In niri, style it with `layer-rule { match namespace="^keymux-steno$" }`.
+`keymux overlay --always` keeps it on screen on every layer, not only steno ones (the
+`layers` list is ignored too; `enabled: false` still turns it off). `keymux overlay --demo`
+draws made-up strokes to try the look without the daemon, and `keymux overlay --dump`
+prints what the daemon sends. With several keyboards, it follows the
+one you last pressed a key on.
+
+### Staying in step with the text box
+
+Steno takes words back and rewrites them (`*`, a two-stroke word that replaces its first
+stroke) by sending backspaces, so it needs to know what is on screen. It keeps its own record
+of what it typed, and that record goes wrong whenever the text changes behind its back: you
+click somewhere else, an app autocorrects, a key is dropped.
+
+Three things keep it right:
+
+- **It forgets when it can tell it's lost.** A key that reaches the application from a steno
+  layer (Delete, Enter, a remapped Space, the arrows) makes the next word start fresh, instead
+  of carrying on from text that is no longer at the cursor.
+- **It can read the text box itself.** `keymux textbox` registers as your Wayland input method,
+  which is how a focused text box tells the compositor what is around its cursor. The daemon
+  then compares the last characters before the cursor with what steno thinks it typed, and when
+  they differ, it goes by the text box: no wrong backspaces after a click or a focus change, the
+  first word after clicking into existing text gets its space and capital, and `*` never
+  deletes text steno didn't type. Only the last 240 characters before the cursor are kept, in
+  memory, and never logged. Password fields and anything marked sensitive are not read.
+- **The tape follows the text.** When the cursor lands in text you didn't write with strokes
+  (you clicked into a document, or switched windows), the tape is replaced with the strokes
+  that would have written the words before the cursor, shown dimmer than strokes you wrote.
+  It is a reverse lookup, so each word shows the dictionary's shortest outline for it, not
+  necessarily the one you would have used. Those words can be undone like any other: `*`
+  takes back the word before the cursor. Space and Backspace still do their normal jobs on
+  them.
+
+When the tape is empty, `*` presses Ctrl+Backspace instead, which deletes the word before the
+cursor in nearly every app, so it works even in apps that don't report their text.
+
+`keymux-steno.service` runs the text box reader alongside the overlay, so there is nothing more to enable; if
+one of the two can't run on your system (no layer-shell, another input method), the other
+carries on. You can also run `keymux textbox` by hand. `keymux textbox --dump` prints what the focused text box reports, to see which of your
+apps support it. It listens only: it never takes keys, never types and has no window, so
+nothing changes for apps that don't support it, which carry on with the record steno keeps (a
+text box has to support `zwp_text_input_v3`: GTK, Qt and Firefox do; many terminals don't).
+Only one input method can have a seat, so it can't run next to fcitx or ibus. A compositor
+needs `zwp_input_method_v2`; niri and Sway have it, GNOME doesn't.
 
 ## 🎮 Usage
 

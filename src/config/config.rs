@@ -325,6 +325,15 @@ pub struct StenoConfig {
     /// longer entry matches. Setting it is a validation warning.
     #[serde(default)]
     pub translation_timeout_ms: Option<u32>,
+    /// A stroke, in Plover notation such as `"HRAOUP"`, that opens a live lookup. It can be
+    /// several strokes separated by `/`, such as `"HRAOUP/AER"`: the lookup opens after the
+    /// last one, and the earlier ones are held back (typing nothing) until then. If the next
+    /// stroke isn't the one the trigger expects, the held strokes are typed as normal. The
+    /// steno layer stays on but its keys go back to QWERTY and type a word into a query shown
+    /// on the overlay, which lists the strokes that type it. Esc or Enter closes it. The
+    /// strokes are used up by this and no longer type their dictionary entries. Off when unset.
+    #[serde(default)]
+    pub lookup_stroke: Option<String>,
 }
 
 fn default_steno_layout() -> String {
@@ -577,6 +586,57 @@ pub struct Config {
     /// layer. Per-keyboard `default_layer` overrides this for that keyboard.
     #[serde(default)]
     pub default_layer: Option<Layer>,
+
+    /// The on-screen steno keyboard and tape drawn by `keymux overlay`.
+    /// Read by the overlay process; the daemon ignores it.
+    #[serde(default)]
+    pub overlay: OverlayConfig,
+}
+
+/// How `keymux overlay` looks. Every field has a default, so `overlay: ()` is enough.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OverlayConfig {
+    pub enabled: bool,
+    /// Monitor to draw on, such as `Some("DP-1")`. `None` lets the compositor pick.
+    pub output: Option<String>,
+    /// Gap between the overlay and the right screen edge, in logical pixels
+    pub margin: u32,
+    /// Overlay width in logical pixels. It is as tall as the screen. The text and the keys
+    /// are sized from this, so a wider overlay has bigger text.
+    pub width: u32,
+    /// Multiplies the text size on top of what `width` gives: 1.2 is a fifth bigger. Bigger
+    /// text means fewer tape lines fit and the words get less room.
+    pub text_scale: f32,
+    /// Opacity of a dark panel behind everything, 0.0 to 1.0. Zero is fully transparent:
+    /// just the keys and the tape.
+    pub background: f32,
+    pub keyboard: bool,
+    pub tape: bool,
+    /// Most tape strokes to show, newest at the bottom. `None` fills the screen height.
+    pub tape_lines: Option<usize>,
+    /// A .ttf/.otf to use instead of the embedded Atkinson Hyperlegible
+    pub font: Option<String>,
+    /// Steno layers that show the overlay. Empty means every steno layer.
+    pub layers: Vec<Layer>,
+}
+
+impl Default for OverlayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            output: None,
+            margin: 0,
+            width: 340,
+            text_scale: 1.0,
+            background: 0.0,
+            keyboard: true,
+            tape: true,
+            tape_lines: None,
+            font: None,
+            layers: Vec::new(),
+        }
+    }
 }
 
 const fn default_tapping_term() -> u32 {
@@ -833,27 +893,16 @@ impl Config {
 
                     let normalized_pattern = pattern.strip_prefix("/dev/input/").unwrap_or(pattern);
 
-                    let matches = if let Some(event) = normalized_event {
-                        // Check event path match (e.g., "event17" or "/dev/input/event17")
-                        pattern == event
-                            || normalized_pattern == event
-                            || keyboard_id.contains(pattern)
-                            || keyboard_id.contains(normalized_pattern)
-                            || keyboard_id.starts_with(pattern)
-                            || keyboard_id.starts_with(normalized_pattern)
-                            || keyboard_name
-                                .map(|name| name.contains(pattern))
-                                .unwrap_or(false)
-                    } else {
-                        // Just check ID match or name match
-                        keyboard_id.contains(pattern)
-                            || keyboard_id.contains(normalized_pattern)
-                            || keyboard_id.starts_with(pattern)
-                            || keyboard_id.starts_with(normalized_pattern)
-                            || keyboard_name
-                                .map(|name| name.contains(pattern))
-                                .unwrap_or(false)
-                    };
+                    // Event path match (e.g., "event17" or "/dev/input/event17")
+                    let by_event = normalized_event
+                        .is_some_and(|event| pattern == event || normalized_pattern == event);
+                    // ID match or name match
+                    let by_id_or_name = keyboard_id.contains(pattern)
+                        || keyboard_id.contains(normalized_pattern)
+                        || keyboard_id.starts_with(pattern)
+                        || keyboard_id.starts_with(normalized_pattern)
+                        || keyboard_name.is_some_and(|name| name.contains(pattern));
+                    let matches = by_event || by_id_or_name;
 
                     if matches {
                         final_action = Some(action);
@@ -955,6 +1004,7 @@ impl Config {
                     hot_config_reload: self.hot_config_reload, // Keep global hot reload setting
                     per_keyboard_inherits_global_layout: self.per_keyboard_inherits_global_layout, // Keep global setting
                     default_layer: override_cfg.default_layer.clone(),
+                    overlay: self.overlay.clone(), // The overlay is one per screen, not per keyboard
                 }
             }
         } else {

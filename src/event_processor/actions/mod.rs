@@ -96,7 +96,7 @@ pub enum HeldAction {
     /// was swallowed, so its release is swallowed too.
     SwallowedBySteno,
     /// The children of a MULTI, each with the held action its press left, if any
-    MultiManaged(Vec<(KeyAction, Option<HeldAction>)>),
+    MultiManaged(Vec<(KeyAction, Option<Self>)>),
 }
 
 pub struct HandleContext<'a> {

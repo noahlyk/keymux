@@ -40,10 +40,23 @@ impl Fixture {
     }
 
     fn processor(&self) -> KeymapProcessor {
+        self.processor_from(CONFIG)
+    }
+
+    /// A keyboard that starts on the steno layer, like a steno-only board with `default_layer`.
+    fn steno_processor(&self) -> KeymapProcessor {
+        self.processor_from(&CONFIG.replacen("(\n", "(\n    default_layer: Some(\"chords\"),\n", 1))
+    }
+
+    fn processor_from(&self, config_text: &str) -> KeymapProcessor {
+        self.processor_with(config_text, r#"{"KAT": "cat", "-PB": "and"}"#)
+    }
+
+    fn processor_with(&self, config_text: &str, dictionary: &str) -> KeymapProcessor {
         let dict = self.dir.join("main.json");
-        std::fs::write(&dict, r#"{"KAT": "cat", "-PB": "and"}"#).unwrap();
+        std::fs::write(&dict, dictionary).unwrap();
         let config_path = self.dir.join("config.ron");
-        std::fs::write(&config_path, CONFIG.replace("DICT", &path_str(&dict))).unwrap();
+        std::fs::write(&config_path, config_text.replace("DICT", &path_str(&dict))).unwrap();
         let config = Config::load(&config_path).unwrap();
         let mut keymap = KeymapProcessor::new(&config, config_path, 0);
         keymap.wait_for_steno_dictionaries();
@@ -341,6 +354,24 @@ fn undo_takes_back_a_word_typed_after_a_space() {
 }
 
 #[test]
+fn undo_with_nothing_on_the_tape_presses_ctrl_backspace() {
+    let fixture = Fixture::new("undo-empty-tape");
+    let mut p = fixture.processor();
+    enter_steno(&mut p);
+
+    // `*` with nothing typed on this layer takes back a word with the keys that do it
+    assert_eq!(
+        chord(&mut p, &[KeyCode::KC_T]),
+        ProcessResult::MultipleEvents(vec![
+            (KeyCode::KC_LCTL, true),
+            (KeyCode::KC_BSPC, true),
+            (KeyCode::KC_BSPC, false),
+            (KeyCode::KC_LCTL, false),
+        ])
+    );
+}
+
+#[test]
 fn toggling_back_into_steno_starts_without_a_prefix_space() {
     let fixture = Fixture::new("toggle-reenter");
     let dict = fixture.dir.join("main.json");
@@ -414,4 +445,405 @@ fn enter_outlines_produce_their_output() {
 fn newline_and_tab_have_keys_to_type() {
     assert_eq!(super::char_to_key('\n').0, Some(evdev::Key::KEY_ENTER));
     assert_eq!(super::char_to_key('\t').0, Some(evdev::Key::KEY_TAB));
+}
+
+/// Press and release `keys` one after another, each alone, returning every result. A lookup
+/// uses these as letters, so none of them may produce output.
+fn type_keys(p: &mut KeymapProcessor, keys: &[KeyCode]) -> Vec<ProcessResult> {
+    keys.iter()
+        .flat_map(|&key| [p.process_key(key, true), p.process_key(key, false)])
+        .collect()
+}
+
+#[test]
+fn the_lookup_stroke_turns_the_keys_into_qwerty_input_to_a_query_and_nothing_is_typed() {
+    use crate::steno::layout::parse_stroke;
+
+    let fixture = Fixture::new("lookup");
+    // KAT is both a word and, here, the stroke that opens a lookup: the lookup wins
+    let config = CONFIG.replace(
+        "dictionaries: [\"DICT\"],",
+        "dictionaries: [\"DICT\"], lookup_stroke: Some(\"KAT\"),",
+    );
+    let mut p = fixture.processor_with(
+        &config,
+        r#"{"KAT": "cat", "-T": "the", "KAPB": "can", "KAPBD": "candy", "KAPBL": "candle"}"#,
+    );
+    let hub = private_hub();
+    p.set_overlay_hub(hub);
+    enter_steno(&mut p);
+    assert_eq!(hub.snapshot().lookup, None);
+
+    // The stroke opens the lookup instead of typing "cat", and doesn't go on the tape
+    assert_eq!(
+        chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]),
+        ProcessResult::None
+    );
+    let open = hub.snapshot();
+    assert_eq!(open.lookup.as_ref().map(|l| l.query.as_str()), Some(""));
+    assert!(open.tape.is_empty());
+
+    // Typing is QWERTY: these keys are stroke keys on the steno layer, but now they are letters
+    // (C-A-N-D-Y), and none of it reaches the application
+    let typed = type_keys(
+        &mut p,
+        &[
+            KeyCode::KC_C,
+            KeyCode::KC_A,
+            KeyCode::KC_N,
+            KeyCode::KC_D,
+            KeyCode::KC_Y,
+        ],
+    );
+    assert!(typed.iter().all(|r| *r == ProcessResult::None), "{typed:?}");
+    let found = hub.snapshot().lookup.unwrap();
+    assert_eq!(found.query, "candy");
+    assert_eq!(found.rows[0].text, "candy");
+    assert_eq!(found.rows[0].outline, "KAPBD");
+    // The best stroke is lit on the overlay's keyboard
+    assert_eq!(found.hint, parse_stroke("KAPBD").unwrap());
+    assert!(hub.snapshot().tape.is_empty(), "looking things up types nothing");
+
+    // Backspace edits the query, and now it also suggests longer words
+    type_keys(&mut p, &[KeyCode::KC_BSPC, KeyCode::KC_BSPC]);
+    let found = hub.snapshot().lookup.unwrap();
+    assert_eq!(found.query, "can");
+    let words: Vec<_> = found.rows.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(words, ["can", "candy", "candle"]);
+
+    // Shift capitalizes: lookups are case-sensitive
+    p.process_key(KeyCode::KC_LSFT, true);
+    type_keys(&mut p, &[KeyCode::KC_X]);
+    p.process_key(KeyCode::KC_LSFT, false);
+    assert_eq!(hub.snapshot().lookup.unwrap().query, "canX");
+
+    // Esc closes it, and is swallowed even though this layer remaps Esc
+    assert_eq!(
+        type_keys(&mut p, &[KeyCode::KC_ESC]),
+        vec![ProcessResult::None; 2]
+    );
+    assert_eq!(hub.snapshot().lookup, None);
+
+    // Back to normal steno: the same keys are strokes again, so the stroke reopens it
+    chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]);
+    assert!(hub.snapshot().lookup.is_some());
+}
+
+#[test]
+fn leaving_steno_in_the_middle_of_a_lookup_closes_it_and_does_not_keep_eating_keys() {
+    let fixture = Fixture::new("lookup-leave");
+    let config = CONFIG.replace(
+        "dictionaries: [\"DICT\"],",
+        "dictionaries: [\"DICT\"], lookup_stroke: Some(\"KAT\"),",
+    );
+    let mut p = fixture.processor_with(&config, r#"{"-T": "the", "KAPB": "can"}"#);
+    let hub = private_hub();
+    p.set_overlay_hub(hub);
+    enter_steno(&mut p);
+    chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]);
+    assert!(hub.snapshot().lookup.is_some());
+
+    // Let go of the layer key: the overlay hides, and with it the lookup
+    p.process_key(KeyCode::KC_TAB, false);
+    assert_eq!(hub.snapshot().layer, None);
+    assert_eq!(hub.snapshot().lookup, None);
+
+    // Back on the base layer a letter is just a letter again
+    assert_ne!(
+        p.process_key(KeyCode::KC_A, true),
+        ProcessResult::None,
+        "base layer keys must not be swallowed by a stale lookup"
+    );
+    p.process_key(KeyCode::KC_A, false);
+
+    // Coming back to steno starts clean: the old lookup is gone
+    enter_steno(&mut p);
+    assert_eq!(hub.snapshot().lookup, None);
+    assert_eq!(
+        chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C]),
+        ProcessResult::None,
+        "a stroke, not lookup letters"
+    );
+}
+
+/// A fixture keyboard whose steno layer opens a lookup on `trigger`, with a tiny dictionary:
+/// K-A--T is "cat" and -T is "the". On this layout those are the keys S C P and P.
+fn lookup_trigger_processor(fixture: &Fixture, trigger: &str) -> KeymapProcessor {
+    let config = CONFIG.replace(
+        "dictionaries: [\"DICT\"],",
+        &format!("dictionaries: [\"DICT\"], lookup_stroke: Some(\"{trigger}\"),"),
+    );
+    fixture.processor_with(&config, r#"{"KAT": "cat", "-T": "the"}"#)
+}
+
+const KAT: [KeyCode; 3] = [KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P];
+const THE: [KeyCode; 1] = [KeyCode::KC_P];
+
+#[test]
+fn a_two_stroke_lookup_trigger_holds_the_first_stroke_back_and_opens_after_the_second() {
+    let fixture = Fixture::new("lookup-two");
+    let mut p = lookup_trigger_processor(&fixture, "KAT/-T");
+    let hub = private_hub();
+    p.set_overlay_hub(hub);
+    enter_steno(&mut p);
+
+    // The first stroke might be the start of the trigger, so it types nothing yet and is not on
+    // the tape, and no lookup is open
+    assert_eq!(chord(&mut p, &KAT), ProcessResult::None);
+    assert!(hub.snapshot().tape.is_empty());
+    assert_eq!(hub.snapshot().lookup, None);
+
+    // The second stroke completes it: the lookup opens, and neither stroke typed or is on the tape
+    assert_eq!(chord(&mut p, &THE), ProcessResult::None);
+    assert!(hub.snapshot().lookup.is_some());
+    assert!(hub.snapshot().tape.is_empty());
+
+    // From here keys are QWERTY input to the query, as with a one-stroke trigger
+    type_keys(&mut p, &[KeyCode::KC_C, KeyCode::KC_A]);
+    assert_eq!(hub.snapshot().lookup.unwrap().query, "ca");
+}
+
+#[test]
+fn held_back_strokes_are_typed_as_normal_when_the_trigger_does_not_follow() {
+    let fixture = Fixture::new("lookup-replay");
+    let mut p = lookup_trigger_processor(&fixture, "KAT/-T");
+    let hub = private_hub();
+    p.set_overlay_hub(hub);
+    enter_steno(&mut p);
+
+    assert_eq!(chord(&mut p, &KAT), ProcessResult::None);
+    // KAT again is not -T: the first KAT was an ordinary stroke after all and types "cat". The
+    // second one is looked at again, and is held back in its turn.
+    assert_eq!(
+        chord(&mut p, &KAT),
+        ProcessResult::TypeString("cat".to_string(), false)
+    );
+    assert_eq!(hub.snapshot().tape.len(), 1);
+    assert_eq!(hub.snapshot().lookup, None);
+
+    // -T now completes KAT/-T, using the second KAT: the lookup opens, and the first "cat"
+    // is still there
+    assert_eq!(chord(&mut p, &THE), ProcessResult::None);
+    assert!(hub.snapshot().lookup.is_some());
+    assert_eq!(hub.snapshot().tape.len(), 1);
+}
+
+#[test]
+fn a_held_back_stroke_followed_by_something_else_types_both() {
+    let fixture = Fixture::new("lookup-both");
+    let mut p = lookup_trigger_processor(&fixture, "KAT/KAT");
+    enter_steno(&mut p);
+
+    assert_eq!(chord(&mut p, &KAT), ProcessResult::None);
+    // -T is not KAT: both strokes are ordinary, and arrive as one edit, in order
+    assert_eq!(
+        chord(&mut p, &THE),
+        ProcessResult::TypeString("cat the".to_string(), false)
+    );
+}
+
+#[test]
+fn a_three_stroke_trigger_opens_only_after_the_third() {
+    let fixture = Fixture::new("lookup-three");
+    let mut p = lookup_trigger_processor(&fixture, "KAT/-T/KAT");
+    let hub = private_hub();
+    p.set_overlay_hub(hub);
+    enter_steno(&mut p);
+
+    assert_eq!(chord(&mut p, &KAT), ProcessResult::None);
+    assert_eq!(chord(&mut p, &THE), ProcessResult::None);
+    assert_eq!(hub.snapshot().lookup, None, "two of three is not enough");
+    assert_eq!(chord(&mut p, &KAT), ProcessResult::None);
+    assert!(hub.snapshot().lookup.is_some());
+    assert!(hub.snapshot().tape.is_empty());
+}
+
+#[test]
+fn backspace_does_not_delete_text_before_a_held_back_stroke() {
+    let fixture = Fixture::new("lookup-bspc");
+    let mut p = lookup_trigger_processor(&fixture, "KAT/-T");
+    enter_steno(&mut p);
+    assert_eq!(chord(&mut p, &KAT), ProcessResult::None);
+
+    // Nothing has been typed for the held stroke, so Backspace would eat whatever came
+    // before it. It is swallowed instead, as it is whenever there is something to undo.
+    assert_eq!(p.process_key(KeyCode::KC_BSPC, true), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_BSPC, false), ProcessResult::None);
+}
+
+#[test]
+fn a_two_stroke_word_still_combines_after_a_stroke_that_matched_nothing() {
+    // From a real tape: a stroke that is in no dictionary, then a two-stroke word (here
+    // PER/TPEBGT, "perfect") typed on an empty line, used to come out as "per effect" until
+    // you left and rejoined steno. On this layout PER is E N J and TPEBGT is W E N K L P.
+    let fixture = Fixture::new("unmatched-then-two-stroke");
+    let mut p = fixture.processor_with(
+        CONFIG,
+        r#"{"PER": "per", "TPEBGT": "effect", "PER/TPEBGT": "perfect"}"#,
+    );
+    enter_steno(&mut p);
+
+    // A stroke with no entry (just K-): it types nothing
+    assert_eq!(chord(&mut p, &[KeyCode::KC_S]), ProcessResult::None);
+    assert_eq!(
+        chord(&mut p, &[KeyCode::KC_E, KeyCode::KC_N, KeyCode::KC_J]),
+        ProcessResult::TypeString("per".to_string(), false)
+    );
+    let tpebgt = [
+        KeyCode::KC_W,
+        KeyCode::KC_E,
+        KeyCode::KC_N,
+        KeyCode::KC_K,
+        KeyCode::KC_L,
+        KeyCode::KC_P,
+    ];
+    // The second stroke finishes the word: "fect" goes after "per", not " effect"
+    assert_eq!(
+        chord(&mut p, &tpebgt),
+        ProcessResult::TypeString("fect".to_string(), false)
+    );
+}
+
+#[test]
+fn half_a_trigger_is_dropped_when_you_leave_the_layer() {
+    let fixture = Fixture::new("lookup-leave-half");
+    let mut p = lookup_trigger_processor(&fixture, "KAT/-T");
+    let hub = private_hub();
+    p.set_overlay_hub(hub);
+    enter_steno(&mut p);
+    assert_eq!(chord(&mut p, &KAT), ProcessResult::None);
+
+    p.process_key(KeyCode::KC_TAB, false);
+    enter_steno(&mut p);
+    // The old KAT is gone: -T alone is just "the", and opens nothing
+    assert_eq!(
+        chord(&mut p, &THE),
+        ProcessResult::TypeString("the".to_string(), false)
+    );
+    assert_eq!(hub.snapshot().lookup, None);
+}
+
+/// A hub of its own, so these tests don't see strokes from other tests through the global one.
+fn private_hub() -> &'static crate::steno::overlay::OverlayHub {
+    Box::leak(Box::default())
+}
+
+/// Press and release one key on a keyboard.
+fn touch(p: &mut KeymapProcessor, key: KeyCode) {
+    p.process_key(key, true);
+    p.process_key(key, false);
+}
+
+#[test]
+fn the_overlay_follows_whichever_keyboard_was_touched_last() {
+    let fixture = Fixture::new("two-keyboards");
+    let hub = private_hub();
+    // One keyboard is steno all the time, the other is a plain keyboard on the base layer
+    let mut steno_board = fixture.steno_processor();
+    let mut plain_board = fixture.processor();
+    steno_board.set_overlay_hub(hub);
+    plain_board.set_overlay_hub(hub);
+
+    // The steno keyboard shows it from the start; the plain one, starting later, doesn't hide it
+    assert_eq!(hub.snapshot().layer.as_deref(), Some("chords"));
+
+    // Touching the plain keyboard makes it the current one, and it isn't in steno
+    touch(&mut plain_board, KeyCode::KC_A);
+    assert_eq!(hub.snapshot().layer, None);
+
+    // Touching the steno keyboard brings it back, and a stroke lands on the tape
+    touch(&mut steno_board, KeyCode::KC_S);
+    assert_eq!(hub.snapshot().layer.as_deref(), Some("chords"));
+    assert_eq!(hub.snapshot().tape.len(), 1);
+
+    // And back and forth, every time
+    touch(&mut plain_board, KeyCode::KC_B);
+    assert_eq!(hub.snapshot().layer, None);
+    touch(&mut steno_board, KeyCode::KC_S);
+    assert_eq!(hub.snapshot().layer.as_deref(), Some("chords"));
+
+    // A plain keyboard that switches into steno itself shows it, and leaving hides it again
+    plain_board.process_key(KeyCode::KC_TAB, true);
+    assert_eq!(hub.snapshot().layer.as_deref(), Some("chords"));
+    plain_board.process_key(KeyCode::KC_TAB, false);
+    assert_eq!(hub.snapshot().layer, None);
+}
+
+#[test]
+fn the_overlay_follows_the_layer_the_held_keys_and_each_finished_stroke() {
+    use crate::steno::layout::parse_stroke;
+
+    let fixture = Fixture::new("overlay");
+    let mut p = fixture.processor();
+    let hub = private_hub();
+    p.set_overlay_hub(hub);
+    assert_eq!(hub.snapshot().layer, None);
+
+    // Switching into steno shows the overlay on that very press
+    enter_steno(&mut p);
+    assert_eq!(hub.snapshot().layer.as_deref(), Some("chords"));
+
+    // K- A- -T, pressed one key at a time: each key lights up as it goes down
+    let (k, a, t) = (KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P);
+    p.process_key(k, true);
+    assert_eq!(hub.snapshot().held, parse_stroke("K").unwrap());
+    p.process_key(a, true);
+    p.process_key(t, true);
+    let lit = hub.snapshot();
+    assert_eq!(lit.chord, parse_stroke("KAT").unwrap());
+    assert_eq!(lit.held, lit.chord);
+
+    // Letting go of K keeps it in the stroke (dimmer) but no longer held
+    p.process_key(k, false);
+    let released = hub.snapshot();
+    assert_eq!(released.chord, parse_stroke("KAT").unwrap());
+    assert_eq!(released.held, parse_stroke("AT").unwrap());
+    assert!(released.tape.is_empty(), "the stroke isn't finished yet");
+
+    // The last release finishes it: on the tape, keys cleared
+    p.process_key(a, false);
+    p.process_key(t, false);
+    let done = hub.snapshot();
+    assert_eq!((done.chord, done.held), (0, 0));
+    assert_eq!(done.tape.len(), 1);
+    assert_eq!(done.tape[0].stroke, parse_stroke("KAT").unwrap());
+    assert_eq!(done.tape[0].text, "\"cat\"");
+    assert!(!done.tape[0].unmatched);
+
+    // A stroke the dictionary doesn't have is marked, not silently dropped
+    chord(&mut p, &[KeyCode::KC_Q]);
+    let last = hub.snapshot().tape.back().cloned().unwrap();
+    assert!(last.unmatched);
+
+    // Leaving steno hides the overlay
+    p.process_key(KeyCode::KC_TAB, false);
+    assert_eq!(hub.snapshot().layer, None);
+}
+
+#[test]
+fn a_key_that_reaches_the_screen_makes_the_next_word_start_fresh() {
+    // Delete is not a stroke key: it reaches the application and edits the text at the cursor
+    // behind the translator's back. After it, the translator no longer knows what is before
+    // the cursor, so the next word is not given a leading space as if it followed "cat".
+    let fixture = Fixture::new("edit-key-resets");
+    let mut p = fixture.processor();
+    enter_steno(&mut p);
+
+    let cat = [KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P];
+    assert_eq!(
+        chord(&mut p, &cat),
+        ProcessResult::TypeString("cat".to_string(), false)
+    );
+    // Without anything in between, the second word follows the first
+    assert_eq!(
+        chord(&mut p, &cat),
+        ProcessResult::TypeString(" cat".to_string(), false)
+    );
+
+    p.process_key(KeyCode::KC_DEL, true);
+    p.process_key(KeyCode::KC_DEL, false);
+    assert_eq!(
+        chord(&mut p, &cat),
+        ProcessResult::TypeString("cat".to_string(), false)
+    );
 }

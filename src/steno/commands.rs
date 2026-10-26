@@ -101,7 +101,7 @@ pub fn layout() -> Result<()> {
         .collect();
     // Sounds order: the number key (the last slot) first, then the rest in slot order
     let number_slot = SLOTS.len() - 1;
-    let rows: Vec<[String; 3]> = std::iter::once(number_slot)
+    let rows = std::iter::once(number_slot)
         .chain(0..number_slot)
         .map(|slot| {
             let (_, name) = SLOTS[slot];
@@ -109,8 +109,7 @@ pub fn layout() -> Result<()> {
                 .get(&(1 << slot))
                 .map_or_else(String::new, |&key| key_label(key));
             [name.to_string(), press, SLOT_SOUNDS[slot].to_string()]
-        })
-        .collect();
+        });
     // Combined keys press several stroke keys at once, so list them after the single ones
     let mut combined: Vec<[String; 3]> = keys_by_bit
         .iter()
@@ -130,7 +129,7 @@ pub fn layout() -> Result<()> {
         })
         .collect();
     combined.sort_by(|a, b| a[0].cmp(&b[0]));
-    let rows: Vec<[String; 3]> = rows.into_iter().chain(extras).chain(combined).collect();
+    let rows: Vec<[String; 3]> = rows.chain(extras).chain(combined).collect();
     let widths = [0, 1, 2].map(|col| {
         rows.iter().map(|row| row[col].len()).max().unwrap_or(0)
     });
@@ -345,10 +344,18 @@ fn chars_as_spans(text: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
 /// suffixes that glue to a neighbouring word (`{under^}`, `{^under}`) are left out.
 #[must_use]
 pub fn proper_outlines(dict: &Dictionary, word: &str) -> Vec<Vec<u32>> {
-    let base = Translator::new(dict.clone());
-    ranked_strokes(dict, word)
+    proper_outlines_in(&Translator::new(dict.clone()), word)
+}
+
+/// Like [`proper_outlines`], but over a translator that already has the dictionary.
+///
+/// Nothing is copied, so the live lookup can call this on every key press. `base` must have
+/// nothing typed: use [`Translator::fresh`].
+#[must_use]
+pub fn proper_outlines_in(base: &Translator, word: &str) -> Vec<Vec<u32>> {
+    ranked_strokes(base.dictionary(), word)
         .into_iter()
-        .filter(|outline| types_in_context(&base, word, outline))
+        .filter(|outline| types_in_context(base, word, outline))
         .collect()
 }
 
@@ -449,7 +456,7 @@ fn stroke_keys(bits: u32, keys_by_bit: &HashMap<u32, KeyCode>) -> Vec<String> {
 
 /// Where a press sits in the sounds order: the number key is the last slot in SLOTS but reads
 /// first, so it ranks before every other key.
-fn display_rank(mask: u32) -> u32 {
+const fn display_rank(mask: u32) -> u32 {
     let number_bit = 1 << (SLOTS.len() - 1);
     if mask & number_bit != 0 {
         0

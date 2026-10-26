@@ -38,6 +38,27 @@ crossbeam-channel = "0.5"
 crossterm = "0.28"
 sha2 = "0.10"
 
+# `keymux overlay`: on-screen steno keyboard and tape (Wayland layer-shell)
+smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"], optional = true }
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"], optional = true }
+ab_glyph = { version = "0.2", optional = true }
+
+# `keymux textbox`: reads the text around the cursor of the focused text box (Wayland input method)
+wayland-client = { version = "0.31", optional = true }
+wayland-protocols = { version = "0.32", features = ["client", "unstable"], optional = true }
+wayland-protocols-misc = { version = "0.3", features = ["client"], optional = true }
+
+[dev-dependencies]
+# A stand-in compositor, so the text box listener can be tested without a real one
+wayland-server = "0.31"
+wayland-protocols = { version = "0.32", features = ["server", "unstable"] }
+wayland-protocols-misc = { version = "0.3", features = ["server"] }
+
+[features]
+default = ["overlay", "textbox"]
+overlay = ["dep:smithay-client-toolkit", "dep:tiny-skia", "dep:ab_glyph"]
+textbox = ["dep:wayland-client", "dep:wayland-protocols", "dep:wayland-protocols-misc"]
+
 [profile.release]
 opt-level = 3
 lto = "fat"

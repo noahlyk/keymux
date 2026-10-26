@@ -6,6 +6,8 @@ use crate::event_processor::actions::{
 use crate::event_processor::layer_stack::LayerStack;
 use crate::keycode::KeyCode;
 use crate::steno::translate::StenoOutput;
+use crate::steno::lookup::{classify, LookupKey};
+use crate::steno::overlay::OverlayHub;
 use crate::steno::setup::Cooldown;
 use crate::steno::{self, StenoEngine};
 use std::collections::HashMap;
@@ -13,8 +15,18 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tracing::error;
 
+/// Hands out [`KeymapProcessor::id`]. Starts at 1: the hub's 0 means no keyboard yet.
+static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// Keys that always reach the screen on a steno layer, without a remap.
 const STENO_PASSTHROUGH: [KeyCode; 1] = [KeyCode::KC_DEL];
+
+/// Whether a key that reaches the application from a steno layer can change the text or move
+/// the caret without the translator knowing. Modifiers don't, alone. Backspace is not counted
+/// either: the translator already follows it.
+const fn edits_text_behind_steno(key: KeyCode) -> bool {
+    !key.is_modifier() && !matches!(key, KeyCode::KC_BSPC)
+}
 
 fn steno_result(output: Option<StenoOutput>) -> ProcessResult {
     match output {
@@ -70,6 +82,14 @@ pub struct KeymapProcessor {
     steno_engines: HashMap<Layer, StenoEngine>,
     /// The steno layer that was on top at the last key press, if any
     steno_active: Option<Layer>,
+    /// Where this keyboard's steno state is published for the overlay. One hub is shared by
+    /// every keyboard: the overlay follows whichever was touched last.
+    overlay_hub: &'static OverlayHub,
+    /// Tells this keyboard from the others to the overlay hub, which remembers the last one
+    /// touched
+    id: u64,
+    /// Whether a Shift key is down, for the capital letters of a live lookup
+    shift_down: bool,
     /// Limits the "steno isn't set up" notification
     setup_hint: Cooldown,
     config_dir: PathBuf,
@@ -104,7 +124,7 @@ impl KeymapProcessor {
             }
         }
 
-        Self {
+        let processor = Self {
             held_keys: HashMap::new(),
             layer_stack: LayerStack::new(config),
             mt_processor: crate::event_processor::actions::MtProcessor::new(config),
@@ -114,9 +134,33 @@ impl KeymapProcessor {
             adaptive_processor: AdaptiveProcessor::new(),
             steno_engines,
             steno_active: None,
+            overlay_hub: OverlayHub::global(),
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            shift_down: false,
             setup_hint: Cooldown::new(Duration::from_secs(3)),
             config_dir,
             user_id,
+        };
+        // A keyboard that starts on a steno layer (`default_layer`) shows the overlay now,
+        // not on its first key press. One that starts on base publishes nothing yet, so it
+        // can't hide the overlay for a steno keyboard that started first; it takes over
+        // when its first key is touched.
+        if processor.overlay_layer_name().is_some() {
+            processor.publish_overlay_layer();
+        }
+        processor
+    }
+
+    /// Publish to `hub` instead of the daemon's, from here on. Tests use this so they
+    /// don't share state through the global hub.
+    #[cfg(test)]
+    pub(crate) fn set_overlay_hub(&mut self, hub: &'static OverlayHub) {
+        self.overlay_hub = hub;
+        for engine in self.steno_engines.values_mut() {
+            engine.set_hub(hub);
+        }
+        if self.overlay_layer_name().is_some() {
+            self.publish_overlay_layer();
         }
     }
 
@@ -137,6 +181,14 @@ impl KeymapProcessor {
     /// Finish any steno stroke that has been held past its timeout, or translate
     /// held strokes that have gone idle. Returns what to type, if anything.
     pub fn check_steno_timeouts(&mut self) -> ProcessResult {
+        // The tape follows the text box when the cursor lands somewhere new, but only for the
+        // keyboard in use: the others have no say over what the overlay shows
+        if self.overlay_hub.touched_last_by(self.id) && self.overlay_layer_name().is_some() {
+            let top = self.layer_stack.current_layer();
+            if let Some(engine) = self.steno_engines.get_mut(&top) {
+                engine.sync_idle();
+            }
+        }
         let now = Instant::now();
         let output = self
             .steno_engines
@@ -164,6 +216,10 @@ impl KeymapProcessor {
     }
 
     pub fn process_key(&mut self, keycode: KeyCode, pressed: bool) -> ProcessResult {
+        // A live lookup types capital letters while Shift is down
+        if matches!(keycode, KeyCode::KC_LSFT | KeyCode::KC_RSFT) {
+            self.shift_down = pressed;
+        }
         let result = match self.steno_capture(keycode, pressed) {
             Some(result) => result,
             None if pressed => self.process_key_press(keycode),
@@ -172,7 +228,32 @@ impl KeymapProcessor {
         if pressed {
             self.steno_setup_hint();
         }
+        self.publish_overlay_layer();
         result
+    }
+
+    /// The steno layer that is on top for this keyboard, if any: what the overlay should show.
+    fn overlay_layer_name(&self) -> Option<&str> {
+        let game_mode = self.layer_stack.is_game_mode_active();
+        self.layer_stack
+            .layers()
+            .last()
+            .filter(|layer| {
+                self.steno_engines
+                    .get(*layer)
+                    .is_some_and(|engine| !(game_mode && engine.disabled_in_game_mode))
+            })
+            .map(|layer| layer.0.as_str())
+    }
+
+    /// Tell the overlay about this keyboard's steno state. It runs on every key event, so
+    /// whichever keyboard was touched last decides what the overlay shows: a steno keyboard
+    /// shows it, and touching one that isn't in steno hides it. This also shows it on the
+    /// press that switches into steno, not on the next stroke. The hub ignores a repeat of
+    /// what it already has, so the common case is one uncontended lock and a comparison.
+    fn publish_overlay_layer(&self) {
+        self.overlay_hub.touch(self.id);
+        self.overlay_hub.set_layer(self.overlay_layer_name());
     }
 
     /// On a steno layer that has no dictionary yet, point the user at setup.
@@ -230,6 +311,25 @@ impl KeymapProcessor {
             return None;
         }
 
+        // A live lookup is open: every key is QWERTY input to it, and none reaches the
+        // application. Esc and Enter close it even though the layer may remap them. Other
+        // remapped keys (F10 back to base, say) still do their job, and leave it behind.
+        if engine.lookup_active() {
+            let closes = classify(keycode, false) == LookupKey::Close;
+            let remapped = self
+                .layer_stack
+                .layer_configs()
+                .get(&top)
+                .is_some_and(|config| config.remaps.contains_key(&keycode));
+            if closes || !remapped {
+                engine.lookup_key(keycode, self.shift_down);
+                // Swallowed on release too, so it can't leak a stray key event
+                self.held_keys
+                    .insert(keycode, vec![HeldAction::SwallowedBySteno]);
+                return Some(ProcessResult::None);
+            }
+        }
+
         if engine.owns(keycode) {
             engine.press(keycode, Instant::now());
             self.held_keys
@@ -245,16 +345,18 @@ impl KeymapProcessor {
         if keycode == KeyCode::KC_BSPC && tape_empty {
             engine.backspace();
         }
-        if STENO_PASSTHROUGH.contains(&keycode) || (tape_key && tape_empty) {
-            return None;
-        }
-
         let has_remap = self
             .layer_stack
             .layer_configs()
             .get(&top)
             .is_some_and(|config| config.remaps.contains_key(&keycode));
-        if has_remap {
+        if STENO_PASSTHROUGH.contains(&keycode) || (tape_key && tape_empty) || has_remap {
+            // This key reaches the application, and may move the caret or change the text
+            // behind the translator's back (arrows, Enter, Delete, a remapped Space...). What
+            // it remembers of the text is no longer the text at the cursor, so it lets go.
+            if edits_text_behind_steno(keycode) {
+                engine.start_fresh();
+            }
             return None;
         }
 

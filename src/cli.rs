@@ -1,32 +1,6 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
-/// Get keyboard IDs and names for shell completions
-pub fn get_keyboard_completions() -> Vec<String> {
-    use keymux::keyboard_id::find_all_keyboards;
-
-    let mut completions = vec!["*".to_string()];
-
-    for (id, kb) in find_all_keyboards() {
-        completions.push(id.to_string());
-        let base_id = id
-            .to_string()
-            .split('@')
-            .next()
-            .unwrap_or(&id.to_string())
-            .to_string();
-        if !completions.contains(&base_id) {
-            completions.push(base_id);
-        }
-        if !completions.contains(&kb.name) {
-            completions.push(kb.name);
-        }
-    }
-
-    completions.sort();
-    completions
-}
-
 /// Shell completion generator
 pub fn generate_completions(shell: Shell) {
     use clap::builder::styling::{AnsiColor, Styles};
@@ -160,6 +134,32 @@ pub enum Commands {
     /// Run the niri window watcher daemon
     #[command(hide = true)]
     NiriDaemon,
+
+    /// Show the steno keyboard and tape on screen while a steno layer is on
+    Overlay {
+        /// Print what the daemon sends instead of drawing it
+        #[arg(long)]
+        dump: bool,
+
+        /// Draw made-up strokes without the daemon, to check how it looks
+        #[arg(long, conflicts_with = "dump")]
+        demo: bool,
+
+        /// Show the overlay all the time, not only while a steno layer is on
+        #[arg(long, conflicts_with = "dump")]
+        always: bool,
+    },
+
+    /// Tell the daemon what the focused text box holds, so steno can stop guessing
+    Textbox {
+        /// Print what the focused text box reports instead of sending it to the daemon
+        #[arg(long)]
+        dump: bool,
+    },
+
+    /// Run everything steno needs from your graphical session: the overlay and the text box
+    /// reader. This is what `keymux-steno.service` runs
+    StenoSession,
 
     /// Run the hyprland window watcher daemon
     #[command(hide = true)]

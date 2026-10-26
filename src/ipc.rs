@@ -1,12 +1,16 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use crate::gamemode_state::{GlobalOverride, WindowOverride};
+use crate::steno::overlay::{OverlayHub, OverlaySnapshot};
+use crate::steno::textbox::{TextBoxHub, TextBoxReport};
 use crate::window_manager::WindowInfo;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 /// IPC message from client to daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +58,12 @@ pub enum IpcRequest {
     SetGlobalOverride(GlobalOverride),
     /// Get the current global override
     GetGlobalOverride,
+    /// Keep the connection open and stream [`OverlaySnapshot`] frames on every change.
+    /// Handled by the IPC thread itself, never reaches the daemon's main loop.
+    SubscribeOverlay,
+    /// Keep the connection open and read [`TextBoxReport`] frames from it: what the focused text
+    /// box says is before the cursor. Handled by the IPC thread itself, like the overlay.
+    ReportTextBox,
 }
 
 /// IPC response from daemon to client
@@ -144,4 +154,201 @@ pub fn send_request(request: &IpcRequest) -> Result<IpcResponse> {
     let response: IpcResponse = bincode::deserialize(&response_buf)?;
 
     Ok(response)
+}
+
+/// Write one length-prefixed bincode frame, the same framing as requests and responses.
+fn write_frame(stream: &mut impl Write, value: &impl Serialize) -> Result<()> {
+    let encoded = bincode::serialize(value)?;
+    stream.write_all(&(encoded.len() as u32).to_le_bytes())?;
+    stream.write_all(&encoded)?;
+    stream.flush()?;
+    Ok(())
+}
+
+/// Daemon side of [`IpcRequest::SubscribeOverlay`]: send the current state, then every newer one.
+///
+/// Runs on its own thread until the subscriber goes away, and never touches the key path except
+/// through the hub's lock.
+///
+/// The subscriber never sends anything after subscribing, so a second thread blocks reading
+/// the socket: it returns the moment the overlay closes its end, and wakes the writer. That
+/// way a closed overlay is noticed at once, not at the next write (which can still succeed
+/// once after the peer has gone) and with no idle wakeups.
+pub fn serve_overlay(mut stream: UnixStream, hub: &OverlayHub) {
+    let Ok(mut watcher) = stream.try_clone() else {
+        return;
+    };
+    let gone = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut ignored = [0u8; 64];
+            while matches!(watcher.read(&mut ignored), Ok(n) if n > 0) {}
+            gone.store(true, Ordering::Release);
+            hub.wake();
+        });
+
+        let mut state = hub.snapshot();
+        'serving: loop {
+            if write_frame(&mut stream, &state).is_err() {
+                break;
+            }
+            // Wait for something newer; the long timeout only bounds a single wait
+            loop {
+                if gone.load(Ordering::Acquire) {
+                    break 'serving;
+                }
+                if let Some(newer) =
+                    hub.wait_newer(state.generation, Duration::from_secs(3600), &gone)
+                {
+                    state = newer;
+                    break;
+                }
+            }
+        }
+        // Ends the watcher's blocking read too, if it is still running (a failed write)
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+    });
+}
+
+/// Daemon side of [`IpcRequest::ReportTextBox`]: take each report until the reporter goes away,
+/// then forget the text box, since nobody is watching it any more.
+pub fn serve_text_box(mut stream: UnixStream, hub: &TextBoxHub) {
+    while let Some(report) = read_frame::<TextBoxReport>(&mut stream) {
+        hub.report(report);
+    }
+    hub.clear();
+}
+
+/// `keymux textbox` side: sends reports to the daemon, connecting again if it went away.
+#[derive(Debug, Default)]
+pub struct TextBoxReporter {
+    stream: Option<UnixStream>,
+}
+
+impl TextBoxReporter {
+    /// Send a report. Returns whether the daemon got it; if not, the next report connects again.
+    pub fn send(&mut self, report: &TextBoxReport) -> bool {
+        // A connection that broke since the last report fails on the write, so it is tried
+        // twice: once on the old connection, once on a new one
+        for _ in 0..2 {
+            if self.stream.is_none() {
+                self.stream = Self::connect().ok();
+            }
+            let Some(stream) = self.stream.as_mut() else {
+                return false;
+            };
+            if write_frame(stream, report).is_ok() {
+                return true;
+            }
+            self.stream = None;
+        }
+        false
+    }
+
+    fn connect() -> Result<UnixStream> {
+        let mut stream = UnixStream::connect(get_socket_path())
+            .context("Failed to connect to daemon. Is it running?")?;
+        write_frame(&mut stream, &IpcRequest::ReportTextBox)?;
+        Ok(stream)
+    }
+}
+
+/// Overlay side: connect, subscribe, and return the frames as they arrive. The iterator
+/// ends when the daemon goes away; the caller reconnects.
+pub fn subscribe_overlay() -> Result<impl Iterator<Item = OverlaySnapshot>> {
+    let mut stream = UnixStream::connect(get_socket_path())
+        .context("Failed to connect to daemon. Is it running?")?;
+    write_frame(&mut stream, &IpcRequest::SubscribeOverlay)?;
+    Ok(std::iter::from_fn(move || read_frame(&mut stream)))
+}
+
+/// The next length-prefixed frame, or `None` when the stream ends or breaks.
+fn read_frame<T: serde::de::DeserializeOwned>(stream: &mut impl Read) -> Option<T> {
+    let mut len = [0u8; 4];
+    stream.read_exact(&mut len).ok()?;
+    let mut frame = vec![0u8; u32::from_le_bytes(len) as usize];
+    stream.read_exact(&mut frame).ok()?;
+    bincode::deserialize(&frame).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_subscriber_gets_the_current_state_then_each_change() {
+        let hub = OverlayHub::default();
+        hub.set_layer(Some("steno"));
+        let (mut client, server) = UnixStream::pair().unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| serve_overlay(server, &hub));
+
+            let first: OverlaySnapshot = read_frame(&mut client).unwrap();
+            assert_eq!(first.layer.as_deref(), Some("steno"));
+
+            hub.set_keys(0b11, 0b11);
+            let next: OverlaySnapshot = read_frame(&mut client).unwrap();
+            assert_eq!((next.chord, next.held), (0b11, 0b11));
+            assert!(next.generation > first.generation);
+
+            // Closing our end must stop the stream thread on its own, with no further change
+            // to wake it, so the scope can end. If it didn't, this test would hang.
+            drop(client);
+        });
+    }
+
+    #[test]
+    fn a_subscriber_that_stops_listening_is_noticed_without_any_change() {
+        let hub = OverlayHub::default();
+        let (client, server) = UnixStream::pair().unwrap();
+        let started = std::time::Instant::now();
+        std::thread::scope(|scope| {
+            scope.spawn(|| serve_overlay(server, &hub));
+            // Let it send its first frame and settle into waiting, then hang up
+            let mut client = client;
+            let _: OverlaySnapshot = read_frame(&mut client).unwrap();
+            drop(client);
+        });
+        // A heartbeat design would take its whole interval here; this must be near instant
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn text_box_reports_reach_the_hub_and_are_forgotten_when_the_reporter_goes() {
+        use crate::steno::textbox::TextBoxState;
+        let hub = TextBoxHub::default();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let report = TextBoxReport {
+            focus: 3,
+            state: TextBoxState {
+                active: true,
+                before: "hello".to_string(),
+                selection: false,
+                ..TextBoxState::default()
+            },
+        };
+        std::thread::scope(|scope| {
+            scope.spawn(|| serve_text_box(server, &hub));
+            write_frame(&mut client, &report).unwrap();
+            // Wait for it to arrive
+            let started = std::time::Instant::now();
+            while hub.view().is_none() && started.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let view = hub.view().unwrap();
+            assert_eq!((view.focus, view.state.before.as_str()), (3, "hello"));
+            drop(client);
+        });
+        assert!(hub.view().is_none());
+    }
+
+    #[test]
+    fn the_request_round_trips_in_the_same_framing() {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+        write_frame(&mut a, &IpcRequest::SubscribeOverlay).unwrap();
+        assert!(matches!(
+            read_frame::<IpcRequest>(&mut b),
+            Some(IpcRequest::SubscribeOverlay)
+        ));
+    }
 }

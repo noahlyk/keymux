@@ -42,6 +42,18 @@ impl ChordState {
         self.stroke |= new;
     }
 
+    /// Stroke bits pressed so far in the stroke in progress.
+    #[must_use]
+    pub const fn pending(&self) -> u32 {
+        self.stroke
+    }
+
+    /// Stroke bits whose keys are down right now.
+    #[must_use]
+    pub const fn held(&self) -> u32 {
+        self.held
+    }
+
     /// A stroke key came up. `bit` is the part of its stroke no other held key still
     /// presses. Returns the finished stroke once nothing is held.
     pub fn release(&mut self, bit: u32) -> Option<u32> {

@@ -1,0 +1,21 @@
+[Unit]
+Description=Keyboard Middleware Steno Session (on-screen overlay and text box reader)
+Documentation=https://github.com/noahlyk/keymux
+After=graphical-session.target
+Requires=graphical-session.target
+# Replaces the separate overlay unit of earlier versions
+Conflicts=keymux-overlay.service
+# It exits when neither the overlay (needs layer-shell) nor the text box reader (needs an
+# input method protocol, and no other input method) can run. Don't retry forever.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/keymux steno-session
+Restart=on-failure
+RestartSec=3
+Environment="RUST_LOG=info"
+
+[Install]
+WantedBy=graphical-session.target
