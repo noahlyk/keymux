@@ -228,7 +228,7 @@ impl StenoEngine {
     /// held-back lookup stroke counts as something: Backspace must not delete text that comes
     /// before it, and the stroke is not on screen to take back.
     #[must_use]
-    pub const fn tape_is_empty(&self) -> bool {
+    pub fn tape_is_empty(&self) -> bool {
         self.trigger_held.is_empty() && self.translator.tape_is_empty()
     }
 
@@ -243,8 +243,26 @@ impl StenoEngine {
     /// application reports it. If they differ the text box is right: it knows about the click,
     /// the autocorrect or the dropped key that the translator didn't.
     fn sync_with_text_box(&mut self) {
-        if let Verdict::Resync(before) = self.text_box.check(self.translator.text()) {
-            self.translator.adopt(&before);
+        if let Verdict::Resync { before, truncated } = self.text_box.check(self.translator.text())
+        {
+            // The words already there become steps `*` can undo, and the tape shows the strokes
+            // that would have written them
+            let rows = self.translator.adopt(&before, truncated);
+            self.hub.replace_tape(&rows);
+        }
+    }
+
+    /// Look at the text box while nothing is being typed, so the tape follows the text as soon as
+    /// the cursor lands in it, not at the next stroke. Cheap when the text box has said nothing
+    /// new, so it can run on every pass of the idle loop.
+    pub fn sync_idle(&mut self) {
+        let writing = self.chord.pending() != 0 || self.lookup.is_some();
+        // Strokes waiting for the dictionary would be undone by words it doesn't know yet
+        if writing || self.loading.is_some() || !self.trigger_held.is_empty() {
+            return;
+        }
+        if self.text_box.has_news() {
+            self.sync_with_text_box();
         }
     }
 
@@ -623,6 +641,7 @@ mod tests {
                     active: true,
                     before: before.to_string(),
                     selection: false,
+                    ..TextBoxState::default()
                 },
             });
         }
@@ -664,15 +683,21 @@ mod tests {
         }
 
         #[test]
-        fn undo_does_not_delete_text_the_translator_never_typed() {
+        fn undo_takes_back_the_last_word_of_text_the_translator_never_typed() {
             let hub = hub();
             let mut engine = engine(hub);
             says(hub, 1, "");
             engine.translate(stroke("KAT"));
             // The user clicked into the middle of other text. Undoing "cat" now would delete
-            // three characters of that text.
+            // three characters of that text; the last word of it is what `*` takes back.
             says(hub, 1, "some other text");
-            assert_eq!(engine.translate(UNDO_STROKE), None);
+            assert_eq!(
+                engine.translate(UNDO_STROKE),
+                Some(StenoOutput::Retype {
+                    backspaces: 5,
+                    text: String::new()
+                })
+            );
         }
 
         #[test]
@@ -712,6 +737,77 @@ mod tests {
                 engine.translate(stroke("-PB")),
                 Some(StenoOutput::Type(" and".into()))
             );
+        }
+
+        fn engine_with_overlay(
+            text_box: &'static TextBoxHub,
+            overlay: &'static OverlayHub,
+        ) -> StenoEngine {
+            let mut engine = engine(text_box);
+            engine.set_hub(overlay);
+            engine
+        }
+
+        /// The words on the tape, newest last.
+        fn tape(overlay: &OverlayHub) -> Vec<String> {
+            overlay
+                .snapshot()
+                .tape
+                .iter()
+                .map(|entry| entry.text.clone())
+                .collect()
+        }
+
+        #[test]
+        fn the_tape_shows_the_strokes_for_the_text_the_cursor_landed_in() {
+            let text_box = hub();
+            let overlay: &'static OverlayHub = Box::leak(Box::default());
+            let mut engine = engine_with_overlay(text_box, overlay);
+            says(text_box, 1, "cat and");
+            // No stroke has been written: the cursor landing in the text is enough
+            engine.sync_idle();
+            assert_eq!(tape(overlay), ["\"cat\"", "\"and\""]);
+            assert!(overlay.snapshot().tape.iter().all(|entry| entry.adopted));
+            // A stroke written next goes after them
+            engine.translate(stroke("KAT"));
+            assert_eq!(tape(overlay).len(), 3);
+            assert!(!overlay.snapshot().tape.back().unwrap().adopted);
+        }
+
+        #[test]
+        fn the_tape_is_replaced_when_the_cursor_moves_to_other_text() {
+            let text_box = hub();
+            let overlay: &'static OverlayHub = Box::leak(Box::default());
+            let mut engine = engine_with_overlay(text_box, overlay);
+            says(text_box, 1, "cat and");
+            engine.sync_idle();
+            says(text_box, 1, "and");
+            engine.sync_idle();
+            assert_eq!(tape(overlay), ["\"and\""]);
+        }
+
+        #[test]
+        fn nothing_changes_while_the_text_box_has_nothing_new_to_say() {
+            let text_box = hub();
+            let overlay: &'static OverlayHub = Box::leak(Box::default());
+            let mut engine = engine_with_overlay(text_box, overlay);
+            says(text_box, 1, "cat");
+            engine.sync_idle();
+            let generation = overlay.snapshot().generation;
+            engine.sync_idle();
+            engine.sync_idle();
+            assert_eq!(overlay.snapshot().generation, generation);
+        }
+
+        #[test]
+        fn the_tape_is_left_alone_in_the_middle_of_a_stroke() {
+            let text_box = hub();
+            let overlay: &'static OverlayHub = Box::leak(Box::default());
+            let mut engine = engine_with_overlay(text_box, overlay);
+            engine.press(key_for(&engine, 1 << 2), Instant::now());
+            says(text_box, 1, "cat and");
+            engine.sync_idle();
+            assert!(tape(overlay).is_empty());
         }
 
         #[test]

@@ -50,6 +50,8 @@ const PROBE_PX: f32 = 32.0;
 /// The oldest tape lines, at the top of the screen, fade out: this many of them, the topmost
 /// faintest. Every other line is at full strength.
 const FADE_LINES: usize = 3;
+/// How strong a tape line is that was worked out from the text box rather than written.
+const ADOPTED_DIM: f32 = 0.6;
 /// Plover paper tape order: `#` first, then the slots in stroke order
 const PAPER_ORDER: [usize; 23] = [
     22, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
@@ -456,6 +458,8 @@ impl Renderer {
         baseline: f32,
         fade: f32,
     ) {
+        // Strokes worked out from text that was already there were not written by hand
+        let fade = if entry.adopted { fade * ADOPTED_DIM } else { fade };
         // Every slot has its own column, as wide as its letter, so strokes line up from line
         // to line and nothing overlaps
         for (index, &slot) in PAPER_ORDER.iter().enumerate() {
@@ -719,6 +723,7 @@ mod tests {
             stroke: crate::steno::layout::parse_stroke(stroke).unwrap(),
             text: text.into(),
             unmatched: text.is_empty(),
+            adopted: false,
         }
     }
 

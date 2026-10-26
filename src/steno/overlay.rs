@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
@@ -26,6 +26,9 @@ pub struct TapeEntry {
     pub text: String,
     /// The stroke matched nothing in the dictionaries
     pub unmatched: bool,
+    /// Not typed on this layer: worked out from text that was already in the text box, as the
+    /// strokes that would have typed it. The overlay draws these dimmer.
+    pub adopted: bool,
 }
 
 /// One result of a live lookup: a word, and the outline that types it.
@@ -68,6 +71,8 @@ pub struct OverlaySnapshot {
 pub struct OverlayHub {
     state: Mutex<OverlaySnapshot>,
     changed: Condvar,
+    /// The keyboard (see [`Self::touch`]) that last sent a key event
+    last_touched: AtomicU64,
 }
 
 impl OverlayHub {
@@ -127,11 +132,45 @@ impl OverlayHub {
                 stroke,
                 text,
                 unmatched,
+                adopted: false,
             });
             state.chord = 0;
             state.held = 0;
             true
         });
+    }
+
+    /// Replace the tape with strokes worked out from the text already in the text box, each as
+    /// `(stroke, text)`. What was on the tape described a different place in the text.
+    pub fn replace_tape(&self, rows: &[(u32, String)]) {
+        self.update(|state| {
+            let first_seq = state.tape.back().map_or(0, |last| last.seq) + 1;
+            state.tape.clear();
+            // Only the newest rows fit
+            let skip = rows.len().saturating_sub(TAPE_CAPACITY);
+            for (seq, (stroke, text)) in (first_seq..).zip(rows.iter().skip(skip)) {
+                state.tape.push_back(TapeEntry {
+                    seq,
+                    stroke: *stroke,
+                    text: text.clone(),
+                    unmatched: false,
+                    adopted: true,
+                });
+            }
+            true
+        });
+    }
+
+    /// Keyboard `id` just sent a key event. Whatever happens to the text box next belongs on
+    /// its tape, not the tape of a keyboard nobody is touching.
+    pub fn touch(&self, id: u64) {
+        self.last_touched.store(id, Ordering::Relaxed);
+    }
+
+    /// Whether keyboard `id` is the one that last sent a key event.
+    #[must_use]
+    pub fn touched_last_by(&self, id: u64) -> bool {
+        self.last_touched.load(Ordering::Relaxed) == id
     }
 
     /// The current state, whatever its generation.

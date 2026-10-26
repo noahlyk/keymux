@@ -324,6 +324,7 @@ mod tests {
                 active: true,
                 before: "hello".to_string(),
                 selection: false,
+                ..TextBoxState::default()
             },
         };
         std::thread::scope(|scope| {

@@ -638,7 +638,7 @@ stroke) by sending backspaces, so it needs to know what is on screen. It keeps i
 of what it typed, and that record goes wrong whenever the text changes behind its back: you
 click somewhere else, an app autocorrects, a key is dropped.
 
-Two things keep it right:
+Three things keep it right:
 
 - **It forgets when it can tell it's lost.** A key that reaches the application from a steno
   layer (Delete, Enter, a remapped Space, the arrows) makes the next word start fresh, instead
@@ -648,10 +648,20 @@ Two things keep it right:
   then compares the last characters before the cursor with what steno thinks it typed, and when
   they differ, it goes by the text box: no wrong backspaces after a click or a focus change, the
   first word after clicking into existing text gets its space and capital, and `*` never
-  deletes text steno didn't type. Only the last 64 characters before the cursor are kept, in
+  deletes text steno didn't type. Only the last 240 characters before the cursor are kept, in
   memory, and never logged. Password fields and anything marked sensitive are not read.
+- **The tape follows the text.** When the cursor lands in text you didn't write with strokes
+  (you clicked into a document, or switched windows), the tape is replaced with the strokes
+  that would have written the words before the cursor, shown dimmer than strokes you wrote.
+  It is a reverse lookup, so each word shows the dictionary's shortest outline for it, not
+  necessarily the one you would have used. Those words can be undone like any other: `*`
+  takes back the word before the cursor. Space and Backspace still do their normal jobs on
+  them.
 
-`keymux-steno.service` runs it alongside the overlay, so there is nothing more to enable; if
+When the tape is empty, `*` presses Ctrl+Backspace instead, which deletes the word before the
+cursor in nearly every app, so it works even in apps that don't report their text.
+
+`keymux-steno.service` runs the text box reader alongside the overlay, so there is nothing more to enable; if
 one of the two can't run on your system (no layer-shell, another input method), the other
 carries on. You can also run `keymux textbox` by hand. `keymux textbox --dump` prints what the focused text box reports, to see which of your
 apps support it. It listens only: it never takes keys, never types and has no window, so

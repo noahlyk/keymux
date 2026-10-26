@@ -12,11 +12,13 @@
 //! Only the last few characters before the cursor are kept, in memory, and never logged.
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// How many characters before the cursor are kept. More than a stroke ever retypes.
-pub const MAX_BEFORE: usize = 64;
+/// How many characters before the cursor are kept: a few dozen words, enough to fill the tape
+/// and more than a stroke ever retypes.
+pub const MAX_BEFORE: usize = 240;
 
 /// How long a report must have gone without a newer one before it is believed.
 ///
@@ -34,6 +36,8 @@ pub struct TextBoxState {
     pub before: String,
     /// Some text is selected, so the next thing typed replaces it
     pub selection: bool,
+    /// There is more text before `before`, so its first word may be cut short
+    pub truncated: bool,
 }
 
 impl TextBoxState {
@@ -51,6 +55,7 @@ impl TextBoxState {
             active: true,
             before: before.chars().skip(skip).collect(),
             selection: cursor != anchor,
+            truncated: skip > 0,
         }
     }
 }
@@ -133,6 +138,8 @@ struct Inner {
 #[derive(Debug, Default)]
 pub struct TextBoxHub {
     inner: Mutex<Inner>,
+    /// `Inner::serial`, readable without the lock, so polling for news costs nothing
+    serial: AtomicU64,
 }
 
 /// A report and when it arrived.
@@ -162,23 +169,31 @@ impl TextBoxHub {
     }
 
     fn report_at(&self, report: TextBoxReport, at: Instant) {
-        let mut inner = self.lock();
-        inner.serial += 1;
-        let serial = inner.serial;
-        inner.current = Some(Current { report, serial, at });
+        let serial = {
+            let mut inner = self.lock();
+            inner.serial += 1;
+            let serial = inner.serial;
+            inner.current = Some(Current { report, serial, at });
+            serial
+        };
+        self.serial.store(serial, Ordering::Release);
     }
 
     /// Whoever was reporting has gone. Nothing is known about any text box until they return.
     pub fn clear(&self) {
-        let mut inner = self.lock();
-        inner.serial += 1;
-        inner.current = None;
+        let serial = {
+            let mut inner = self.lock();
+            inner.serial += 1;
+            inner.current = None;
+            inner.serial
+        };
+        self.serial.store(serial, Ordering::Release);
     }
 
     /// How many reports have arrived. See [`TextBoxSync::note_edit`].
     #[must_use]
     pub fn serial(&self) -> u64 {
-        self.lock().serial
+        self.serial.load(Ordering::Acquire)
     }
 
     /// The latest report, or `None` when nobody is reporting.
@@ -201,8 +216,9 @@ pub enum Verdict {
     Unknown,
     /// The text before the cursor is what the record says
     InSync,
-    /// It is not. This is the text really before the cursor.
-    Resync(String),
+    /// It is not. This is the text really before the cursor, and whether there is more before
+    /// that.
+    Resync { before: String, truncated: bool },
 }
 
 /// One engine's view of the hub: which box it has already looked at, and when it last typed.
@@ -210,10 +226,12 @@ pub enum Verdict {
 pub struct TextBoxSync {
     hub: &'static TextBoxHub,
     settle: Duration,
-    /// The text box the record was last checked against
-    seen_focus: Option<u64>,
     /// The hub's serial when the engine last typed. A report numbered above it was made after.
     edit_serial: u64,
+    /// The report last looked at, and found settled
+    checked_serial: u64,
+    /// A report is waiting to settle, so it must be looked at again soon
+    waiting: bool,
 }
 
 impl TextBoxSync {
@@ -222,8 +240,9 @@ impl TextBoxSync {
         Self {
             hub,
             settle: SETTLE,
-            seen_focus: None,
             edit_serial: 0,
+            checked_serial: 0,
+            waiting: false,
         }
     }
 
@@ -239,25 +258,41 @@ impl TextBoxSync {
         self.edit_serial = self.hub.serial();
     }
 
+    /// Whether the text box has said something since the last [`Self::check`] that settled, or
+    /// a report is still settling. Cheap, so the idle loop can ask all the time.
+    #[must_use]
+    pub fn has_news(&self) -> bool {
+        self.waiting || self.hub.serial() != self.checked_serial
+    }
+
     /// Compare `remembered`, the text the translator believes it has typed, with the text box.
     pub fn check(&mut self, remembered: &str) -> Verdict {
+        self.waiting = false;
         let Some(view) = self.hub.view() else {
+            self.checked_serial = self.hub.serial();
             return Verdict::Unknown;
         };
         if !view.state.active {
-            // Whatever box comes next is a different one, even if it reports the same number
-            self.seen_focus = None;
+            self.checked_serial = view.serial;
             return Verdict::Unknown;
         }
-        // The box has not said anything since the last edit, or is still saying it
-        if view.serial <= self.edit_serial || view.age < self.settle {
+        // The box has not said anything since the last edit
+        if view.serial <= self.edit_serial {
+            self.checked_serial = view.serial;
             return Verdict::Unknown;
         }
-        let new_box = self.seen_focus != Some(view.focus);
-        self.seen_focus = Some(view.focus);
+        // It is still saying it
+        if view.age < self.settle {
+            self.waiting = true;
+            return Verdict::Unknown;
+        }
+        self.checked_serial = view.serial;
         // A selection is replaced by what is typed next, so the old record doesn't carry over
-        if new_box || view.state.selection || !agrees(remembered, &view.state.before) {
-            Verdict::Resync(view.state.before)
+        if view.state.selection || !agrees(remembered, &view.state.before, view.state.truncated) {
+            Verdict::Resync {
+                before: view.state.before,
+                truncated: view.state.truncated,
+            }
         } else {
             Verdict::InSync
         }
@@ -265,17 +300,23 @@ impl TextBoxSync {
 }
 
 /// Whether the end of `remembered` is the end of `before`, as far as both reach back. The text
-/// box only reports so many characters, and the record may be longer or shorter than that.
-fn agrees(remembered: &str, before: &str) -> bool {
-    let shared = remembered
-        .chars()
-        .count()
-        .min(before.chars().count());
+/// box only reports so many characters, so unless `truncated` says there is more before them,
+/// a record longer than `before` claims text that isn't there.
+fn agrees(remembered: &str, before: &str, truncated: bool) -> bool {
+    let (have, seen) = (remembered.chars().count(), before.chars().count());
+    if have > seen && !truncated {
+        return false;
+    }
+    let shared = have.min(seen);
     if shared == 0 {
         // One of them has nothing. They agree only if both do.
-        return remembered.is_empty() == before.is_empty();
+        return have == seen;
     }
-    remembered.chars().rev().take(shared).eq(before.chars().rev().take(shared))
+    remembered
+        .chars()
+        .rev()
+        .take(shared)
+        .eq(before.chars().rev().take(shared))
 }
 
 #[cfg(test)]
@@ -286,6 +327,13 @@ mod tests {
         Box::leak(Box::default())
     }
 
+    fn resync(before: &str) -> Verdict {
+        Verdict::Resync {
+            before: before.to_string(),
+            truncated: false,
+        }
+    }
+
     fn report(focus: u64, before: &str) -> TextBoxReport {
         TextBoxReport {
             focus,
@@ -293,6 +341,7 @@ mod tests {
                 active: true,
                 before: before.to_string(),
                 selection: false,
+                ..TextBoxState::default()
             },
         }
     }
@@ -403,7 +452,7 @@ mod tests {
         let hub = hub();
         hub.report(report(1, "Hello"));
         let mut sync = TextBoxSync::new(hub).without_settling();
-        assert_eq!(sync.check(""), Verdict::Resync("Hello".to_string()));
+        assert_eq!(sync.check(""), resync("Hello"));
         // The same box, now in step
         assert_eq!(sync.check("Hello"), Verdict::InSync);
     }
@@ -415,7 +464,23 @@ mod tests {
         let mut sync = TextBoxSync::new(hub).without_settling();
         sync.check("");
         assert_eq!(sync.check("so the cat"), Verdict::InSync);
-        // The record may reach back further than the box reports
+        // A record that reaches back further than the text there is has made something up
+        assert_eq!(sync.check("and so the cat"), resync("so the cat"));
+    }
+
+    #[test]
+    fn a_record_may_reach_back_further_than_a_box_that_reports_only_so_much() {
+        let hub = hub();
+        hub.report(TextBoxReport {
+            focus: 1,
+            state: TextBoxState {
+                active: true,
+                before: "so the cat".to_string(),
+                truncated: true,
+                ..TextBoxState::default()
+            },
+        });
+        let mut sync = TextBoxSync::new(hub).without_settling();
         assert_eq!(sync.check("and so the cat"), Verdict::InSync);
     }
 
@@ -427,7 +492,7 @@ mod tests {
         sync.check("");
         assert_eq!(
             sync.check("so the dog"),
-            Verdict::Resync("so the cat".to_string())
+            resync("so the cat")
         );
     }
 
@@ -438,18 +503,18 @@ mod tests {
         let mut sync = TextBoxSync::new(hub).without_settling();
         sync.check("word");
         hub.report(report(1, ""));
-        assert_eq!(sync.check("word"), Verdict::Resync(String::new()));
+        assert_eq!(sync.check("word"), resync(""));
     }
 
     #[test]
-    fn a_new_text_box_is_taken_as_it_is_even_if_the_text_matches() {
+    fn a_new_text_box_with_the_same_ending_is_in_sync() {
         let hub = hub();
         hub.report(report(1, "ab"));
         let mut sync = TextBoxSync::new(hub).without_settling();
         sync.check("");
         hub.report(report(2, "ab"));
-        // Same text, but a different box, so any history of the old one is let go
-        assert_eq!(sync.check("ab"), Verdict::Resync("ab".to_string()));
+        // A different box, but the text before the cursor is what the record says
+        assert_eq!(sync.check("ab"), Verdict::InSync);
     }
 
     #[test]
@@ -461,11 +526,12 @@ mod tests {
                 active: true,
                 before: "ab".to_string(),
                 selection: true,
+                ..TextBoxState::default()
             },
         });
         let mut sync = TextBoxSync::new(hub).without_settling();
         sync.check("");
-        assert_eq!(sync.check("ab"), Verdict::Resync("ab".to_string()));
+        assert_eq!(sync.check("ab"), resync("ab"));
     }
 
     #[test]
@@ -491,7 +557,7 @@ mod tests {
         assert_eq!(sync.check("zz"), Verdict::Unknown);
         // A report old enough to have settled
         hub.report_at(report(1, "ab"), Instant::now() - SETTLE * 2);
-        assert_eq!(sync.check("zz"), Verdict::Resync("ab".to_string()));
+        assert_eq!(sync.check("zz"), resync("ab"));
     }
 
     #[test]
@@ -505,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn leaving_for_a_box_that_does_not_report_and_coming_back_is_a_new_box() {
+    fn a_box_that_does_not_report_is_not_compared_with() {
         let hub = hub();
         hub.report(report(1, "ab"));
         let mut sync = TextBoxSync::new(hub).without_settling();
@@ -516,6 +582,6 @@ mod tests {
         });
         assert_eq!(sync.check("ab"), Verdict::Unknown);
         hub.report(report(1, "ab"));
-        assert_eq!(sync.check("ab"), Verdict::Resync("ab".to_string()));
+        assert_eq!(sync.check("ab"), Verdict::InSync);
     }
 }
