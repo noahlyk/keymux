@@ -260,6 +260,16 @@
     //
     // Common layer names: "nav", "num", "sym", "media", "coding"
     // But you can use: "gaming", "work", "home", "my_custom_layer_123"
+    //
+    // PRIORITY: when several layers are on, which one is above? Add `priority: N` to a layer.
+    //   - Higher is always above lower, whichever layer was turned on first.
+    //   - base is 0. A layer that doesn't say is 1.
+    //   - Same priority: the layer turned on last is on top (so with no priorities at all,
+    //     the newest layer wins, as it always has).
+    //   - Turning on a layer that is already on raises it among the layers of its priority.
+    //   - Only the top layer's steno engine captures strokes, so a layer above your steno
+    //     layer takes the keys while it is on.
+    //   Example: `"sym": ( priority: 2, remaps: { ... } )` stays above `"nav"` (priority 1).
     // ============================================================================
 
     layers: {
