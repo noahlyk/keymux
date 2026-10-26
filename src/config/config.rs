@@ -844,6 +844,17 @@ impl Config {
         }
     }
 
+    /// Whether `other` makes the daemon behave exactly as this config does. Comments,
+    /// whitespace, ordering and the like are gone once a file is parsed, so they never differ.
+    /// The `overlay` block is read by the overlay process alone, so it doesn't count either:
+    /// restyling the overlay shouldn't restart every keyboard.
+    #[must_use]
+    pub fn behaves_like(&self, other: &Self) -> bool {
+        let mut mine = self.clone();
+        mine.overlay = other.overlay.clone();
+        mine == *other
+    }
+
     /// Check if a keyboard should be enabled based on the enabled_keyboards config
     ///
     /// Parsing rules (applied in order):
@@ -1297,6 +1308,41 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse(text: &str) -> Config {
+        ron::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn comments_and_whitespace_do_not_change_how_a_config_behaves() {
+        let before = parse("(tapping_term_ms: 130, remaps: {KC_A: Key(KC_B)})");
+        let after = parse(
+            "(\n  // faster\n  tapping_term_ms: 130,   /* same */\n  remaps: {\n    KC_A: Key(KC_B),\n  },\n)",
+        );
+        assert!(before.behaves_like(&after));
+    }
+
+    #[test]
+    fn the_order_entries_are_written_in_does_not_change_how_a_config_behaves() {
+        let before = parse("(remaps: {KC_A: Key(KC_B), KC_C: Key(KC_D)})");
+        let after = parse("(remaps: {KC_C: Key(KC_D), KC_A: Key(KC_B)})");
+        assert!(before.behaves_like(&after));
+    }
+
+    #[test]
+    fn a_changed_remap_or_setting_changes_how_a_config_behaves() {
+        let before = parse("(tapping_term_ms: 130, remaps: {KC_A: Key(KC_B)})");
+        assert!(!before.behaves_like(&parse("(tapping_term_ms: 130, remaps: {KC_A: Key(KC_C)})")));
+        assert!(!before.behaves_like(&parse("(tapping_term_ms: 140, remaps: {KC_A: Key(KC_B)})")));
+        assert!(!before.behaves_like(&parse("(tapping_term_ms: 130, remaps: {})")));
+    }
+
+    #[test]
+    fn restyling_the_overlay_does_not_change_how_the_daemon_behaves() {
+        let before = parse("(overlay: (width: 340))");
+        let after = parse("(overlay: (width: 400, text_scale: 1.2))");
+        assert!(before.behaves_like(&after));
+    }
 
     const HE80: &str = "0c45:8092:0110:0003@3-4.3";
     const GLOVE: &str = "16c0:27db:0111:0003@1-3";

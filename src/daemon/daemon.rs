@@ -218,9 +218,15 @@ impl AsyncDaemon {
                     }
 
                     if hot_reload_enabled {
-                        info!("Config file changed, reloading...");
-                        if let Err(e) = self.reload_all_configs().await {
-                            error!("Config reload failed: {}", e);
+                        // A save that changed nothing the daemon acts on (a comment, spacing,
+                        // a rewrite of the same text) must not restart every keyboard
+                        if self.config_changed_on_disk().await {
+                            info!("Config file changed, reloading...");
+                            if let Err(e) = self.reload_all_configs().await {
+                                error!("Config reload failed: {}", e);
+                            }
+                        } else {
+                            debug!("Config file saved with no change to how it behaves, not reloading");
                         }
                     }
                 }
@@ -1141,6 +1147,24 @@ impl AsyncDaemon {
         });
 
         rx
+    }
+
+    /// Whether any loaded config differs, in how it behaves, from the file on disk now. A file
+    /// that can't be read or parsed counts as changed, so the reload reports what is wrong.
+    async fn config_changed_on_disk(&self) -> bool {
+        // Nothing loaded yet, or a user who has no config loaded: a reload may load one
+        if self.user_configs.is_empty() {
+            return true;
+        }
+        for mgr in self.user_configs.values() {
+            let Ok(on_disk) = crate::config::Config::load(&mgr.get_config_path()) else {
+                return true;
+            };
+            if !mgr.get_config().await.behaves_like(&on_disk) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Reload all user configs and restart processors
