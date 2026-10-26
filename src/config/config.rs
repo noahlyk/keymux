@@ -292,6 +292,19 @@ pub struct LayerConfig {
     /// Stop capturing strokes while game mode is active. Only affects steno layers.
     #[serde(default)]
     pub disabled_in_game_mode: bool,
+    /// Where the layer sits when more than one is on. The layer with the higher priority is
+    /// above the lower one, whichever was turned on first; layers with the same priority stack
+    /// in the order they were turned on, the newest on top. The base layer is 0 and a layer
+    /// that doesn't say is 1, so by default every layer is above base and the newest wins.
+    #[serde(default = "default_layer_priority")]
+    pub priority: u32,
+}
+
+/// The priority of a layer that doesn't set one: above the base layer (0).
+pub const DEFAULT_LAYER_PRIORITY: u32 = 1;
+
+const fn default_layer_priority() -> u32 {
+    DEFAULT_LAYER_PRIORITY
 }
 
 /// What a layer does with the keys pressed while it's active.
@@ -1385,6 +1398,37 @@ mod tests {
 
     fn parse(text: &str) -> Config {
         ron::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn a_priority_that_is_the_default_written_out_does_not_change_how_a_config_behaves() {
+        let left_out = parse(r#"(layers: { "nav": (kind: Remap, remaps: {}) })"#);
+        let written = parse(r#"(layers: { "nav": (kind: Remap, remaps: {}, priority: 1) })"#);
+        assert!(left_out.behaves_like(&written));
+        assert_eq!(left_out.layers[&Layer::new("nav")].priority, DEFAULT_LAYER_PRIORITY);
+    }
+
+    #[test]
+    fn changing_a_layers_priority_changes_how_a_config_behaves() {
+        let before = parse(WITH_LAYERS);
+        let after = parse(&WITH_LAYERS.replace(
+            "\"soundboard\": (kind: Remap,",
+            "\"soundboard\": (kind: Remap, priority: 5,",
+        ));
+        assert!(!before.behaves_like(&after));
+    }
+
+    #[test]
+    fn renaming_a_layer_keeps_its_priority_in_the_comparison() {
+        let with_priority = WITH_LAYERS.replace(
+            "\"steno\": (kind: Remap,",
+            "\"steno\": (kind: Remap, priority: 7,",
+        );
+        let renamed = with_priority.replace("\"steno\"", "\"stenography\"");
+        assert!(parse(&with_priority).behaves_like(&parse(&renamed)));
+        // ...but a rename that also changes the priority is a change
+        let changed = renamed.replace("priority: 7", "priority: 8");
+        assert!(!parse(&with_priority).behaves_like(&parse(&changed)));
     }
 
     #[test]

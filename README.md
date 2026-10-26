@@ -280,6 +280,24 @@ KC_F8: TO("stenopractice"),    // Only stenopractice is on afterwards
 
 A keyboard can start with a layer already on, with `default_layer: Some("steno")` in `per_keyboard_overrides` (or globally at the top level).
 
+#### Layer priority
+When more than one layer is on, `priority` decides which is above the other. A layer with a higher priority is always above a lower one, whichever was turned on first. The base layer is `0`, and a layer that doesn't set `priority` is `1`.
+
+```ron
+layers: {
+    "nav": ( remaps: { /* ... */ } ),                       // priority 1, the default
+    "symbols": ( priority: 2, remaps: { /* ... */ } ),      // always above nav
+    "steno": ( priority: 10, kind: Steno(()), remaps: {} ), // above everything else
+}
+```
+
+- **Same priority:** the layer turned on last is on top. With no priorities set, this is how layers have always behaved.
+- **Higher priority:** holding `symbols` and then `nav` leaves `symbols` on top, and so does holding `nav` and then `symbols`. A key goes to the top layer that remaps it, and falls through to the layers below it, as before.
+- **Turning on a layer that is already on** raises it above the other layers of its priority. It is never on the stack twice.
+- **Priority 0** puts a layer level with base, so it is above base but below every layer that doesn't set a priority.
+- **Steno:** only the top layer's steno engine captures strokes, so a layer with a higher priority than your steno layer takes the keys while it is on.
+- Hot reload sees a changed `priority` as a real change, and leaving the default written out (`priority: 1`) as no change.
+
 #### MULTI([...])
 Press several actions at once, and release them together.
 ```ron

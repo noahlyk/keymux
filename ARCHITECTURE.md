@@ -42,7 +42,7 @@ layers: {
 ```
 
 **How it works:**
-- Layers stack on top of base layer
+- Layers stack on top of base layer, in order of `priority` (higher is higher; same priority: newest on top)
 - Key lookups check: Game Mode → Current Layer → Base Layer
 - Switch layers with `TO("layer_name")`
 - Releasing the layer switch key returns to base
@@ -286,7 +286,7 @@ remaps: {
 1. Active layers form a stack. The top one is the current layer. Only the current layer's steno engine captures strokes.
 2. A key lookup walks the stack from the top down and uses the first remap it finds. A layer that doesn't remap a key lets it fall through to the layers below.
 3. When nothing on the stack remaps the key, game-mode remaps apply (if game mode is on), then the base `remaps`.
-4. Turning on a layer that is already on does nothing. It is not added to the stack twice.
+4. **Priority** decides where a layer goes in the stack. Each layer has a `priority`: the base layer is 0, and a layer that doesn't set one is 1. A layer goes above every layer with a lower or equal priority, so a higher priority is always higher, whichever layer was turned on first, and among layers with the same priority the newest is on top. With no priorities set, every layer is 1 and the newest wins. Turning on a layer that is already on raises it among the layers of its priority; it is never in the stack twice.
 5. Layer keys don't turn each other off. Stacking `TG("nohrm")` on top of steno leaves steno underneath, but steno is no longer the current layer, so its strokes stop being captured. Use `TO` to reset the stack: `TO("base")` clears it.
 6. A held `TO`/`MO` key only removes its own layer when released. Anything switched on underneath it stays on.
 7. `default_layer` (global, or per keyboard) puts one layer on the stack at startup, above base.
