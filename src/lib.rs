@@ -11,6 +11,8 @@ pub mod keycode;
 pub mod niri;
 #[cfg(feature = "overlay")]
 pub mod overlay;
+#[cfg(feature = "textbox")]
+pub mod textbox;
 pub mod session_manager;
 pub mod steno;
 pub mod ui;

@@ -63,6 +63,8 @@ package() {
         install -Dm644 "systemd/keymux.service" "$pkgdir/usr/lib/systemd/system/keymux.service"
         # On-screen steno overlay: any Wayland compositor with layer-shell, so not tied to one
         install -Dm644 "systemd/keymux-overlay.service" "$pkgdir/usr/lib/systemd/user/keymux-overlay.service"
+        # Steno reads the text box it types into, on compositors with the input method protocol
+        install -Dm644 "systemd/keymux-textbox.service" "$pkgdir/usr/lib/systemd/user/keymux-textbox.service"
 
         if pacman -Qq niri &>/dev/null; then
             install -Dm644 "systemd/keymux-niri.service" "$pkgdir/usr/lib/systemd/user/keymux-niri.service"

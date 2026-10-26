@@ -9,6 +9,7 @@ use super::lookup::{classify, Lookup};
 use super::overlay::OverlayHub;
 use super::setup::default_dictionaries;
 use super::tape;
+use super::textbox::{TextBoxHub, TextBoxSync, Verdict};
 use super::translate::{StenoOutput, Translator};
 use crate::config::{KeyAction, StenoConfig};
 use crate::keycode::KeyCode;
@@ -44,6 +45,8 @@ pub struct StenoEngine {
     trigger_held: Vec<u32>,
     /// The lookup that is open right now. While it is, keys are QWERTY input to it.
     lookup: Option<Lookup>,
+    /// What the focused text box says is there, when it says anything
+    text_box: TextBoxSync,
 }
 
 impl StenoEngine {
@@ -108,6 +111,7 @@ impl StenoEngine {
                 .unwrap_or_default(),
             trigger_held: Vec::new(),
             lookup: None,
+            text_box: TextBoxSync::new(TextBoxHub::global()),
         })
     }
 
@@ -151,6 +155,13 @@ impl StenoEngine {
     #[cfg(test)]
     pub const fn set_hub(&mut self, hub: &'static OverlayHub) {
         self.hub = hub;
+    }
+
+    /// Read the text box from `hub` instead of the daemon's, and believe it at once. Tests use
+    /// this so they don't share state or wait.
+    #[cfg(test)]
+    pub const fn set_text_box_hub(&mut self, hub: &'static TextBoxHub) {
+        self.text_box = TextBoxSync::new(hub).without_settling();
     }
 
     /// Whether dictionaries are loaded. False means `keymux steno setup` hasn't run.
@@ -223,7 +234,18 @@ impl StenoEngine {
 
     /// A space was typed on the steno layer. Returns what to type.
     pub fn space(&mut self) -> StenoOutput {
+        self.sync_with_text_box();
+        self.text_box.note_edit();
         self.translator.space()
+    }
+
+    /// Check what the translator remembers of the text against the text box itself, when the
+    /// application reports it. If they differ the text box is right: it knows about the click,
+    /// the autocorrect or the dropped key that the translator didn't.
+    fn sync_with_text_box(&mut self) {
+        if let Verdict::Resync(before) = self.text_box.check(self.translator.text()) {
+            self.translator.adopt(&before);
+        }
     }
 
     /// Check the stuck-key timeout and pick up finished dictionary loads.
@@ -313,7 +335,11 @@ impl StenoEngine {
     }
 
     fn translate(&mut self, stroke: u32) -> Option<StenoOutput> {
+        self.sync_with_text_box();
         let output = self.translator.stroke(stroke);
+        if output.is_some() {
+            self.text_box.note_edit();
+        }
         let unmatched = self.translator.was_unmatched();
         let description = tape::describe(output.as_ref(), unmatched);
         if let Some(path) = &self.tape {
@@ -417,6 +443,7 @@ mod tests {
             lookup_trigger: Vec::new(),
             trigger_held: Vec::new(),
             lookup: None,
+            text_box: TextBoxSync::new(TextBoxHub::global()),
         }
     }
 
@@ -576,5 +603,129 @@ mod tests {
     fn stroke_names_render_for_the_tape() {
         use crate::steno::layout::render_stroke;
         assert_eq!(render_stroke(1 << 2 | 1 << 7 | 1 << 18), "KAT");
+    }
+
+    mod text_box {
+        use super::*;
+        use crate::steno::layout::parse_stroke;
+        use crate::steno::textbox::{TextBoxReport, TextBoxState};
+        use crate::steno::translate::UNDO_STROKE;
+
+        fn hub() -> &'static TextBoxHub {
+            Box::leak(Box::default())
+        }
+
+        /// What the focused text box reports: box number `focus`, with `before` before the cursor.
+        fn says(hub: &TextBoxHub, focus: u64, before: &str) {
+            hub.report(TextBoxReport {
+                focus,
+                state: TextBoxState {
+                    active: true,
+                    before: before.to_string(),
+                    selection: false,
+                },
+            });
+        }
+
+        fn engine(hub: &'static TextBoxHub) -> StenoEngine {
+            let mut engine = engine_with_dict(r#"{"KAT": "cat", "-PB": "and"}"#);
+            engine.set_text_box_hub(hub);
+            engine
+        }
+
+        fn stroke(text: &str) -> u32 {
+            parse_stroke(text).unwrap()
+        }
+
+        #[test]
+        fn a_word_typed_into_a_box_with_text_follows_that_text() {
+            let hub = hub();
+            let mut engine = engine(hub);
+            says(hub, 1, "the");
+            // Without the box, a fresh layer would type "cat" with no space before it
+            assert_eq!(
+                engine.translate(stroke("KAT")),
+                Some(StenoOutput::Type(" cat".into()))
+            );
+        }
+
+        #[test]
+        fn a_word_typed_at_the_start_of_a_line_has_no_space_before_it() {
+            let hub = hub();
+            let mut engine = engine(hub);
+            says(hub, 1, "one two");
+            engine.translate(stroke("KAT"));
+            // The cursor was clicked to the start of an empty line
+            says(hub, 1, "");
+            assert_eq!(
+                engine.translate(stroke("-PB")),
+                Some(StenoOutput::Type("and".into()))
+            );
+        }
+
+        #[test]
+        fn undo_does_not_delete_text_the_translator_never_typed() {
+            let hub = hub();
+            let mut engine = engine(hub);
+            says(hub, 1, "");
+            engine.translate(stroke("KAT"));
+            // The user clicked into the middle of other text. Undoing "cat" now would delete
+            // three characters of that text.
+            says(hub, 1, "some other text");
+            assert_eq!(engine.translate(UNDO_STROKE), None);
+        }
+
+        #[test]
+        fn undo_still_works_when_the_box_agrees() {
+            let hub = hub();
+            let mut engine = engine(hub);
+            says(hub, 1, "");
+            engine.translate(stroke("KAT"));
+            says(hub, 1, "cat");
+            assert_eq!(
+                engine.translate(UNDO_STROKE),
+                Some(StenoOutput::Retype {
+                    backspaces: 3,
+                    text: String::new()
+                })
+            );
+        }
+
+        #[test]
+        fn a_box_that_has_not_caught_up_with_the_last_edit_is_not_believed() {
+            let hub = hub();
+            let mut engine = engine(hub);
+            says(hub, 1, "");
+            engine.translate(stroke("KAT"));
+            // The box still shows the text from before "cat" went in
+            assert_eq!(
+                engine.translate(stroke("-PB")),
+                Some(StenoOutput::Type(" and".into()))
+            );
+        }
+
+        #[test]
+        fn without_any_report_the_translator_goes_by_what_it_typed() {
+            let mut engine = engine(hub());
+            engine.translate(stroke("KAT"));
+            assert_eq!(
+                engine.translate(stroke("-PB")),
+                Some(StenoOutput::Type(" and".into()))
+            );
+        }
+
+        #[test]
+        fn a_space_goes_in_after_the_box_is_checked() {
+            let hub = hub();
+            let mut engine = engine(hub);
+            says(hub, 1, "the");
+            // The space is typed, and the word after it needs none of its own
+            assert_eq!(engine.space(), StenoOutput::Type(" ".into()));
+            says(hub, 1, "the ");
+            assert_eq!(
+                engine.translate(stroke("KAT")),
+                Some(StenoOutput::Type("cat".into()))
+            );
+        }
     }
 }

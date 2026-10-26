@@ -17,6 +17,7 @@ pub mod overlay;
 pub mod setup;
 pub mod shortest;
 pub mod tape;
+pub mod textbox;
 pub mod translate;
 
 #[cfg(test)]

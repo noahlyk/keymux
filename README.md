@@ -630,6 +630,34 @@ draws made-up strokes to try the look without the daemon, and `keymux overlay --
 prints what the daemon sends. With several keyboards, it follows the
 one you last pressed a key on.
 
+### Staying in step with the text box
+
+Steno takes words back and rewrites them (`*`, a two-stroke word that replaces its first
+stroke) by sending backspaces, so it needs to know what is on screen. It keeps its own record
+of what it typed, and that record goes wrong whenever the text changes behind its back: you
+click somewhere else, an app autocorrects, a key is dropped.
+
+Two things keep it right:
+
+- **It forgets when it can tell it's lost.** A key that reaches the application from a steno
+  layer (Delete, Enter, a remapped Space, the arrows) makes the next word start fresh, instead
+  of carrying on from text that is no longer at the cursor.
+- **It can read the text box itself.** `keymux textbox` registers as your Wayland input method,
+  which is how a focused text box tells the compositor what is around its cursor. The daemon
+  then compares the last characters before the cursor with what steno thinks it typed, and when
+  they differ, it goes by the text box: no wrong backspaces after a click or a focus change, the
+  first word after clicking into existing text gets its space and capital, and `*` never
+  deletes text steno didn't type. Only the last 64 characters before the cursor are kept, in
+  memory, and never logged. Password fields and anything marked sensitive are not read.
+
+Start it with `systemctl --user enable --now keymux-textbox.service`, or run `keymux textbox`
+by hand. `keymux textbox --dump` prints what the focused text box reports, to see which of your
+apps support it. It listens only: it never takes keys, never types and has no window, so
+nothing changes for apps that don't support it, which carry on with the record steno keeps (a
+text box has to support `zwp_text_input_v3`: GTK, Qt and Firefox do; many terminals don't).
+Only one input method can have a seat, so it can't run next to fcitx or ibus. A compositor
+needs `zwp_input_method_v2`; niri and Sway have it, GNOME doesn't.
+
 ## 🎮 Usage
 
 ### Daemon Management

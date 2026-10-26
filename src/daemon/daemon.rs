@@ -873,6 +873,15 @@ impl AsyncDaemon {
                                 if let Ok(request) = bincode::deserialize::<IpcRequest>(&buffer) {
                                     // A subscription keeps its connection, so it gets its own
                                     // thread and this loop goes back to accepting
+                                    if matches!(request, IpcRequest::ReportTextBox) {
+                                        thread::spawn(move || {
+                                            crate::ipc::serve_text_box(
+                                                stream,
+                                                crate::steno::textbox::TextBoxHub::global(),
+                                            );
+                                        });
+                                        continue;
+                                    }
                                     if matches!(request, IpcRequest::SubscribeOverlay) {
                                         thread::spawn(move || {
                                             crate::ipc::serve_overlay(
@@ -1554,6 +1563,9 @@ impl AsyncDaemon {
             // The IPC thread hands subscriptions to their own thread before they get here
             IpcRequest::SubscribeOverlay => {
                 IpcResponse::Error("overlay subscriptions are streamed, not answered".into())
+            }
+            IpcRequest::ReportTextBox => {
+                IpcResponse::Error("text box reports are streamed, not answered".into())
             }
         }
     }

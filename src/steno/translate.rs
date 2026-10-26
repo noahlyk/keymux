@@ -88,6 +88,22 @@ impl Translator {
         self.unmatched = false;
     }
 
+    /// Take `before`, the text really before the cursor as the application reports it, as the
+    /// record of what is on screen. Nothing typed earlier can be undone any more, but the next
+    /// word is spaced and capitalized to follow `before`, which a fresh start can't know.
+    pub fn adopt(&mut self, before: &str) {
+        self.start_fresh();
+        self.output.push_str(before);
+        let last = before.chars().last();
+        self.state = FormatState {
+            // A word follows another with a space, unless there already is one, or the text
+            // before is open (a bracket) or empty
+            has_text: last.is_some_and(|ch| !ch.is_whitespace() && !matches!(ch, '(' | '[' | '{')),
+            capitalize: before.trim_end().ends_with(['.', '!', '?']),
+            ..FormatState::default()
+        };
+    }
+
     /// Swap in dictionaries that finished loading in the background.
     pub fn set_dictionary(&mut self, dict: Dictionary) {
         self.dict = Arc::new(dict);
@@ -1153,5 +1169,46 @@ mod tests {
         assert_eq!(parse_pieces("{PLOVER:FOCUS}"), None);
         assert_eq!(parse_pieces("{#NotAKey}"), None);
         assert_eq!(parse_pieces("{#Bogus(Left)}"), None);
+    }
+
+    #[test]
+    fn a_word_after_adopted_text_follows_it_with_a_space() {
+        let mut t = translator(r#"{"KAT": "cat"}"#);
+        t.adopt("the");
+        assert_eq!(t.stroke(stroke("KAT")), Some(StenoOutput::Type(" cat".into())));
+        assert_eq!(t.text(), "the cat");
+    }
+
+    #[test]
+    fn a_word_after_adopted_space_or_nothing_has_no_space_of_its_own() {
+        let mut t = translator(r#"{"KAT": "cat"}"#);
+        t.adopt("the ");
+        assert_eq!(t.stroke(stroke("KAT")), Some(StenoOutput::Type("cat".into())));
+        t.adopt("line\n");
+        assert_eq!(t.stroke(stroke("KAT")), Some(StenoOutput::Type("cat".into())));
+        t.adopt("");
+        assert_eq!(t.stroke(stroke("KAT")), Some(StenoOutput::Type("cat".into())));
+        t.adopt("f(");
+        assert_eq!(t.stroke(stroke("KAT")), Some(StenoOutput::Type("cat".into())));
+    }
+
+    #[test]
+    fn a_word_after_adopted_text_that_ends_a_sentence_is_capitalized() {
+        let mut t = translator(r#"{"KAT": "cat"}"#);
+        t.adopt("It sat. ");
+        assert_eq!(t.stroke(stroke("KAT")), Some(StenoOutput::Type("Cat".into())));
+        t.adopt("Why?");
+        assert_eq!(t.stroke(stroke("KAT")), Some(StenoOutput::Type(" Cat".into())));
+    }
+
+    #[test]
+    fn adopted_text_can_be_retyped_but_what_came_before_is_not_undone() {
+        let mut t = translator(r#"{"KAT": "cat", "KAT/-S": "cats"}"#);
+        t.stroke(stroke("KAT"));
+        t.adopt("a cat");
+        // Nothing from before the adopt is left to take back
+        assert!(t.tape_is_empty());
+        assert_eq!(t.stroke(UNDO_STROKE), None);
+        assert_eq!(t.text(), "a cat");
     }
 }

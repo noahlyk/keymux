@@ -150,6 +150,13 @@ pub enum Commands {
         always: bool,
     },
 
+    /// Tell the daemon what the focused text box holds, so steno can stop guessing
+    Textbox {
+        /// Print what the focused text box reports instead of sending it to the daemon
+        #[arg(long)]
+        dump: bool,
+    },
+
     /// Run the hyprland window watcher daemon
     #[command(hide = true)]
     HyprlandDaemon,
