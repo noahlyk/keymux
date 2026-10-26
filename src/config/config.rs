@@ -849,7 +849,9 @@ impl Config {
     /// Parsing rules (applied in order):
     /// 1. Field absent entirely → treat as ["*": Enable] (enable all)
     /// 2. None (ExplicitNone) → disable all
-    /// 3. List → use the list (last match wins)
+    /// 3. List → use the list (last match wins). A keyboard that no entry matches is disabled
+    ///    when the list has any entry that enables something (it is a list of the keyboards to
+    ///    use), and enabled when the list only disables (`["x": Disable]` leaves the rest on)
     /// 4. Bare string → defaults to Enable
     pub fn is_keyboard_enabled(
         &self,
@@ -873,7 +875,7 @@ impl Config {
                 // Track the final decision (last match wins)
                 let mut final_action: Option<EnableDisable> = None;
 
-                for entry in entries {
+                for entry in &entries {
                     let pattern = entry.pattern();
                     let action = entry.action();
 
@@ -914,8 +916,12 @@ impl Config {
                     return true;
                 }
 
-                // Return the final action, or true if no matches (enable by default for explicit items)
-                final_action.unwrap_or(EnableDisable::Enable) == EnableDisable::Enable
+                // A keyboard nothing matched is left out of a list of keyboards to enable, but not
+                // out of a list that only names keyboards to disable
+                let lists_enabled = entries
+                    .iter()
+                    .any(|entry| entry.action() == EnableDisable::Enable);
+                final_action.map_or(!lists_enabled, |action| action == EnableDisable::Enable)
             }
         }
     }
@@ -1291,6 +1297,51 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HE80: &str = "0c45:8092:0110:0003@3-4.3";
+    const GLOVE: &str = "16c0:27db:0111:0003@1-3";
+
+    fn enabled(config: &str, id: &str) -> bool {
+        let config: Config = ron::from_str(&format!("({config})")).unwrap();
+        config.is_keyboard_enabled(id, None, None)
+    }
+
+    #[test]
+    fn a_list_of_keyboards_to_enable_leaves_the_others_off() {
+        let config = r#"enabled_keyboards: ["0c45:8092:0110:0003"]"#;
+        assert!(enabled(config, HE80));
+        assert!(!enabled(config, GLOVE));
+    }
+
+    #[test]
+    fn star_enables_every_keyboard() {
+        assert!(enabled(r#"enabled_keyboards: ["*"]"#, GLOVE));
+    }
+
+    #[test]
+    fn star_with_a_keyboard_disabled_leaves_the_rest_on() {
+        let config = r#"enabled_keyboards: ["*", ("16c0:27db", "Disable")]"#;
+        assert!(enabled(config, HE80));
+        assert!(!enabled(config, GLOVE));
+    }
+
+    #[test]
+    fn a_list_that_only_disables_leaves_every_other_keyboard_on() {
+        let config = r#"enabled_keyboards: [("16c0:27db", "Disable")]"#;
+        assert!(enabled(config, HE80));
+        assert!(!enabled(config, GLOVE));
+    }
+
+    #[test]
+    fn an_empty_list_enables_nothing() {
+        assert!(!enabled("enabled_keyboards: []", HE80));
+    }
+
+    #[test]
+    fn leaving_the_field_out_enables_every_keyboard() {
+        assert!(enabled("", HE80));
+        assert!(enabled("", GLOVE));
+    }
 
     #[test]
     fn default_layer_applies_only_to_the_keyboard_it_is_set_for() {
