@@ -1286,6 +1286,14 @@ impl AsyncDaemon {
             "Window focus changed: app_id={:?}, game mode={:?}",
             window.app_id, state
         );
+        // Another window has a different caret and different text, so what steno remembers of
+        // the old one is no longer what is before the cursor
+        let moved = self.last_focused_window.as_ref().is_none_or(|last| {
+            last.app_id != window.app_id || last.pid != window.pid
+        });
+        if moved {
+            crate::steno::journal::fence_all();
+        }
         self.last_focused_window = Some(window);
         self.set_game_mode_all(state.is_game_mode()).await;
     }

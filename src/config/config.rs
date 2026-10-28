@@ -378,6 +378,23 @@ pub struct StenoConfig {
     /// `{:firstup}`. Those then send on the last key up like any other.
     #[serde(default)]
     pub disable_first_up: bool,
+    /// Entering this layer starts a fresh sentence: the first word has no space in front and
+    /// nothing before it can be undone. Off by default, so steno carries on from whatever was
+    /// typed, here or by hand.
+    #[serde(default)]
+    pub fresh_on_enter: bool,
+    /// Don't follow plain typing outside steno. Without it, words typed by hand are in the
+    /// history: steno carries on from them and `*` takes them back.
+    #[serde(default)]
+    pub disable_typing_history: bool,
+    /// The keyboard layout the system uses, so typed keys become the right characters in the
+    /// history: `us` (the default), `dvorak` or `colemak`.
+    #[serde(default = "default_typing_layout")]
+    pub typing_layout: String,
+}
+
+fn default_typing_layout() -> String {
+    "us".to_string()
 }
 
 const fn default_double_tap_window_ms() -> u32 {

@@ -409,7 +409,7 @@ impl Formatter {
     }
 
     /// The last action of `previous`, or what a session starts with.
-    fn last_action(&self, previous: &[Translation]) -> Action {
+    pub fn last_action(&self, previous: &[Translation]) -> Action {
         if let Some(last) = previous.last().and_then(|t| t.formatting.last()) {
             return last.effective().clone();
         }
@@ -439,6 +439,13 @@ impl Formatter {
             let last_action = self.last_action(prev);
             let mut ctx = Context::new(prev, last_action, orthography);
             for translation in do_.iter_mut() {
+                if !translation.origin.is_stroke() {
+                    // Text typed or erased by hand is not translated: it is what it says
+                    let action = super::journal::recorded_action(&translation.origin, &ctx.last_action);
+                    ctx.translated(action.clone());
+                    translation.formatting = vec![action];
+                    continue;
+                }
                 translation.formatting = match translation.english.as_deref() {
                     Some(english) if !english.is_empty() => translation_to_actions(english, &mut ctx),
                     _ => {

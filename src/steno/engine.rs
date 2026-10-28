@@ -3,6 +3,7 @@
 
 use super::chord::ChordState;
 use super::dict::Dictionary;
+use super::journal::{MachineId, SharedHistory};
 use super::layout::{build_key_map, parse_strokes_trimmed, preset};
 use super::lookup::{classify, Lookup};
 use super::overlay::OverlayHub;
@@ -86,6 +87,16 @@ pub struct StenoEngine {
     lookup: Option<Lookup>,
     /// A stroke wrote `{plover:toggle}` or `{plover:suspend}`: the layer should be left
     leave_requested: bool,
+    fresh_on_enter: bool,
+    label: String,
+}
+
+/// Which set of dictionaries a layer stands for: the places they are loaded from, in order.
+fn machine_id(roots: &[PathBuf]) -> MachineId {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    roots.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl StenoEngine {
@@ -103,6 +114,8 @@ impl StenoEngine {
         disabled_in_game_mode: bool,
         config_dir: &Path,
         home: Option<&Path>,
+        history: &SharedHistory,
+        label: &str,
     ) -> Result<Self> {
         let preset = preset(&config.layout).map_err(|e| anyhow!(e))?;
         let overrides: HashMap<String, KeyAction> = config.layout_overrides.clone();
@@ -119,9 +132,12 @@ impl StenoEngine {
                 .map(|raw| resolve_dictionary_path(raw, config_dir, home))
                 .collect()
         };
+        let machine = machine_id(&roots);
         let updates = live::subscribe(roots, super::setup::cache_dir(config_dir));
 
-        let mut translator = Translator::new(Dictionary::default());
+        // Every layer and keyboard writes to the one history; this layer's dictionaries are its machine
+        let mut translator =
+            Translator::with_history(Arc::new(Dictionary::default()), Arc::clone(history), machine);
         translator.set_options(super::formatter::Options {
             spaces_after: config.spaces_after,
             start_attached: config.start_attached,
@@ -166,7 +182,32 @@ impl StenoEngine {
             trigger_held: Vec::new(),
             lookup: None,
             leave_requested: false,
+            fresh_on_enter: config.fresh_on_enter,
+            label: label.to_string(),
         })
+    }
+
+    /// The layer was entered. By default nothing changes: the history carries on. With
+    /// `fresh_on_enter` the first word starts a new sentence, as it used to.
+    pub fn enter(&mut self) {
+        // A lookup left open, or half a trigger written, before leaving the layer isn't carried over
+        self.lookup = None;
+        self.trigger_held.clear();
+        if self.fresh_on_enter {
+            self.start_fresh();
+        }
+    }
+
+    /// This layer's dictionary once it has loaded, for suggestions on another thread.
+    #[must_use]
+    pub fn dictionary_handle(&self) -> Option<Arc<Dictionary>> {
+        self.translator.dictionary_handle()
+    }
+
+    /// The name of the layer, for the tape.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
     }
 
     /// Whether a live lookup is open. While it is, the layer's keys are plain QWERTY input to
@@ -500,7 +541,7 @@ impl StenoEngine {
 
     /// `{plover:set_config:'start_attached':True,...}`: the options of a session that keymux has.
     fn set_config(&mut self, args: &str) {
-        let mut options = self.translator.options().clone();
+        let mut options = self.translator.options();
         for (key, value) in config_pairs(args) {
             let truth = value.eq_ignore_ascii_case("true");
             match key.as_str() {
@@ -649,6 +690,8 @@ mod tests {
             trigger_held: Vec::new(),
             lookup: None,
             leave_requested: false,
+            fresh_on_enter: false,
+            label: String::new(),
         }
     }
 
@@ -775,8 +818,12 @@ mod tests {
             repeat_rate_ms: 40,
             disable_repeat: false,
             disable_first_up: false,
+            fresh_on_enter: false,
+            disable_typing_history: false,
+            typing_layout: "us".to_string(),
         };
-        let err = StenoEngine::from_config(&config, true, Path::new("."), None).unwrap_err();
+        let history = crate::steno::journal::new_shared(crate::steno::formatter::Formatter::default());
+        let err = StenoEngine::from_config(&config, true, Path::new("."), None, &history, "test").unwrap_err();
         assert!(err.to_string().contains("unknown steno layout preset"));
     }
 

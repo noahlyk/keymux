@@ -71,6 +71,47 @@ pub fn append(path: &Path, stroke: u32, description: &str) {
     }
 }
 
+/// Add a line that isn't a stroke, such as a word typed by hand: `kind` takes the stroke's place.
+pub fn append_note(path: &Path, kind: &str, description: &str) {
+    let line = format!("{}  {:<12} {}\n", clock(), kind, description);
+    let result = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .and_then(|mut file| file.write_all(line.as_bytes()))
+        });
+    if let Err(e) = result {
+        warn!("steno tape {}: {e}", path.display());
+    }
+}
+
+/// The longest outline worth suggesting for a word typed by hand.
+const MAX_SUGGESTED_STROKES: usize = 3;
+
+/// What to write on the tape for a word typed by hand.
+///
+/// The word, and the strokes that would have typed it if the dictionary has them. Looking through
+/// a big dictionary takes a moment, so callers do this off the typing path.
+#[must_use]
+pub fn describe_typed(dict: &super::dict::Dictionary, word: &str) -> String {
+    let shown = format!("{word:?}");
+    let bare = word.trim();
+    if !bare.chars().any(char::is_alphanumeric) {
+        return shown;
+    }
+    match super::shortest::shortest_outline(dict, bare) {
+        Some(outline) if outline.len() <= MAX_SUGGESTED_STROKES => {
+            let strokes: Vec<String> = outline.iter().map(|&stroke| render_stroke(stroke)).collect();
+            format!("{shown}  could be {}", strokes.join("/"))
+        }
+        _ => shown,
+    }
+}
+
 /// Time of day in UTC as `HH:MM:SS`.
 fn clock() -> String {
     let secs = SystemTime::now()
@@ -129,6 +170,17 @@ mod tests {
             describe(Some(&StenoOutput::Type("\n".into())), false),
             "\"\\n\""
         );
+    }
+
+    #[test]
+    fn a_word_typed_by_hand_shows_the_stroke_that_would_have_typed_it() {
+        let mut dict = crate::steno::dict::Dictionary::default();
+        dict.merge_json(r#"{"KAT": "cat"}"#).unwrap();
+        assert_eq!(describe_typed(&dict, "cat "), "\"cat \"  could be KAT");
+        // No dictionary entry, and too long to fingerspell: nothing to suggest
+        assert_eq!(describe_typed(&dict, "elephant"), "\"elephant\"");
+        // Punctuation alone has nothing to look up
+        assert_eq!(describe_typed(&dict, ". "), "\". \"");
     }
 
     #[test]

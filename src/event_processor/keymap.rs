@@ -8,7 +8,9 @@ use crate::keycode::KeyCode;
 use crate::steno::translate::StenoOutput;
 use crate::steno::lookup::{classify, LookupKey};
 use crate::steno::overlay::OverlayHub;
+use crate::steno::journal::{self, SharedHistory};
 use crate::steno::setup::Cooldown;
+use crate::steno::typing::{Typist, TypingLayout};
 use crate::steno::{self, StenoEngine};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,13 +19,6 @@ use tracing::error;
 
 /// Keys that always reach the screen on a steno layer, without a remap.
 const STENO_PASSTHROUGH: [KeyCode; 1] = [KeyCode::KC_DEL];
-
-/// Whether a key that reaches the application from a steno layer can change the text or move
-/// the caret without the translator knowing. Modifiers don't, alone. Backspace is not counted
-/// either: the translator already follows it.
-const fn edits_text_behind_steno(key: KeyCode) -> bool {
-    !key.is_modifier() && !matches!(key, KeyCode::KC_BSPC)
-}
 
 fn steno_result(output: Option<StenoOutput>) -> ProcessResult {
     match output {
@@ -43,6 +38,10 @@ impl KeymapProcessor {
         for engine in self.steno_engines.values_mut() {
             engine.wait_until_loaded();
         }
+    }
+
+    pub(crate) fn shared_history(&self) -> SharedHistory {
+        std::sync::Arc::clone(&self.history)
     }
 
     pub(crate) fn current_layer_name(&self) -> String {
@@ -75,11 +74,35 @@ pub struct KeymapProcessor {
     setup_hint: Cooldown,
     config_dir: PathBuf,
     user_id: u32,
+    /// What is on screen, shared by every keyboard of this user and every steno layer
+    history: SharedHistory,
+    /// Follows the keys that reach the application from plain layers, into the history. `None`
+    /// when there is no steno layer to use it, or it is turned off.
+    typist: Option<Typist>,
+    /// Where finished words typed by hand are noted, next to the strokes
+    tape: Option<PathBuf>,
 }
 
 impl KeymapProcessor {
     #[must_use]
     pub fn new(config: &Config, config_path: PathBuf, user_id: u32) -> Self {
+        // Tests keep to their own history; the daemon shares one among a user's keyboards
+        let history = if cfg!(test) {
+            journal::new_shared(steno::formatter::Formatter::default())
+        } else {
+            journal::for_user(user_id)
+        };
+        Self::with_history(config, config_path, user_id, history)
+    }
+
+    /// A keyboard that writes to the history `history`, which other keyboards share.
+    #[must_use]
+    pub fn with_history(
+        config: &Config,
+        config_path: PathBuf,
+        user_id: u32,
+        history: SharedHistory,
+    ) -> Self {
         let config_dir = config_path
             .parent()
             .map(|p| p.to_path_buf())
@@ -95,15 +118,28 @@ impl KeymapProcessor {
             steno::setup::prepare_dir(&config_dir);
         }
         let mut steno_engines = HashMap::new();
-        for (layer, layer_config) in &config.layers {
+        let mut typist = None;
+        // Layers in name order, so which one sets the typing layout doesn't change from run to run
+        let mut layers: Vec<_> = config.layers.iter().collect();
+        layers.sort_by(|a, b| a.0 .0.cmp(&b.0 .0));
+        for (layer, layer_config) in layers {
             let LayerKind::Steno(steno) = &layer_config.kind else {
                 continue;
             };
+            if typist.is_none() && !steno.disable_typing_history {
+                let layout = TypingLayout::parse(&steno.typing_layout).unwrap_or_else(|| {
+                    error!("steno typing_layout \"{}\" is not known, so us is used", steno.typing_layout);
+                    TypingLayout::Us
+                });
+                typist = Some(Typist::new(layout));
+            }
             match StenoEngine::from_config(
                 steno,
                 layer_config.disabled_in_game_mode,
                 &config_dir,
                 home.as_deref(),
+                &history,
+                &layer.0,
             ) {
                 Ok(engine) => {
                     steno_engines.insert(layer.clone(), engine);
@@ -128,6 +164,9 @@ impl KeymapProcessor {
             setup_hint: Cooldown::new(Duration::from_secs(3)),
             config_dir,
             user_id,
+            history,
+            typist,
+            tape: home.as_deref().map(steno::tape::default_path),
         };
         // A keyboard that starts on a steno layer (`default_layer`) shows the overlay now,
         // not on its first key press. One that starts on base publishes nothing yet, so it
@@ -204,16 +243,72 @@ impl KeymapProcessor {
         if matches!(keycode, KeyCode::KC_LSFT | KeyCode::KC_RSFT) {
             self.shift_down = pressed;
         }
-        let result = match self.steno_capture(keycode, pressed) {
-            Some(result) => result,
-            None if pressed => self.process_key_press(keycode),
-            None => self.process_key_release(keycode),
-        };
+        let result = self.steno_capture(keycode, pressed).unwrap_or_else(|| {
+            let result = if pressed {
+                self.process_key_press(keycode)
+            } else {
+                self.process_key_release(keycode)
+            };
+            // What reached the application from a plain layer, steno never typed
+            self.watch_typing(&result);
+            result
+        });
         if pressed {
             self.steno_setup_hint();
         }
         self.publish_overlay_layer();
         result
+    }
+
+    /// Follow what a plain layer sent to the application into the history, so steno carries on
+    /// from it and `*` can take it back.
+    fn watch_typing(&mut self, result: &ProcessResult) {
+        if self.layer_stack.is_game_mode_active() {
+            return;
+        }
+        let Some(typist) = self.typist.as_mut() else {
+            return;
+        };
+        let mut history = journal::lock(&self.history);
+        match result {
+            ProcessResult::EmitKey(key, pressed) => typist.key(&mut history, *key, *pressed),
+            ProcessResult::TapKeyPressRelease(key) => {
+                typist.key(&mut history, *key, true);
+                typist.key(&mut history, *key, false);
+            }
+            ProcessResult::MultipleEvents(events) => {
+                for (key, pressed) in events {
+                    typist.key(&mut history, *key, *pressed);
+                }
+            }
+            // Text a layer types for you is on screen like any other
+            ProcessResult::TypeString(text, _) => {
+                for ch in text.chars() {
+                    history.typed(ch);
+                }
+            }
+            ProcessResult::Retype { .. } | ProcessResult::Ops(_) | ProcessResult::None => {}
+        }
+        let words = std::mem::take(&mut history.finished_words);
+        drop(history);
+        let Some(path) = self.tape.clone() else {
+            return;
+        };
+        // The first layer's dictionary, by name, once it has loaded. Looking a word up in it takes
+        // a moment, so that happens on a thread of its own and never holds up a key.
+        let dict = self
+            .steno_engines
+            .iter()
+            .min_by(|a, b| a.0 .0.cmp(&b.0 .0))
+            .and_then(|(_, engine)| engine.dictionary_handle());
+        for word in words {
+            let path = path.clone();
+            let dict = dict.clone();
+            std::thread::spawn(move || {
+                let line = dict.map_or_else(|| format!("{word:?}"), |dict| steno::tape::describe_typed(&dict, &word));
+                steno::tape::append_note(&path, "typed", &line);
+            });
+        }
     }
 
     /// The steno layer that is on top for this keyboard, if any: what the overlay should show.
@@ -296,10 +391,10 @@ impl KeymapProcessor {
         }
 
         let top = self.layer_stack.current_layer();
-        // Entering a steno layer starts a fresh sentence, so its first word has no leading space
+        // Entering a steno layer carries on from what was typed, unless the layer asks to start over
         if self.steno_active.as_ref() != Some(&top) {
             if let Some(engine) = self.steno_engines.get_mut(&top) {
-                engine.start_fresh();
+                engine.enter();
             }
             self.steno_active = self.steno_engines.contains_key(&top).then(|| top.clone());
         }
@@ -342,11 +437,8 @@ impl KeymapProcessor {
             .is_some_and(|config| config.remaps.contains_key(&keycode));
         if STENO_PASSTHROUGH.contains(&keycode) || has_remap {
             // This key reaches the application, and may move the caret or change the text
-            // behind the translator's back (arrows, Enter, Delete, a remapped Space...). What
-            // it remembers of the text is no longer the text at the cursor, so it lets go.
-            if edits_text_behind_steno(keycode) {
-                engine.start_fresh();
-            }
+            // behind the translator's back (arrows, Delete...). The typist sees it go by and
+            // makes the history let go of what it remembers, or follows it if it types text.
             return None;
         }
 
