@@ -38,23 +38,69 @@ pub const SLOTS: [(char, &str); 23] = [
 const NUMBER_SLOT: usize = 22;
 /// Slot index of the star, which sits between the left and right hands.
 const STAR_SLOT: usize = 9;
-/// Slots `0..LEFT_END` are the left hand, `LEFT_END..MIDDLE_END` the vowels and star.
+/// Slots `0..LEFT_END` are the left hand; the vowels, star and right thumb follow, then the right hand.
 const LEFT_END: usize = 7;
-const MIDDLE_END: usize = 12;
+/// First slot of the right hand (`-F`).
+const RIGHT_START: usize = 12;
+/// First slot a `-` allows: after it the next key is `-E` or further right, never `A`, `O` or `*`.
+const AFTER_HYPHEN: usize = 10;
+/// The keys that write a digit when the number key is down: slot and digit. In stroke order, so
+/// digits read `1 2 3 4 5 0 6 7 8 9` across a stroke.
+const NUMBER_KEYS: [(usize, char); 10] = [
+    (0, '1'),
+    (1, '2'),
+    (3, '3'),
+    (5, '4'),
+    (7, '5'),
+    (8, '0'),
+    (12, '6'),
+    (14, '7'),
+    (16, '8'),
+    (18, '9'),
+];
 
-/// Parse a Plover stroke string such as `KAT`, `TEFT` or `-PB` into a bitmask.
+/// Parse one stroke in Plover's notation: `KAT`, `TEFT`, `-PB`, `1-9`, `12K` or `#S`.
 ///
-/// Returns `None` for anything that isn't a single stroke, including multi-stroke
-/// dictionary keys (those contain `/`).
+/// Letters and digits must come in key order, a `-` separates the left hand from the right when
+/// no vowel or star does, and the number key `#` may stand anywhere, once. A digit writes its
+/// key and implies the number key. Returns `None` for anything Plover rejects, for a stroke with
+/// no keys, and for multi-stroke dictionary keys (those contain `/`).
 #[must_use]
 pub fn parse_stroke(text: &str) -> Option<u32> {
+    let bits = parse_stroke_bits(text)?;
+    (bits != 0).then_some(bits)
+}
+
+fn parse_stroke_bits(text: &str) -> Option<u32> {
     let mut bits = 0u32;
     let mut cursor = 0usize;
+    let mut number = false;
+    let mut hash_seen = false;
     for ch in text.chars() {
         match ch {
-            '#' => bits |= 1 << NUMBER_SLOT,
-            // A dash means the letters after it are not left-hand letters.
-            '-' => cursor = cursor.max(LEFT_END),
+            '#' => {
+                if hash_seen {
+                    return None;
+                }
+                hash_seen = true;
+                number = true;
+            }
+            // A hyphen only makes sense while the left hand and star are still to be written
+            '-' => {
+                if cursor > AFTER_HYPHEN + 1 {
+                    return None;
+                }
+                cursor = cursor.max(AFTER_HYPHEN);
+            }
+            '0'..='9' => {
+                let (slot, _) = *NUMBER_KEYS.iter().find(|(_, digit)| *digit == ch)?;
+                if slot < cursor {
+                    return None;
+                }
+                bits |= 1 << slot;
+                cursor = slot + 1;
+                number = true;
+            }
             _ => {
                 let offset = SLOTS[cursor..NUMBER_SLOT]
                     .iter()
@@ -65,43 +111,71 @@ pub fn parse_stroke(text: &str) -> Option<u32> {
             }
         }
     }
-    (bits != 0).then_some(bits)
+    if number {
+        bits |= 1 << NUMBER_SLOT;
+    }
+    Some(bits)
 }
 
-/// Parse one stroke, or several separated by `/` as in a multi-stroke dictionary key
-/// (`"HRAOUP/AER"`). `None` if any part isn't a valid stroke, which includes empty parts such as
-/// a trailing `/`.
+/// Parse one stroke, or several separated by `/` as in a multi-stroke dictionary key.
+///
+/// Such a key is `"HRAOUP/AER"`. `None` if any part isn't a valid stroke, which includes empty
+/// parts such as a trailing `/`. A leading `/` is the empty stroke that marks a word boundary
+/// (`"/S"`), kept as the stroke `0`, and a lone `-` is that empty stroke written out.
 #[must_use]
 pub fn parse_strokes(text: &str) -> Option<Vec<u32>> {
-    text.split('/').map(|part| parse_stroke(part.trim())).collect()
+    let parts: Vec<&str> = text.split('/').collect();
+    let mut strokes = Vec::with_capacity(parts.len());
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            if i == 0 && parts.len() > 1 {
+                strokes.push(0);
+                continue;
+            }
+            return None;
+        }
+        strokes.push(parse_stroke_bits(part)?);
+    }
+    Some(strokes)
+}
+
+/// Like `parse_strokes`, for what people type: spaces around a slash are not part of a stroke.
+#[must_use]
+pub fn parse_strokes_trimmed(text: &str) -> Option<Vec<u32>> {
+    parse_strokes(&text.split('/').map(str::trim).collect::<Vec<_>>().join("/"))
 }
 
 /// Render a stroke bitmask in Plover's canonical notation.
+///
+/// With the number key down, the keys that carry a digit are written as digits (`1`, `-9`, `12K`)
+/// and the `#` itself is dropped. With no such key, `#` is written. A `-` stands between the left
+/// hand and the right when no vowel or star does, so `-S` and `S-S` can't be mistaken for each other.
 #[must_use]
 pub fn render_stroke(bits: u32) -> String {
-    let letters = |range: std::ops::Range<usize>| -> String {
-        range
-            .filter(|i| bits & (1 << i) != 0)
-            .map(|i| SLOTS[i].0)
-            .collect()
+    let down = |slot: usize| bits & (1 << slot) != 0;
+    let number = down(NUMBER_SLOT);
+    let digits = number && NUMBER_KEYS.iter().any(|(slot, _)| down(*slot));
+    let key = |slot: usize| {
+        if digits {
+            if let Some((_, digit)) = NUMBER_KEYS.iter().find(|(s, _)| *s == slot) {
+                return *digit;
+            }
+        }
+        SLOTS[slot].0
     };
-
     let mut out = String::new();
-    if bits & (1 << NUMBER_SLOT) != 0 {
+    if number && !digits {
         out.push('#');
     }
-    let left = letters(0..LEFT_END);
-    let middle = letters(LEFT_END..MIDDLE_END);
-    let right = letters(MIDDLE_END..NUMBER_SLOT);
-
-    out.push_str(&left);
+    out.extend((0..LEFT_END).filter(|&slot| down(slot)).map(key));
     // With no vowel or star in between, right-hand letters would read as left-hand
     // ones, so Plover marks the boundary with a dash.
-    if middle.is_empty() && !right.is_empty() {
+    let middle = (LEFT_END..RIGHT_START).any(down);
+    let right = (RIGHT_START..NUMBER_SLOT).any(down);
+    if !middle && right {
         out.push('-');
     }
-    out.push_str(&middle);
-    out.push_str(&right);
+    out.extend((LEFT_END..NUMBER_SLOT).filter(|&slot| down(slot)).map(key));
     out
 }
 
@@ -328,14 +402,16 @@ mod tests {
         assert_eq!(parse_strokes("HRAOUP"), Some(vec![one]));
         assert_eq!(parse_strokes("HRAOUP/AER"), Some(vec![one, two]));
         assert_eq!(parse_strokes("HRAOUP/AER/HRAOUP"), Some(vec![one, two, one]));
-        // Spaces around a slash are not part of the stroke
-        assert_eq!(parse_strokes("HRAOUP / AER"), Some(vec![one, two]));
+        // Spaces around a slash are not part of the stroke, though Plover itself would refuse them
+        assert_eq!(parse_strokes_trimmed("HRAOUP / AER"), Some(vec![one, two]));
+        assert_eq!(parse_strokes("HRAOUP / AER"), None);
         // Anything wrong anywhere makes the whole thing invalid, never a shorter trigger
         assert_eq!(parse_strokes("HRAOUP/"), None);
-        assert_eq!(parse_strokes("/AER"), None);
         assert_eq!(parse_strokes("HRAOUP//AER"), None);
         assert_eq!(parse_strokes("HRAOUP/ZZZ"), None);
         assert_eq!(parse_strokes(""), None);
+        // A leading slash is the empty stroke that marks a word boundary, as in "/S"
+        assert_eq!(parse_strokes("/AER"), Some(vec![0, two]));
     }
 
     #[test]
@@ -344,7 +420,10 @@ mod tests {
             "KAT",
             "-PB",
             "TEFT",
-            "#T",
+            "#K",
+            "2",
+            "1-9",
+            "12K",
             "STKPWHR",
             "-FRPBLGTSDZ",
             "*",
@@ -372,6 +451,46 @@ mod tests {
             let bits = parse_stroke(text).unwrap_or_else(|| panic!("{text} should parse"));
             assert_eq!(render_raw_stroke(bits), raw, "rendering {text}");
         }
+    }
+
+    /// Plover's own answers for how a set of keys is written and how a spelling is read. See
+    /// `tools/plover-golden`.
+    #[test]
+    fn stroke_notation_matches_plovers_for_every_reference_case() {
+        let data: serde_json::Value =
+            serde_json::from_str(include_str!("testdata/stroke_golden.json")).unwrap();
+        for case in data["render"].as_array().unwrap() {
+            let bits = case[0]
+                .as_array()
+                .unwrap()
+                .iter()
+                .fold(0u32, |bits, key| bits | 1 << slot_by_name(key.as_str().unwrap()).unwrap());
+            let steno = case[1].as_str().unwrap();
+            assert_eq!(render_stroke(bits), steno, "writing {:?}", case[0]);
+            assert_eq!(parse_strokes(steno), Some(vec![bits]), "reading {steno}");
+        }
+        let mut mismatches = Vec::new();
+        for case in data["parse"].as_array().unwrap() {
+            let text = case[0].as_str().unwrap();
+            // Plover reads "" as an outline with no strokes, which nothing can use
+            if text.is_empty() {
+                continue;
+            }
+            let expected: Option<Vec<String>> = case[1].as_array().map(|strokes| {
+                strokes.iter().map(|s| s.as_str().unwrap().to_string()).collect()
+            });
+            let got = parse_strokes(text)
+                .map(|strokes| strokes.into_iter().map(render_stroke).collect::<Vec<_>>());
+            if got != expected {
+                mismatches.push(format!("{text:?}: Plover {expected:?}, keymux {got:?}"));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "{} spellings read differently from Plover, such as:\n{}",
+            mismatches.len(),
+            mismatches.iter().take(25).cloned().collect::<Vec<_>>().join("\n")
+        );
     }
 
     #[test]

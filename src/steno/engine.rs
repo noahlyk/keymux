@@ -4,7 +4,7 @@
 use super::chord::ChordState;
 use super::dict::Dictionary;
 use super::format::KeyPress;
-use super::layout::{build_key_map, parse_strokes, preset};
+use super::layout::{build_key_map, parse_strokes_trimmed, preset};
 use super::lookup::{classify, Lookup};
 use super::overlay::OverlayHub;
 use super::live;
@@ -99,7 +99,8 @@ impl StenoEngine {
                 .lookup_stroke
                 .as_deref()
                 .map(|text| {
-                    parse_strokes(text).unwrap_or_else(|| {
+                    // The empty stroke of a word boundary entry is no stroke you can press
+                    parse_strokes_trimmed(text).filter(|strokes| !strokes.contains(&0)).unwrap_or_else(|| {
                         warn!(
                             "steno lookup_stroke {text:?} is not a stroke, or strokes separated \
                              by `/`, in Plover notation, so lookup is off"
