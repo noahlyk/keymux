@@ -29,7 +29,7 @@ installed daemon**: that needs `make install` and a daemon restart. See **Steps*
 
 The daemon runs as root and can't reach the Wayland socket, so drawing happens in a
 user process, the same split as the `niri-daemon` focus watcher. It ships as
-`keymux overlay` with a `systemd/keymux-overlay.service` user unit.
+`keymux overlay` with a `systemd/keymux-steno.service` user unit.
 
 ## 1. State in the daemon: `OverlayHub` — `src/steno/overlay.rs` [done, tested]
 
@@ -226,7 +226,7 @@ surface gone when the process stops.
    Proves the daemon-to-overlay path with real keyboard input.
 2. `keymux overlay`, then switch into steno: the panel should appear on that key press.
 3. Click on the panel's area: the click should reach the window underneath. Not tested yet.
-4. `systemctl --user enable --now keymux-overlay.service`.
+4. `systemctl --user enable --now keymux-steno.service`.
 
 ## 6. Live lookup — `src/steno/lookup.rs` [done, tested; not yet tried on real hardware]
 

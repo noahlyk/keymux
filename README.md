@@ -129,8 +129,8 @@ install the one matching your compositor/WM.
 **Steno overlay (optional):** `keymux overlay` draws the steno keyboard and tape on
 screen while a steno layer is on. Needs a Wayland compositor with layer-shell (niri,
 Hyprland, Sway; not GNOME). See [On-screen overlay](#on-screen-overlay).
-- Path: `/usr/lib/systemd/user/keymux-overlay.service`
-- Enable: `systemctl --user enable --now keymux-overlay.service`
+- Path: `/usr/lib/systemd/user/keymux-steno.service`
+- Enable: `systemctl --user enable --now keymux-steno.service`
 
 ## 📖 Configuration Guide
 
@@ -718,7 +718,7 @@ clicks or focus. It costs next to nothing: it only redraws when a key or the tap
 ![overlay](docs/overlay-preview.png)
 
 It runs as your user, since the daemon runs as root and can't draw on your screen. Start it
-with `systemctl --user enable --now keymux-overlay.service`, or run `keymux overlay` by hand.
+with `systemctl --user enable --now keymux-steno.service`, or run `keymux overlay` by hand.
 It needs a Wayland compositor with `wlr-layer-shell`: niri, Hyprland and Sway have it, GNOME
 doesn't.
 
