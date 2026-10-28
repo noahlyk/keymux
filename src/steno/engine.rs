@@ -3,14 +3,13 @@
 
 use super::chord::ChordState;
 use super::dict::Dictionary;
-use super::format::KeyPress;
 use super::layout::{build_key_map, parse_strokes_trimmed, preset};
 use super::lookup::{classify, Lookup};
 use super::overlay::OverlayHub;
 use super::live;
 use super::setup::default_dictionaries;
 use super::tape;
-use super::translate::{StenoOutput, Translator};
+use super::translate::{OutputOp, StenoOutput, Translator};
 use crate::config::{KeyAction, StenoConfig};
 use crate::keycode::KeyCode;
 use anyhow::{anyhow, Result};
@@ -49,6 +48,8 @@ pub struct StenoEngine {
     trigger_held: Vec<u32>,
     /// The lookup that is open right now. While it is, keys are QWERTY input to it.
     lookup: Option<Lookup>,
+    /// A stroke wrote `{plover:toggle}` or `{plover:suspend}`: the layer should be left
+    leave_requested: bool,
 }
 
 impl StenoEngine {
@@ -84,11 +85,18 @@ impl StenoEngine {
         };
         let updates = live::subscribe(roots, super::setup::cache_dir(config_dir));
 
+        let mut translator = Translator::new(Dictionary::default());
+        translator.set_options(super::formatter::Options {
+            spaces_after: config.spaces_after,
+            start_attached: config.start_attached,
+            start_capitalized: config.start_capitalized,
+            ..super::formatter::Options::default()
+        });
         Ok(Self {
             keys,
             held_keys: HashSet::new(),
             chord: ChordState::new(Duration::from_millis(u64::from(config.stroke_timeout_ms))),
-            translator: Translator::new(Dictionary::default()),
+            translator,
             updates: Some(updates),
             loading: true,
             backlog: Vec::new(),
@@ -111,6 +119,7 @@ impl StenoEngine {
                 .unwrap_or_default(),
             trigger_held: Vec::new(),
             lookup: None,
+            leave_requested: false,
         })
     }
 
@@ -209,11 +218,6 @@ impl StenoEngine {
             return None;
         };
         self.on_stroke(stroke)
-    }
-
-    /// A space was typed on the steno layer. Returns what to type.
-    pub fn space(&mut self) -> StenoOutput {
-        self.translator.space()
     }
 
     /// Check the stuck-key timeout and pick up finished dictionary loads.
@@ -324,6 +328,7 @@ impl StenoEngine {
 
     fn translate(&mut self, stroke: u32) -> Option<StenoOutput> {
         let output = self.translator.stroke(stroke);
+        let output = self.run_commands(output);
         let unmatched = self.translator.was_unmatched();
         let description = tape::describe(output.as_ref(), unmatched);
         if let Some(path) = &self.tape {
@@ -332,6 +337,61 @@ impl StenoEngine {
         // Same description as the tape file, so the overlay and `keymux steno tape` agree
         self.hub.push_stroke(stroke, description, unmatched);
         output
+    }
+
+    /// Run the engine commands (`{plover:...}`) in an output, and return the rest of it.
+    fn run_commands(&mut self, output: Option<StenoOutput>) -> Option<StenoOutput> {
+        let Some(StenoOutput::Ops(ops)) = output else {
+            return output;
+        };
+        let mut rest = Vec::new();
+        for op in ops {
+            match op {
+                OutputOp::Command(command) => self.run_command(&command),
+                other => rest.push(other),
+            }
+        }
+        StenoOutput::from_ops(rest)
+    }
+
+    /// Run one of Plover's engine commands, as it is written after `{plover:`. What has a
+    /// counterpart in keymux is done: `suspend` and `toggle` leave the steno layer (see
+    /// [`Self::take_leave_request`]), `lookup` opens the live lookup, `set_config` sets how a
+    /// session starts. The rest belong to Plover's windows and do nothing here.
+    fn run_command(&mut self, command: &str) {
+        let (name, args) = command.split_once(':').unwrap_or((command, ""));
+        match name.trim().to_lowercase().as_str() {
+            "suspend" | "toggle" => self.leave_requested = true,
+            // The layer's own keys turn steno on again, so there is nothing to resume
+            "resume" => {}
+            "lookup" if self.lookup.is_none() => self.open_lookup(),
+            "lookup" => {}
+            "set_config" => self.set_config(args),
+            "add_translation" | "suggestions" | "configure" | "focus" | "quit" => {
+                tracing::info!("steno command `{name}` has no counterpart in keymux, so it does nothing");
+            }
+            other => warn!("unknown steno command `{other}`"),
+        }
+    }
+
+    /// `{plover:set_config:'start_attached':True,...}`: the options of a session that keymux has.
+    fn set_config(&mut self, args: &str) {
+        let mut options = self.translator.options().clone();
+        for (key, value) in config_pairs(args) {
+            let truth = value.eq_ignore_ascii_case("true");
+            match key.as_str() {
+                "start_attached" => options.start_attached = truth,
+                "start_capitalized" => options.start_capitalized = truth,
+                "space_placement" => options.spaces_after = value.eq_ignore_ascii_case("After Output"),
+                other => tracing::info!("steno option `{other}` is not one keymux has"),
+            }
+        }
+        self.translator.set_options(options);
+    }
+
+    /// Whether a stroke asked to leave the steno layer. Asking again is up to the next stroke.
+    pub fn take_leave_request(&mut self) -> bool {
+        std::mem::take(&mut self.leave_requested)
     }
 
     /// Block until the dictionaries are loaded. Tests use this so they don't race
@@ -347,44 +407,75 @@ impl StenoEngine {
     }
 }
 
-/// Several outputs combined into one, so a backlog replays as a single edit.
+/// Several outputs combined into one, so a backlog replays as a single edit. Typing that a later
+/// output deletes again is never sent.
 #[derive(Default)]
 struct Merged {
-    backspaces: usize,
-    text: String,
-    keys: Vec<KeyPress>,
+    ops: Vec<OutputOp>,
 }
 
 impl Merged {
     fn push(&mut self, output: StenoOutput) {
-        match output {
-            StenoOutput::Type(text) => self.text.push_str(&text),
-            StenoOutput::Retype { backspaces, text } => {
-                let mut remaining = backspaces;
-                while remaining > 0 && self.text.pop().is_some() {
-                    remaining -= 1;
+        for op in output.into_ops() {
+            let OutputOp::Backspaces(count) = op else {
+                self.ops.push(op);
+                continue;
+            };
+            let mut remaining = count;
+            // Take back what this backlog typed first; the rest was already on screen
+            while remaining > 0 {
+                let Some(OutputOp::Text(text)) = self.ops.last_mut() else {
+                    break;
+                };
+                let len = text.chars().count();
+                if len > remaining {
+                    *text = text.chars().take(len - remaining).collect();
+                    remaining = 0;
+                } else {
+                    remaining -= len;
+                    self.ops.pop();
                 }
-                // Whatever is left was already on screen
-                self.backspaces += remaining;
-                self.text.push_str(&text);
             }
-            StenoOutput::Keys(presses) => self.keys.extend(presses),
+            if remaining > 0 {
+                self.ops.push(OutputOp::Backspaces(remaining));
+            }
         }
     }
 
     fn finish(self) -> Option<StenoOutput> {
-        match (self.backspaces, self.text.is_empty()) {
-            (0, true) if self.keys.is_empty() => None,
-            (0, true) => Some(StenoOutput::Keys(self.keys)),
-            // Text and key presses backlogged together can't share one output. The text
-            // wins, as in the translator, so the key presses are dropped.
-            (0, false) => Some(StenoOutput::Type(self.text)),
-            (backspaces, _) => Some(StenoOutput::Retype {
-                backspaces,
-                text: self.text,
-            }),
+        StenoOutput::from_ops(self.ops)
+    }
+}
+
+/// The `'key':value` pairs of a Python dictionary body, with quotes taken off. Commas inside
+/// quotes don't separate pairs.
+fn config_pairs(args: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    let mut part = String::new();
+    let mut quote: Option<char> = None;
+    let mut push = |part: &mut String| {
+        if let Some((key, value)) = part.split_once(':') {
+            let clean = |text: &str| text.trim().trim_matches(['\'', '"']).to_string();
+            pairs.push((clean(key), clean(value)));
+        }
+        part.clear();
+    };
+    for c in args.chars() {
+        match (c, quote) {
+            ('\'' | '"', None) => {
+                quote = Some(c);
+                part.push(c);
+            }
+            (c2, Some(q)) if c2 == q => {
+                quote = None;
+                part.push(c2);
+            }
+            (',', None) => push(&mut part),
+            _ => part.push(c),
         }
     }
+    push(&mut part);
+    pairs
 }
 
 /// Resolve a dictionary path from config: `~/` goes to `home`, relative paths to `config_dir`.
@@ -429,6 +520,7 @@ mod tests {
             lookup_trigger: Vec::new(),
             trigger_held: Vec::new(),
             lookup: None,
+            leave_requested: false,
         }
     }
 
@@ -547,42 +639,48 @@ mod tests {
             stroke_timeout_ms: 5000,
             translation_timeout_ms: None,
             lookup_stroke: None,
+            spaces_after: false,
+            start_attached: true,
+            start_capitalized: false,
         };
         let err = StenoEngine::from_config(&config, true, Path::new("."), None).unwrap_err();
         assert!(err.to_string().contains("unknown steno layout preset"));
     }
 
     #[test]
-    fn backlogged_key_presses_come_out_as_keys() {
+    fn backlogged_key_presses_and_text_all_come_out_in_order() {
         use crate::keycode::KeyCode;
-        use crate::steno::format::KeyPress;
-        let press = |key| KeyPress {
-            modifiers: vec![],
-            key,
-        };
+        let press = |key| OutputOp::Keys(vec![(key, true), (key, false)]);
         let mut merged = Merged::default();
-        merged.push(StenoOutput::Keys(vec![press(KeyCode::KC_LEFT)]));
-        merged.push(StenoOutput::Keys(vec![press(KeyCode::KC_RGHT)]));
+        merged.push(StenoOutput::Ops(vec![press(KeyCode::KC_LEFT)]));
+        merged.push(StenoOutput::Type("cat".into()));
+        merged.push(StenoOutput::Ops(vec![press(KeyCode::KC_RGHT)]));
         assert_eq!(
             merged.finish(),
-            Some(StenoOutput::Keys(vec![
+            Some(StenoOutput::Ops(vec![
                 press(KeyCode::KC_LEFT),
+                OutputOp::Text("cat".into()),
                 press(KeyCode::KC_RGHT),
             ]))
         );
     }
 
     #[test]
-    fn backlogged_text_wins_over_key_presses_in_one_batch() {
-        use crate::keycode::KeyCode;
-        use crate::steno::format::KeyPress;
+    fn backlogged_typing_that_a_later_output_deletes_is_never_sent() {
         let mut merged = Merged::default();
-        merged.push(StenoOutput::Keys(vec![KeyPress {
-            modifiers: vec![],
-            key: KeyCode::KC_LEFT,
-        }]));
-        merged.push(StenoOutput::Type("cat".into()));
-        assert_eq!(merged.finish(), Some(StenoOutput::Type("cat".into())));
+        merged.push(StenoOutput::Type("per".into()));
+        merged.push(StenoOutput::Retype { backspaces: 3, text: "perfect".into() });
+        merged.push(StenoOutput::Retype { backspaces: 2, text: String::new() });
+        assert_eq!(merged.finish(), Some(StenoOutput::Type("perfe".into())));
+
+        let mut merged = Merged::default();
+        merged.push(StenoOutput::Type("ab".into()));
+        merged.push(StenoOutput::Retype { backspaces: 5, text: "x".into() });
+        // Three of the five were already on screen
+        assert_eq!(
+            merged.finish(),
+            Some(StenoOutput::Retype { backspaces: 3, text: "x".into() })
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! `keymux steno` commands that read or edit dictionaries, and show the tape.
 
 use super::dict::Dictionary;
-use super::format::{parse_pieces, render, FormatState, Piece};
+use super::formatter::{leaves_attached, plain_text};
 use super::layout::{
     build_key_map, extra_keys, parse_stroke, preset, render_stroke, without_extra_keys, SLOTS, SLOT_SOUNDS,
 };
@@ -12,7 +12,7 @@ use super::shortest::shortest_outline;
 use super::tape;
 use super::translate::Translator;
 use crate::keycode::KeyCode;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use console::style;
 use std::collections::HashMap;
 use std::fs::File;
@@ -45,8 +45,8 @@ pub fn lookup(config_dir: &Path, word: &str) {
 pub fn show_stroke(config_dir: &Path, text: &str) -> Result<()> {
     let strokes = parse_strokes(text)?;
     let dict = load_dictionary(config_dir);
-    if let Some(pieces) = dict.get(&strokes) {
-        println!("{:?}", render(pieces, &mut FormatState::default()));
+    if let Some(translation) = dict.lookup(&strokes) {
+        println!("{:?}", plain_text(translation).unwrap_or_else(|| translation.to_string()));
     } else if let Some(digits) = strokes
         .first()
         .filter(|_| strokes.len() == 1)
@@ -367,11 +367,7 @@ pub fn proper_outlines_in(base: &Translator, word: &str) -> Vec<Vec<u32>> {
 /// the next word would attach to it, so it doesn't type `be` as a word.
 fn ranked_strokes(dict: &Dictionary, word: &str) -> Vec<Vec<u32>> {
     let mut found = dict.strokes_for(word);
-    found.retain(|strokes| {
-        !dict
-            .get(strokes)
-            .is_some_and(|pieces| pieces.iter().any(|piece| matches!(piece, Piece::TextAttach(_))))
-    });
+    found.retain(|strokes| !dict.lookup(strokes).is_some_and(leaves_attached));
     found.sort_by_key(|strokes| {
         (strokes.len(), strokes.iter().map(|s| s.count_ones()).sum::<u32>())
     });
@@ -521,9 +517,6 @@ fn print_table(rows: &[ChordRow], show_keys: bool) {
 /// Add or replace a translation in your own dictionary, which comes before every other one.
 pub fn add(config_dir: &Path, stroke: &str, text: &str) -> Result<()> {
     let strokes = parse_strokes(stroke)?;
-    if parse_pieces(text).is_none() {
-        bail!("\"{text}\" uses a command keymux doesn't support yet");
-    }
     let key = format_strokes(&strokes);
 
     prepare_dir(config_dir);

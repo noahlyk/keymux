@@ -1,13 +1,19 @@
-//! Plover-format dictionaries: JSON objects mapping stroke sequences to text.
+//! Plover-format dictionaries: JSON objects mapping stroke sequences to translations.
 //!
-//! Keys are one or more strokes separated by `/` (e.g. `KPA/TKAOEU`). Values are
-//! parsed once at load time. Entries using commands we don't support are counted
-//! and skipped.
+//! Keys are one or more strokes separated by `/` (e.g. `KPA/TKAOEU`), with number keys as digits
+//! (`1-9`) and a leading slash for a word boundary (`/S`). Values are Plover's translation
+//! language and are kept as written: they are formatted when a stroke is typed, because what
+//! one means depends on what came before it (see [`super::formatter`]). A value of
+//! `{plover:deleted}` hides the same outline in every dictionary after this one.
+//!
+//! Besides `.json`, a dictionary can be an `.rtf` file (RTF/CRE, see [`super::rtf`]), and the
+//! word list that orthography needs (`american_english_words.txt`) is read from the same place.
 
-use super::format::{parse_pieces, render, FormatState, Piece};
-use super::layout::parse_stroke;
+use super::formatter::plain_text;
+use super::layout::parse_strokes;
+use super::orthography::{Orthography, WORDLIST_FILE};
 use anyhow::{Context, Result};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::hash_map::Entry;
@@ -16,17 +22,26 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 /// Bumped when the cached layout changes, so older cache files are ignored.
-const CACHE_LAYOUT: u32 = 2;
+const CACHE_LAYOUT: u32 = 3;
+
+/// The value that deletes an entry of a dictionary after this one.
+pub const DELETED: &str = "{plover:deleted}";
+
+/// Whether a translation is the deletion marker, in any letter case.
+#[must_use]
+pub const fn is_deleted(translation: &str) -> bool {
+    translation.eq_ignore_ascii_case(DELETED)
+}
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Dictionary {
-    entries: FxHashMap<Vec<u32>, Vec<Piece>>,
+    /// Each outline and its translation as written, deletions included
+    entries: FxHashMap<Vec<u32>, String>,
     /// Stroke sequences grouped by the text they type, for reverse lookup
     by_text: FxHashMap<String, Vec<Vec<u32>>>,
     max_len: usize,
-    /// The first stroke of every entry longer than one stroke. A stroke in this set
-    /// is incomplete on its own: more strokes may still finish an entry it starts.
-    openers: FxHashSet<u32>,
+    /// How suffixes are spelled: Plover's rules and, when there is one, its word list
+    orthography: Orthography,
 }
 
 /// The file a cache was built from: its path, and the sha256 of its contents when it was read.
@@ -73,8 +88,17 @@ fn cache_version() -> String {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct MergeStats {
     pub loaded: usize,
-    pub unsupported: usize,
     pub invalid: usize,
+}
+
+/// Read bytes as text the way Plover reads a dictionary: UTF-8, or failing that Latin-1.
+#[must_use]
+pub fn decode_text(bytes: &[u8]) -> String {
+    String::from_utf8(bytes.to_vec()).unwrap_or_else(|_| bytes.iter().map(|&b| char::from(b)).collect())
+}
+
+fn has_extension(path: &Path, extension: &str) -> bool {
+    path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
 }
 
 impl Dictionary {
@@ -92,15 +116,11 @@ impl Dictionary {
         let mut problems = Vec::new();
         for path in paths {
             let path = path.as_ref();
-            match std::fs::read_to_string(path)
-                .with_context(|| format!("reading {}", path.display()))
-                .and_then(|text| dict.merge_json(&text))
-            {
+            match dict.merge_file(path) {
                 Ok(stats) => info!(
-                    "steno dictionary {}: {} entries ({} unsupported, {} invalid skipped)",
+                    "steno dictionary {}: {} entries ({} invalid skipped)",
                     path.display(),
                     stats.loaded,
-                    stats.unsupported,
                     stats.invalid
                 ),
                 Err(e) => {
@@ -112,47 +132,107 @@ impl Dictionary {
         (dict, problems)
     }
 
+    /// Merge one file: a JSON or RTF/CRE dictionary, or the orthography word list.
+    pub fn merge_file(&mut self, path: &Path) -> Result<MergeStats> {
+        let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let name = path.file_name().and_then(|n| n.to_str());
+        if name == Some(WORDLIST_FILE) {
+            let words = Orthography::from_wordlist(&decode_text(&bytes));
+            // The first word list found is the one used
+            if !self.orthography.has_words() {
+                self.orthography = words;
+            }
+            return Ok(MergeStats::default());
+        }
+        if has_extension(path, "rtf") {
+            return self.merge_rtf(&bytes);
+        }
+        self.merge_json(&decode_text(&bytes))
+    }
+
     /// Merge one Plover JSON dictionary. Entries already present are kept.
     pub fn merge_json(&mut self, json: &str) -> Result<MergeStats> {
         let raw: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(json).context("dictionary is not a JSON object")?;
-
         let mut stats = MergeStats::default();
+        // Within one file the last of two spellings of the same outline wins, as in Plover
+        let mut entries: FxHashMap<Vec<u32>, String> = FxHashMap::default();
         for (key, value) in raw {
-            let (Some(strokes), Some(text)) = (parse_strokes(&key), value.as_str()) else {
-                stats.invalid += 1;
-                continue;
-            };
-            let Some(pieces) = parse_pieces(text) else {
-                stats.unsupported += 1;
-                continue;
-            };
-            if let Entry::Vacant(slot) = self.entries.entry(strokes.clone()) {
-                self.max_len = self.max_len.max(strokes.len());
-                if strokes.len() > 1 {
-                    self.openers.insert(strokes[0]);
+            match (parse_strokes(&key), value.as_str()) {
+                (Some(strokes), Some(text)) => {
+                    entries.insert(strokes, text.to_string());
                 }
-                let text = render(&pieces, &mut FormatState::default())
-                    .trim_start()
-                    .to_string();
-                self.by_text.entry(text).or_default().push(strokes);
-                slot.insert(pieces);
+                _ => stats.invalid += 1,
+            }
+        }
+        for (strokes, text) in entries {
+            if self.add(strokes, text) {
                 stats.loaded += 1;
             }
         }
         Ok(stats)
     }
 
-    /// The pieces for an exact stroke sequence.
-    #[must_use]
-    pub fn get(&self, strokes: &[u32]) -> Option<&[Piece]> {
-        self.entries.get(strokes).map(Vec::as_slice)
+    /// Merge the entries of one RTF/CRE dictionary.
+    pub fn merge_rtf(&mut self, bytes: &[u8]) -> Result<MergeStats> {
+        let mut stats = MergeStats::default();
+        let mut entries: FxHashMap<Vec<u32>, String> = FxHashMap::default();
+        for (outline, translation) in super::rtf::parse_rtf(bytes)? {
+            match parse_strokes(&outline) {
+                Some(strokes) => {
+                    entries.insert(strokes, translation);
+                }
+                None => stats.invalid += 1,
+            }
+        }
+        for (strokes, text) in entries {
+            if self.add(strokes, text) {
+                stats.loaded += 1;
+            }
+        }
+        Ok(stats)
     }
 
-    /// Whether some entry longer than one stroke starts with `stroke`.
+    /// Add an entry unless an earlier dictionary already has one for the outline.
+    fn add(&mut self, strokes: Vec<u32>, text: String) -> bool {
+        let Entry::Vacant(slot) = self.entries.entry(strokes.clone()) else {
+            return false;
+        };
+        self.max_len = self.max_len.max(strokes.len());
+        if !is_deleted(&text) {
+            if let Some(typed) = plain_text(&text) {
+                self.by_text.entry(typed).or_default().push(strokes);
+            }
+        }
+        slot.insert(text);
+        true
+    }
+
+    /// The translation of an exact outline, as written. `None` if there is none, or the
+    /// outline was deleted.
     #[must_use]
-    pub fn opens_longer_entry(&self, stroke: u32) -> bool {
-        self.openers.contains(&stroke)
+    pub fn lookup(&self, strokes: &[u32]) -> Option<&str> {
+        self.entries
+            .get(strokes)
+            .map(String::as_str)
+            .filter(|translation| !is_deleted(translation))
+    }
+
+    /// Use this orthography, as if its word list had been read.
+    pub fn set_orthography(&mut self, orthography: Orthography) {
+        self.orthography = orthography;
+    }
+
+    /// How suffixes are spelled.
+    #[must_use]
+    pub const fn orthography(&self) -> &Orthography {
+        &self.orthography
+    }
+
+    /// The length in strokes of the longest outline.
+    #[must_use]
+    pub const fn longest_key(&self) -> usize {
+        self.max_len
     }
 
     /// Every stroke sequence whose translation is exactly `text`, ignoring the
@@ -214,9 +294,9 @@ impl Dictionary {
         (dict, problems)
     }
 
-    /// Every entry, for listing and search.
-    pub fn iter(&self) -> impl Iterator<Item = (&Vec<u32>, &Vec<Piece>)> {
-        self.entries.iter()
+    /// Every entry that is in force, for listing and search.
+    pub fn iter(&self) -> impl Iterator<Item = (&Vec<u32>, &String)> {
+        self.entries.iter().filter(|(_, translation)| !is_deleted(translation))
     }
 
     /// Length in strokes of the longest entry.
@@ -305,11 +385,6 @@ fn prune_cache(dir: &Path, keep: &Path) {
     }
 }
 
-/// Parse `KPA/TKAOEU` into stroke bitmasks. `None` if any part isn't a stroke.
-fn parse_strokes(key: &str) -> Option<Vec<u32>> {
-    key.split('/').map(parse_stroke).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,16 +408,53 @@ mod tests {
         }"#;
         let mut dict = Dictionary::default();
         let stats = dict.merge_json(json).unwrap();
-        assert!(dict.get(&[KAT]).is_some());
-        assert!(dict.get(&[KPA, TKAOEU]).is_some());
+        assert_eq!(dict.lookup(&[KAT]), Some("cat"));
+        assert_eq!(dict.lookup(&[KPA, TKAOEU]), Some("example"));
+        // Commands are entries like any other: they are run when the stroke is typed
+        assert!(dict.lookup(&[parse_strokes("-PB").unwrap()[0]]).is_some());
         assert_eq!(
             stats,
             MergeStats {
-                loaded: 2,
-                unsupported: 1,
+                loaded: 3,
                 invalid: 2,
             }
         );
+    }
+
+    #[test]
+    fn a_deleted_entry_hides_the_same_outline_in_later_dictionaries() {
+        let mut dict = Dictionary::default();
+        dict.merge_json(&format!(r#"{{"KAT": "{DELETED}"}}"#)).unwrap();
+        dict.merge_json(r#"{"KAT": "cat", "TKOG": "dog"}"#).unwrap();
+        assert_eq!(dict.lookup(&[KAT]), None);
+        assert!(dict.strokes_for("cat").is_empty(), "a deleted entry has no reverse lookup either");
+        assert_eq!(dict.iter().count(), 1);
+        // In any letter case
+        let mut upper = Dictionary::default();
+        upper.merge_json(&format!(r#"{{"KAT": "{}"}}"#, DELETED.to_uppercase())).unwrap();
+        assert_eq!(upper.lookup(&[KAT]), None);
+    }
+
+    #[test]
+    fn number_keys_and_the_word_boundary_stroke_are_read_in_keys() {
+        let mut dict = Dictionary::default();
+        dict.merge_json(r#"{"1": "one", "1-9": "x", "/S": "{prefix^}"}"#).unwrap();
+        assert_eq!(dict.lookup(&[parse_strokes("1").unwrap()[0]]), Some("one"));
+        assert_eq!(dict.lookup(&[0, parse_strokes("S").unwrap()[0]]), Some("{prefix^}"));
+        assert_eq!(dict.longest_key(), 2);
+    }
+
+    #[test]
+    fn within_one_file_the_later_of_two_spellings_of_an_outline_wins() {
+        let mut dict = Dictionary::default();
+        dict.merge_json(r#"{"KAT": "first", "KA-T": "second"}"#).unwrap();
+        assert_eq!(dict.lookup(&[KAT]), Some("second"));
+    }
+
+    #[test]
+    fn latin_1_files_are_read_like_plover_reads_them() {
+        assert_eq!(decode_text("caf\u{e9}".as_bytes()), "caf\u{e9}");
+        assert_eq!(decode_text(&[b'c', b'a', b'f', 0xe9]), "caf\u{e9}");
     }
 
     #[test]
@@ -431,10 +543,7 @@ mod tests {
         let mut dict = Dictionary::default();
         dict.merge_json(r#"{"KAT": "kitty"}"#).unwrap();
         dict.merge_json(r#"{"KAT": "cat"}"#).unwrap();
-        assert_eq!(
-            dict.get(&[KAT]),
-            Some(&[Piece::Text("kitty".to_string())][..])
-        );
+        assert_eq!(dict.lookup(&[KAT]), Some("kitty"));
     }
 
     #[test]

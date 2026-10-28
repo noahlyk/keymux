@@ -2,7 +2,7 @@
 //! how a learner sees what a stroke was, and which strokes matched nothing.
 
 use super::layout::render_stroke;
-use super::translate::StenoOutput;
+use super::translate::{OutputOp, StenoOutput};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -27,9 +27,20 @@ pub fn describe(output: Option<&StenoOutput>, unmatched: bool) -> String {
         Some(StenoOutput::Retype { backspaces, text }) => {
             format!("-{backspaces} {text:?}")
         }
-        Some(StenoOutput::Keys(presses)) => presses
+        Some(StenoOutput::Ops(ops)) => ops
             .iter()
-            .map(|press| format!("{:?}", press.key))
+            .map(|op| match op {
+                OutputOp::Backspaces(count) => format!("-{count}"),
+                OutputOp::Text(text) => format!("{text:?}"),
+                // The keys pressed, not the modifiers held while they are
+                OutputOp::Keys(events) => events
+                    .iter()
+                    .filter(|(key, down)| *down && !key.is_modifier())
+                    .map(|(key, _)| format!("{key:?}"))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                OutputOp::Command(command) => format!("{{plover:{command}}}"),
+            })
             .collect::<Vec<_>>()
             .join(" "),
         None => String::new(),
@@ -96,20 +107,17 @@ mod tests {
     #[test]
     fn describes_key_presses_by_key_name() {
         use crate::keycode::KeyCode;
-        use crate::steno::format::KeyPress;
-        let presses = vec![
-            KeyPress {
-                modifiers: vec![KeyCode::KC_LSFT],
-                key: KeyCode::KC_LEFT,
-            },
-            KeyPress {
-                modifiers: vec![],
-                key: KeyCode::KC_ENT,
-            },
+        let events = vec![
+            (KeyCode::KC_LSFT, true),
+            (KeyCode::KC_LEFT, true),
+            (KeyCode::KC_LEFT, false),
+            (KeyCode::KC_LSFT, false),
+            (KeyCode::KC_ENT, true),
+            (KeyCode::KC_ENT, false),
         ];
         // The key name, not the modifier, is what the tape shows
         assert_eq!(
-            describe(Some(&StenoOutput::Keys(presses)), false),
+            describe(Some(&StenoOutput::Ops(vec![OutputOp::Keys(events)])), false),
             "KC_LEFT KC_ENT"
         );
     }

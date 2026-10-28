@@ -32,20 +32,7 @@ fn steno_result(output: Option<StenoOutput>) -> ProcessResult {
         Some(StenoOutput::Retype { backspaces, text }) => {
             ProcessResult::Retype { backspaces, text }
         }
-        // Each press is key down, then key up, with its modifiers held around it
-        Some(StenoOutput::Keys(presses)) => ProcessResult::MultipleEvents(
-            presses
-                .into_iter()
-                .flat_map(|press| {
-                    let mut events: Vec<(KeyCode, bool)> =
-                        press.modifiers.iter().map(|&m| (m, true)).collect();
-                    events.push((press.key, true));
-                    events.push((press.key, false));
-                    events.extend(press.modifiers.iter().rev().map(|&m| (m, false)));
-                    events
-                })
-                .collect(),
-        ),
+        Some(StenoOutput::Ops(ops)) => ProcessResult::Ops(ops),
     }
 }
 
@@ -183,11 +170,15 @@ impl KeymapProcessor {
     /// held strokes that have gone idle. Returns what to type, if anything.
     pub fn check_steno_timeouts(&mut self) -> ProcessResult {
         let now = Instant::now();
-        let output = self
+        let found = self
             .steno_engines
-            .values_mut()
-            .find_map(|engine| engine.tick(now));
-        steno_result(output)
+            .iter_mut()
+            .find_map(|(layer, engine)| Some((layer.clone(), engine.tick(now)?)));
+        let Some((layer, output)) = found else {
+            return ProcessResult::None;
+        };
+        self.leave_if_asked(&layer);
+        steno_result(Some(output))
     }
 
     pub fn get_held_keys(&self) -> Vec<KeyCode> {
@@ -248,6 +239,19 @@ impl KeymapProcessor {
         self.overlay_hub.set_layer(self.overlay_layer_name());
     }
 
+    /// A stroke that wrote `{plover:toggle}` or `{plover:suspend}` leaves the steno layer, so the
+    /// keys type normally again.
+    fn leave_if_asked(&mut self, layer: &Layer) {
+        if self
+            .steno_engines
+            .get_mut(layer)
+            .is_some_and(StenoEngine::take_leave_request)
+        {
+            self.layer_stack.deactivate_layer(layer);
+            self.publish_overlay_layer();
+        }
+    }
+
     /// On a steno layer with no dictionary at all, point the user at how to get one.
     /// Rate-limited so holding a key doesn't spam notifications.
     fn steno_setup_hint(&mut self) {
@@ -279,6 +283,7 @@ impl KeymapProcessor {
                     let layer = layer.clone();
                     self.held_keys.remove(&keycode);
                     let output = self.steno_engines.get_mut(&layer)?.release(keycode);
+                    self.leave_if_asked(&layer);
                     return Some(steno_result(output));
                 }
                 // A swallowed press must not produce a release on its own

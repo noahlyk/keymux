@@ -349,6 +349,18 @@ pub struct StenoConfig {
     /// strokes are used up by this and no longer type their dictionary entries. Off when unset.
     #[serde(default)]
     pub lookup_stroke: Option<String>,
+    /// Put the space after each word instead of before it, as Plover's "After Output" does.
+    /// Lapwing is written for spaces after.
+    #[serde(default)]
+    pub spaces_after: bool,
+    /// The first word of a session attaches to the text already there, so it has no space in
+    /// front of it. Plover's `start_attached`, which is on here: steno is usually turned on
+    /// in the middle of writing.
+    #[serde(default = "default_true")]
+    pub start_attached: bool,
+    /// The first word of a session is capitalized. Plover's `start_capitalized`.
+    #[serde(default)]
+    pub start_capitalized: bool,
 }
 
 fn default_steno_layout() -> String {

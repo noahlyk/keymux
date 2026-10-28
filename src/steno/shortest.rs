@@ -6,7 +6,7 @@
 //! - one fingerspelled letter per letter, from the dictionary's `{&x}` entries
 //!
 //! Segments only join where the translator would put no space between them. Its
-//! spacing rules (see `format::render`) add a space before every word and before
+//! spacing rules (see [`super::formatter`]) add a space before every word and before
 //! every fingerspelled letter, except that consecutive fingerspelled letters join.
 //! So under the current rules:
 //! - letters join only with letters, and a word can't be glued after a letter
@@ -19,7 +19,6 @@
 //! attaches its text, such as `{^...}`, or a letter that doesn't add a space).
 
 use super::dict::Dictionary;
-use super::format::Piece;
 use std::collections::HashMap;
 
 /// The fewest strokes that type `word` exactly, or `None` if neither a plain
@@ -59,9 +58,7 @@ fn spelled_outline(letters: &HashMap<char, u32>, target: &[char]) -> Option<Vec<
 /// The fewest-stroke dictionary entry whose plain text is exactly `target`.
 fn whole_word_outline(dict: &Dictionary, target: &[char]) -> Option<Vec<u32>> {
     dict.iter()
-        .filter(|(_, pieces)| {
-            matches!(pieces.as_slice(), [Piece::Text(text)] if text.chars().eq(target.iter().copied()))
-        })
+        .filter(|(_, translation)| translation.chars().eq(target.iter().copied()))
         .map(|(strokes, _)| strokes.clone())
         .min_by_key(|strokes| {
             (strokes.len(), strokes.iter().map(|s| s.count_ones()).sum::<u32>(), strokes.clone())
@@ -79,10 +76,13 @@ fn relax(slot: &mut Option<Vec<u32>>, candidate: Vec<u32>) {
 /// letter has more than one, the lowest stroke is used so the answer doesn't depend on order.
 fn letter_strokes(dict: &Dictionary) -> HashMap<char, u32> {
     let mut map: HashMap<char, u32> = HashMap::new();
-    for (strokes, pieces) in dict.iter() {
+    for (strokes, translation) in dict.iter() {
         // `{>}` only keeps the letter lowercase, which it already is
-        let pieces: Vec<&Piece> = pieces.iter().filter(|piece| !matches!(piece, Piece::LowercaseNext)).collect();
-        let ([stroke], [Piece::Fingerspell(letters)]) = (strokes.as_slice(), pieces.as_slice()) else {
+        let body = translation.strip_prefix("{>}").unwrap_or(translation);
+        let Some(letters) = body.strip_prefix("{&").and_then(|rest| rest.strip_suffix('}')) else {
+            continue;
+        };
+        let [stroke] = strokes.as_slice() else {
             continue;
         };
         let mut chars = letters.chars();

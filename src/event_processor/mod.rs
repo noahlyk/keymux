@@ -1,5 +1,6 @@
 use crate::keyboard_id::KeyboardId;
 use crate::keycode::KeyCode;
+use crate::steno::translate::OutputOp;
 use actions::ProcessResult as ProcResult;
 pub use actions::ProcessResult;
 use anyhow::{Context, Result};
@@ -210,6 +211,9 @@ fn run_event_processor(
                                 ProcessResult::Retype { backspaces, text } => {
                                     retype(&mut virtual_device, &mut pacer, backspaces, &text)?;
                                 }
+                                ProcessResult::Ops(ops) => {
+                                    emit_ops(&mut virtual_device, &mut pacer, &ops)?;
+                                }
                                 ProcessResult::TypeString(text, add_enter) => {
                                     // Type out the string character by character
                                     type_string(&mut virtual_device, &mut pacer, &text, add_enter)?;
@@ -284,6 +288,9 @@ fn run_event_processor(
                     }
                     ProcResult::Retype { backspaces, text } => {
                         retype(&mut virtual_device, &mut pacer, backspaces, &text)?;
+                    }
+                    ProcResult::Ops(ops) => {
+                        emit_ops(&mut virtual_device, &mut pacer, &ops)?;
                     }
                     _ => {}
                 }
@@ -633,6 +640,41 @@ fn retype(
     text: &str,
 ) -> Result<()> {
     emit_keystrokes(virtual_device, pacer, &retype_keystrokes(backspaces, text))
+}
+
+/// Do what a steno stroke asked for, in order: delete, type, press keys.
+fn emit_ops(virtual_device: &mut VirtualDevice, pacer: &mut Pacer, ops: &[OutputOp]) -> Result<()> {
+    let mut i = 0;
+    while i < ops.len() {
+        match &ops[i] {
+            OutputOp::Backspaces(count) => {
+                // The text that replaces what was deleted goes out with it
+                if let Some(OutputOp::Text(text)) = ops.get(i + 1) {
+                    retype(virtual_device, pacer, *count, text)?;
+                    i += 1;
+                } else {
+                    retype(virtual_device, pacer, *count, "")?;
+                }
+            }
+            OutputOp::Text(text) => type_string(virtual_device, pacer, text, false)?,
+            OutputOp::Keys(events) => {
+                let groups: Vec<Vec<InputEvent>> = events
+                    .iter()
+                    .map(|(key, pressed)| {
+                        vec![
+                            InputEvent::new_now(EventType::KEY, Key::new(key.code()).code(), i32::from(*pressed)),
+                            InputEvent::new_now(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT),
+                        ]
+                    })
+                    .collect();
+                emit_keystrokes(virtual_device, pacer, &groups)?;
+            }
+            // Commands were run by the steno engine
+            OutputOp::Command(_) => {}
+        }
+        i += 1;
+    }
+    Ok(())
 }
 
 /// Type a string by emitting key events for each character

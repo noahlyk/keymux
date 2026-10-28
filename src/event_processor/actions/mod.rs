@@ -27,6 +27,8 @@ pub enum ProcessResult {
     TypeString(String, bool),
     /// Delete `backspaces` characters, then type `text` (used for undo)
     Retype { backspaces: usize, text: String },
+    /// Several things in order: typing, deleting, key presses (what a steno stroke can ask for)
+    Ops(Vec<crate::steno::translate::OutputOp>),
     None,
 }
 

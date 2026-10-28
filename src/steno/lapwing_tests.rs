@@ -6,11 +6,10 @@
 //! first), the same files a Lapwing layer uses in production.
 
 use super::dict::Dictionary;
-use super::format::KeyPress;
 use super::layout::parse_stroke;
 use super::setup::LAPWING_FILES;
 use super::numbers::NUMBER_BIT;
-use super::translate::{StenoOutput, Translator, UNDO_STROKE};
+use super::translate::{OutputOp, StenoOutput, Translator, UNDO_STROKE};
 use crate::keycode::KeyCode;
 use std::path::PathBuf;
 
@@ -119,16 +118,7 @@ fn type_with(dict: Dictionary, strokes: &[&str]) -> String {
     let mut translator = Translator::new(dict);
     let mut typed = String::new();
     for stroke in strokes {
-        match translator.stroke(parse_stroke(stroke).unwrap()) {
-            None | Some(StenoOutput::Keys(_)) => {}
-            Some(StenoOutput::Type(text)) => typed.push_str(&text),
-            Some(StenoOutput::Retype { backspaces, text }) => {
-                for _ in 0..backspaces {
-                    typed.pop();
-                }
-                typed.push_str(&text);
-            }
-        }
+        apply_output(&mut typed, translator.stroke(parse_stroke(stroke).unwrap()));
     }
     typed
 }
@@ -216,7 +206,7 @@ fn book_worked_examples_type_what_the_book_shows() {
 
 /// Random steno sessions, checked after every stroke: the screen, rebuilt from the outputs
 /// the translator returns, must equal the translator's own record of the text. Covers
-/// undo, space, backspace and repeat, interleaved with real Lapwing strokes.
+/// undo and repeat, interleaved with real Lapwing strokes.
 #[test]
 #[ignore = "needs Lapwing's dictionaries in ~/.config/keymux/steno/lapwing; run with --ignored"]
 fn random_sessions_keep_the_screen_and_the_translator_in_step() {
@@ -240,16 +230,7 @@ fn random_sessions_keep_the_screen_and_the_translator_in_step() {
         let mut screen = String::new();
         for step in 0..150 {
             match next(100) {
-                // Space, backspace and undo are the keys the steno layer handles itself
-                0..=3 => {
-                    let output = translator.space();
-                    apply_output(&mut screen, Some(output));
-                }
-                4..=5 => {
-                    translator.backspace();
-                    screen.pop();
-                }
-                6..=12 => {
+                0..=12 => {
                     let output = translator.stroke(UNDO_STROKE);
                     apply_output(&mut screen, output);
                 }
@@ -270,14 +251,15 @@ fn random_sessions_keep_the_screen_and_the_translator_in_step() {
 
 /// Apply one translator output to the simulated screen.
 fn apply_output(screen: &mut String, output: Option<StenoOutput>) {
-    match output {
-        None | Some(StenoOutput::Keys(_)) => {}
-        Some(StenoOutput::Type(text)) => screen.push_str(&text),
-        Some(StenoOutput::Retype { backspaces, text }) => {
-            for _ in 0..backspaces {
-                screen.pop();
+    for op in output.map(StenoOutput::into_ops).unwrap_or_default() {
+        match op {
+            OutputOp::Text(text) => screen.push_str(&text),
+            OutputOp::Backspaces(count) => {
+                for _ in 0..count {
+                    screen.pop();
+                }
             }
-            screen.push_str(&text);
+            OutputOp::Keys(_) | OutputOp::Command(_) => {}
         }
     }
 }
@@ -285,31 +267,34 @@ fn apply_output(screen: &mut String, output: Option<StenoOutput>) {
 /// Chapter 26's movement commands, with the fixture entries they use.
 const CH26: &str = r##"{
     "#TPH-R": "{#Left}{^}", "#TPH*R": "{#Shift_l(Left)}{^}",
-    "#TPH-RB": "{#Control_L(Left)}{^}", "KAT": "cat"
+    "#TPH-RB": "{#Control_L(Left)}{^}", "KAT": "cat", "#": "=repeat_last_translation"
 }"##;
 
-/// The one key press a stroke makes, from the translator's output.
-fn key_presses(json: &str, strokes: &[&str]) -> Vec<KeyPress> {
+/// The key events strokes make, from the translator's output: `(key, true)` is a press.
+fn key_presses(json: &str, strokes: &[&str]) -> Vec<(KeyCode, bool)> {
     let mut dict = Dictionary::default();
     dict.merge_json(json).unwrap();
     let mut translator = Translator::new(dict);
-    let mut presses = Vec::new();
+    let mut events = Vec::new();
     for stroke in strokes {
-        if let Some(StenoOutput::Keys(keys)) = translator.stroke(parse_stroke(stroke).unwrap()) {
-            presses.extend(keys);
+        for op in translator
+            .stroke(parse_stroke(stroke).unwrap())
+            .map(StenoOutput::into_ops)
+            .unwrap_or_default()
+        {
+            if let OutputOp::Keys(keys) = op {
+                events.extend(keys);
+            }
         }
     }
-    presses
+    events
 }
 
 #[test]
 fn ch26_basic_movement_presses_its_key() {
     assert_eq!(
         key_presses(CH26, &["#TPH-R"]),
-        vec![KeyPress {
-            modifiers: vec![],
-            key: KeyCode::KC_LEFT
-        }]
+        vec![(KeyCode::KC_LEFT, true), (KeyCode::KC_LEFT, false)]
     );
 }
 
@@ -317,10 +302,12 @@ fn ch26_basic_movement_presses_its_key() {
 fn ch26_selection_holds_shift_while_moving() {
     assert_eq!(
         key_presses(CH26, &["#TPH*R"]),
-        vec![KeyPress {
-            modifiers: vec![KeyCode::KC_LSFT],
-            key: KeyCode::KC_LEFT
-        }]
+        vec![
+            (KeyCode::KC_LSFT, true),
+            (KeyCode::KC_LEFT, true),
+            (KeyCode::KC_LEFT, false),
+            (KeyCode::KC_LSFT, false),
+        ]
     );
 }
 
@@ -328,28 +315,30 @@ fn ch26_selection_holds_shift_while_moving() {
 fn ch26_word_movement_holds_control() {
     assert_eq!(
         key_presses(CH26, &["#TPH-RB"]),
-        vec![KeyPress {
-            modifiers: vec![KeyCode::KC_LCTL],
-            key: KeyCode::KC_LEFT
-        }]
+        vec![
+            (KeyCode::KC_LCTL, true),
+            (KeyCode::KC_LEFT, true),
+            (KeyCode::KC_LEFT, false),
+            (KeyCode::KC_LCTL, false),
+        ]
     );
 }
 
 #[test]
 fn ch26_number_key_repeats_the_last_movement() {
-    // Lapwing: `#TPH-R/#/#` moves left three times
-    assert_eq!(key_presses(CH26, &["#TPH-R", "#", "#"]).len(), 3);
+    // Lapwing: `#TPH-R/#/#` moves left three times (a press and a release each)
+    assert_eq!(key_presses(CH26, &["#TPH-R", "#", "#"]).len(), 6);
 }
 
 #[test]
-fn ch26_undo_after_movement_leaves_text_alone() {
+fn ch26_undo_after_movement_goes_on_to_the_word_before_it() {
     let mut dict = Dictionary::default();
     dict.merge_json(CH26).unwrap();
     let mut translator = Translator::new(dict);
     translator.stroke(parse_stroke("KAT").unwrap());
     translator.stroke(parse_stroke("#TPH-R").unwrap());
-    // The undo ends at the movement: the word on screen is not deleted
-    assert_eq!(translator.stroke(UNDO_STROKE), None);
+    // As in Plover, undo skips a translation that typed nothing, and takes back the one before
+    // it in the same stroke
     assert!(matches!(
         translator.stroke(UNDO_STROKE),
         Some(StenoOutput::Retype { backspaces: 3, .. })
@@ -374,67 +363,35 @@ fn real_lapwing_movement_table_presses_its_keys() {
     for (stroke, key) in table {
         let mut translator = Translator::new(dict.clone());
         let output = translator.stroke(parse_stroke(stroke).unwrap());
-        let Some(StenoOutput::Keys(presses)) = output else {
+        let Some(OutputOp::Keys(events)) = output.clone().and_then(|o| {
+            o.into_ops().into_iter().find(|op| matches!(op, OutputOp::Keys(_)))
+        }) else {
             panic!("{stroke} should press a key, got {output:?}");
         };
-        assert_eq!(presses[0].key, key, "{stroke}");
+        assert!(events.contains(&(key, true)), "{stroke}: {events:?}");
     }
 }
 
-/// Entries keymux can't type, and why. Anything not in this list is a gap in the engine.
-fn expected_unsupported(value: &str) -> Option<&'static str> {
-    if value.starts_with('=') {
-        // Plover functions such as `=undo` and `=repeat_last_translation`. keymux handles
-        // `*` and `#` itself, so these entries are never looked up.
-        Some("plover function, handled by the translator")
-    } else if value.contains("PLOVER:") {
-        // Plover's own windows (lookup, add translation, configure), not typing
-        Some("plover application command, not typing")
-    } else if value.contains(":stitch") {
-        // Plover's stitching plugin: not taught anywhere in the book
-        Some("plover stitching, not taught in the book")
-    } else if value.contains("MODE:")
-        || value.contains("upper_first_word")
-        || value.contains("{*-|}")
-        || value.contains("{*}")
-    {
-        // Plover-only modes and casing that the book never uses
-        Some("plover mode or casing, not taught in the book")
-    } else {
-        None
-    }
-}
-
+/// Every entry of Lapwing's dictionaries is a translation keymux can format: none is skipped
+/// at load time, and none panics when it is typed.
 #[test]
 #[ignore = "needs Lapwing's dictionaries in ~/.config/keymux/steno/lapwing; run with --ignored"]
-fn every_unsupported_lapwing_entry_is_a_known_category() {
-    use std::collections::BTreeMap;
+fn every_lapwing_entry_loads_and_formats() {
     let home = std::env::var("HOME").unwrap();
     let dir = PathBuf::from(home).join(".config/keymux/steno/lapwing");
-    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-    let mut gaps = Vec::new();
+    let mut entries = 0;
     for file in LAPWING_FILES {
         let json = std::fs::read_to_string(dir.join(file)).unwrap();
-        let raw: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(&json).unwrap();
-        for (stroke, value) in raw {
-            let text = value.as_str().unwrap_or_default();
-            if super::format::parse_pieces(text).is_some() {
-                continue;
-            }
-            match expected_unsupported(text) {
-                Some(category) => *counts.entry(category).or_default() += 1,
-                None => gaps.push(format!("{file}: {stroke} = {text}")),
-            }
+        let mut dict = Dictionary::default();
+        let stats = dict.merge_json(&json).unwrap();
+        assert_eq!(stats.invalid, 0, "{file}");
+        entries += stats.loaded;
+        for (_, translation) in dict.iter() {
+            let _ = super::formatter::plain_text(translation);
+            let _ = super::formatter::leaves_attached(translation);
         }
     }
-    println!("unsupported Lapwing entries by category: {counts:?}");
-    assert!(
-        gaps.is_empty(),
-        "{} entries keymux can't type and doesn't know why:\n{}",
-        gaps.len(),
-        gaps.iter().take(40).cloned().collect::<Vec<_>>().join("\n")
-    );
+    println!("{entries} Lapwing entries");
 }
 
 #[test]
@@ -442,6 +399,6 @@ fn every_unsupported_lapwing_entry_is_a_known_category() {
 fn real_lapwing_dictionaries_support_chapter_20_case_commands() {
     // KPA is "capitalize next" (`{:case:cap_first_word}`), not a skipped plugin command
     let dict = lapwing_dictionary();
-    assert!(dict.get(&[parse_stroke("KPA").unwrap()]).is_some());
-    assert!(dict.get(&[parse_stroke("KA*PD").unwrap()]).is_some());
+    assert!(dict.lookup(&[parse_stroke("KPA").unwrap()]).is_some());
+    assert!(dict.lookup(&[parse_stroke("KA*PD").unwrap()]).is_some());
 }

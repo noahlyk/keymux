@@ -346,12 +346,12 @@ fn undo_with_nothing_on_the_tape_presses_ctrl_backspace() {
     // `*` with nothing typed on this layer takes back a word with the keys that do it
     assert_eq!(
         chord(&mut p, &[KeyCode::KC_T]),
-        ProcessResult::MultipleEvents(vec![
+        ProcessResult::Ops(vec![crate::steno::translate::OutputOp::Keys(vec![
             (KeyCode::KC_LCTL, true),
             (KeyCode::KC_BSPC, true),
             (KeyCode::KC_BSPC, false),
             (KeyCode::KC_LCTL, false),
-        ])
+        ])])
     );
 }
 
@@ -416,12 +416,12 @@ fn enter_outlines_produce_their_output() {
     // #R-R: number key 1 (#), F (R-) and J (-R)
     assert_eq!(
         chord(&mut p, &[KeyCode::KC_1, KeyCode::KC_F, KeyCode::KC_J]),
-        ProcessResult::MultipleEvents(vec![
+        ProcessResult::Ops(vec![crate::steno::translate::OutputOp::Keys(vec![
             (KeyCode::KC_LSFT, true),
             (KeyCode::KC_ENT, true),
             (KeyCode::KC_ENT, false),
             (KeyCode::KC_LSFT, false),
-        ])
+        ])])
     );
 }
 

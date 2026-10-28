@@ -28,7 +28,26 @@ from plover.translation import Translator
 
 import dicts
 
+class Recording(dict):
+    """The word list, remembering which words were asked about."""
+
+    def __init__(self, words):
+        super().__init__(words)
+        self.asked = set()
+
+    def __contains__(self, word):
+        self.asked.add(word)
+        return super().__contains__(word)
+
+    def __getitem__(self, word):
+        self.asked.add(word)
+        return super().__getitem__(word)
+
+
 OUT_PATH = sys.argv[1]
+WORDS_PATH = sys.argv[2]
+WORDS = Recording(system.ORTHOGRAPHY_WORDS)
+system.ORTHOGRAPHY_WORDS = WORDS
 KEYMUX_LEFT = ["S-", "T-", "K-", "P-", "W-", "H-", "R-", "A-", "O-"]
 KEYMUX_RIGHT = ["-E", "-U", "-F", "-R", "-P", "-B", "-L", "-G", "-T", "-S", "-D", "-Z"]
 
@@ -85,11 +104,22 @@ class Out:
         self.events.append(["command", command])
 
 
-def run(dict_sets, strokes):
+CONFIGS = {
+    "default": {"start_attached": False, "start_capitalized": False, "spaces_after": False},
+    "attached": {"start_attached": True, "start_capitalized": False, "spaces_after": False},
+    "capitalized": {"start_attached": False, "start_capitalized": True, "spaces_after": False},
+    "after": {"start_attached": False, "start_capitalized": False, "spaces_after": True},
+}
+
+
+def run(dict_sets, strokes, config):
     """dict_sets: list of {steno: translation}, highest priority first."""
     translator = Translator()
     translator.set_dictionary(StenoDictionaryCollection([make_dict(d) for d in dict_sets]))
     formatter = Formatter()
+    formatter.start_attached = config["start_attached"]
+    formatter.start_capitalized = config["start_capitalized"]
+    formatter.set_space_placement("After Output" if config["spaces_after"] else "Before Output")
     out = Out()
     formatter.set_output(out)
     translator.add_listener(formatter.format)
@@ -132,7 +162,7 @@ def strokes_for(*parts):
     """Names from MAIN become their strokes; anything else is a stroke already."""
     out = []
     for p in parts:
-        out.append(dicts.MAIN[p][0] if p in dicts.MAIN else p)
+        out.extend((dicts.MAIN[p][0] if p in dicts.MAIN else p).split("/"))
     return out
 
 
@@ -327,6 +357,25 @@ case("key then text", "kitchen", "key_then_text", "dog")
 case("backspace key", "kitchen", "cat", "backspace_key")
 case("combo then undo", "kitchen", "cat", "left", "*", "*")
 case("combo keeps cap pending", "kitchen", "period", "left", "cat")
+# --- Lapwing's plugins
+case("stitch letters", "kitchen", "stitch_a", "stitch_b", "stitch_c")
+case("stitch with delimiter", "kitchen", "stitch_a", "stitch_tilde", "stitch_b")
+case("stitch after a word", "kitchen", "cat", "stitch_a", "stitch_b")
+case("stitch last word", "kitchen", "cat", "stitch_last")
+case("stitch last two words", "kitchen", "cat", "dog", "stitch_last2")
+case("stitch last word default", "kitchen", "cat", "stitch_last_default")
+case("stitch last word of nothing", "kitchen", "stitch_last")
+case("stitch then undo", "kitchen", "cat", "stitch_last", "*")
+case("repeat translation", "kitchen", "cat", "repeat_t")
+case("repeat two translations", "kitchen", "cat", "dog", "repeat_t2")
+case("repeat zero translations", "kitchen", "cat", "dog", "repeat_zero")
+case("repeat translation after suffix", "kitchen", "make", "ing", "repeat_t")
+case("repeat last word", "kitchen", "cat", "dog", "repeat_w")
+case("repeat last two words", "kitchen", "perfect", "situation", "repeat_w2")
+case("repeat last fragment", "kitchen", "cat", "dog", "repeat_f")
+case("repeat last characters", "kitchen", "cat", "dog", "repeat_c")
+case("repeat on nothing", "kitchen", "repeat_t", "repeat_w", "repeat_f", "repeat_c")
+case("repeat then undo", "kitchen", "cat", "repeat_w", "*")
 # --- commands
 for name in ("suspend", "resume", "toggle", "add", "lookup", "suggest", "config", "focus", "quit", "set_config", "upper"):
     case(f"command {name}", "kitchen", "cat", f"cmd_{name}", "dog")
@@ -397,7 +446,7 @@ def pool(set_name):
     # Multi-stroke outlines contribute their strokes one by one so the fuzz can complete them
     parts = []
     for s in strokes:
-        parts.extend(s.split("/"))
+        parts.extend(part for part in s.split("/") if part)
     extra = SPECIAL_RAW + ["KATS", "KAGT", "TKOGS", "1", "2", "12", "-6", "#T", "KAT", "HROG", "TKAOEUS"]
     return sorted(set(parts + extra)) + ["*"] * 60
 
@@ -413,7 +462,16 @@ def fuzz(set_name, count, seed, longest):
     return cases
 
 
-ALL = FEATURE_CASES + fuzz("kitchen", 2600, 7, 9) + fuzz("layered", 500, 11, 7) + fuzz("empty", 100, 13, 6)
+ALL = []
+for name, set_name, strokes in FEATURE_CASES:
+    for config_name in CONFIGS:
+        ALL.append((name if config_name == "default" else f"{name} [{config_name}]", set_name, strokes, config_name))
+for name, set_name, strokes in fuzz("kitchen", 2200, 7, 9) + fuzz("layered", 400, 11, 7) + fuzz("empty", 80, 13, 6):
+    ALL.append((name, set_name, strokes, "default"))
+for name, set_name, strokes in fuzz("kitchen", 500, 17, 8):
+    ALL.append((name + " [after]", set_name, strokes, "after"))
+for name, set_name, strokes in fuzz("kitchen", 250, 19, 8):
+    ALL.append((name + " [attached]", set_name, strokes, "attached"))
 
 result = {
     "sets": {
@@ -423,9 +481,9 @@ result = {
     "cases": [],
 }
 bad = 0
-for name, set_name, strokes in ALL:
+for name, set_name, strokes, config_name in ALL:
     try:
-        steps = run(SETS[set_name], strokes)
+        steps = run(SETS[set_name], strokes, CONFIGS[config_name])
     except Exception as e:  # a case Plover itself can't run is a mistake in the case
         bad += 1
         print("SKIPPED", name, strokes, repr(e), file=sys.stderr)
@@ -434,6 +492,7 @@ for name, set_name, strokes in ALL:
         {
             "name": name,
             "set": set_name,
+            "config": CONFIGS[config_name],
             "strokes": strokes,
             "texts": [s[0] for s in steps],
             "events": [s[1] for s in steps],
@@ -442,4 +501,8 @@ for name, set_name, strokes in ALL:
 
 with open(OUT_PATH, "w", encoding="utf-8") as fp:
     json.dump(result, fp, ensure_ascii=False, separators=(",", ":"))
+with open(WORDS_PATH, "w", encoding="utf-8") as fp:
+    for word in sorted(WORDS.asked):
+        if dict.__contains__(WORDS, word):
+            fp.write(f"{word} {dict.__getitem__(WORDS, word)}\n")
 print(f"wrote {len(result['cases'])} cases ({bad} skipped) to {OUT_PATH}")
