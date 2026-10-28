@@ -539,8 +539,10 @@ To add your own, drop a file in; to switch one off, start its name with `disable
 ├── lapwing/                a theory, installed by `keymux steno theory lapwing`
 │   └── lapwing-base.json
 ├── disabled_plover/        switched off: anything starting with `disabled` is skipped
-└── cache/                  keymux's own copies of the parsed dictionaries
 ```
+
+The parsed copies keymux keeps for fast startup live in `~/.cache/keymux/steno/`, one file per
+set of dictionaries, written over in place. They are safe to delete; they are made again.
 
 **Priority.** When two entries have the same stroke, the one from the earlier file wins. A folder
 is one unit: it ranks among its neighbours by its own name, everything inside it stays together

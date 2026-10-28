@@ -270,19 +270,22 @@ impl Dictionary {
     /// contents it had when the copy was made. Otherwise the JSON is parsed and a new copy saved.
     #[must_use]
     pub fn load_cached(paths: &[impl AsRef<Path>], cache_dir: &Path) -> Self {
-        Self::load_cached_reporting(paths, &fingerprint(paths), cache_dir).0
+        let names: Vec<String> = paths.iter().map(|path| path.as_ref().display().to_string()).collect();
+        Self::load_cached_reporting(paths, &fingerprint(paths), cache_dir, &cache_name(&names)).0
     }
 
-    /// Like `load_cached`, for files whose `fingerprint` is already known. Also returns what
-    /// went wrong with each file that couldn't be read. Nothing is cached then, so a file
-    /// caught mid-save is never remembered as the real thing.
+    /// Like `load_cached`, for files whose `fingerprint` is already known, kept under `name`
+    /// (see [`cache_name`]). Also returns what went wrong with each file that couldn't be
+    /// read. Nothing is cached then, so a file caught mid-save is never remembered as the
+    /// real thing.
     #[must_use]
     pub fn load_cached_reporting(
         paths: &[impl AsRef<Path>],
         sources: &[Source],
         cache_dir: &Path,
+        name: &str,
     ) -> (Self, Vec<String>) {
-        let file = cache_dir.join(format!("{}.bin", cache_name(sources)));
+        let file = cache_dir.join(format!("{name}.bin"));
         if let Some(dict) = read_cache(&file, sources) {
             info!("steno dictionaries restored from {}", file.display());
             return (dict, Vec::new());
@@ -316,12 +319,16 @@ impl Dictionary {
     }
 }
 
-/// A stable name for the cache of these files: a hash of their paths, not their contents,
-/// so an edited file overwrites its old cache instead of leaving it behind.
-fn cache_name(sources: &[Source]) -> String {
+/// The name of the cache file for a dictionary made from `sources`.
+///
+/// That is the folders and files it was asked for, not the files found inside them. Adding,
+/// removing or editing a dictionary then writes over the one cache file instead of leaving a
+/// copy of every version behind.
+#[must_use]
+pub fn cache_name(sources: &[String]) -> String {
     let mut hasher = Sha256::new();
-    for (path, _) in sources {
-        hasher.update(path.as_bytes());
+    for source in sources {
+        hasher.update(source.as_bytes());
         hasher.update(b"\n");
     }
     format!("{:x}", hasher.finalize())[..16].to_string()
@@ -349,7 +356,7 @@ fn write_cache(file: &Path, sources: &[Source], dict: &Dictionary) {
     let tmp: PathBuf = file.with_extension("bin.part");
     let saved = file
         .parent()
-        .map_or(Ok(()), fs::create_dir_all)
+        .map_or(Ok(()), super::setup::create_dir_owned)
         .and_then(|()| fs::write(&tmp, &bytes))
         .and_then(|()| fs::rename(&tmp, file));
     if let Err(e) = saved {
@@ -514,6 +521,25 @@ mod tests {
             1,
             "the changed file overwrites its cache"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adding_and_removing_dictionaries_rewrites_one_cache_file_instead_of_piling_up() {
+        let (dir, file, cache) = cache_fixture("one-file", r#"{"KAT": "cat"}"#);
+        let extra = dir.join("extra.json");
+        fs::write(&extra, r#"{"TKOG": "dog"}"#).unwrap();
+        let asked = cache_name(&[dir.display().to_string()]);
+        let load = |files: &[&Path]| {
+            Dictionary::load_cached_reporting(files, &fingerprint(files), &cache, &asked).0
+        };
+        // The same folder, as its files come and go: always the one cache file
+        let _ = load(&[&file]);
+        let both = load(&[&file, &extra]);
+        assert_eq!(both.strokes_for("dog"), vec![vec![(1 << 1) | (1 << 2) | (1 << 8) | (1 << 17)]]);
+        let _ = load(&[&extra]);
+        let _ = load(&[&file, &extra]);
+        assert_eq!(cache_files(&cache), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 

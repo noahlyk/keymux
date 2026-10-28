@@ -54,9 +54,59 @@ pub fn steno_dir(config_dir: &Path) -> PathBuf {
 }
 
 /// Binary copies of the loaded dictionaries, so starting up doesn't parse the JSON again.
+///
+/// It is made again whenever it is missing, so it doesn't belong with your files: for the usual
+/// `~/.config/keymux` it is `~/.cache/keymux/steno`. For a config folder anywhere else it is a
+/// hidden `.cache` folder inside the steno folder, which is never read as a dictionary.
 #[must_use]
 pub fn cache_dir(config_dir: &Path) -> PathBuf {
-    steno_dir(config_dir).join("cache")
+    let usual = config_dir.file_name().is_some_and(|name| name == "keymux")
+        && config_dir
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == ".config");
+    if usual {
+        if let Some(home) = config_dir.parent().and_then(Path::parent) {
+            return home.join(".cache").join("keymux").join("steno");
+        }
+    }
+    steno_dir(config_dir).join(".cache")
+}
+
+/// Make `dir` and any folders above it that are missing, each given to whoever owns the folder
+/// it is in. The daemon runs as root, and a cache folder it makes in someone's home would
+/// otherwise be root's.
+pub fn create_dir_owned(dir: &Path) -> std::io::Result<()> {
+    let mut missing = Vec::new();
+    let mut at = Some(dir);
+    while let Some(path) = at.filter(|path| !path.exists()) {
+        missing.push(path.to_path_buf());
+        at = path.parent();
+    }
+    for path in missing.iter().rev() {
+        std::fs::create_dir(path)?;
+        hand_to_owner_of_parent(path);
+    }
+    Ok(())
+}
+
+/// Older versions kept the cache in `steno/cache`. Remove it if it is only cache files.
+fn remove_old_cache(config_dir: &Path) {
+    let old = steno_dir(config_dir).join("cache");
+    if old == cache_dir(config_dir) || !old.is_dir() {
+        return;
+    }
+    let only_cache = std::fs::read_dir(&old).is_ok_and(|entries| {
+        entries.flatten().all(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "bin" || ext == "part")
+        })
+    });
+    if only_cache && std::fs::remove_dir_all(&old).is_ok() {
+        tracing::info!("removed the old cache folder {}", old.display());
+    }
 }
 
 /// Lapwing's JSON dictionaries from plover-lapwing-aio. Its `.modal` and `.py` files need
@@ -111,7 +161,8 @@ fn look(root: &Path, dir: &Path, theory: &str, depth: usize, found: &mut Vec<Fou
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_dir() || path == root.join("cache") {
+        let hidden = entry.file_name().to_str().is_some_and(|name| name.starts_with('.'));
+        if !path.is_dir() || hidden || path == root.join("cache") {
             continue;
         }
         if std::fs::read_to_string(path.join(MARKER)).is_ok_and(|text| text.trim() == theory) {
@@ -225,6 +276,7 @@ pub fn prepare_dir(config_dir: &Path) {
     let config_text = std::fs::read_to_string(config_dir.join("config.ron")).unwrap_or_default();
     migrate_older_layout(&dir, &config_text);
     stamp_older_folders(&dir);
+    remove_old_cache(config_dir);
 }
 
 /// Older versions kept Plover's `main.json` at the top of the folder, chose the theory with a
@@ -597,6 +649,48 @@ mod tests {
     /// Stands in for a download: a folder with one file in it
     fn fake_download(folder: &Path) -> Result<()> {
         fs::write(folder.join("fake.json"), "{}").map_err(Into::into)
+    }
+
+    #[test]
+    fn the_cache_lives_in_the_cache_folder_not_with_your_files() {
+        // The usual config folder: the user's own cache folder
+        assert_eq!(
+            cache_dir(Path::new("/home/a/.config/keymux")),
+            PathBuf::from("/home/a/.cache/keymux/steno")
+        );
+        // Anywhere else: a hidden folder in the steno folder, which is never read
+        assert_eq!(
+            cache_dir(Path::new("/tmp/elsewhere")),
+            PathBuf::from("/tmp/elsewhere/steno/.cache")
+        );
+    }
+
+    #[test]
+    fn an_old_cache_folder_made_only_of_cache_files_is_removed_but_yours_is_not() {
+        let config = config("old-cache");
+        let dir = steno_dir(&config);
+        fs::create_dir_all(dir.join("cache")).unwrap();
+        fs::write(dir.join("cache/0123456789abcdef.bin"), "x").unwrap();
+        prepare_dir(&config);
+        assert!(!dir.join("cache").exists());
+
+        // A folder called cache with something of yours in it is left alone
+        fs::create_dir_all(dir.join("cache")).unwrap();
+        fs::write(dir.join("cache/mine.json"), "{}").unwrap();
+        prepare_dir(&config);
+        assert!(dir.join("cache/mine.json").exists());
+        fs::remove_dir_all(&config).unwrap();
+    }
+
+    #[test]
+    fn folders_made_for_the_user_are_made_one_level_at_a_time() {
+        let config = config("owned");
+        let deep = config.join("a/b/c");
+        create_dir_owned(&deep).unwrap();
+        assert!(deep.is_dir());
+        // Already there: nothing to do
+        create_dir_owned(&deep).unwrap();
+        fs::remove_dir_all(&config).unwrap();
     }
 
     #[test]

@@ -14,7 +14,7 @@
 //! A reload that finds a file it can't read, such as one saved half-finished, keeps the
 //! dictionary already in use and tries again on the next change.
 
-use super::dict::{fingerprint, Dictionary, Source};
+use super::dict::{cache_name, fingerprint, Dictionary, Source};
 use super::source::expand;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::{HashMap, HashSet};
@@ -191,7 +191,9 @@ fn refresh(key: &Key) {
     };
 
     // Parsing a large dictionary takes a moment, so it happens with nothing locked
-    let (dict, problems) = Dictionary::load_cached_reporting(&files, &sources, &key.cache_dir);
+    let asked: Vec<String> = key.roots.iter().map(|root| root.display().to_string()).collect();
+    let (dict, problems) =
+        Dictionary::load_cached_reporting(&files, &sources, &key.cache_dir, &cache_name(&asked));
     if !problems.is_empty() && !first_time {
         warn!(
             "steno dictionaries not reloaded, keeping the ones in use: {}",
