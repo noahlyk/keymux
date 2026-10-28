@@ -339,6 +339,7 @@ pub fn run_theory(config_dir: &Path, choice: Option<&str>) -> Result<()> {
         "plover" => download_plover(folder),
         _ => download_lapwing(folder),
     })?;
+    ensure_wordlist(&dir);
     println!(
         "steno theory is now {choice}. Running keymux picks it up on its own; nothing to restart."
     );
@@ -412,11 +413,52 @@ fn switch_theory(dir: &Path, choice: &str, download: impl FnOnce(&Path) -> Resul
     Ok(())
 }
 
-/// Download Plover's main dictionary into `folder`.
+/// Plover's own commands (`*` is undo, and the `{plover:...}` entries), which Plover loads
+/// before its main dictionary.
+pub const COMMANDS_DICT_URL: &str =
+    "https://raw.githubusercontent.com/openstenoproject/plover/master/plover/assets/commands.json";
+
+/// The word list Plover's orthography uses to tell good spellings from bad.
+pub const WORDLIST_URL: &str =
+    "https://raw.githubusercontent.com/openstenoproject/plover/master/plover/assets/american_english_words.txt";
+
+/// Download the orthography word list into the steno folder unless there is one somewhere in it.
+/// Without it suffixes are still spelled by Plover's rules, just not checked against real words.
+fn ensure_wordlist(dir: &Path) {
+    let roots = [dir.to_path_buf()];
+    let found = super::source::expand(&roots, &dir.join("cache"))
+        .iter()
+        .any(|file| file.file_name().and_then(|n| n.to_str()) == Some(super::orthography::WORDLIST_FILE));
+    if found {
+        return;
+    }
+    println!("downloading the word list suffixes are spelled against...");
+    let target = dir.join(super::orthography::WORDLIST_FILE);
+    let partial = dir.join(format!("{}.part", super::orthography::WORDLIST_FILE));
+    let fetched = Command::new("curl")
+        .args(["--silent", "--show-error", "--fail", "--location", "--max-time", "120", "--output"])
+        .arg(&partial)
+        .arg(WORDLIST_URL)
+        .status();
+    let ok = fetched.is_ok_and(|status| status.success())
+        && std::fs::read_to_string(&partial)
+            .is_ok_and(|text| super::orthography::Orthography::from_wordlist(&text).has_words());
+    if ok && std::fs::rename(&partial, &target).is_ok() {
+        hand_to_owner_of_parent(&target);
+        println!("installed {}", target.display());
+    } else {
+        let _ = std::fs::remove_file(&partial);
+        println!("couldn't download the word list; suffixes are spelled by the rules alone");
+    }
+}
+
+/// Download Plover's main dictionary, and its commands, into `folder`.
 fn download_plover(folder: &Path) -> Result<()> {
     println!("downloading Plover's main dictionary...");
     let (entries, checksum) = download_dictionary(MAIN_DICT_URL, &folder.join("main.json"))?;
     println!("installed {entries} entries");
+    let (commands, _) = download_dictionary(COMMANDS_DICT_URL, &folder.join("commands.json"))?;
+    println!("installed {commands} commands"); 
     if checksum != MAIN_DICT_SHA256 {
         println!(
             "warning: Plover's dictionary changed since this keymux release.\n  \

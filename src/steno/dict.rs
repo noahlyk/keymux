@@ -547,6 +547,36 @@ mod tests {
     }
 
     #[test]
+    fn an_rtf_dictionary_loads_like_a_json_one_and_the_word_list_from_the_same_place() {
+        let dir = std::env::temp_dir().join(format!("keymux-dict-rtf-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let rtf = dir.join("pro.rtf");
+        fs::write(
+            &rtf,
+            "{\\rtf1\\ansi\\cxdict\r\n{\\*\\cxs KAT}cat\r\n{\\*\\cxs -S}\\cxds s\r\n}",
+        )
+        .unwrap();
+        let json = dir.join("mine.json");
+        fs::write(&json, r#"{"KAT": "kitty", "TKOG": "dog"}"#).unwrap();
+        let words = dir.join(WORDLIST_FILE);
+        fs::write(&words, "cats 5\ncarries 9\n").unwrap();
+
+        // The first dictionary wins, whichever format it is
+        let dict = Dictionary::load(&[json.as_path(), rtf.as_path(), words.as_path()]);
+        assert_eq!(dict.lookup(&[KAT]), Some("kitty"));
+        assert_eq!(dict.lookup(&[parse_strokes("-S").unwrap()[0]]), Some("{^s}"));
+        assert_eq!(dict.lookup(&[parse_strokes("TKOG").unwrap()[0]]), Some("dog"));
+        assert!(dict.orthography().has_words());
+        assert_eq!(dict.orthography().add_suffix("cat", "s"), "cats");
+
+        let other_way = Dictionary::load(&[rtf.as_path(), json.as_path()]);
+        assert_eq!(other_way.lookup(&[KAT]), Some("cat"));
+        assert!(!other_way.orthography().has_words());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn missing_file_is_skipped() {
         let dict = Dictionary::load(&[Path::new("/nonexistent/steno/main.json")]);
         assert!(dict.is_empty());

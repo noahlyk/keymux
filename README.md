@@ -586,6 +586,39 @@ older layout (`main.json` and a `theory` file at the top, or a theory folder cal
 `lapwing`), it keeps working, and `main.json` is moved into this layout the first time keymux
 starts.
 
+### Plover compatibility
+
+A dictionary written for Plover types the same text here. keymux reads Plover's formats, and its translator, formatter and orthography are ports of Plover's own, which its tests hold to Plover's output.
+
+**Dictionary formats**
+
+| Format | |
+|---|---|
+| JSON (`.json`) | read, as UTF-8 or Latin-1 like Plover does. A value of `{plover:deleted}` hides the same outline in every dictionary after it. |
+| RTF/CRE (`.rtf`) | read: the format professional steno software exchanges. Comments, conflict lists and usage data are skipped, as Plover skips them. |
+| Python programmatic dictionaries (`.py`) | **not run.** They are code, and a keyboard daemon that runs as root won't execute files from your config folder. Lapwing's `jeff-phrasing.py` and the Emily and Abby modifier dictionaries are of this kind. |
+| Other plugin formats (`.sgdct`, `.dct`, `.dix`, Lapwing's `.modal`) | **not read.** Export them to RTF/CRE or JSON from the software that made them. |
+
+Outlines use Plover's notation, with number keys written as digits (`1-9`, `12K`, `-69`), and a leading slash for a word boundary (`/S`, used when the word before is finished).
+
+**Translation language**: every operator on [Plover's page](https://plover.readthedocs.io/en/latest/translation_language.html):
+
+- Attaching and spacing: `{^}` `{^ing}` `{pre^}` `{^-^}` and the `{:attach:...}` forms, orthography-aware suffixes (`{^ing}` after `make` is `making`, using Plover's rules and its word list), `{^ ^}`, `{*?}` `{*!}` and the `=retro_insert_space` `=retro_delete_space` forms, `\n` and `\t`, `{mode:set_space:x}`
+- Glue: `{&a}`, `{:glue:a}`, and numbers made of digits, which glue to each other
+- Case: `{-|}` `{>}` `{<}` and their retroactive `{*-|}` `{*>}` `{*<}`, `{:case:...}`, `{~|"^}` carrying a capital over a quote, and the modes `{mode:caps}` `title` `lower` `camel` `snake` `reset_case` `reset_space` `reset`
+- Punctuation: `{.}` `{,}` `{?}` `{!}` `{:}` `{;}` and `{:stop:.}` `{:comma:,}`
+- Currency: `{*($c)}` and `{:retro_currency:...}`
+- Look-ahead: `{=regex/yes/no}`, such as `{=[AEIOUaeiou]/an/a}`, which fixes the word when the next one is known
+- Key combinations: `{#Return}`, `{#Control_L(a)}`, `{#control(z shift(z))}`, with modifiers, sequences and Plover's key names on a US keyboard
+- Actions: `=undo`, `{*+}` and `=repeat_last_stroke`, `{*}` and `=retro_toggle_asterisk`, `{}` and `{#}` (nothing), `{$}` and `{:word_end}`
+- Translator behaviour: the longest match over recent strokes, `*` undoing a translation and bringing back what it replaced, and the suffix keys `-Z -D -S -G` folded into a stroke that has no entry of its own
+- Commands: `{plover:suspend}` and `{plover:toggle}` leave the steno layer, `{plover:lookup}` opens keymux's lookup, `{plover:set_config:'start_attached':True}` sets how a session starts; the commands that open Plover's windows (`add_translation`, `suggestions`, `configure`, `focus`, `quit`) have nothing to open here and do nothing
+- Lapwing's plugins, which its dictionaries use: `{:stitch:A}`, `{:stitch_last_word:...}`, `=repeat_last_translation`, `=repeat_last_word`, `=repeat_last_fragment`, `=repeat_last_character`
+
+A stroke with no translation types its keys (`STPHA-UBGS`), not Plover's `STPHAUBGS`, and a first word attaches to what is already written unless `start_attached: false`. A key combination can only press keys of a US keyboard: Plover's names for accented letters (`eacute`) aren't sent.
+
+**How it is checked.** `tools/plover-golden` runs Plover's own code and records what it does: 4,400 stroke sequences through every operator, in every start mode and with spaces before and after (`spaces_after: true` is Plover's "After Output", which Lapwing is written for); 7,900 suffixes added to words; 21,500 stroke spellings read and written; RTF files Plover writes and hand-made ones with the format's corners; and 1,800 random sequences over Plover's shipped `main.json` and `commands.json`. keymux must give the same text after every stroke, the same key combinations and the same commands.
+
 ### Config
 
 Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno layer:
@@ -604,6 +637,7 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
 ```
 
 - If `dictionaries` is empty, the layer uses the whole `steno` folder (see above). A list replaces that: each entry is a file, or a folder read the same way, and they are watched and reloaded live too.
+- `spaces_after: true` puts the space after each word instead of before it (Plover's "After Output", which Lapwing is written for), `start_attached: false` makes the first word of a session start with a space, and `start_capitalized: true` capitalizes it. These are Plover's session options of the same names.
 - `keymux steno layout` shows every stroke key and the key that presses it. `layout_overrides` keys are those slot names (`S-`, `A-`, `-E`, `-U`, ...).
 - On a steno layer, keys that are neither stroke keys nor remapped are swallowed, so an accidental press types nothing. Delete always passes through.
 - Turn the layer on with `TO("steno")` (stays on, exclusive) or `TG("steno")` (toggle), and leave with `TO("base")`. A keyboard can also start in steno with `default_layer`.

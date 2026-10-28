@@ -18,7 +18,9 @@
 //!   what is left, so the order never depends on how the disk lists them.
 //! - **Switching off.** A file or folder whose name starts with `disabled` is skipped, so
 //!   renaming `lapwing/` to `disabled_lapwing/` turns it off without deleting it.
-//! - Hidden files (`.name`) and anything that isn't `.json` are skipped.
+//! - Dictionaries are `.json` and `.rtf` (RTF/CRE) files, and the orthography word list
+//!   (`american_english_words.txt`) is found the same way. Hidden files (`.name`) and anything
+//!   else are skipped.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -73,7 +75,7 @@ fn walk(dir: &Path, skip: &Path, depth: usize, files: &mut Vec<PathBuf>) {
         // `metadata` follows links, so a linked file or folder counts as what it points to
         match std::fs::metadata(&path) {
             Ok(meta) if meta.is_dir() => entries.push((order_key(&name, true), path, true)),
-            Ok(meta) if meta.is_file() && is_json(&path) => {
+            Ok(meta) if meta.is_file() && is_dictionary_file(&path) => {
                 entries.push((order_key(&name, false), path, false));
             }
             _ => {}
@@ -112,9 +114,15 @@ fn order_key(name: &std::ffi::OsStr, is_folder: bool) -> OrderKey {
     (if is_folder { 2 } else { 1 }, 0, name.to_lowercase(), name)
 }
 
-fn is_json(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+/// Whether a file is read as part of the dictionary: JSON, RTF/CRE, or the word list.
+fn is_dictionary_file(path: &Path) -> bool {
+    let kind = |wanted: &str| {
+        path.extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case(wanted))
+    };
+    kind("json")
+        || kind("rtf")
+        || path.file_name().and_then(|name| name.to_str()) == Some(super::orthography::WORDLIST_FILE)
 }
 
 #[cfg(test)]
@@ -292,13 +300,22 @@ mod tests {
     }
 
     #[test]
-    fn only_json_files_and_not_hidden_ones_or_the_cache() {
+    fn only_dictionaries_and_the_word_list_and_not_hidden_ones_or_the_cache() {
         let dir = tree(
             "kinds",
-            &["a.json", "b.txt", "c.modal", ".hidden.json", "a.json.part", "cache/x.json"],
+            &[
+                "a.json",
+                "b.txt",
+                "c.modal",
+                ".hidden.json",
+                "a.json.part",
+                "cache/x.json",
+                "d.RTF",
+                "american_english_words.txt",
+            ],
         );
         let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
-        assert_eq!(names(&dir, &found), ["a.json"]);
+        assert_eq!(names(&dir, &found), ["a.json", "american_english_words.txt", "d.RTF"]);
         let _ = fs::remove_dir_all(&dir);
     }
 

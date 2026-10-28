@@ -95,3 +95,51 @@ fn every_reference_case_types_what_plover_types() {
         failures.iter().take(12).cloned().collect::<Vec<_>>().join("\n")
     );
 }
+
+/// The same check against Plover's own shipped dictionaries, which are too big to keep in the
+/// repository. `PLOVER_ASSETS` is a folder with `main.json`, `commands.json` and
+/// `american_english_words.txt`, and `PLOVER_REAL_GOLDEN` the output of
+/// `tools/plover-golden/gen_real.py` over them.
+#[test]
+#[ignore = "needs Plover's dictionaries; see PLOVER_ASSETS and PLOVER_REAL_GOLDEN"]
+fn plovers_own_dictionaries_type_what_plover_types() {
+    let (Ok(assets), Ok(golden)) = (std::env::var("PLOVER_ASSETS"), std::env::var("PLOVER_REAL_GOLDEN")) else {
+        panic!("set PLOVER_ASSETS and PLOVER_REAL_GOLDEN");
+    };
+    let assets = std::path::Path::new(&assets);
+    let mut dict = Dictionary::default();
+    for file in ["commands.json", "main.json", "american_english_words.txt"] {
+        dict.merge_file(&assets.join(file)).unwrap();
+    }
+    let dict = Arc::new(dict);
+    let data: Value = serde_json::from_str(&std::fs::read_to_string(golden).unwrap()).unwrap();
+    let cases = data["cases"].as_array().unwrap();
+    let mut failures = Vec::new();
+    for (n, case) in cases.iter().enumerate() {
+        let mut translator = Translator::with_shared(Arc::clone(&dict), options(&case["config"]));
+        let strokes = case["strokes"].as_array().unwrap();
+        for (step, stroke_text) in strokes.iter().enumerate() {
+            let ops = translator.stroke_ops(stroke(stroke_text.as_str().unwrap()));
+            let want_text = case["texts"][step].as_str().unwrap();
+            let want_events = case["events"][step].as_array().unwrap();
+            if translator.text() != want_text || events(&ops) != *want_events {
+                let typed: Vec<&str> = strokes.iter().map(|s| s.as_str().unwrap()).collect();
+                failures.push(format!(
+                    "case {n}: after stroke {} of {}\n    plover {want_text:?} {want_events:?}\n    keymux {:?} {:?}",
+                    step + 1,
+                    typed.join(" "),
+                    translator.text(),
+                    events(&ops)
+                ));
+                break;
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} cases differ from Plover. The first ones:\n{}",
+        failures.len(),
+        cases.len(),
+        failures.iter().take(10).cloned().collect::<Vec<_>>().join("\n")
+    );
+}
