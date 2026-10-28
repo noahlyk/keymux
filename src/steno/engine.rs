@@ -8,6 +8,7 @@ use super::layout::{build_key_map, preset};
 use super::live;
 use super::lookup::{Lookup, LookupKey};
 use super::overlay::OverlayHub;
+use super::plugin::Chain;
 use super::setup::default_dictionaries;
 use super::tape;
 use super::translate::{OutputOp, StenoOutput, Translator};
@@ -66,7 +67,7 @@ pub struct StenoEngine {
     translator: Translator,
     /// The dictionary, first loaded and then again whenever its files change. `None` when
     /// there is nothing to follow.
-    updates: Option<Receiver<Arc<Dictionary>>>,
+    updates: Option<Receiver<Arc<Chain>>>,
     /// No dictionary has arrived yet, so strokes wait in `backlog`
     loading: bool,
     /// Strokes finished before the dictionaries arrived. Translated once they do.
@@ -129,14 +130,8 @@ impl StenoEngine {
         let updates = live::subscribe(roots, super::setup::cache_dir(config_dir));
 
         // Every layer and keyboard writes to the one history; this layer's dictionaries are its machine
-        let mut translator = Translator::with_history(
-            Arc::new(Dictionary::default()),
-            Arc::clone(history),
-            machine,
-        )
-        .with_plugins(Arc::new(std::sync::Mutex::new(super::plugin::load_all(
-            config_dir,
-        ))));
+        let mut translator =
+            Translator::with_history(Arc::new(Chain::default()), Arc::clone(history), machine);
         translator.set_options(super::formatter::Options {
             spaces_after: config.spaces_after,
             start_attached: config.start_attached,
@@ -406,7 +401,7 @@ impl StenoEngine {
             // Nothing will arrive any more. Steno stays without a dictionary instead of
             // waiting for one forever.
             if self.loading && newest.is_none() {
-                newest = Some(Arc::new(Dictionary::default()));
+                newest = Some(Arc::new(Chain::default()));
             }
         } else {
             self.updates = Some(updates);
@@ -726,7 +721,7 @@ mod tests {
 
         let mut dict = Dictionary::default();
         dict.merge_json(r#"{"KAT": "cat"}"#).unwrap();
-        sender.send(Arc::new(dict)).unwrap();
+        sender.send(Arc::new(Chain::from(dict))).unwrap();
         assert_eq!(engine.tick(now), Some(StenoOutput::Type("cat".to_string())));
     }
 

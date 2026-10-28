@@ -1,20 +1,26 @@
 //! Plugins: ordinary `.rs` files that extend the engine beyond a dictionary.
 //!
-//! Each lives under `<config>/plugins/`, compiled to a sandboxed WebAssembly module and asked
-//! only when nothing else has an answer.
+//! A plugin lives in the steno folder exactly like a dictionary file, any `.rs` found the same
+//! way a `.json` or `.rtf` is (see [`super::source`]), and keeps its place in that same
+//! priority order: a [`Chain`] built from the folder tries each in turn, dictionary files
+//! merged together where they are consecutive, a plugin at its own position otherwise, each
+//! giving way to whatever is next if it has no answer. A plugin numbered above a dictionary can
+//! override it outright; one numbered below, or with no number, is a fallback for whatever
+//! nothing earlier in the folder answers.
 //!
-//! A plugin is real Rust, compiled with the exact `rustc` this build of keymux runs on, to
-//! `wasm32-unknown-unknown`. Compiling it is on keymux, the moment it is first used, exactly
-//! the way a dictionary is parsed once and kept as a binary copy (see
-//! [`super::dict::load_cached`]): unchanged, a plugin is never recompiled. Running it is on
-//! [`wasmtime`], so a bug in a plugin cannot corrupt keymux's memory or bring the daemon down
-//! with it; a crash, an infinite loop or a panic inside a plugin becomes an ordinary `Err` from
-//! the call into it, nothing more.
+//! A plugin is real Rust, compiled with the exact `rustc` this build of keymux runs on, to a
+//! sandboxed WebAssembly module via [`wasmtime`], the moment it is first used and again
+//! whenever the file changes, cached by content hash exactly the way a dictionary is parsed
+//! once and kept as a binary copy (see [`super::dict::load_cached`]). Running it this way,
+//! rather than as a native library, means a bug in a plugin cannot corrupt keymux's memory or
+//! bring the daemon down with it: a crash, a bad read or an infinite loop becomes an ordinary
+//! `Err` from the call into it, nothing more, and the module stays loadable by any compliant
+//! runtime indefinitely, with no ABI to keep matching a particular `rustc`.
 //!
 //! # The fallback interface
 //!
 //! The one thing a plugin can be asked right now: a reading of a stroke outline that missed
-//! every dictionary outright, such as an orthographic guess from a theory's own phonetic rules.
+//! everything ahead of it, such as an orthographic guess from a theory's own phonetic rules.
 //! A plugin exports two functions:
 //!
 //! ```ignore
@@ -33,64 +39,27 @@
 //!
 //! See `docs/plugins/orthographic-fallback.rs` for a complete, working example.
 
+use super::dict::Dictionary;
+use super::layout::render_strokes;
+use super::source::is_plugin_file;
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use wasmtime::{Engine, Instance, Memory, Module, Store, TypedFunc};
 
 /// Bumped whenever the interface above changes, so a plugin compiled against an older one is
 /// recompiled rather than trusted.
 const ABI_VERSION: u32 = 1;
 
-/// Directory plugins live in, under the keymux config directory: every `.rs` file in it,
-/// however deeply nested, is one.
-#[must_use]
-pub fn plugins_dir(config_dir: &Path) -> PathBuf {
-    config_dir.join("plugins")
-}
-
-/// Where compiled plugins are cached, the same way as [`super::setup::cache_dir`].
-///
-/// For the usual `~/.config/keymux` it is `~/.cache/keymux/plugins`, elsewhere a hidden
-/// `.cache` folder inside the plugins folder.
+/// Where compiled plugins are cached, under the same cache root a dictionary's own binary copy
+/// is kept (see [`super::setup::cache_dir`]): `<cache>/steno/plugins`.
 #[must_use]
 pub fn cache_dir(config_dir: &Path) -> PathBuf {
-    let usual = config_dir.file_name().is_some_and(|name| name == "keymux")
-        && config_dir
-            .parent()
-            .and_then(Path::file_name)
-            .is_some_and(|name| name == ".config");
-    if usual {
-        if let Some(home) = config_dir.parent().and_then(Path::parent) {
-            return home.join(".cache").join("keymux").join("plugins");
-        }
-    }
-    plugins_dir(config_dir).join(".cache")
-}
-
-/// Every `.rs` file under `dir`, in a stable order.
-fn find_sources(dir: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    walk(dir, &mut found);
-    found.sort();
-    found
-}
-
-fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
-    let Ok(read) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in read.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            walk(&path, found);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
-            found.push(path);
-        }
-    }
+    super::setup::cache_dir(config_dir).join("plugins")
 }
 
 /// Compile `source` to a WebAssembly module with this build's own `rustc`, caching the result
@@ -219,39 +188,202 @@ impl Plugin {
     }
 }
 
-/// Every plugin found under `config_dir`'s plugins folder, compiled and loaded.
-///
-/// One that fails to compile or load is left out, with a warning, rather than stopping the
-/// daemon: a plugins folder with nothing usable in it behaves exactly like having none.
-#[must_use]
-pub fn load_all(config_dir: &Path) -> Vec<Plugin> {
-    let dir = plugins_dir(config_dir);
-    let cache = cache_dir(config_dir);
-    find_sources(&dir)
-        .into_iter()
-        .filter_map(|source| {
-            let name = source.file_stem().map_or_else(
-                || "plugin".to_string(),
-                |s| s.to_string_lossy().into_owned(),
-            );
-            match compiled(&source, &cache).and_then(|wasm| Plugin::load(name, &wasm)) {
-                Ok(plugin) => Some(plugin),
-                Err(e) => {
-                    tracing::warn!("plugin {} not loaded: {e:#}", source.display());
-                    None
-                }
-            }
-        })
-        .collect()
+/// Compile and load the plugin at `source`, by its own file stem. A plugin that fails to
+/// compile or load is `Err`, logged by the caller and left out rather than stopping the daemon.
+fn load_one(source: &Path, cache_dir: &Path) -> Result<Plugin> {
+    let name = source.file_stem().map_or_else(
+        || "plugin".to_string(),
+        |s| s.to_string_lossy().into_owned(),
+    );
+    let wasm = compiled(source, cache_dir)?;
+    Plugin::load(name, &wasm)
 }
 
-/// The first reading any loaded plugin gives a stroke outline that missed every dictionary.
-pub fn fallback(plugins: &mut [Plugin], outline: &str) -> Option<String> {
-    plugins.iter_mut().find_map(|p| p.fallback(outline))
+/// One step of a lookup: a run of dictionary files merged together, or one plugin.
+enum Step {
+    Dict(Dictionary),
+    Plugin(Mutex<Plugin>),
+}
+
+/// A dictionary lookup pipeline built from one priority-ordered file list.
+///
+/// It is the same list [`super::source::expand`] gives a plain dictionary, except that a `.rs`
+/// file in it is a plugin: asked at its own place in the order, giving way to whatever is next
+/// if it has nothing, the same as a dictionary file would.
+pub struct Chain {
+    /// Every dictionary file in the list merged into one, ignoring where any plugins fell: for
+    /// everything a plain [`Dictionary`] already does that a plugin cannot meaningfully join in
+    /// on anyway (reverse lookup, completions, listing).
+    dict: Dictionary,
+    steps: Vec<Step>,
+}
+
+impl fmt::Debug for Chain {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Chain")
+            .field("dict", &self.dict)
+            .field("steps", &self.steps.len())
+            .finish()
+    }
+}
+
+impl Default for Chain {
+    fn default() -> Self {
+        Self::from(Dictionary::default())
+    }
+}
+
+/// A chain of exactly the one dictionary, no plugins: for a `Dictionary` already in memory
+/// (built from a literal `.json` string in a test, say) rather than files on disk.
+impl From<Dictionary> for Chain {
+    fn from(dict: Dictionary) -> Self {
+        Self {
+            dict: dict.clone(),
+            steps: vec![Step::Dict(dict)],
+        }
+    }
+}
+
+impl Chain {
+    /// Load `files` (already expanded, highest priority first) into a chain, caching both the
+    /// merged dictionary and each compiled plugin under `cache_dir`, with no error even if
+    /// every file fails: a working but empty chain, exactly as an all-missing dictionary is.
+    #[must_use]
+    pub fn load_cached(files: &[PathBuf], cache_dir: &Path) -> Self {
+        Self::load_cached_reporting(files, cache_dir).0
+    }
+
+    /// Like [`Self::load_cached`], and also returns what went wrong with any dictionary file
+    /// that was skipped (a plugin that fails is only ever logged, never reported: unlike a
+    /// malformed dictionary, there is no older, still-good copy of it to protect).
+    #[must_use]
+    pub fn load_cached_reporting(files: &[PathBuf], cache_dir: &Path) -> (Self, Vec<String>) {
+        let dict_only: Vec<PathBuf> = files
+            .iter()
+            .filter(|p| !is_plugin_file(p))
+            .cloned()
+            .collect();
+        let names: Vec<String> = dict_only.iter().map(|p| p.display().to_string()).collect();
+        let (dict, problems) = Dictionary::load_cached_reporting(
+            &dict_only,
+            &super::dict::fingerprint(&dict_only),
+            cache_dir,
+            &super::dict::cache_name(&names),
+        );
+        if !problems.is_empty() {
+            return (
+                Self {
+                    dict,
+                    steps: Vec::new(),
+                },
+                problems,
+            );
+        }
+        // No plugin at all: the common case, and the one every keymux without one already
+        // has, needs nothing further, the merged dictionary standing as the only step.
+        if dict_only.len() == files.len() {
+            return (
+                Self {
+                    dict: dict.clone(),
+                    steps: vec![Step::Dict(dict)],
+                },
+                Vec::new(),
+            );
+        }
+        let plugin_cache = cache_dir.join("plugins");
+        let mut steps = Vec::new();
+        let mut pending: Vec<PathBuf> = Vec::new();
+        for path in files {
+            if is_plugin_file(path) {
+                if !pending.is_empty() {
+                    steps.push(Step::Dict(Dictionary::load_cached(&pending, cache_dir)));
+                    pending.clear();
+                }
+                match load_one(path, &plugin_cache) {
+                    Ok(plugin) => steps.push(Step::Plugin(Mutex::new(plugin))),
+                    Err(e) => tracing::warn!("plugin {} not loaded: {e:#}", path.display()),
+                }
+            } else {
+                pending.push(path.clone());
+            }
+        }
+        if !pending.is_empty() {
+            steps.push(Step::Dict(Dictionary::load_cached(&pending, cache_dir)));
+        }
+        (Self { dict, steps }, Vec::new())
+    }
+
+    /// The translation of an exact outline: the first step with an answer, trying each in the
+    /// priority order the files were given in.
+    #[must_use]
+    pub fn lookup(&self, strokes: &[u32]) -> Option<String> {
+        for step in &self.steps {
+            let found = match step {
+                Step::Dict(dict) => dict.lookup(strokes).map(str::to_owned),
+                Step::Plugin(plugin) => {
+                    let outline = render_strokes(strokes);
+                    lock(plugin).fallback(&outline)
+                }
+            };
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    }
+
+    /// The merged view of every dictionary file in the chain, ignoring where any plugin fell:
+    /// for a caller that wants a plain `Dictionary` specifically (reverse lookup, completions),
+    /// since there is nothing a plugin could meaningfully add to either.
+    #[must_use]
+    pub const fn as_dictionary(&self) -> &Dictionary {
+        &self.dict
+    }
+
+    #[must_use]
+    pub const fn orthography(&self) -> &super::orthography::Orthography {
+        self.dict.orthography()
+    }
+
+    #[must_use]
+    pub const fn longest_key(&self) -> usize {
+        self.dict.longest_key()
+    }
+
+    #[must_use]
+    pub fn strokes_for(&self, text: &str) -> Vec<Vec<u32>> {
+        self.dict.strokes_for(text)
+    }
+
+    #[must_use]
+    pub fn completions(&self, prefix: &str, limit: usize) -> Vec<&str> {
+        self.dict.completions(prefix, limit)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&Vec<u32>, &String)> {
+        self.dict.iter()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.dict.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.dict.is_empty()
+    }
+}
+
+fn lock(mutex: &Mutex<Plugin>) -> std::sync::MutexGuard<'_, Plugin> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::layout::parse_stroke;
     use super::*;
     use std::sync::OnceLock;
 
@@ -315,49 +447,55 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
 
     #[test]
     fn the_documented_example_plugin_compiles_and_gives_a_plausible_reading() {
-        // The example a real plugin author would copy and adapt: keep it loadable.
-        let config_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
-        let mut plugins = load_all(&config_dir);
+        // The example a real plugin author would copy and adapt: keep it loadable, and keep
+        // giving a reading once it sits in a chain the way it would in a real steno folder.
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("docs")
+            .join("plugins")
+            .join("orthographic-fallback.rs");
+        let cache =
+            tmp_dir().join("the_documented_example_plugin_compiles_and_gives_a_plausible_reading");
+        let chain = Chain::load_cached(&[source], &cache);
         assert_eq!(
-            plugins.len(),
-            1,
-            "docs/plugins/orthographic-fallback.rs should load"
+            chain.lookup(&[parse_stroke("KAT").unwrap()]),
+            Some("kat".to_string())
         );
-        assert_eq!(fallback(&mut plugins, "KAT"), Some("kat".to_string()));
-        assert_eq!(fallback(&mut plugins, "STOP"), Some("stop".to_string()));
-        assert_eq!(fallback(&mut plugins, "TKPWEUPB"), Some("gin".to_string()));
+        assert_eq!(
+            chain.lookup(&[parse_stroke("STOP").unwrap()]),
+            Some("stop".to_string())
+        );
+        assert_eq!(
+            chain.lookup(&[parse_stroke("TKPWEUPB").unwrap()]),
+            Some("gin".to_string())
+        );
     }
 
     #[test]
-    fn load_all_skips_a_plugin_that_does_not_compile_rather_than_failing() {
-        let dir =
-            tmp_dir().join("load_all_skips_a_plugin_that_does_not_compile_rather_than_failing");
-        let plugins = dir.join("plugins");
-        fs::create_dir_all(&plugins).unwrap();
-        fs::write(plugins.join("broken.rs"), "this is not rust").unwrap();
-        fs::write(plugins.join("good.rs"), DOUBLER).unwrap();
-        let loaded = load_all(&dir);
+    fn a_chain_skips_a_plugin_that_does_not_compile_and_still_uses_the_one_after_it() {
+        let dir = tmp_dir()
+            .join("a_chain_skips_a_plugin_that_does_not_compile_and_still_uses_the_one_after_it");
+        fs::create_dir_all(&dir).unwrap();
+        let broken = dir.join("01-broken.rs");
+        let good = dir.join("02-good.rs");
+        fs::write(&broken, "this is not rust").unwrap();
+        fs::write(&good, DOUBLER).unwrap();
+        let chain = Chain::load_cached(&[broken, good], &dir.join("cache"));
         assert_eq!(
-            loaded.len(),
-            1,
-            "the good plugin loads, the broken one is skipped"
+            chain.lookup(&[parse_stroke("KAT").unwrap()]),
+            Some("KKAATT".to_string()),
+            "the broken plugin is skipped, the good one after it still answers"
         );
-        assert_eq!(loaded[0].name(), "good");
     }
 
     #[test]
-    fn plugins_dir_and_cache_dir_match_the_steno_folder_convention() {
-        assert_eq!(
-            plugins_dir(Path::new("/home/a/.config/keymux")),
-            PathBuf::from("/home/a/.config/keymux/plugins")
-        );
+    fn cache_dir_matches_the_steno_folder_convention() {
         assert_eq!(
             cache_dir(Path::new("/home/a/.config/keymux")),
-            PathBuf::from("/home/a/.cache/keymux/plugins")
+            PathBuf::from("/home/a/.cache/keymux/steno/plugins")
         );
         assert_eq!(
             cache_dir(Path::new("/tmp/elsewhere")),
-            PathBuf::from("/tmp/elsewhere/plugins/.cache")
+            PathBuf::from("/tmp/elsewhere/steno/.cache/plugins")
         );
     }
 }

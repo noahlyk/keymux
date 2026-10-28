@@ -12,14 +12,10 @@ use super::formatter::{Formatter, Op, Options};
 use super::journal::{self, History, MachineId, Origin, SharedHistory};
 use super::keycombo::key_events;
 use super::layout::{render_stroke, JOIN_BIT};
-use super::plugin::Plugin;
+use super::plugin::Chain;
 use crate::keycode::KeyCode;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tracing::{info, warn};
-
-/// Plugins shared by every translator of the user, the same way [`SharedHistory`] is: loaded
-/// once, asked only once a stroke has missed every dictionary outright.
-pub type SharedPlugins = Arc<Mutex<Vec<Plugin>>>;
 
 /// The stroke that undoes the last translation: the star on its own.
 pub const UNDO_STROKE: u32 = 1 << 9;
@@ -241,7 +237,7 @@ fn mapping_to_macro(mapping: Option<&str>, stroke: u32) -> Option<Macro> {
 /// Converts a stream of strokes into typing.
 #[derive(Debug)]
 pub struct Translator {
-    dict: Arc<Dictionary>,
+    dict: Arc<Chain>,
     /// Which set of dictionaries this is, stamped on what it makes
     machine: MachineId,
     /// What every translator of the user shares: what was typed, and what can be undone
@@ -249,13 +245,10 @@ pub struct Translator {
     /// The shared history while a stroke is being translated, and empty otherwise
     hist: History,
     unmatched: bool,
-    /// Loaded once for the user, asked for a reading only once a stroke misses every dictionary
-    plugins: SharedPlugins,
 }
 
 /// A copy of a translator has a copy of the history too, so trying strokes on it (a lookup
-/// does) doesn't touch what the original has typed. Plugins are shared, not copied: there is
-/// one loaded set, same as the dictionary.
+/// does) doesn't touch what the original has typed.
 impl Clone for Translator {
     fn clone(&self) -> Self {
         let history = journal::lock(&self.shared).clone();
@@ -265,7 +258,6 @@ impl Clone for Translator {
             shared: Arc::new(std::sync::Mutex::new(history)),
             hist: History::default(),
             unmatched: self.unmatched,
-            plugins: Arc::clone(&self.plugins),
         }
     }
 }
@@ -275,7 +267,7 @@ impl Translator {
     #[must_use]
     pub fn new(dict: Dictionary) -> Self {
         Self::with_shared(
-            Arc::new(dict),
+            Arc::new(Chain::from(dict)),
             Options {
                 start_attached: true,
                 ..Options::default()
@@ -283,22 +275,22 @@ impl Translator {
         )
     }
 
-    /// A translator over a dictionary others share, with these options. Its history is its own.
+    /// A translator over a dictionary chain others share, with these options. Its history is
+    /// its own.
     #[must_use]
-    pub fn with_shared(dict: Arc<Dictionary>, options: Options) -> Self {
+    pub fn with_shared(dict: Arc<Chain>, options: Options) -> Self {
         Self::with_history(dict, journal::new_shared(Formatter::new(options)), 0)
     }
 
     /// A translator over the history `shared`, which other translators write to as well.
     #[must_use]
-    pub fn with_history(dict: Arc<Dictionary>, shared: SharedHistory, machine: MachineId) -> Self {
+    pub fn with_history(dict: Arc<Chain>, shared: SharedHistory, machine: MachineId) -> Self {
         Self {
             dict,
             machine,
             shared,
             hist: History::default(),
             unmatched: false,
-            plugins: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -306,19 +298,6 @@ impl Translator {
     #[must_use]
     pub fn history(&self) -> SharedHistory {
         Arc::clone(&self.shared)
-    }
-
-    /// Use these plugins for a reading when a stroke misses every dictionary, instead of none.
-    #[must_use]
-    pub fn with_plugins(mut self, plugins: SharedPlugins) -> Self {
-        self.plugins = plugins;
-        self
-    }
-
-    fn plugins(&self) -> std::sync::MutexGuard<'_, Vec<Plugin>> {
-        self.plugins
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Which set of dictionaries this translator stands for.
@@ -340,12 +319,12 @@ impl Translator {
 
     /// Swap in the dictionary. What was typed stays undoable.
     pub fn set_dictionary(&mut self, dict: Dictionary) {
-        self.set_shared(Arc::new(dict));
+        self.set_shared(Arc::new(Chain::from(dict)));
     }
 
-    /// Swap in a dictionary that other translators share. What is already typed is untouched,
-    /// so `*` still takes it back; only the strokes from now on use the new one.
-    pub fn set_shared(&mut self, dict: Arc<Dictionary>) {
+    /// Swap in a dictionary chain that other translators share. What is already typed is
+    /// untouched, so `*` still takes it back; only the strokes from now on use the new one.
+    pub fn set_shared(&mut self, dict: Arc<Chain>) {
         self.dict = dict;
     }
 
@@ -360,10 +339,12 @@ impl Translator {
         journal::lock(&self.shared).formatter.options.clone()
     }
 
-    /// The dictionary strokes are translated with.
+    /// The dictionary strokes are translated with: the merged view of every dictionary file,
+    /// ignoring where any plugin fell, since reverse lookup and completions have nothing a
+    /// plugin could meaningfully join in on.
     #[must_use]
     pub fn dictionary(&self) -> &Dictionary {
-        &self.dict
+        self.dict.as_dictionary()
     }
 
     /// Whether any dictionary entries loaded.
@@ -375,7 +356,7 @@ impl Translator {
     /// The dictionary, to look things up on another thread. `None` when nothing loaded.
     #[must_use]
     pub fn dictionary_handle(&self) -> Option<Arc<Dictionary>> {
-        (!self.dict.is_empty()).then(|| Arc::clone(&self.dict))
+        (!self.dict.is_empty()).then(|| Arc::new(self.dict.as_dictionary().clone()))
     }
 
     /// How many entries the dictionary has.
@@ -510,16 +491,9 @@ impl Translator {
                     .then(|| mapping.map(|m| Translation::new(vec![stroke], Some(m))))
                     .flatten()
             })
-            // No direct match: try with suffixes
+            // No direct match: try with suffixes (a plugin at its own place in the chain
+            // already had its chance, in `mapping` above and in each attempt here)
             .or_else(|| self.find_longest_match(1, max_len, stroke, &SUFFIX_KEYS))
-            // No dictionary entry at all: a plugin's own reading, unless the stroke already
-            // declared itself a continuation, which was never meant to stand alone either
-            .or_else(|| {
-                (!joined)
-                    .then(|| super::plugin::fallback(&mut self.plugins(), &render_stroke(stroke)))
-                    .flatten()
-                    .map(|text| Translation::new(vec![stroke], Some(text)))
-            })
             // Nothing: the stroke as its keys
             .unwrap_or_else(|| Translation::new(vec![stroke], None));
         if translation.english.is_none() {
@@ -949,7 +923,7 @@ impl Translator {
     }
 
     fn lookup_strokes(&self, strokes: &[u32]) -> Option<String> {
-        self.dict.lookup(strokes).map(str::to_string)
+        self.dict.lookup(strokes)
     }
 
     /// Look the strokes up, with the last one's suffix key folded in if there are suffixes: the
@@ -1137,21 +1111,26 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
 }
 "#;
 
+    /// A translator over a folder with one dictionary file and, after it (lower priority, a
+    /// fallback), one plugin: the same shape a real steno folder is in, built the same way.
     fn with_shout_plugin(dict: &str, test_name: &str) -> Translator {
-        let plugins_root = std::env::temp_dir().join(format!(
+        let dir = std::env::temp_dir().join(format!(
             "keymux-translate-plugin-test-{}-{test_name}",
             std::process::id()
         ));
-        let plugins = super::super::plugin::plugins_dir(&plugins_root);
-        fs::create_dir_all(&plugins).unwrap();
-        fs::write(plugins.join("shout.rs"), SHOUT_PLUGIN).unwrap();
-        let loaded = super::super::plugin::load_all(&plugins_root);
-        assert_eq!(
-            loaded.len(),
-            1,
-            "the plugin should have compiled and loaded"
-        );
-        translator(dict).with_plugins(Arc::new(Mutex::new(loaded)))
+        fs::create_dir_all(&dir).unwrap();
+        let dict_path = dir.join("01-dict.json");
+        let plugin_path = dir.join("02-shout.rs");
+        fs::write(&dict_path, dict).unwrap();
+        fs::write(&plugin_path, SHOUT_PLUGIN).unwrap();
+        let chain = Chain::load_cached(&[dict_path, plugin_path], &dir.join("cache"));
+        Translator::with_shared(
+            Arc::new(chain),
+            Options {
+                start_attached: true,
+                ..Options::default()
+            },
+        )
     }
 
     #[test]
@@ -1372,7 +1351,7 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         let make = |json: &str, machine| {
             let mut dict = Dictionary::default();
             dict.merge_json(json).unwrap();
-            Translator::with_history(Arc::new(dict), Arc::clone(&shared), machine)
+            Translator::with_history(Arc::new(Chain::from(dict)), Arc::clone(&shared), machine)
         };
         (
             make(r#"{"KAT": "cat"}"#, 1),

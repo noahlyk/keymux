@@ -7,6 +7,7 @@ use super::layout::{
     SLOT_SOUNDS,
 };
 use super::numbers::number_text;
+use super::plugin::Chain;
 use super::setup::{cache_dir, default_dictionaries, prepare_dir, steno_dir, USER_DICTIONARY};
 use super::shortest::shortest_outline;
 use super::source::expand;
@@ -29,6 +30,15 @@ pub fn load_dictionary(config_dir: &Path) -> Dictionary {
     Dictionary::load_cached(&files, &cache)
 }
 
+/// The same files as [`load_dictionary`], with any `.rs` plugin among them kept in the chain
+/// instead of skipped: for a forward lookup (stroke to text), where a plugin can answer.
+#[must_use]
+pub fn load_chain(config_dir: &Path) -> Chain {
+    let cache = cache_dir(config_dir);
+    let files = expand(&default_dictionaries(config_dir), &cache);
+    Chain::load_cached(&files, &cache)
+}
+
 /// Print the stroke(s) that type `word`.
 pub fn lookup(config_dir: &Path, word: &str) {
     let dict = load_dictionary(config_dir);
@@ -45,11 +55,11 @@ pub fn lookup(config_dir: &Path, word: &str) {
 /// Print the text a stroke (or `KPA/TKAOEU`-style sequence) types.
 pub fn show_stroke(config_dir: &Path, text: &str) -> Result<()> {
     let strokes = parse_strokes(text)?;
-    let dict = load_dictionary(config_dir);
+    let dict = load_chain(config_dir);
     if let Some(translation) = dict.lookup(&strokes) {
         println!(
             "{:?}",
-            plain_text(translation).unwrap_or_else(|| translation.to_string())
+            plain_text(&translation).unwrap_or_else(|| translation.clone())
         );
     } else if let Some(digits) = strokes
         .first()
@@ -974,5 +984,56 @@ mod tests {
         assert_eq!(key_label(KeyCode::KC_COMM), ",");
         assert_eq!(key_label(KeyCode::KC_SCLN), ";");
         assert_eq!(key_label(KeyCode::KC_QUOT), "'");
+    }
+
+    /// Doubles every letter it is given: proves a plugin dropped into the steno folder is
+    /// really consulted by `load_chain`, not silently skipped the way a plain `Dictionary`
+    /// load skips a `.rs` file it can't parse as JSON.
+    const DOUBLER_PLUGIN: &str = r#"
+#[no_mangle]
+pub extern "C" fn alloc(len: i32) -> i32 {
+    let mut v: Vec<u8> = vec![0u8; len as usize];
+    let ptr = v.as_mut_ptr();
+    std::mem::forget(v);
+    ptr as i32
+}
+
+#[no_mangle]
+pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
+    let input = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let mut out: Vec<u8> = Vec::with_capacity(input.len() * 2);
+    for &b in input {
+        out.push(b);
+        out.push(b);
+    }
+    let out_len = out.len();
+    let out_ptr = out.as_mut_ptr();
+    std::mem::forget(out);
+    (i64::from(out_ptr as i32) << 32) | i64::from(out_len as i32)
+}
+"#;
+
+    #[test]
+    fn load_chain_answers_from_a_plugin_in_the_steno_folder_when_the_dictionary_misses() {
+        let config_dir =
+            std::env::temp_dir().join(format!("keymux-commands-load-chain-{}", std::process::id()));
+        let steno = config_dir.join("steno");
+        std::fs::create_dir_all(&steno).unwrap();
+        std::fs::write(steno.join("01-dict.json"), r#"{"KAT": "cat"}"#).unwrap();
+        std::fs::write(steno.join("02-doubler.rs"), DOUBLER_PLUGIN).unwrap();
+
+        let chain = load_chain(&config_dir);
+        assert_eq!(
+            chain.lookup(&[parse_stroke("KAT").unwrap()]),
+            Some("cat".to_string()),
+            "a dictionary hit is never overridden by the plugin after it"
+        );
+        assert_eq!(
+            chain.lookup(&[parse_stroke("TKOG").unwrap()]),
+            Some("TTKKOOGG".to_string()),
+            "a stroke no dictionary covers reaches the plugin"
+        );
+
+        std::fs::remove_dir_all(&config_dir).ok();
     }
 }
