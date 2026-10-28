@@ -22,6 +22,7 @@
 - **Hardware-Based IDs**: Keyboards identified by USB properties, not device paths
 - **Adaptive Statistics**: View real-time typing analytics with `adaptive-stats` command
 - **Shell Completions**: Bash, Zsh, Fish support built-in
+- **Plugins**: Drop an ordinary `.rs` file into `~/.config/keymux/plugins/` to extend what a stroke that misses every dictionary does, compiled to sandboxed WebAssembly, no build step by hand — see [`docs/plugins/README.md`](docs/plugins/README.md)
 
 ### System Integration
 - **Systemd Service**: Runs as user service with automatic startup

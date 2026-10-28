@@ -37,6 +37,7 @@ tokio = { version = "1.41", features = ["full"] }
 crossbeam-channel = "0.5"
 crossterm = "0.28"
 sha2 = "0.10"
+wasmtime = { version = "50", default-features = false, features = ["runtime", "cranelift"] }
 
 # `keymux overlay`: on-screen steno keyboard and tape (Wayland layer-shell)
 smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"], optional = true }
