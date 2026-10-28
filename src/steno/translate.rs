@@ -1213,6 +1213,50 @@ mod tests {
         assert_eq!(b.text(), "cat dog");
     }
 
+    const SPACE_DICT: &str = r#"{
+        "H*EU": "hi", "KAT": "cat", "TKOG": "dog", "KAT/TKOG": "catdog",
+        "SP*": "{*!}", "S-PD": "{*?}", "R*E": "{:redo}"
+    }"#;
+
+    #[test]
+    fn retro_insert_space_does_nothing_right_after_a_retro_delete_space_and_undo_is_the_way_back() {
+        let mut t = translator(SPACE_DICT);
+        for s in ["H*EU", "H*EU", "SP*"] {
+            t.stroke(stroke(s));
+        }
+        assert_eq!(t.text(), "hihi");
+        // As in Plover: insert space only splits a longer outline, it doesn't undo a join
+        t.stroke(stroke("S-PD"));
+        assert_eq!(t.text(), "hihi");
+        // `*` puts the space back, and redo joins them again
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "hi hi");
+        t.stroke(stroke("R*E"));
+        assert_eq!(t.text(), "hihi");
+    }
+
+    #[test]
+    fn retro_insert_space_splits_a_longer_outline_into_its_words() {
+        let mut t = translator(SPACE_DICT);
+        for s in ["KAT", "TKOG"] {
+            t.stroke(stroke(s));
+        }
+        assert_eq!(t.text(), "catdog");
+        t.stroke(stroke("S-PD"));
+        assert_eq!(t.text(), "cat dog");
+    }
+
+    #[test]
+    fn retro_delete_space_removes_only_the_space_before_the_last_word() {
+        let mut t = translator(SPACE_DICT);
+        for s in ["H*EU", "H*EU", "H*EU", "H*EU"] {
+            t.stroke(stroke(s));
+        }
+        let ops = t.stroke_ops(stroke("SP*"));
+        assert_eq!(ops, vec![Op::Backspaces(3), Op::Text("hi".to_string())]);
+        assert_eq!(t.text(), "hi hi hihi");
+    }
+
     #[test]
     fn a_stroke_types_its_translation() {
         assert_eq!(type_strokes(r#"{"KAT": "cat"}"#, &["KAT"]), "cat");
