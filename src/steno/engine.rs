@@ -5,7 +5,7 @@ use super::chord::ChordState;
 use super::dict::Dictionary;
 use super::journal::{MachineId, SharedHistory};
 use super::layout::{build_key_map, preset};
-use super::lookup::{classify, Lookup};
+use super::lookup::{Lookup, LookupKey};
 use super::overlay::OverlayHub;
 use super::live;
 use super::setup::default_dictionaries;
@@ -187,23 +187,29 @@ impl StenoEngine {
         &self.label
     }
 
-    /// Whether a live lookup is open. While it is, the layer's keys are plain QWERTY input to
-    /// it (see [`Self::lookup_key`]) and nothing reaches the application.
+    /// Whether a live lookup is open. While it is, keys go through the layers as usual and
+    /// what comes out types into it (see [`Self::lookup_input`]); nothing reaches the application.
     #[must_use]
     pub const fn lookup_active(&self) -> bool {
         self.lookup.is_some()
     }
 
-    /// A key went down during an open lookup. `shift` is whether Shift is held. It types into
-    /// the query, edits it, or closes the lookup, and updates the overlay.
-    pub fn lookup_key(&mut self, key: KeyCode, shift: bool) {
+    /// A key came out of the layers during an open lookup. It types into the query, edits it,
+    /// or closes the lookup, and updates the overlay.
+    pub fn lookup_input(&mut self, key: LookupKey) {
         let Some(lookup) = self.lookup.as_mut() else {
             return;
         };
-        if lookup.apply(classify(key, shift)) {
+        if lookup.apply(key) {
             self.publish_lookup();
         } else {
-            self.lookup = None;
+            self.close_lookup();
+        }
+    }
+
+    /// Close the lookup, if one is open.
+    pub fn close_lookup(&mut self) {
+        if self.lookup.take().is_some() {
             self.hub.set_lookup(None);
         }
     }

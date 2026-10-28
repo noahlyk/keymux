@@ -6,13 +6,13 @@ use crate::event_processor::actions::{
 use crate::event_processor::layer_stack::LayerStack;
 use crate::keycode::KeyCode;
 use crate::steno::translate::StenoOutput;
-use crate::steno::lookup::{classify, LookupKey};
+use crate::steno::lookup::{LookupInput, LookupKey};
 use crate::steno::overlay::OverlayHub;
 use crate::steno::journal::{self, SharedHistory};
 use crate::steno::setup::Cooldown;
 use crate::steno::typing::{Typist, TypingLayout};
 use crate::steno::{self, StenoEngine};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tracing::error;
@@ -68,8 +68,10 @@ pub struct KeymapProcessor {
     /// Where this keyboard's steno state is published for the overlay. One hub is shared by
     /// every keyboard: the overlay follows whichever was touched last.
     overlay_hub: &'static OverlayHub,
-    /// Whether a Shift key is down, for the capital letters of a live lookup
-    shift_down: bool,
+    /// Reads the keys that come out of the layers during a live lookup
+    lookup_input: LookupInput,
+    /// Keys pressed during a lookup, whose releases must stay out of the application too
+    lookup_keys: HashSet<KeyCode>,
     /// Limits the "steno isn't set up" notification
     setup_hint: Cooldown,
     config_dir: PathBuf,
@@ -119,6 +121,7 @@ impl KeymapProcessor {
         }
         let mut steno_engines = HashMap::new();
         let mut typist = None;
+        let mut layout = None;
         // Layers in name order, so which one sets the typing layout doesn't change from run to run
         let mut layers: Vec<_> = config.layers.iter().collect();
         layers.sort_by(|a, b| a.0 .0.cmp(&b.0 .0));
@@ -126,12 +129,14 @@ impl KeymapProcessor {
             let LayerKind::Steno(steno) = &layer_config.kind else {
                 continue;
             };
-            if typist.is_none() && !steno.disable_typing_history {
-                let layout = TypingLayout::parse(&steno.typing_layout).unwrap_or_else(|| {
+            if layout.is_none() {
+                layout = Some(TypingLayout::parse(&steno.typing_layout).unwrap_or_else(|| {
                     error!("steno typing_layout \"{}\" is not known, so us is used", steno.typing_layout);
                     TypingLayout::Us
-                });
-                typist = Some(Typist::new(layout));
+                }));
+            }
+            if typist.is_none() && !steno.disable_typing_history {
+                typist = layout.map(Typist::new);
             }
             match StenoEngine::from_config(
                 steno,
@@ -149,6 +154,7 @@ impl KeymapProcessor {
             }
         }
 
+        let layout = layout.unwrap_or_default();
         let processor = Self {
             held_keys: HashMap::new(),
             layer_stack: LayerStack::new(config),
@@ -160,7 +166,8 @@ impl KeymapProcessor {
             steno_engines,
             steno_active: None,
             overlay_hub: OverlayHub::global(),
-            shift_down: false,
+            lookup_input: LookupInput::new(layout),
+            lookup_keys: HashSet::new(),
             setup_hint: Cooldown::new(Duration::from_secs(3)),
             config_dir,
             user_id,
@@ -239,9 +246,9 @@ impl KeymapProcessor {
     }
 
     pub fn process_key(&mut self, keycode: KeyCode, pressed: bool) -> ProcessResult {
-        // A live lookup types capital letters while Shift is down
-        if matches!(keycode, KeyCode::KC_LSFT | KeyCode::KC_RSFT) {
-            self.shift_down = pressed;
+        if let Some(result) = self.lookup_capture(keycode, pressed) {
+            self.publish_overlay_layer();
+            return result;
         }
         let result = self.steno_capture(keycode, pressed).unwrap_or_else(|| {
             let result = if pressed {
@@ -313,6 +320,15 @@ impl KeymapProcessor {
 
     /// The steno layer that is on top for this keyboard, if any: what the overlay should show.
     fn overlay_layer_name(&self) -> Option<&str> {
+        // An open lookup keeps the overlay on its layer while a layer is held above it
+        let layers = self.layer_stack.layers();
+        if let Some((layer, _)) = self
+            .steno_engines
+            .iter()
+            .find(|(layer, engine)| engine.lookup_active() && layers.contains(layer))
+        {
+            return Some(layer.0.as_str());
+        }
         let game_mode = self.layer_stack.is_game_mode_active();
         self.layer_stack
             .layers()
@@ -365,6 +381,100 @@ impl KeymapProcessor {
         }
     }
 
+    /// While a live lookup is open, every key goes through the layers as it always does (remaps,
+    /// mod-taps, held layers), and what comes out types into the lookup instead of reaching the
+    /// application. Esc and Enter close it, even where a layer remaps them. Returns `None` when
+    /// no lookup is open, or the key is not one for it (a stroke key let go of, say).
+    fn lookup_capture(&mut self, keycode: KeyCode, pressed: bool) -> Option<ProcessResult> {
+        let open = self
+            .steno_engines
+            .iter()
+            .find_map(|(layer, engine)| engine.lookup_active().then(|| layer.clone()));
+        let Some(layer) = open else {
+            // Let go of after the lookup closed: still not the application's business
+            if !pressed && self.lookup_keys.remove(&keycode) {
+                let result = self.process_key_release(keycode);
+                self.read_lookup_keys(&result);
+                return Some(ProcessResult::None);
+            }
+            return None;
+        };
+        if !self.layer_stack.layers().contains(&layer) {
+            // The layer was left in the middle of it
+            self.close_lookup(&layer);
+            return None;
+        }
+
+        if !pressed {
+            if !self.lookup_keys.remove(&keycode) {
+                return None;
+            }
+            let result = self.process_key_release(keycode);
+            self.read_lookup_keys(&result);
+            return Some(ProcessResult::None);
+        }
+
+        if matches!(keycode, KeyCode::KC_ESC | KeyCode::KC_ENT) {
+            self.close_lookup(&layer);
+            // Swallowed on release too, so it can't leak a stray key event
+            self.held_keys
+                .insert(keycode, vec![HeldAction::SwallowedBySteno]);
+            return Some(ProcessResult::None);
+        }
+
+        self.lookup_keys.insert(keycode);
+        let result = self.process_key_press(keycode);
+        self.read_lookup_keys(&result);
+        // A key that left the steno layer (a remap to base, say) leaves the lookup behind
+        if !self.layer_stack.layers().contains(&layer) {
+            self.close_lookup(&layer);
+        }
+        Some(ProcessResult::None)
+    }
+
+    fn close_lookup(&mut self, layer: &Layer) {
+        if let Some(engine) = self.steno_engines.get_mut(layer) {
+            engine.close_lookup();
+        }
+        self.lookup_input.reset();
+    }
+
+    /// What came out of the layers for a key during a lookup, as input to it.
+    fn read_lookup_keys(&mut self, result: &ProcessResult) {
+        let mut keys = Vec::new();
+        match result {
+            ProcessResult::EmitKey(key, pressed) => keys.push(self.lookup_input.key(*key, *pressed)),
+            ProcessResult::TapKeyPressRelease(key) => {
+                keys.push(self.lookup_input.key(*key, true));
+                keys.push(self.lookup_input.key(*key, false));
+            }
+            ProcessResult::MultipleEvents(events) => {
+                for (key, pressed) in events {
+                    keys.push(self.lookup_input.key(*key, *pressed));
+                }
+            }
+            // Text a layer types for you goes into the query like typed keys
+            ProcessResult::TypeString(text, _) => {
+                keys.extend(
+                    text.chars()
+                        .filter(|c| !matches!(c, '\n' | '\t'))
+                        .map(|c| Some(LookupKey::Char(c))),
+                );
+            }
+            ProcessResult::Retype { .. } | ProcessResult::Ops(_) | ProcessResult::None => {}
+        }
+        let Some(engine) = self
+            .steno_engines
+            .values_mut()
+            .find(|engine| engine.lookup_active())
+        else {
+            return;
+        };
+        for key in keys.into_iter().flatten() {
+            engine.lookup_input(key);
+        }
+    }
+
     /// Route a key to the top layer if that layer is steno. Returns `None` when the
     /// key should go through the normal remap path.
     ///
@@ -402,25 +512,6 @@ impl KeymapProcessor {
         let engine = self.steno_engines.get_mut(&top)?;
         if game_mode && engine.disabled_in_game_mode {
             return None;
-        }
-
-        // A live lookup is open: every key is QWERTY input to it, and none reaches the
-        // application. Esc and Enter close it even though the layer may remap them. Other
-        // remapped keys (F10 back to base, say) still do their job, and leave it behind.
-        if engine.lookup_active() {
-            let closes = classify(keycode, false) == LookupKey::Close;
-            let remapped = self
-                .layer_stack
-                .layer_configs()
-                .get(&top)
-                .is_some_and(|config| config.remaps.contains_key(&keycode));
-            if closes || !remapped {
-                engine.lookup_key(keycode, self.shift_down);
-                // Swallowed on release too, so it can't leak a stray key event
-                self.held_keys
-                    .insert(keycode, vec![HeldAction::SwallowedBySteno]);
-                return Some(ProcessResult::None);
-            }
         }
 
         if engine.owns(keycode) {

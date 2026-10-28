@@ -599,6 +599,98 @@ fn the_lookup_stroke_turns_the_keys_into_qwerty_input_to_a_query_and_nothing_is_
     assert!(hub.snapshot().lookup.is_some());
 }
 
+/// A keyboard with a remapped letter (Q types C), a Shift on Z, a symbol layer held on X where A
+/// types 9, and a lookup stroke (KAT).
+const LOOKUP_LAYERS_CONFIG: &str = r#"(
+    remaps: {
+        KC_TAB: MO("chords"),
+        KC_Q: Key(KC_C),
+        KC_Z: Key(KC_LSFT),
+        KC_X: MO("sym"),
+        KC_CAPS: Key(KC_ESC),
+    },
+    layers: {
+        "sym": (kind: Remap, remaps: { KC_A: Key(KC_9) }),
+        "chords": (
+            kind: Steno((
+                dictionaries: ["DICT"],
+            )),
+            remaps: {},
+            disabled_in_game_mode: true,
+        ),
+    },
+    game_mode: (
+        remaps: {},
+    ),
+)"#;
+
+#[allow(clippy::literal_string_with_formatting_args)] // a command, not a format
+fn open_lookup_with_layers(
+    fixture: &Fixture,
+) -> (KeymapProcessor, &'static crate::steno::overlay::OverlayHub) {
+    let mut p = fixture.processor_with(LOOKUP_LAYERS_CONFIG, r#"{"KAT": "{PLOVER:LOOKUP}"}"#);
+    let hub = private_hub();
+    p.set_overlay_hub(hub);
+    enter_steno(&mut p);
+    chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]);
+    assert!(hub.snapshot().lookup.is_some());
+    (p, hub)
+}
+
+fn query(hub: &crate::steno::overlay::OverlayHub) -> String {
+    hub.snapshot().lookup.unwrap().query
+}
+
+#[test]
+fn a_lookup_goes_through_the_remaps_mod_taps_and_layers_below_it() {
+    let fixture = Fixture::new("lookup-layers");
+    let (mut p, hub) = open_lookup_with_layers(&fixture);
+
+    // A remapped letter types what it is remapped to, and nothing reaches the application
+    let typed = type_keys(&mut p, &[KeyCode::KC_Q, KeyCode::KC_A]);
+    assert!(typed.iter().all(|r| *r == ProcessResult::None), "{typed:?}");
+    assert_eq!(query(hub), "ca");
+
+    // Shift on another key capitalizes and gives symbols, like anywhere else
+    p.process_key(KeyCode::KC_Z, true);
+    type_keys(&mut p, &[KeyCode::KC_T, KeyCode::KC_1]);
+    p.process_key(KeyCode::KC_Z, false);
+    type_keys(&mut p, &[KeyCode::KC_T]);
+    assert_eq!(query(hub), "caT!t");
+
+    // A layer held on a key changes what the keys under it type
+    p.process_key(KeyCode::KC_X, true);
+    assert!(hub.snapshot().lookup.is_some(), "holding a layer keeps the lookup on screen");
+    let typed = type_keys(&mut p, &[KeyCode::KC_A]);
+    assert!(typed.iter().all(|r| *r == ProcessResult::None), "{typed:?}");
+    assert_eq!(p.process_key(KeyCode::KC_X, false), ProcessResult::None);
+    assert_eq!(query(hub), "caT!t9");
+    // ...and it lets go again
+    type_keys(&mut p, &[KeyCode::KC_A]);
+    assert_eq!(query(hub), "caT!t9a");
+
+    // A key the base layer turns into Esc closes it
+    assert_eq!(type_keys(&mut p, &[KeyCode::KC_CAPS]), vec![ProcessResult::None; 2]);
+    assert_eq!(hub.snapshot().lookup, None);
+}
+
+#[test]
+fn keys_held_through_the_end_of_a_lookup_do_not_leak_their_release() {
+    let fixture = Fixture::new("lookup-held");
+    let (mut p, hub) = open_lookup_with_layers(&fixture);
+
+    p.process_key(KeyCode::KC_Z, true);
+    type_keys(&mut p, &[KeyCode::KC_ESC]);
+    assert_eq!(hub.snapshot().lookup, None);
+    // The Shift came up after the lookup closed, and the application never saw it go down
+    assert_eq!(p.process_key(KeyCode::KC_Z, false), ProcessResult::None);
+
+    // Back to steno, and Shift is not stuck on in the next lookup
+    chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]);
+    type_keys(&mut p, &[KeyCode::KC_T]);
+    assert_eq!(query(hub), "t");
+}
+
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // a command, not a format
 fn leaving_steno_in_the_middle_of_a_lookup_closes_it_and_does_not_keep_eating_keys() {
