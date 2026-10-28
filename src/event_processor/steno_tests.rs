@@ -953,3 +953,66 @@ fn shift_is_never_held_across_two_parts() {
         );
     }
 }
+
+/// A steno layer that lists no dictionaries, so it reads the `steno` folder in the config
+/// directory.
+fn config_without_dictionaries() -> String {
+    CONFIG.replace("dictionaries: [\"DICT\"],", "")
+}
+
+#[test]
+fn a_steno_layer_makes_a_steno_folder_to_drop_dictionaries_in() {
+    let fixture = Fixture::new("steno-folder");
+    assert!(!fixture.dir.join("steno").exists());
+    let _p = fixture.processor_from(&config_without_dictionaries());
+    assert!(fixture.dir.join("steno").is_dir());
+}
+
+#[test]
+fn with_no_dictionary_strokes_type_as_they_are_and_one_dropped_in_takes_over_while_running() {
+    let fixture = Fixture::new("drop-in");
+    // A folder that already exists gets no starter entries, which would translate KAT
+    std::fs::create_dir_all(fixture.dir.join("steno")).unwrap();
+    let mut p = fixture.processor_from(&config_without_dictionaries());
+    enter_steno(&mut p);
+    let cat = [KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P];
+
+    // Nothing installed: the stroke types its keys
+    assert_eq!(
+        chord(&mut p, &cat),
+        ProcessResult::TypeString("KA-T".to_string(), false)
+    );
+
+    // A dictionary dropped into the folder is used without restarting anything or leaving
+    // the layer
+    std::fs::write(fixture.dir.join("steno/mine.json"), r#"{"KAT": "cat"}"#).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        p.check_steno_timeouts();
+        if chord(&mut p, &cat) == ProcessResult::TypeString(" cat".to_string(), false) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dictionary was never picked up"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(p.current_layer_name(), "chords", "still in steno");
+
+    // Edited live: the same stroke now types something else
+    std::fs::write(fixture.dir.join("steno/mine.json"), r#"{"KAT": "kitten"}"#).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        p.check_steno_timeouts();
+        if chord(&mut p, &cat) == ProcessResult::TypeString(" kitten".to_string(), false) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the edit was never picked up"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(p.current_layer_name(), "chords", "still in steno");
+}

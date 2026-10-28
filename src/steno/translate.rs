@@ -85,7 +85,13 @@ impl Translator {
 
     /// Swap in dictionaries that finished loading in the background.
     pub fn set_dictionary(&mut self, dict: Dictionary) {
-        self.dict = Arc::new(dict);
+        self.set_shared(Arc::new(dict));
+    }
+
+    /// Swap in a dictionary that other translators share. What is already typed is untouched,
+    /// so `*` still takes it back; only the strokes from now on use the new one.
+    pub fn set_shared(&mut self, dict: Arc<Dictionary>) {
+        self.dict = dict;
     }
 
     /// A translator over the same dictionary with nothing typed. Cheap: the dictionary is
@@ -151,10 +157,16 @@ impl Translator {
         StenoOutput::Type(" ".to_string())
     }
 
-    /// Whether any dictionary entries loaded. False means steno isn't set up yet.
+    /// Whether any dictionary entries loaded.
     #[must_use]
     pub fn has_dictionary(&self) -> bool {
         !self.dict.is_empty()
+    }
+
+    /// How many entries the dictionary has.
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.dict.len()
     }
 
     /// Whether the last stroke matched nothing. The stroke is still recorded so
@@ -938,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs the Plover dictionary from `keymux steno setup`; run with --ignored"]
+    #[ignore = "needs the Plover dictionary from `keymux steno theory plover`; run with --ignored"]
     fn real_sentence_through_plover_dictionary() {
         let home = std::env::var("HOME").unwrap();
         let path = std::path::Path::new(&home).join(".config/keymux/steno/main.json");

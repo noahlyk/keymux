@@ -99,6 +99,14 @@ impl KeymapProcessor {
             .unwrap_or_else(|| PathBuf::from("."));
 
         let home = crate::get_user_home_dir(user_id).ok();
+        // A steno layer needs a place to drop dictionaries, so make it before anything looks
+        if config
+            .layers
+            .values()
+            .any(|layer| matches!(layer.kind, LayerKind::Steno(_)))
+        {
+            steno::setup::prepare_dir(&config_dir);
+        }
         let mut steno_engines = HashMap::new();
         for (layer, layer_config) in &config.layers {
             let LayerKind::Steno(steno) = &layer_config.kind else {
@@ -240,7 +248,7 @@ impl KeymapProcessor {
         self.overlay_hub.set_layer(self.overlay_layer_name());
     }
 
-    /// On a steno layer that has no dictionary yet, point the user at setup.
+    /// On a steno layer with no dictionary at all, point the user at how to get one.
     /// Rate-limited so holding a key doesn't spam notifications.
     fn steno_setup_hint(&mut self) {
         let top = self.layer_stack.current_layer();
@@ -251,8 +259,9 @@ impl KeymapProcessor {
         if needs_setup && self.setup_hint.ready(Instant::now()) {
             steno::setup::notify_user(
                 self.user_id,
-                "Steno isn't set up",
-                "Run: keymux steno setup",
+                "Steno has no dictionary",
+                "Strokes type as they are. Run: keymux steno theory lapwing (or plover), \
+                 or drop dictionaries into ~/.config/keymux/steno",
             );
         }
     }

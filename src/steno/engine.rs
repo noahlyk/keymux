@@ -7,6 +7,7 @@ use super::format::KeyPress;
 use super::layout::{build_key_map, parse_strokes, preset};
 use super::lookup::{classify, Lookup};
 use super::overlay::OverlayHub;
+use super::live;
 use super::setup::default_dictionaries;
 use super::tape;
 use super::translate::{StenoOutput, Translator};
@@ -15,7 +16,8 @@ use crate::keycode::KeyCode;
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::warn;
 
@@ -26,8 +28,11 @@ pub struct StenoEngine {
     held_keys: HashSet<KeyCode>,
     chord: ChordState,
     translator: Translator,
-    /// Dictionaries still loading on a background thread
-    loading: Option<Receiver<Dictionary>>,
+    /// The dictionary, first loaded and then again whenever its files change. `None` when
+    /// there is nothing to follow.
+    updates: Option<Receiver<Arc<Dictionary>>>,
+    /// No dictionary has arrived yet, so strokes wait in `backlog`
+    loading: bool,
     /// Strokes finished before the dictionaries arrived. Translated once they do.
     backlog: Vec<u32>,
     /// Where each stroke is recorded. `None` when the home directory is unknown.
@@ -50,7 +55,8 @@ impl StenoEngine {
     /// Build an engine from a layer's steno config.
     ///
     /// Dictionaries load on a background thread, so the daemon doesn't wait on
-    /// a large file. Until they arrive, strokes wait in the chord.
+    /// a large file. Until they arrive, strokes wait in the chord. After that they follow their
+    /// files: when one changes, the new dictionary is swapped in between two strokes.
     ///
     /// `home` is the session user's home directory, used to expand `~/` in
     /// dictionary paths and to place the tape. Relative dictionary paths are
@@ -66,8 +72,8 @@ impl StenoEngine {
         let keys =
             build_key_map(&preset, &overrides).map_err(|errors| anyhow!(errors.join("; ")))?;
 
-        // Without an explicit list, use what `keymux steno setup` installed
-        let paths: Vec<PathBuf> = if config.dictionaries.is_empty() {
+        // Without an explicit list, read the whole steno folder. Each entry is a file or a folder.
+        let roots: Vec<PathBuf> = if config.dictionaries.is_empty() {
             default_dictionaries(config_dir)
         } else {
             config
@@ -76,19 +82,15 @@ impl StenoEngine {
                 .map(|raw| resolve_dictionary_path(raw, config_dir, home))
                 .collect()
         };
-        let (sender, loading) = mpsc::channel();
-        let cache = super::setup::cache_dir(config_dir);
-        std::thread::spawn(move || {
-            // The engine may be dropped before this finishes; nothing to do then
-            let _ = sender.send(Dictionary::load_cached(&paths, &cache));
-        });
+        let updates = live::subscribe(roots, super::setup::cache_dir(config_dir));
 
         Ok(Self {
             keys,
             held_keys: HashSet::new(),
             chord: ChordState::new(Duration::from_millis(u64::from(config.stroke_timeout_ms))),
             translator: Translator::new(Dictionary::default()),
-            loading: Some(loading),
+            updates: Some(updates),
+            loading: true,
             backlog: Vec::new(),
             tape: home.map(tape::default_path),
             disabled_in_game_mode,
@@ -153,11 +155,12 @@ impl StenoEngine {
         self.hub = hub;
     }
 
-    /// Whether dictionaries are loaded. False means `keymux steno setup` hasn't run.
-    /// Still loading counts as set up, so the hint doesn't fire during startup.
+    /// Whether there is no real dictionary: no theory is installed, and what is in the steno
+    /// folder is only the starter entries or a few of your own. Still loading counts as set
+    /// up, so the hint doesn't fire during startup.
     #[must_use]
     pub fn needs_setup(&self) -> bool {
-        self.loading.is_none() && !self.translator.has_dictionary()
+        !self.loading && self.translator.entry_count() < super::setup::MIN_REAL_DICTIONARY
     }
 
     /// Whether this physical key is a stroke key on this layer.
@@ -223,17 +226,37 @@ impl StenoEngine {
         self.on_stroke(stroke)
     }
 
-    /// Install the dictionaries once they arrive, and translate what was queued.
+    /// Swap in a dictionary when one arrives: the first, after which the strokes queued while
+    /// waiting for it are translated, or a newer one after its files changed.
     fn poll_dictionary(&mut self) -> Option<StenoOutput> {
-        let loading = self.loading.as_ref()?;
-        let dict = match loading.try_recv() {
-            Ok(dict) => dict,
-            Err(TryRecvError::Empty) => return None,
-            // The loader thread died. Steno stays unset up instead of stuck loading.
-            Err(TryRecvError::Disconnected) => Dictionary::default(),
-        };
-        self.loading = None;
-        self.translator.set_dictionary(dict);
+        let updates = self.updates.take()?;
+        // Only the newest matters if several came in
+        let mut newest = None;
+        let mut closed = false;
+        loop {
+            match updates.try_recv() {
+                Ok(dict) => newest = Some(dict),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    closed = true;
+                    break;
+                }
+            }
+        }
+        if closed {
+            // Nothing will arrive any more. Steno stays without a dictionary instead of
+            // waiting for one forever.
+            if self.loading && newest.is_none() {
+                newest = Some(Arc::new(Dictionary::default()));
+            }
+        } else {
+            self.updates = Some(updates);
+        }
+        self.translator.set_shared(newest?);
+        // A dictionary that replaces a working one leaves nothing waiting
+        if !std::mem::replace(&mut self.loading, false) {
+            return None;
+        }
         let mut merged = Merged::default();
         for stroke in std::mem::take(&mut self.backlog) {
             if let Some(output) = self.translate(stroke) {
@@ -290,7 +313,7 @@ impl StenoEngine {
     /// A stroke that is not part of a lookup trigger: translate it, or queue it until the
     /// dictionaries have loaded.
     fn type_stroke(&mut self, stroke: u32) -> Option<StenoOutput> {
-        if self.loading.is_some() {
+        if self.loading {
             self.backlog.push(stroke);
             self.publish_keys();
             return None;
@@ -314,10 +337,11 @@ impl StenoEngine {
     /// the loader thread.
     #[cfg(test)]
     pub fn wait_until_loaded(&mut self) {
-        if let Some(loading) = self.loading.take() {
-            if let Ok(dict) = loading.recv() {
-                self.translator.set_dictionary(dict);
+        if self.loading {
+            if let Some(Ok(dict)) = self.updates.as_ref().map(Receiver::recv) {
+                self.translator.set_shared(dict);
             }
+            self.loading = false;
         }
     }
 }
@@ -395,7 +419,8 @@ mod tests {
             held_keys: HashSet::new(),
             chord: ChordState::new(Duration::from_secs(1)),
             translator: Translator::new(dict),
-            loading: None,
+            updates: None,
+            loading: false,
             backlog: Vec::new(),
             tape: None,
             disabled_in_game_mode: true,
@@ -465,8 +490,9 @@ mod tests {
     #[test]
     fn strokes_made_before_the_dictionary_arrives_type_once_it_does() {
         let mut engine = engine_with_dict("{}");
-        let (sender, loading) = mpsc::channel();
-        engine.loading = Some(loading);
+        let (sender, updates) = std::sync::mpsc::channel();
+        engine.updates = Some(updates);
+        engine.loading = true;
         engine.translator = Translator::new(Dictionary::default());
 
         let now = Instant::now();
@@ -481,7 +507,7 @@ mod tests {
 
         let mut dict = Dictionary::default();
         dict.merge_json(r#"{"KAT": "cat"}"#).unwrap();
-        sender.send(dict).unwrap();
+        sender.send(Arc::new(dict)).unwrap();
         assert_eq!(engine.tick(now), Some(StenoOutput::Type("cat".to_string())));
     }
 

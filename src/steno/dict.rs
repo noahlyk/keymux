@@ -30,7 +30,24 @@ pub struct Dictionary {
 }
 
 /// The file a cache was built from: its path, and the sha256 of its contents when it was read.
-type Source = (String, String);
+pub type Source = (String, String);
+
+/// The path and content hash of each file, which says whether a dictionary built from them
+/// is still current. A file that can't be read counts as `missing`.
+#[must_use]
+pub fn fingerprint(paths: &[impl AsRef<Path>]) -> Vec<Source> {
+    paths
+        .iter()
+        .map(|path| {
+            let path = path.as_ref();
+            let digest = fs::read(path).map_or_else(
+                |_| "missing".to_string(),
+                |bytes| format!("{:x}", Sha256::digest(&bytes)),
+            );
+            (path.display().to_string(), digest)
+        })
+        .collect()
+}
 
 /// What a cache file holds. Written borrowed, read owned.
 #[derive(Deserialize)]
@@ -65,7 +82,14 @@ impl Dictionary {
     /// A file that can't be read is logged and skipped rather than failing the layer.
     #[must_use]
     pub fn load(paths: &[impl AsRef<Path>]) -> Self {
+        Self::load_reporting(paths).0
+    }
+
+    /// Like `load`, and also returns what went wrong with each file that was skipped.
+    #[must_use]
+    pub fn load_reporting(paths: &[impl AsRef<Path>]) -> (Self, Vec<String>) {
         let mut dict = Self::default();
+        let mut problems = Vec::new();
         for path in paths {
             let path = path.as_ref();
             match std::fs::read_to_string(path)
@@ -79,10 +103,13 @@ impl Dictionary {
                     stats.unsupported,
                     stats.invalid
                 ),
-                Err(e) => warn!("steno dictionary skipped: {e:#}"),
+                Err(e) => {
+                    warn!("steno dictionary skipped: {e:#}");
+                    problems.push(format!("{e:#}"));
+                }
             }
         }
-        dict
+        (dict, problems)
     }
 
     /// Merge one Plover JSON dictionary. Entries already present are kept.
@@ -163,25 +190,28 @@ impl Dictionary {
     /// contents it had when the copy was made. Otherwise the JSON is parsed and a new copy saved.
     #[must_use]
     pub fn load_cached(paths: &[impl AsRef<Path>], cache_dir: &Path) -> Self {
-        let sources: Vec<Source> = paths
-            .iter()
-            .map(|path| {
-                let path = path.as_ref();
-                let digest = fs::read(path).map_or_else(
-                    |_| "missing".to_string(),
-                    |bytes| format!("{:x}", Sha256::digest(&bytes)),
-                );
-                (path.display().to_string(), digest)
-            })
-            .collect();
-        let file = cache_dir.join(format!("{}.bin", cache_name(&sources)));
-        if let Some(dict) = read_cache(&file, &sources) {
+        Self::load_cached_reporting(paths, &fingerprint(paths), cache_dir).0
+    }
+
+    /// Like `load_cached`, for files whose `fingerprint` is already known. Also returns what
+    /// went wrong with each file that couldn't be read. Nothing is cached then, so a file
+    /// caught mid-save is never remembered as the real thing.
+    #[must_use]
+    pub fn load_cached_reporting(
+        paths: &[impl AsRef<Path>],
+        sources: &[Source],
+        cache_dir: &Path,
+    ) -> (Self, Vec<String>) {
+        let file = cache_dir.join(format!("{}.bin", cache_name(sources)));
+        if let Some(dict) = read_cache(&file, sources) {
             info!("steno dictionaries restored from {}", file.display());
-            return dict;
+            return (dict, Vec::new());
         }
-        let dict = Self::load(paths);
-        write_cache(&file, &sources, &dict);
-        dict
+        let (dict, problems) = Self::load_reporting(paths);
+        if problems.is_empty() {
+            write_cache(&file, sources, &dict);
+        }
+        (dict, problems)
     }
 
     /// Every entry, for listing and search.
@@ -244,6 +274,34 @@ fn write_cache(file: &Path, sources: &[Source], dict: &Dictionary) {
         .and_then(|()| fs::rename(&tmp, file));
     if let Err(e) = saved {
         warn!("steno cache {}: {e}", file.display());
+        return;
+    }
+    if let Some(dir) = file.parent() {
+        super::setup::hand_to_owner_of_parent(dir);
+        super::setup::hand_to_owner_of_parent(file);
+        prune_cache(dir, file);
+    }
+}
+
+/// Copies kept in a cache folder, newest first. Each set of dictionary files has its own copy,
+/// so a few cover every layer; beyond that, they are copies of sets no longer in use.
+const CACHE_KEPT: usize = 6;
+
+/// Delete all but the newest `CACHE_KEPT` copies, never the one just written (`keep`).
+fn prune_cache(dir: &Path, keep: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut copies: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "bin"))
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .collect();
+    copies.sort_by_key(|copy| std::cmp::Reverse(copy.0));
+    for (_, path) in copies.into_iter().skip(CACHE_KEPT) {
+        if path != keep {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 

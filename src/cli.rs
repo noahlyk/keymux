@@ -219,7 +219,7 @@ pub enum Commands {
     /// Reload configuration from disk
     Reload,
 
-    /// Stenography: install Plover's dictionary and check steno setup
+    /// Stenography: install dictionaries, look up strokes, and check steno setup
     Steno {
         #[command(subcommand)]
         action: StenoAction,
@@ -255,12 +255,13 @@ pub enum Commands {
 
 #[derive(clap::Subcommand, Debug, Clone)]
 pub enum StenoAction {
-    /// Download Plover's dictionary into ~/.config/keymux/steno
+    /// Install Plover's dictionary (same as `theory plover`) and show how to turn steno on
     Setup,
-    /// Show or set the steno theory: `plover` (the default) or `lapwing`. Choosing
-    /// lapwing downloads its dictionaries the first time.
+    /// Install and switch the steno theory: `plover` or `lapwing`. The first time downloads it
+    /// into ~/.config/keymux/steno/<theory>/. The other theory's folder is renamed
+    /// disabled_<theory>, never deleted. Running keymux picks the change up on its own.
     Theory {
-        /// `plover` or `lapwing`. Leave out to show the current theory.
+        /// `plover` or `lapwing`. Leave out to show what is installed.
         theory: Option<String>,
     },
     /// Show the built-in QWERTY layout: each steno key, the key that presses it, and its sound
@@ -287,7 +288,7 @@ pub enum StenoAction {
         /// Stroke in Plover notation; use `/` between strokes of one word
         stroke: String,
     },
-    /// Add a translation to your dictionary (user.json), replacing any existing one
+    /// Add a translation to your own dictionary (00-user.json), replacing any existing one
     Add {
         /// Stroke in Plover notation, e.g. `KAT` or `KPA/TKAOEU`
         stroke: String,

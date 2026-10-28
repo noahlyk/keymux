@@ -326,8 +326,10 @@ pub struct StenoConfig {
     /// Per-key changes to the preset, e.g. `{ "S-": Key(KC_Q) }`.
     #[serde(default)]
     pub layout_overrides: HashMap<String, KeyAction>,
-    /// Plover-format dictionaries, highest priority first. `~/` expands to the
-    /// session user's home; relative paths resolve against the config directory.
+    /// Plover-format dictionaries, highest priority first. Each is a file, or a folder whose
+    /// `.json` files (at any depth) are all used. `~/` expands to the session user's home;
+    /// relative paths resolve against the config directory. Leave it out to use the whole
+    /// `steno` folder in the config directory.
     #[serde(default)]
     pub dictionaries: Vec<String>,
     /// Safety net for a key that never comes up: the stroke is finished after this

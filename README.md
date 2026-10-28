@@ -513,15 +513,78 @@ quick corrections, not a permanent rule change.
 
 keymux can turn a layer into a stenography (steno) machine that types Plover-format dictionaries. Chords are pressed on the stroke keys of your keyboard, and each stroke is translated as soon as its keys come up.
 
-### Setup
+### Dictionaries
+
+A new install has none. A steno layer still works: each stroke you make types its own keys,
+such as `STPWHA-UBGSZ` (capitals, one hyphen between the hands, the star on the right), and `*`
+takes it back like any word. Install a dictionary with one command:
 
 ```sh
-keymux steno setup             # download Plover's main.json into ~/.config/keymux/steno
-keymux steno theory lapwing    # optional: use Lapwing (downloads its dictionaries)
-keymux steno theory            # show the current theory (plover or lapwing)
+keymux steno theory plover     # download Plover's dictionary
+keymux steno theory lapwing    # or Lapwing's; the other one is switched off, not deleted
+keymux steno theory            # show what is installed
 ```
 
-Lapwing dictionaries are used automatically when the theory is `lapwing`. Entries you add with `keymux steno add` go into `user.json`, which has the highest priority.
+Whenever keymux starts with a steno layer in the config, it makes `~/.config/keymux/steno/` if
+it isn't there, with a small `00-user.json` of your own to edit (`KAT` is `cat`, `-T` is `the`;
+delete it if you don't want it). Until a theory is installed, steno tells you how to. **Every `.json` file in it, at any depth, is part of your dictionary.**
+To add your own, drop a file in; to switch one off, start its name with `disabled`.
+
+```
+~/.config/keymux/steno/
+├── 00-user.json            your own entries: `keymux steno add KAT "cat"` writes here
+├── medical.json            any file you add
+├── work/                   folders can nest as deep as you like
+│   └── names.json
+├── lapwing/                a theory, installed by `keymux steno theory lapwing`
+│   └── lapwing-base.json
+├── disabled_plover/        switched off: anything starting with `disabled` is skipped
+└── cache/                  keymux's own copies of the parsed dictionaries
+```
+
+**Priority.** When two entries have the same stroke, the one from the earlier file wins. A folder
+is one unit: it ranks among its neighbours by its own name, everything inside it stays together
+at that spot, and the order inside only decides between the things in it. In each folder, in
+this order:
+
+1. **Names starting with a number**, files and folders alike, lowest number first (`2-` comes
+   before `10-`). However big the number, it beats any plain name: a number is a priority, and
+   having none is the lowest priority there is.
+2. **Plain files**, which have no number.
+3. **Plain folders.**
+
+Anything tied, such as two names with the same number, goes by alphabetical order (ignoring
+case), and then by the exact name (capitals first), so the order never depends on the disk.
+Digits only count as a number when they stand alone: `00-user.json` and `10.json` are numbered,
+`3dprinting.json` is just a name.
+
+The installed theory is a plain folder, so everything numbered beats it, and so does any plain
+file of yours. You override an entry by writing it in a file of your own, without touching
+Lapwing's. If you want it to win over a plain folder as well, give your folder a number. To make
+a theory beat something of yours, give *its* folder a number, such as `00-lapwing/`: folders are
+found by a hidden marker file inside, not by name, so you can rename them.
+
+```
+00-user.json            numbered: first
+20-mine/                a numbered folder ranks against files by its own number...
+├── 00-first.json       ...and what is inside only orders the inside
+└── notes.json
+medical.json            plain file
+work/                   plain folder, after plain files
+lapwing/                a theory: plain too, so it comes down here
+```
+
+**Live.** Nothing needs restarting or reloading. keymux watches the folder, and when any file
+changes (saved, added, renamed, removed), it rebuilds the dictionary on a background thread and
+swaps it in between two strokes, without leaving steno mode. Watching costs no CPU while
+nothing changes. If a file is saved half-finished and doesn't parse, the dictionary in use
+stays until the next save fixes it.
+
+`keymux steno theory <name>` downloads a theory into its own folder the first time, and after
+that only renames folders, so switching is instant and never deletes anything. If you are on an
+older layout (`main.json` and a `theory` file at the top, or a theory folder called just
+`lapwing`), it keeps working, and `main.json` is moved into this layout the first time keymux
+starts.
 
 ### Config
 
@@ -532,10 +595,7 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
     kind: Steno((
         layout: "qwerty",
         layout_overrides: { "S-": Key(KC_Q) },   // optional: change individual stroke keys
-        dictionaries: [                          // optional: highest priority first
-            "~/.config/keymux/steno/user.json",
-            "~/.config/keymux/steno/main.json",
-        ],
+        dictionaries: ["~/work/steno"],          // optional: files or folders, highest priority first
         stroke_timeout_ms: 5000,                 // completes a stroke whose key never comes up
     )),
     remaps: { KC_F10: TO("base") },              // non-stroke keys: remaps still work
@@ -543,7 +603,7 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
 ),
 ```
 
-- If `dictionaries` is empty, keymux uses `user.json` and then `main.json` (or the Lapwing files, with the Lapwing theory).
+- If `dictionaries` is empty, the layer uses the whole `steno` folder (see above). A list replaces that: each entry is a file, or a folder read the same way, and they are watched and reloaded live too.
 - `keymux steno layout` shows every stroke key and the key that presses it. `layout_overrides` keys are those slot names (`S-`, `A-`, `-E`, `-U`, ...).
 - On a steno layer, keys that are neither stroke keys nor remapped are swallowed, so an accidental press types nothing. Delete always passes through.
 - Turn the layer on with `TO("steno")` (stays on, exclusive) or `TG("steno")` (toggle), and leave with `TO("base")`. A keyboard can also start in steno with `default_layer`.
@@ -594,6 +654,7 @@ Backspace and Space do nothing while a stroke is held back.
 
 | Command | What it does |
 |---|---|
+| `keymux steno theory lapwing` | Install Lapwing (or `plover`) and switch the other off. With no name, show what is installed |
 | `keymux steno layout` | Show every stroke key, the key that presses it, and its sound |
 | `keymux steno keys "candy"` | Show every outline that types a word properly. Words are split on spaces |
 | `keymux steno keys "candy" --fast` | Show only the fewest-stroke outline for each word |
@@ -601,7 +662,7 @@ Backspace and Space do nothing while a stroke is held back.
 | `keymux steno keys` | With no text, an interactive session: type strings one after another |
 | `keymux steno lookup cat` | Show the strokes that type a word (case-sensitive, as the dictionary spells it) |
 | `keymux steno stroke "KPA/TKAOEU"` | Show what a stroke types. Use `/` between strokes of one word |
-| `keymux steno add KAT "cat"` | Add or replace an entry in `user.json` |
+| `keymux steno add KAT "cat"` | Add or replace an entry in `00-user.json`, which beats every other dictionary |
 | `keymux steno tape` | Show what each recent stroke typed. `-f` keeps printing new strokes, `-n N` sets how many lines to start with |
 
 ### On-screen overlay

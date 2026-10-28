@@ -6,7 +6,8 @@ use super::layout::{
     build_key_map, extra_keys, parse_stroke, preset, render_stroke, without_extra_keys, SLOTS, SLOT_SOUNDS,
 };
 use super::numbers::number_text;
-use super::setup::{cache_dir, default_dictionaries, steno_dir};
+use super::setup::{cache_dir, default_dictionaries, prepare_dir, steno_dir, USER_DICTIONARY};
+use super::source::expand;
 use super::shortest::shortest_outline;
 use super::tape;
 use super::translate::Translator;
@@ -22,7 +23,9 @@ use std::time::Duration;
 /// Every dictionary a layer would use with the default config.
 #[must_use]
 pub fn load_dictionary(config_dir: &Path) -> Dictionary {
-    Dictionary::load_cached(&default_dictionaries(config_dir), &cache_dir(config_dir))
+    let cache = cache_dir(config_dir);
+    let files = expand(&default_dictionaries(config_dir), &cache);
+    Dictionary::load_cached(&files, &cache)
 }
 
 /// Print the stroke(s) that type `word`.
@@ -515,7 +518,7 @@ fn print_table(rows: &[ChordRow], show_keys: bool) {
     }
 }
 
-/// Add or replace a translation in the user dictionary.
+/// Add or replace a translation in your own dictionary, which comes before every other one.
 pub fn add(config_dir: &Path, stroke: &str, text: &str) -> Result<()> {
     let strokes = parse_strokes(stroke)?;
     if parse_pieces(text).is_none() {
@@ -523,9 +526,10 @@ pub fn add(config_dir: &Path, stroke: &str, text: &str) -> Result<()> {
     }
     let key = format_strokes(&strokes);
 
+    prepare_dir(config_dir);
     let dir = steno_dir(config_dir);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let path = dir.join("user.json");
+    let path = dir.join(USER_DICTIONARY);
     let mut entries: serde_json::Map<String, serde_json::Value> =
         match std::fs::read_to_string(&path) {
             Ok(json) => serde_json::from_str(&json)
@@ -537,7 +541,7 @@ pub fn add(config_dir: &Path, stroke: &str, text: &str) -> Result<()> {
         .is_some();
 
     // Write to a temp file and rename, so a crash can't leave a half-written dictionary
-    let tmp = dir.join("user.json.tmp");
+    let tmp = dir.join(format!("{USER_DICTIONARY}.tmp"));
     let json = serde_json::to_string_pretty(&entries)?;
     std::fs::write(&tmp, format!("{json}\n"))
         .with_context(|| format!("writing {}", tmp.display()))?;
