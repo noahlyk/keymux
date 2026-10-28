@@ -112,6 +112,8 @@ pub fn meta_to_action(meta: &str, ctx: &Context) -> Action {
             action.word_is_finished = true;
             action
         }
+        // keymux's own: `{:back}` or `{:back:3}` erases that many characters of what was typed
+        "back" => meta_back(ctx, param),
         // keymux's own: `{:firstup}` marks a stroke the engine sends when its first key comes up.
         // It types nothing and changes nothing around it.
         "firstup" => ctx.copy_last_action(),
@@ -149,6 +151,29 @@ fn stitch_word(text: &str, delimiter: &str) -> String {
         out.push_str(&word[bare.len()..]);
     }
     out
+}
+
+/// `{:back}` or `{:back:count}`: erase the last character, or `count` of them, as a replaced
+/// part of the earlier text. Unlike a Backspace key, keymux then knows what it erased, so
+/// undoing the stroke types it back. Text it didn't type can't be erased this way, so with
+/// nothing known to erase it presses Backspace instead.
+fn meta_back(ctx: &Context, count: &str) -> Action {
+    let count = count
+        .parse::<usize>()
+        .ok()
+        .filter(|count| *count > 0)
+        .unwrap_or(1);
+    let mut action = ctx.copy_last_action();
+    let erased = ctx.last_text(count);
+    if erased.is_empty() {
+        action.combo = Some("BackSpace".to_string());
+        return action;
+    }
+    action.prev_attach = true;
+    action.text = Some(String::new());
+    action.prev_replace = erased;
+    action.word = None;
+    action
 }
 
 /// `{:stitch_last_word:count:delimiter}`: the last words rewritten with dashes between letters.

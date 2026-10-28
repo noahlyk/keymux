@@ -795,6 +795,43 @@ mod tests {
         t.text().to_string()
     }
 
+    const BACK_DICT: &str = r#"{"KAT": "cat", "TKOG": "dog", "SPW": "{:back}", "PW-FP": "{:back:3}"}"#;
+
+    #[test]
+    fn back_erases_a_character_and_undo_types_it_again() {
+        let mut t = translator(BACK_DICT);
+        t.stroke(stroke("KAT"));
+        t.stroke(stroke("TKOG"));
+        assert_eq!(t.text(), "cat dog");
+        t.stroke(stroke("SPW"));
+        assert_eq!(t.text(), "cat do");
+        // Undo puts the character back and sends nothing else
+        let ops = t.stroke_ops(stroke("*"));
+        assert_eq!(ops, vec![Op::Text("g".to_string())]);
+        assert_eq!(t.text(), "cat dog");
+        // The next undo takes the word as usual
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "cat");
+    }
+
+    #[test]
+    fn back_with_a_count_erases_that_many() {
+        let mut t = translator(BACK_DICT);
+        t.stroke(stroke("KAT"));
+        t.stroke(stroke("TKOG"));
+        t.stroke(stroke("PW-FP"));
+        assert_eq!(t.text(), "cat ");
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "cat dog");
+    }
+
+    #[test]
+    fn back_with_nothing_typed_presses_backspace() {
+        let mut t = translator(BACK_DICT);
+        let ops = t.stroke_ops(stroke("SPW"));
+        assert_eq!(ops, vec![Op::Combo("BackSpace".to_string())]);
+    }
+
     #[test]
     fn a_stroke_types_its_translation() {
         assert_eq!(type_strokes(r#"{"KAT": "cat"}"#, &["KAT"]), "cat");
