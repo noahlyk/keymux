@@ -207,20 +207,6 @@ impl StenoEngine {
         self.on_stroke(stroke)
     }
 
-    /// Backspace was pressed on this layer while the tape is empty, so it reaches the screen,
-    /// and the translator drops the character it removed.
-    pub fn backspace(&mut self) {
-        self.translator.backspace();
-    }
-
-    /// Whether there is nothing left to undo. Space and Backspace act as normal keys then. A
-    /// held-back lookup stroke counts as something: Backspace must not delete text that comes
-    /// before it, and the stroke is not on screen to take back.
-    #[must_use]
-    pub const fn tape_is_empty(&self) -> bool {
-        self.trigger_held.is_empty() && self.translator.tape_is_empty()
-    }
-
     /// A space was typed on the steno layer. Returns what to type.
     pub fn space(&mut self) -> StenoOutput {
         self.translator.space()

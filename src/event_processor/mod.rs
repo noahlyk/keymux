@@ -507,89 +507,86 @@ fn release_all_keys(virtual_device: &mut VirtualDevice, keymap: &KeymapProcessor
     let _ = virtual_device.emit(&[syn_event]);
 }
 
-/// Delay between each typed character's key events. Emitting a whole word in one
-/// burst with zero spacing lets the consuming app's input queue drop or coalesce
-/// events under load, truncating the output unpredictably.
-const TYPE_CHAR_DELAY: std::time::Duration = std::time::Duration::from_millis(1);
+/// Keystrokes sent in one write. A word or a short correction goes out as a single burst
+/// with no sleep, so it appears at once. Only output longer than this is split up.
+const KEYSTROKES_PER_WRITE: usize = 16;
+
+/// Pause between writes of a long output, so the consuming app's input queue can keep up
+/// instead of dropping or coalescing events and truncating the text. Never applied
+/// after the last write, nor to output that fits in one.
+const WRITE_GAP: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// One key press and release, each followed by a SYN_REPORT, with shift held around it if needed
+fn keystroke(key: Key, shift: bool) -> Vec<InputEvent> {
+    let syn = || InputEvent::new_now(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT);
+    let mut events = Vec::with_capacity(8);
+    if shift {
+        events.push(InputEvent::new_now(
+            EventType::KEY,
+            Key::KEY_LEFTSHIFT.code(),
+            1,
+        ));
+        events.push(syn());
+    }
+    events.push(InputEvent::new_now(EventType::KEY, key.code(), 1));
+    events.push(syn());
+    events.push(InputEvent::new_now(EventType::KEY, key.code(), 0));
+    events.push(syn());
+    if shift {
+        events.push(InputEvent::new_now(
+            EventType::KEY,
+            Key::KEY_LEFTSHIFT.code(),
+            0,
+        ));
+        events.push(syn());
+    }
+    events
+}
+
+/// Group keystrokes into writes of at most `KEYSTROKES_PER_WRITE`. A keystroke is never
+/// split across two writes, so shift is never left held between them.
+fn into_writes(keystrokes: Vec<Vec<InputEvent>>) -> Vec<Vec<InputEvent>> {
+    keystrokes
+        .chunks(KEYSTROKES_PER_WRITE)
+        .map(|group| group.concat())
+        .collect()
+}
+
+/// Emit keystrokes in order: one write if they fit, otherwise several with a short gap
+/// between them.
+fn emit_keystrokes(
+    virtual_device: &mut VirtualDevice,
+    keystrokes: Vec<Vec<InputEvent>>,
+) -> Result<()> {
+    let writes = into_writes(keystrokes);
+    let last = writes.len().saturating_sub(1);
+    for (i, events) in writes.iter().enumerate() {
+        virtual_device.emit(events)?;
+        if i < last {
+            std::thread::sleep(WRITE_GAP);
+        }
+    }
+    Ok(())
+}
+
+/// The keystrokes that delete `backspaces` characters then type `text`
+fn retype_keystrokes(backspaces: usize, text: &str) -> Vec<Vec<InputEvent>> {
+    let deletes = (0..backspaces).map(|_| keystroke(Key::KEY_BACKSPACE, false));
+    let typed = text.chars().filter_map(|ch| {
+        let (key, shift) = char_to_key(ch);
+        key.map(|key| keystroke(key, shift))
+    });
+    deletes.chain(typed).collect()
+}
 
 /// Delete `backspaces` characters before the cursor, then type `text`
 fn retype(virtual_device: &mut VirtualDevice, backspaces: usize, text: &str) -> Result<()> {
-    for _ in 0..backspaces {
-        let events = [
-            InputEvent::new_now(EventType::KEY, Key::KEY_BACKSPACE.code(), 1),
-            InputEvent::new_now(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT),
-        ];
-        virtual_device.emit(&events)?;
-        std::thread::sleep(TYPE_CHAR_DELAY);
-        let events = [
-            InputEvent::new_now(EventType::KEY, Key::KEY_BACKSPACE.code(), 0),
-            InputEvent::new_now(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT),
-        ];
-        virtual_device.emit(&events)?;
-        std::thread::sleep(TYPE_CHAR_DELAY);
-    }
-    type_string(virtual_device, text, false)
+    emit_keystrokes(virtual_device, retype_keystrokes(backspaces, text))
 }
 
-/// Type a string by emitting key events for each character, pacing each one so the
-/// consuming app's input queue can keep up.
+/// Type a string by emitting key events for each character
 fn type_string(virtual_device: &mut VirtualDevice, text: &str, _add_enter: bool) -> Result<()> {
-    for ch in text.chars() {
-        let (key, needs_shift) = char_to_key(ch);
-
-        if let Some(key) = key {
-            let mut events = Vec::with_capacity(8);
-
-            // Press shift if needed
-            if needs_shift {
-                events.push(InputEvent::new_now(
-                    EventType::KEY,
-                    Key::KEY_LEFTSHIFT.code(),
-                    1,
-                ));
-                events.push(InputEvent::new_now(
-                    EventType::SYNCHRONIZATION,
-                    SYN_CODE,
-                    SYN_REPORT,
-                ));
-            }
-
-            // Press key
-            events.push(InputEvent::new_now(EventType::KEY, key.code(), 1));
-            events.push(InputEvent::new_now(
-                EventType::SYNCHRONIZATION,
-                SYN_CODE,
-                SYN_REPORT,
-            ));
-
-            // Release key
-            events.push(InputEvent::new_now(EventType::KEY, key.code(), 0));
-            events.push(InputEvent::new_now(
-                EventType::SYNCHRONIZATION,
-                SYN_CODE,
-                SYN_REPORT,
-            ));
-
-            // Release shift if needed
-            if needs_shift {
-                events.push(InputEvent::new_now(
-                    EventType::KEY,
-                    Key::KEY_LEFTSHIFT.code(),
-                    0,
-                ));
-                events.push(InputEvent::new_now(
-                    EventType::SYNCHRONIZATION,
-                    SYN_CODE,
-                    SYN_REPORT,
-                ));
-            }
-
-            virtual_device.emit(&events)?;
-            std::thread::sleep(TYPE_CHAR_DELAY);
-        }
-    }
-
-    Ok(())
+    retype(virtual_device, 0, text)
 }
 
 /// Convert a character to an evdev Key and whether shift is needed

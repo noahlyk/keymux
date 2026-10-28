@@ -321,20 +321,12 @@ impl KeymapProcessor {
             return Some(ProcessResult::None);
         }
 
-        // Space and Backspace don't type on a steno layer, so an accidental press can't wipe
-        // the tape. Once the tape is empty (everything undone), they act as normal keys again.
-        let tape_empty = engine.tape_is_empty();
-        let tape_key = matches!(keycode, KeyCode::KC_SPC | KeyCode::KC_BSPC);
-        // Backspace reaches the screen here, so the translator drops the character it removed
-        if keycode == KeyCode::KC_BSPC && tape_empty {
-            engine.backspace();
-        }
         let has_remap = self
             .layer_stack
             .layer_configs()
             .get(&top)
             .is_some_and(|config| config.remaps.contains_key(&keycode));
-        if STENO_PASSTHROUGH.contains(&keycode) || (tape_key && tape_empty) || has_remap {
+        if STENO_PASSTHROUGH.contains(&keycode) || has_remap {
             // This key reaches the application, and may move the caret or change the text
             // behind the translator's back (arrows, Enter, Delete, a remapped Space...). What
             // it remembers of the text is no longer the text at the cursor, so it lets go.
@@ -344,9 +336,9 @@ impl KeymapProcessor {
             return None;
         }
 
-        // While the tape has text to undo, Space and Backspace are swallowed: they neither type
-        // nor delete, so `*` is the only way to take text back
-        if tape_key {
+        // Space and Backspace don't type on a steno layer, even with nothing on the tape, so an
+        // accidental press can't wipe text. `*` is the only way to take text back.
+        if matches!(keycode, KeyCode::KC_SPC | KeyCode::KC_BSPC) {
             self.held_keys
                 .insert(keycode, vec![HeldAction::SwallowedBySteno]);
             return Some(ProcessResult::None);

@@ -97,11 +97,7 @@ fn tg_latches_after_release_and_toggles_off() {
     let dict = fixture.dir.join("main.json");
     std::fs::write(&dict, r#"{"KAT": "cat"}"#).unwrap();
     let config_path = fixture.dir.join("toggle.ron");
-    std::fs::write(
-        &config_path,
-        TOGGLE_CONFIG.replace("DICT", &path_str(&dict)),
-    )
-    .unwrap();
+    std::fs::write(&config_path, TOGGLE_CONFIG.replace("DICT", &path_str(&dict))).unwrap();
     let config = Config::load(&config_path).unwrap();
     let mut p = KeymapProcessor::new(&config, config_path, 0);
     p.wait_for_steno_dictionaries();
@@ -134,17 +130,10 @@ fn stray_space_during_a_chord_does_not_disturb_the_stroke() {
     let mut p = fixture.processor();
     enter_steno(&mut p);
 
-    // Space lands in the middle of "cat". The tape is empty, so Space is an ordinary key and
-    // reaches the screen, and the stroke still completes after it
+    // Space lands in the middle of "cat". It is swallowed, and the stroke still completes
     assert_eq!(p.process_key(KeyCode::KC_S, true), ProcessResult::None);
-    assert_eq!(
-        p.process_key(KeyCode::KC_SPC, true),
-        ProcessResult::EmitKey(KeyCode::KC_SPC, true)
-    );
-    assert_eq!(
-        p.process_key(KeyCode::KC_SPC, false),
-        ProcessResult::EmitKey(KeyCode::KC_SPC, false)
-    );
+    assert_eq!(p.process_key(KeyCode::KC_SPC, true), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_SPC, false), ProcessResult::None);
     assert_eq!(p.process_key(KeyCode::KC_C, true), ProcessResult::None);
     assert_eq!(p.process_key(KeyCode::KC_P, true), ProcessResult::None);
     assert_eq!(p.process_key(KeyCode::KC_S, false), ProcessResult::None);
@@ -172,20 +161,17 @@ fn a_key_swallowed_on_press_is_swallowed_on_release_too() {
 }
 
 #[test]
-fn backspace_is_swallowed_while_the_tape_has_text_and_works_once_it_is_empty() {
+fn backspace_is_swallowed_whether_or_not_the_tape_has_text() {
     let fixture = Fixture::new("backspace");
     let mut p = fixture.processor();
     enter_steno(&mut p);
 
-    // "cat" is typed. Backspace doesn't delete on the steno layer while there is text to undo
+    // "cat" is typed. Backspace doesn't delete on the steno layer
     chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]);
     assert_eq!(p.process_key(KeyCode::KC_BSPC, true), ProcessResult::None);
     assert_eq!(p.process_key(KeyCode::KC_BSPC, false), ProcessResult::None);
     // Undo still removes all of "cat"
-    assert_eq!(
-        p.process_key(KeyCode::KC_T, true),
-        ProcessResult::None
-    );
+    assert_eq!(p.process_key(KeyCode::KC_T, true), ProcessResult::None);
     assert_eq!(
         p.process_key(KeyCode::KC_T, false),
         ProcessResult::Retype {
@@ -193,15 +179,9 @@ fn backspace_is_swallowed_while_the_tape_has_text_and_works_once_it_is_empty() {
             text: String::new(),
         }
     );
-    // The tape is empty now, so Backspace is an ordinary key again and deletes on the screen
-    assert_eq!(
-        p.process_key(KeyCode::KC_BSPC, true),
-        ProcessResult::EmitKey(KeyCode::KC_BSPC, true)
-    );
-    assert_eq!(
-        p.process_key(KeyCode::KC_BSPC, false),
-        ProcessResult::EmitKey(KeyCode::KC_BSPC, false)
-    );
+    // The tape is empty now, and Backspace still does nothing
+    assert_eq!(p.process_key(KeyCode::KC_BSPC, true), ProcessResult::None);
+    assert_eq!(p.process_key(KeyCode::KC_BSPC, false), ProcessResult::None);
 }
 
 fn enter_steno(p: &mut KeymapProcessor) {
@@ -350,6 +330,24 @@ fn undo_takes_back_a_word_typed_after_a_space() {
             backspaces: 4,
             text: String::new(),
         }
+    );
+}
+
+#[test]
+fn undo_with_nothing_on_the_tape_presses_ctrl_backspace() {
+    let fixture = Fixture::new("undo-empty-tape");
+    let mut p = fixture.processor();
+    enter_steno(&mut p);
+
+    // `*` with nothing typed on this layer takes back a word with the keys that do it
+    assert_eq!(
+        chord(&mut p, &[KeyCode::KC_T]),
+        ProcessResult::MultipleEvents(vec![
+            (KeyCode::KC_LCTL, true),
+            (KeyCode::KC_BSPC, true),
+            (KeyCode::KC_BSPC, false),
+            (KeyCode::KC_LCTL, false),
+        ])
     );
 }
 
@@ -828,4 +826,53 @@ fn a_key_that_reaches_the_screen_makes_the_next_word_start_fresh() {
         chord(&mut p, &cat),
         ProcessResult::TypeString("cat".to_string(), false)
     );
+}
+
+fn key_events(writes: &[Vec<evdev::InputEvent>]) -> Vec<(u16, i32)> {
+    writes
+        .iter()
+        .flatten()
+        .filter(|e| e.event_type() == evdev::EventType::KEY)
+        .map(|e| (e.code(), e.value()))
+        .collect()
+}
+
+#[test]
+fn a_word_goes_out_as_one_write_with_nothing_to_wait_for() {
+    let writes = super::into_writes(super::retype_keystrokes(0, "about"));
+    assert_eq!(writes.len(), 1);
+    let writes = super::into_writes(super::retype_keystrokes(3, "increase"));
+    assert_eq!(writes.len(), 1);
+}
+
+#[test]
+fn a_long_word_is_split_into_a_few_writes_not_one_per_letter() {
+    let word = "supercalifragilisticexpialidocious";
+    let writes = super::into_writes(super::retype_keystrokes(0, word));
+    assert_eq!(writes.len(), 3);
+    assert_eq!(key_events(&writes).len(), word.len() * 2);
+}
+
+#[test]
+fn splitting_never_changes_the_keys_or_their_order() {
+    let text = "Hello, World";
+    let split = key_events(&super::into_writes(super::retype_keystrokes(30, text)));
+    let whole = key_events(&[super::retype_keystrokes(30, text).concat()]);
+    assert_eq!(split, whole);
+}
+
+#[test]
+fn shift_is_never_held_across_two_writes() {
+    let text = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    for write in super::into_writes(super::retype_keystrokes(5, text)) {
+        let shifts: Vec<i32> = key_events(&[write])
+            .into_iter()
+            .filter(|&(code, _)| code == evdev::Key::KEY_LEFTSHIFT.code())
+            .map(|(_, value)| value)
+            .collect();
+        assert_eq!(
+            shifts.iter().filter(|&&v| v == 1).count(),
+            shifts.iter().filter(|&&v| v == 0).count()
+        );
+    }
 }

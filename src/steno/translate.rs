@@ -439,14 +439,28 @@ impl Translator {
     }
 
     fn undo(&mut self) -> Option<StenoOutput> {
+        // A stroke that matched nothing is on the tape, so taking it back is this press's job
+        let mut took_back_a_stroke = false;
         loop {
-            let (removed, replaced, presses) = self.pop_translation()?;
+            // Nothing left to undo: take back a word with the keys that do it. Whatever they
+            // delete wasn't typed by a stroke, so the record starts fresh.
+            let Some((removed, replaced, presses)) = self.pop_translation() else {
+                if took_back_a_stroke {
+                    return None;
+                }
+                self.start_fresh();
+                return Some(StenoOutput::Keys(vec![KeyPress {
+                    modifiers: vec![KeyCode::KC_LCTL],
+                    key: KeyCode::KC_BSPC,
+                }]));
+            };
             // A key press has no text to take back, so undo ends here without touching the screen
             if presses {
                 return None;
             }
             // Barriers for unmatched strokes have nothing to undo; skip past them
             if removed.is_empty() && replaced.is_empty() {
+                took_back_a_stroke = true;
                 continue;
             }
             info!("steno undo ({} characters)", removed.chars().count());
@@ -860,9 +874,15 @@ mod tests {
     }
 
     #[test]
-    fn undo_with_nothing_to_undo_does_nothing() {
+    fn undo_with_nothing_on_the_tape_deletes_a_word_with_the_keys_that_do_it() {
         let mut t = translator("{}");
-        assert_eq!(t.stroke(UNDO_STROKE), None);
+        assert_eq!(
+            t.stroke(UNDO_STROKE),
+            Some(StenoOutput::Keys(vec![KeyPress {
+                modifiers: vec![KeyCode::KC_LCTL],
+                key: KeyCode::KC_BSPC,
+            }]))
+        );
     }
 
     #[test]
@@ -963,6 +983,8 @@ mod tests {
         );
         // Nothing but the unmatched stroke is left, and it has nothing to take back
         assert_eq!(t.stroke(UNDO_STROKE), None);
+        // Now the tape is empty
+        assert!(matches!(t.stroke(UNDO_STROKE), Some(StenoOutput::Keys(_))));
     }
 
     #[test]

@@ -552,7 +552,8 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
 
 - Press a stroke's keys together. The stroke is translated when they come up.
 - `*` undoes the last translation, including corrections that rewrote earlier text.
-- Space and Backspace are used for undo while there is text to undo. Once nothing is left, they act normally.
+- Space and Backspace do nothing on a steno layer, so an accidental press can't wipe text. `*` is the way to take it back.
+- With nothing on the tape, `*` presses Ctrl+Backspace, which deletes the word before the cursor in nearly every app.
 - `#` repeats the last stroke.
 - A stroke that matches nothing on its own, but starts a longer entry, types a `_` placeholder. The next stroke completes the entry and replaces the `_`, or the `_` is removed.
 - A stroke that matches nothing types nothing, and is marked `?` on the tape.
