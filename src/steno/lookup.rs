@@ -247,7 +247,8 @@ mod tests {
     #[test]
     fn one_letter_gives_no_suggestions_but_an_exact_word_still_does() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"-T": "the", "A": "a", "AB": "about"}"#).unwrap();
+        dict.merge_json(r#"{"-T": "the", "A": "a", "AB": "about"}"#)
+            .unwrap();
         let base = Translator::new(dict);
         let rows = typed("a").view(&base).rows;
         assert_eq!(rows.len(), 1, "{rows:?}");
@@ -275,13 +276,22 @@ mod tests {
     #[test]
     fn keys_mean_what_the_layers_made_of_them() {
         let mut input = LookupInput::default();
-        assert_eq!(press(&mut input, KeyCode::KC_SPC), Some(LookupKey::Char(' ')));
+        assert_eq!(
+            press(&mut input, KeyCode::KC_SPC),
+            Some(LookupKey::Char(' '))
+        );
         assert_eq!(press(&mut input, KeyCode::KC_5), Some(LookupKey::Char('5')));
-        assert_eq!(press(&mut input, KeyCode::KC_MINS), Some(LookupKey::Char('-')));
+        assert_eq!(
+            press(&mut input, KeyCode::KC_MINS),
+            Some(LookupKey::Char('-'))
+        );
         // Symbols come with Shift, as from a symbol layer, and so does Caps Lock for letters
         input.key(KeyCode::KC_RSFT, true);
         assert_eq!(press(&mut input, KeyCode::KC_5), Some(LookupKey::Char('%')));
-        assert_eq!(press(&mut input, KeyCode::KC_QUOT), Some(LookupKey::Char('"')));
+        assert_eq!(
+            press(&mut input, KeyCode::KC_QUOT),
+            Some(LookupKey::Char('"'))
+        );
         input.key(KeyCode::KC_RSFT, false);
         input.key(KeyCode::KC_CAPS, true);
         assert_eq!(press(&mut input, KeyCode::KC_A), Some(LookupKey::Char('A')));
@@ -293,7 +303,10 @@ mod tests {
         input.key(KeyCode::KC_LCTL, false);
         assert_eq!(press(&mut input, KeyCode::KC_ESC), Some(LookupKey::Close));
         assert_eq!(press(&mut input, KeyCode::KC_ENT), Some(LookupKey::Close));
-        assert_eq!(press(&mut input, KeyCode::KC_BSPC), Some(LookupKey::Backspace));
+        assert_eq!(
+            press(&mut input, KeyCode::KC_BSPC),
+            Some(LookupKey::Backspace)
+        );
     }
 
     #[test]

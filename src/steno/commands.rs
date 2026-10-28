@@ -3,12 +3,13 @@
 use super::dict::Dictionary;
 use super::formatter::{leaves_attached, plain_text};
 use super::layout::{
-    build_key_map, extra_keys, parse_stroke, preset, render_stroke, without_extra_keys, SLOTS, SLOT_SOUNDS,
+    build_key_map, extra_keys, parse_stroke, preset, render_stroke, without_extra_keys, SLOTS,
+    SLOT_SOUNDS,
 };
 use super::numbers::number_text;
 use super::setup::{cache_dir, default_dictionaries, prepare_dir, steno_dir, USER_DICTIONARY};
-use super::source::expand;
 use super::shortest::shortest_outline;
+use super::source::expand;
 use super::tape;
 use super::translate::Translator;
 use crate::keycode::KeyCode;
@@ -46,7 +47,10 @@ pub fn show_stroke(config_dir: &Path, text: &str) -> Result<()> {
     let strokes = parse_strokes(text)?;
     let dict = load_dictionary(config_dir);
     if let Some(translation) = dict.lookup(&strokes) {
-        println!("{:?}", plain_text(translation).unwrap_or_else(|| translation.to_string()));
+        println!(
+            "{:?}",
+            plain_text(translation).unwrap_or_else(|| translation.to_string())
+        );
     } else if let Some(digits) = strokes
         .first()
         .filter(|_| strokes.len() == 1)
@@ -72,8 +76,16 @@ pub fn keys(config_dir: &Path, text: Option<&str>, show_keys: bool, fast: bool) 
 }
 
 /// The interactive `steno keys`: a prompt that shows the table for each line typed.
-fn keys_session(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, show_keys: bool, fast: bool) -> Result<()> {
-    println!("{}", style("type a string and press Enter · empty line or Ctrl-D to quit").dim());
+fn keys_session(
+    dict: Dictionary,
+    keys_by_bit: &HashMap<u32, KeyCode>,
+    show_keys: bool,
+    fast: bool,
+) -> Result<()> {
+    println!(
+        "{}",
+        style("type a string and press Enter · empty line or Ctrl-D to quit").dim()
+    );
     let stdin = std::io::stdin();
     loop {
         print!("{} ", style("›").magenta().bold());
@@ -87,7 +99,10 @@ fn keys_session(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, show_keys
         if text.is_empty() {
             break;
         }
-        print_table(&chord_rows(dict.clone(), keys_by_bit, text, fast), show_keys);
+        print_table(
+            &chord_rows(dict.clone(), keys_by_bit, text, fast),
+            show_keys,
+        );
         println!();
     }
     Ok(())
@@ -100,7 +115,13 @@ pub fn layout() -> Result<()> {
     let keys_by_bit = qwerty_keys_by_bit()?;
     let extras: Vec<[String; 3]> = extra_keys(&preset("qwerty").map_err(|e| anyhow!(e))?)
         .into_iter()
-        .map(|(slot, key)| [SLOTS[slot].1.to_string(), key_label(key), SLOT_SOUNDS[slot].to_string()])
+        .map(|(slot, key)| {
+            [
+                SLOTS[slot].1.to_string(),
+                key_label(key),
+                SLOT_SOUNDS[slot].to_string(),
+            ]
+        })
         .collect();
     // Sounds order: the number key (the last slot) first, then the rest in slot order
     let number_slot = SLOTS.len() - 1;
@@ -125,17 +146,23 @@ pub fn layout() -> Result<()> {
                 .map(|(slot, &(_, name))| (name, SLOT_SOUNDS[slot]))
                 .collect();
             [
-                parts.iter().map(|(name, _)| *name).collect::<Vec<_>>().join("+"),
+                parts
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .collect::<Vec<_>>()
+                    .join("+"),
                 key_label(key),
-                parts.iter().map(|(_, sound)| *sound).collect::<Vec<_>>().join(" + "),
+                parts
+                    .iter()
+                    .map(|(_, sound)| *sound)
+                    .collect::<Vec<_>>()
+                    .join(" + "),
             ]
         })
         .collect();
     combined.sort_by(|a, b| a[0].cmp(&b[0]));
     let rows: Vec<[String; 3]> = rows.chain(extras).chain(combined).collect();
-    let widths = [0, 1, 2].map(|col| {
-        rows.iter().map(|row| row[col].len()).max().unwrap_or(0)
-    });
+    let widths = [0, 1, 2].map(|col| rows.iter().map(|row| row[col].len()).max().unwrap_or(0));
     let headers = ["Steno", "Press", "Sound"];
     let line = |cells: [&str; 3]| {
         println!(
@@ -158,7 +185,8 @@ pub fn layout() -> Result<()> {
 fn qwerty_keys_by_bit() -> Result<HashMap<u32, KeyCode>> {
     // Main keys only, so each stroke key names one physical key
     let preset = without_extra_keys(preset("qwerty").map_err(|e| anyhow!(e))?);
-    let layout = build_key_map(&preset, &HashMap::new()).map_err(|errs| anyhow!(errs.join("; ")))?;
+    let layout =
+        build_key_map(&preset, &HashMap::new()).map_err(|errs| anyhow!(errs.join("; ")))?;
     Ok(layout.into_iter().map(|(key, bit)| (bit, key)).collect())
 }
 
@@ -187,19 +215,35 @@ const SEARCH_BUDGET: usize = 20_000;
 /// entry gets its shortest outline (see `shortest`), or a single row marked "no stroke"
 /// when no outline types it.
 #[must_use]
-pub fn chord_rows(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &str, fast: bool) -> Vec<ChordRow> {
+pub fn chord_rows(
+    dict: Dictionary,
+    keys_by_bit: &HashMap<u32, KeyCode>,
+    text: &str,
+    fast: bool,
+) -> Vec<ChordRow> {
     if !fast {
         return all_outline_rows(&dict, keys_by_bit, text);
     }
     let spans = word_spans(text);
-    let words: Vec<&str> = spans.iter().map(|&(start, end)| &text[start..end]).collect();
-    let candidates: Vec<Vec<Vec<u32>>> = words.iter().map(|word| ranked_strokes(&dict, word)).collect();
+    let words: Vec<&str> = spans
+        .iter()
+        .map(|&(start, end)| &text[start..end])
+        .collect();
+    let candidates: Vec<Vec<Vec<u32>>> = words
+        .iter()
+        .map(|word| ranked_strokes(&dict, word))
+        .collect();
 
     // A word with no entry gets its shortest outline, found before the dictionary moves into the translator
     let shortest: Vec<Option<Vec<u32>>> = words
         .iter()
         .zip(&candidates)
-        .map(|(word, options)| options.is_empty().then(|| shortest_outline(&dict, word)).flatten())
+        .map(|(word, options)| {
+            options
+                .is_empty()
+                .then(|| shortest_outline(&dict, word))
+                .flatten()
+        })
         .collect();
 
     // Words with no entry can't be typed, so each run of known words is searched on its own,
@@ -220,12 +264,21 @@ pub fn chord_rows(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &
         let run_start = spans[start].0;
         let wants: Vec<String> = spans[start..end]
             .iter()
-            .map(|&(_, word_end)| text[run_start..word_end].split_whitespace().collect::<Vec<_>>().join(" "))
+            .map(|&(_, word_end)| {
+                text[run_start..word_end]
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
             .collect();
         let run_candidates = &candidates[start..end];
         match exact_strokes(&base, &wants, run_candidates) {
             Some(exact) => chosen.extend(exact.into_iter().map(Some)),
-            None => chosen.extend(run_candidates.iter().map(|options| options.first().cloned())),
+            None => chosen.extend(
+                run_candidates
+                    .iter()
+                    .map(|options| options.first().cloned()),
+            ),
         }
         start = end;
     }
@@ -233,7 +286,11 @@ pub fn chord_rows(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &
     let mut rows = Vec::new();
     for (word, strokes) in words.iter().zip(chosen) {
         let Some(strokes) = strokes else {
-            rows.push(ChordRow { word: (*word).to_string(), outline: "no stroke".to_string(), keys: String::new() });
+            rows.push(ChordRow {
+                word: (*word).to_string(),
+                outline: "no stroke".to_string(),
+                keys: String::new(),
+            });
             continue;
         };
         rows.push(ChordRow {
@@ -247,24 +304,39 @@ pub fn chord_rows(dict: Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &
 
 /// Every outline of each word, fewest strokes first. A word with no entry gets its shortest
 /// outline, or "no stroke". Only the first row of a word carries the word.
-fn all_outline_rows(dict: &Dictionary, keys_by_bit: &HashMap<u32, KeyCode>, text: &str) -> Vec<ChordRow> {
+fn all_outline_rows(
+    dict: &Dictionary,
+    keys_by_bit: &HashMap<u32, KeyCode>,
+    text: &str,
+) -> Vec<ChordRow> {
     let base = Translator::new(dict.clone());
     let mut rows = Vec::new();
     for (start, end) in word_spans(text) {
         let word = &text[start..end];
         // Only outlines that type the word properly after a space, as in a sentence
         let proper = |outline: &Vec<u32>| types_in_context(&base, word, outline);
-        let mut outlines: Vec<Vec<u32>> = ranked_strokes(dict, word).into_iter().filter(proper).collect();
+        let mut outlines: Vec<Vec<u32>> = ranked_strokes(dict, word)
+            .into_iter()
+            .filter(proper)
+            .collect();
         if outlines.is_empty() {
             outlines.extend(shortest_outline(dict, word).filter(proper));
         }
         if outlines.is_empty() {
-            rows.push(ChordRow { word: word.to_string(), outline: "no stroke".to_string(), keys: String::new() });
+            rows.push(ChordRow {
+                word: word.to_string(),
+                outline: "no stroke".to_string(),
+                keys: String::new(),
+            });
             continue;
         }
         for (i, strokes) in outlines.iter().enumerate() {
             rows.push(ChordRow {
-                word: if i == 0 { word.to_string() } else { String::new() },
+                word: if i == 0 {
+                    word.to_string()
+                } else {
+                    String::new()
+                },
                 outline: format_strokes(strokes),
                 keys: keys_text(strokes, keys_by_bit),
             });
@@ -295,7 +367,10 @@ fn types_in_context(base: &Translator, word: &str, outline: &[u32]) -> bool {
 /// The physical keys that press each stroke, one group per stroke. Keys within a stroke run
 /// together; strokes are split by `/`, as in the outline.
 fn keys_text(strokes: &[u32], keys_by_bit: &HashMap<u32, KeyCode>) -> String {
-    let keys: Vec<String> = strokes.iter().map(|&bits| stroke_keys(bits, keys_by_bit).concat()).collect();
+    let keys: Vec<String> = strokes
+        .iter()
+        .map(|&bits| stroke_keys(bits, keys_by_bit).concat())
+        .collect();
     keys.join("/")
 }
 
@@ -305,7 +380,10 @@ fn keys_text(strokes: &[u32], keys_by_bit: &HashMap<u32, KeyCode>) -> String {
 fn word_spans(text: &str) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     let mut chunk_start: Option<usize> = None;
-    for (i, c) in text.char_indices().chain(std::iter::once((text.len(), ' '))) {
+    for (i, c) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), ' ')))
+    {
         match (c.is_whitespace(), chunk_start) {
             (false, None) => chunk_start = Some(i),
             (true, Some(start)) => {
@@ -369,7 +447,10 @@ fn ranked_strokes(dict: &Dictionary, word: &str) -> Vec<Vec<u32>> {
     let mut found = dict.strokes_for(word);
     found.retain(|strokes| !dict.lookup(strokes).is_some_and(leaves_attached));
     found.sort_by_key(|strokes| {
-        (strokes.len(), strokes.iter().map(|s| s.count_ones()).sum::<u32>())
+        (
+            strokes.len(),
+            strokes.iter().map(|s| s.count_ones()).sum::<u32>(),
+        )
     });
     found
 }
@@ -377,7 +458,11 @@ fn ranked_strokes(dict: &Dictionary, word: &str) -> Vec<Vec<u32>> {
 /// One stroke sequence per word that together type the text exactly, or `None`.
 /// `wants[i]` is the text that should be typed once word `i` is done.
 /// `base` is a fresh translator, so the run starts with no leading space.
-fn exact_strokes(base: &Translator, wants: &[String], candidates: &[Vec<Vec<u32>>]) -> Option<Vec<Vec<u32>>> {
+fn exact_strokes(
+    base: &Translator,
+    wants: &[String],
+    candidates: &[Vec<Vec<u32>>],
+) -> Option<Vec<Vec<u32>>> {
     let mut chosen = Vec::new();
     let mut budget = SEARCH_BUDGET;
     search(base, wants, candidates, &mut budget, &mut chosen).then_some(chosen)
@@ -486,13 +571,25 @@ pub fn key_label(key: KeyCode) -> String {
 }
 
 fn print_table(rows: &[ChordRow], show_keys: bool) {
-    let word_w = rows.iter().map(|r| r.word.len()).max().unwrap_or(0).max("Word".len());
-    let outline_w = rows.iter().map(|r| r.outline.len()).max().unwrap_or(0).max("Outline".len());
+    let word_w = rows
+        .iter()
+        .map(|r| r.word.len())
+        .max()
+        .unwrap_or(0)
+        .max("Word".len());
+    let outline_w = rows
+        .iter()
+        .map(|r| r.outline.len())
+        .max()
+        .unwrap_or(0)
+        .max("Outline".len());
     // Pad before styling, so the escape codes don't throw the columns off
     let mut header = format!(
         "{}  {}",
         style(format!("{:<word_w$}", "Word")).bold().underlined(),
-        style(format!("{:<outline_w$}", "Outline")).bold().underlined(),
+        style(format!("{:<outline_w$}", "Outline"))
+            .bold()
+            .underlined(),
     );
     if show_keys {
         header.push_str(&format!("  {}", style("Keys").bold().underlined()));
@@ -502,9 +599,17 @@ fn print_table(rows: &[ChordRow], show_keys: bool) {
         let word = format!("{:<word_w$}", row.word);
         let outline = format!("{:<outline_w$}", row.outline);
         let (word, outline, keys) = if row.outline == "no stroke" {
-            (style(word).dim(), style(outline).red().dim(), style(row.keys.clone()).dim())
+            (
+                style(word).dim(),
+                style(outline).red().dim(),
+                style(row.keys.clone()).dim(),
+            )
         } else {
-            (style(word).bold(), style(outline).cyan(), style(row.keys.clone()).green())
+            (
+                style(word).bold(),
+                style(outline).cyan(),
+                style(row.keys.clone()).green(),
+            )
         };
         if show_keys {
             println!("{word}  {outline}  {keys}");
@@ -665,7 +770,11 @@ mod tests {
         let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "the", false);
         assert_eq!(
             rows,
-            vec![ChordRow { word: "the".to_string(), outline: "-T".to_string(), keys: "P".to_string() }]
+            vec![ChordRow {
+                word: "the".to_string(),
+                outline: "-T".to_string(),
+                keys: "P".to_string()
+            }]
         );
     }
 
@@ -673,7 +782,8 @@ mod tests {
     fn keys_pick_the_stroke_that_types_the_text_exactly() {
         // AOT attaches "out" to the next word, so "out with" needs the plain "A" instead
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"AOT": "{out^}", "A": "out", "W": "with"}"#).unwrap();
+        dict.merge_json(r#"{"AOT": "{out^}", "A": "out", "W": "with"}"#)
+            .unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "out with", true);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].outline, "A");
@@ -683,7 +793,8 @@ mod tests {
     #[test]
     fn unknown_word_does_not_stop_the_rest_from_matching() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"AOT": "{out^}", "A": "out", "W": "with"}"#).unwrap();
+        dict.merge_json(r#"{"AOT": "{out^}", "A": "out", "W": "with"}"#)
+            .unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "out zzyzx with", true);
         let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
         assert_eq!(outlines, ["A", "no stroke", "W"]);
@@ -733,14 +844,23 @@ mod tests {
         // The one-stroke form beats the two-stroke "jump" + "ed" form
         let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "jumped", true);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].outline, render_stroke(parse_stroke("SKWR*UPLD").unwrap()));
+        assert_eq!(
+            rows[0].outline,
+            render_stroke(parse_stroke("SKWR*UPLD").unwrap())
+        );
     }
 
     #[test]
     fn by_default_every_outline_of_a_word_is_listed() {
         let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "jumped", false);
         let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
-        assert_eq!(outlines, [render_stroke(parse_stroke("SKWR*UPLD").unwrap()), "SKWRUPL/-PD".to_string()]);
+        assert_eq!(
+            outlines,
+            [
+                render_stroke(parse_stroke("SKWR*UPLD").unwrap()),
+                "SKWRUPL/-PD".to_string()
+            ]
+        );
         // Only the first outline of a word carries the word
         let words: Vec<&str> = rows.iter().map(|row| row.word.as_str()).collect();
         assert_eq!(words, ["jumped", ""]);
@@ -750,7 +870,8 @@ mod tests {
     fn a_prefix_that_glues_to_the_next_word_is_not_listed_as_the_word() {
         // `{be^}` types "be" but attaches the word after it, so only the plain "be" is an outline
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"-T": "the", "-B": "be", "PWE": "{be^}"}"#).unwrap();
+        dict.merge_json(r#"{"-T": "the", "-B": "be", "PWE": "{be^}"}"#)
+            .unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "be", false);
         let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
         assert_eq!(outlines, ["-B"]);
@@ -760,7 +881,8 @@ mod tests {
     fn an_outline_that_attaches_to_the_word_before_is_not_listed() {
         // `{^under}` glues onto "the", so "the under" would type "theunder"
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"-T": "the", "UPBD": "under", "TPH-PB": "{^under}"}"#).unwrap();
+        dict.merge_json(r#"{"-T": "the", "UPBD": "under", "TPH-PB": "{^under}"}"#)
+            .unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "under", false);
         let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
         assert_eq!(outlines, ["UPBD"]);
@@ -786,8 +908,12 @@ mod tests {
     #[test]
     fn lookup_leaves_out_glued_outlines_too() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"-T": "the", "UPBD": "under", "UPB/TKER": "{under^}"}"#).unwrap();
-        assert_eq!(proper_outlines(&dict, "under"), vec![vec![parse_stroke("UPBD").unwrap()]]);
+        dict.merge_json(r#"{"-T": "the", "UPBD": "under", "UPB/TKER": "{under^}"}"#)
+            .unwrap();
+        assert_eq!(
+            proper_outlines(&dict, "under"),
+            vec![vec![parse_stroke("UPBD").unwrap()]]
+        );
     }
 
     #[test]
@@ -823,14 +949,23 @@ mod tests {
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "now, the", false);
         let words: Vec<&str> = rows.iter().map(|row| row.word.as_str()).collect();
         assert_eq!(words, ["now", ",", "the"]);
-        assert_eq!(rows[0].outline, render_stroke(parse_stroke("TPHOU").unwrap()));
-        assert_eq!(rows[1].outline, render_stroke(parse_stroke("KW-B").unwrap()));
+        assert_eq!(
+            rows[0].outline,
+            render_stroke(parse_stroke("TPHOU").unwrap())
+        );
+        assert_eq!(
+            rows[1].outline,
+            render_stroke(parse_stroke("KW-B").unwrap())
+        );
     }
 
     #[test]
     fn punctuation_inside_a_word_stays_with_it() {
         assert_eq!(word_spans("12:29am, ok"), [(0, 7), (7, 8), (9, 11)]);
-        assert_eq!(word_spans("(a)..."), [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6)]);
+        assert_eq!(
+            word_spans("(a)..."),
+            [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6)]
+        );
     }
 
     #[test]

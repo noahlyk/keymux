@@ -392,8 +392,6 @@ impl MtProcessor {
         tap_key: KeyCode,
         hold_key: KeyCode,
     ) -> Option<MtResolution> {
-
-
         // Check for double-tap
         if self.config.double_tap_then_hold {
             if let Some(last_tap) = self.last_tap_time.get(&keycode) {
@@ -742,16 +740,12 @@ impl MtProcessor {
         let base_threshold = self.config.tapping_term_ms as f32;
         let target_margin = self.config.adaptive_target_margin_ms as f32;
 
-
-
         let stats = self
             .rolling_stats
             .entry(key)
             .or_insert_with(|| RollingStats::new(base_threshold));
 
         stats.update_tap(duration_ms, target_margin);
-
-
     }
 
     /// Check if any keys are pending (for external permissive hold logic)

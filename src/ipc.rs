@@ -263,7 +263,11 @@ mod tests {
             drop(client);
         });
         // A heartbeat design would take its whole interval here; this must be near instant
-        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

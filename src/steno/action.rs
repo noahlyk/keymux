@@ -158,9 +158,7 @@ impl Action {
     /// The action in force: this one, or for a look-ahead the alternative it has picked.
     #[must_use]
     pub fn effective(&self) -> &Self {
-        self.look_ahead
-            .as_ref()
-            .map_or(self, |look| look.current())
+        self.look_ahead.as_ref().map_or(self, |look| look.current())
     }
 
     /// A copy of the state that carries on to the next action, with nothing to render.
@@ -277,7 +275,9 @@ pub fn is_space(s: &str) -> bool {
 /// Python's `str.isdigit` for the digits a dictionary has.
 #[must_use]
 pub fn is_digits(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit() || (c.is_numeric() && !c.is_alphabetic()))
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_digit() || (c.is_numeric() && !c.is_alphabetic()))
 }
 
 /// Capitalize the first letter of `s`: `foo bar` is `Foo bar` and `STUFF` stays as it is.
@@ -420,7 +420,9 @@ pub fn last_fragments(actions: &[&Action]) -> Vec<String> {
                 .map(|m| m.as_str())
                 .collect();
             found.extend(fragments.iter().skip(1).rev().map(|f| (*f).to_string()));
-            current = fragments.first().map_or_else(String::new, |f| (*f).to_string());
+            current = fragments
+                .first()
+                .map_or_else(String::new, |f| (*f).to_string());
         }
         replace += this.prev_replace.chars().count();
         next = Some(action);
@@ -450,9 +452,9 @@ pub fn last_words(actions: &[&Action], count: usize) -> Vec<String> {
 /// The last word typed, with the whitespace after it.
 #[must_use]
 pub fn last_word(actions: &[&Action]) -> Option<String> {
-    last_fragments(actions).iter().find_map(|fragment| {
-        words(fragment).last().map(|word| (*word).to_string())
-    })
+    last_fragments(actions)
+        .iter()
+        .find_map(|fragment| words(fragment).last().map(|word| (*word).to_string()))
 }
 
 /// The last `count` fragments typed, in the order they were typed.
@@ -489,8 +491,20 @@ mod tests {
         assert_eq!(
             words("Something something, blah! Blah: 45.8... (blah: foo42)   "),
             [
-                "Something ", "something", ", ", "blah", "! ", "Blah", ": ", "45.8", "... ", "(", "blah",
-                ": ", "foo42", ")   "
+                "Something ",
+                "something",
+                ", ",
+                "blah",
+                "! ",
+                "Blah",
+                ": ",
+                "45.8",
+                "... ",
+                "(",
+                "blah",
+                ": ",
+                "foo42",
+                ")   "
             ]
         );
     }
@@ -518,7 +532,10 @@ mod tests {
         assert_eq!(capitalize_first_word("STUFF"), "STUFF");
         assert_eq!(lower_first_character("Plover"), "plover");
         assert_eq!(upper_first_word("cat dog"), "CAT dog");
-        assert_eq!(capitalize_all_words("O'Something STUFF"), "O'something Stuff");
+        assert_eq!(
+            capitalize_all_words("O'Something STUFF"),
+            "O'something Stuff"
+        );
     }
 
     #[test]

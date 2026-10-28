@@ -13,12 +13,38 @@ use std::collections::HashMap;
 /// Windows-1252, which RTF dictionaries are written in: bytes 0x80 to 0x9F are not Latin-1.
 fn decode_cp1252(bytes: &[u8]) -> Result<String> {
     const HIGH: [Option<char>; 32] = [
-        Some('\u{20ac}'), None, Some('\u{201a}'), Some('\u{192}'), Some('\u{201e}'), Some('\u{2026}'),
-        Some('\u{2020}'), Some('\u{2021}'), Some('\u{2c6}'), Some('\u{2030}'), Some('\u{160}'),
-        Some('\u{2039}'), Some('\u{152}'), None, Some('\u{17d}'), None, None, Some('\u{2018}'),
-        Some('\u{2019}'), Some('\u{201c}'), Some('\u{201d}'), Some('\u{2022}'), Some('\u{2013}'),
-        Some('\u{2014}'), Some('\u{2dc}'), Some('\u{2122}'), Some('\u{161}'), Some('\u{203a}'),
-        Some('\u{153}'), None, Some('\u{17e}'), Some('\u{178}'),
+        Some('\u{20ac}'),
+        None,
+        Some('\u{201a}'),
+        Some('\u{192}'),
+        Some('\u{201e}'),
+        Some('\u{2026}'),
+        Some('\u{2020}'),
+        Some('\u{2021}'),
+        Some('\u{2c6}'),
+        Some('\u{2030}'),
+        Some('\u{160}'),
+        Some('\u{2039}'),
+        Some('\u{152}'),
+        None,
+        Some('\u{17d}'),
+        None,
+        None,
+        Some('\u{2018}'),
+        Some('\u{2019}'),
+        Some('\u{201c}'),
+        Some('\u{201d}'),
+        Some('\u{2022}'),
+        Some('\u{2013}'),
+        Some('\u{2014}'),
+        Some('\u{2dc}'),
+        Some('\u{2122}'),
+        Some('\u{161}'),
+        Some('\u{203a}'),
+        Some('\u{153}'),
+        None,
+        Some('\u{17e}'),
+        Some('\u{178}'),
     ];
     let mut text = String::with_capacity(bytes.len());
     for &byte in bytes {
@@ -136,11 +162,15 @@ fn finalize_translation(text: &str) -> String {
 }
 
 fn split_chars(text: &str, at: usize) -> (String, String) {
-    (text.chars().take(at).collect(), text.chars().skip(at).collect())
+    (
+        text.chars().take(at).collect(),
+        text.chars().skip(at).collect(),
+    )
 }
 
 fn is_style(name: &str) -> bool {
-    name.strip_prefix('s').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    name.strip_prefix('s')
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// A `\uN` or `\uc` followed by a number: the control word's name and its number.
@@ -184,7 +214,9 @@ struct Group {
 pub fn parse_rtf(bytes: &[u8]) -> Result<Vec<(String, String)>> {
     let text = decode_cp1252(bytes)?;
     let mut tokens = Tokenizer::new(&text);
-    if tokens.next_token().as_deref() != Some("{") || tokens.next_token().as_deref() != Some("\\rtf1") {
+    if tokens.next_token().as_deref() != Some("{")
+        || tokens.next_token().as_deref() != Some("\\rtf1")
+    {
         bail!("not an RTF dictionary: the header is wrong");
     }
     let mut entries = Vec::new();
@@ -236,7 +268,10 @@ pub fn parse_rtf(bytes: &[u8]) -> Result<Vec<(String, String)>> {
                     }
                     ignored = false;
                     current.text.clear();
-                } else if matches!(name, "cxfing" | "cxsvatdictflags" | "cxplovermacro" | "cxplovermeta") {
+                } else if matches!(
+                    name,
+                    "cxfing" | "cxsvatdictflags" | "cxplovermacro" | "cxplovermeta"
+                ) {
                     ignored = false;
                 } else if !is_style(name) {
                     // E.g. `{\par`: `\par` is a control word of the text, not a destination
@@ -308,12 +343,18 @@ pub fn parse_rtf(bytes: &[u8]) -> Result<Vec<(String, String)>> {
                     };
                 }
                 Some("cxsvatdictflags") => {
-                    text = if current.text.contains('N') { "{-|}".into() } else { String::new() };
+                    text = if current.text.contains('N') {
+                        "{-|}".into()
+                    } else {
+                        String::new()
+                    };
                 }
                 Some("cxfing") => text = format!("{{&{}}}", current.text),
                 Some("cxplovermacro") => text = format!("={}", current.text),
                 Some("cxplovermeta") => text = format!("{{{}}}", current.text),
-                Some(name) if is_style(name) && parent.destination.as_deref() == Some("stylesheet") => {
+                Some(name)
+                    if is_style(name) && parent.destination.as_deref() == Some("stylesheet") =>
+                {
                     stylesheet.insert(name.to_string(), current.text.clone());
                 }
                 _ => text = current.text.clone(),
@@ -338,9 +379,13 @@ pub fn parse_rtf(bytes: &[u8]) -> Result<Vec<(String, String)>> {
                 } else if (0xDC00..0xE000).contains(&unit) && pending_high.is_some() {
                     let high = u32::from(pending_high.take().unwrap_or(0xD800)) - 0xD800;
                     let code = 0x1_0000 + (high << 10) + (u32::from(unit) - 0xDC00);
-                    current.text.push(char::from_u32(code).unwrap_or('\u{fffd}'));
+                    current
+                        .text
+                        .push(char::from_u32(code).unwrap_or('\u{fffd}'));
                 } else {
-                    current.text.push(char::from_u32(u32::from(unit)).unwrap_or('\u{fffd}'));
+                    current
+                        .text
+                        .push(char::from_u32(u32::from(unit)).unwrap_or('\u{fffd}'));
                 }
                 skip_count = current.uc;
             } else if let Some(number) = control_number(ctrl, "uc") {
@@ -380,7 +425,10 @@ pub fn parse_rtf(bytes: &[u8]) -> Result<Vec<(String, String)>> {
                     current.text.push_str("\n\n");
                 }
                 // Indent continuation styles
-                if stylesheet.get(ctrl).is_some_and(|style| style.starts_with("Contin")) {
+                if stylesheet
+                    .get(ctrl)
+                    .is_some_and(|style| style.starts_with("Contin"))
+                {
                     current.text.push_str("    ");
                 }
             }
@@ -475,7 +523,10 @@ mod tests {
     #[test]
     fn unicode_escapes_and_their_fallbacks() {
         let rtf = "{\\rtf1{\\*\\cxs A}caf\\u233?\\par x{\\*\\cxs B}{\\uc0\\u8364 }}";
-        assert_eq!(entries(rtf), [pair("A", "caf\u{e9}\n\nx"), pair("B", "\u{20ac}")]);
+        assert_eq!(
+            entries(rtf),
+            [pair("A", "caf\u{e9}\n\nx"), pair("B", "\u{20ac}")]
+        );
     }
 
     fn from_hex(hex: &str) -> Vec<u8> {
@@ -506,7 +557,12 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|e| (e[0].as_str().unwrap().to_string(), e[1].as_str().unwrap().to_string()))
+                .map(|e| {
+                    (
+                        e[0].as_str().unwrap().to_string(),
+                        e[1].as_str().unwrap().to_string(),
+                    )
+                })
                 .collect();
             match got {
                 Ok(got) if got == want => {}
@@ -514,7 +570,13 @@ mod tests {
                 Err(e) => wrong.push(format!("{name}: Plover reads it, keymux refuses it: {e}")),
             }
         }
-        assert!(wrong.is_empty(), "{} of {} files differ from Plover:\n{}", wrong.len(), cases.len(), wrong.join("\n"));
+        assert!(
+            wrong.is_empty(),
+            "{} of {} files differ from Plover:\n{}",
+            wrong.len(),
+            cases.len(),
+            wrong.join("\n")
+        );
     }
 
     #[test]
@@ -522,6 +584,9 @@ mod tests {
         let mut rtf = b"{\\rtf1{\\*\\cxs A}".to_vec();
         rtf.extend_from_slice(&[0x93, b'q', 0x94, 0xe9]);
         rtf.push(b'}');
-        assert_eq!(parse_rtf(&rtf).unwrap(), [pair("A", "\u{201c}q\u{201d}\u{e9}")]);
+        assert_eq!(
+            parse_rtf(&rtf).unwrap(),
+            [pair("A", "\u{201c}q\u{201d}\u{e9}")]
+        );
     }
 }

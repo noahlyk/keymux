@@ -11,7 +11,7 @@ use super::dict::Dictionary;
 use super::formatter::{Formatter, Op, Options};
 use super::journal::{self, History, MachineId, Origin, SharedHistory};
 use super::keycombo::key_events;
-use super::layout::render_stroke;
+use super::layout::{render_stroke, JOIN_BIT};
 use crate::keycode::KeyCode;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -67,7 +67,10 @@ impl Translation {
     /// The strokes as Plover writes them.
     #[must_use]
     pub fn rtfcre(&self) -> Vec<String> {
-        self.strokes.iter().map(|&stroke| render_stroke(stroke)).collect()
+        self.strokes
+            .iter()
+            .map(|&stroke| render_stroke(stroke))
+            .collect()
     }
 
     fn same(&self, other: &Self) -> bool {
@@ -121,7 +124,9 @@ impl StenoOutput {
         for op in ops {
             match (merged.last_mut(), op) {
                 (Some(OutputOp::Text(before)), OutputOp::Text(after)) => before.push_str(&after),
-                (Some(OutputOp::Backspaces(before)), OutputOp::Backspaces(after)) => *before += after,
+                (Some(OutputOp::Backspaces(before)), OutputOp::Backspaces(after)) => {
+                    *before += after
+                }
                 (_, op) => merged.push(op),
             }
         }
@@ -197,7 +202,10 @@ fn mapping_to_macro(mapping: Option<&str>, stroke: u32) -> Option<Macro> {
         });
     }
     // keymux's own, also written like its metas: `{:redo}`, `{:undo:3}`
-    if let Some(inner) = mapping.strip_prefix("{:").and_then(|rest| rest.strip_suffix('}')) {
+    if let Some(inner) = mapping
+        .strip_prefix("{:")
+        .and_then(|rest| rest.strip_suffix('}'))
+    {
         let (name, cmdline) = inner.split_once(':').unwrap_or((inner, ""));
         if HISTORY_MACROS.contains(&name) {
             return Some(Macro {
@@ -218,7 +226,10 @@ fn mapping_to_macro(mapping: Option<&str>, stroke: u32) -> Option<Macro> {
     Some(Macro {
         name: rest[..name_len].to_string(),
         stroke,
-        cmdline: rest[name_len..].strip_prefix(':').unwrap_or_default().to_string(),
+        cmdline: rest[name_len..]
+            .strip_prefix(':')
+            .unwrap_or_default()
+            .to_string(),
     })
 }
 
@@ -453,7 +464,8 @@ impl Translator {
 
     fn translate_stroke(&mut self, stroke: u32, ops: &mut Vec<Op>) {
         let max_len = self.dict.longest_key();
-        let mapping = self.lookup_with_prefix(max_len, &self.hist.state.translations, &[stroke], &[]);
+        let mapping =
+            self.lookup_with_prefix(max_len, &self.hist.state.translations, &[stroke], &[]);
         if let Some(found) = mapping_to_macro(mapping.as_deref(), stroke) {
             // Taking back and putting back keep the redo history; anything else is new input
             if !matches!(found.name.as_str(), "undo" | "undo_word" | "redo") {
@@ -463,11 +475,18 @@ impl Translator {
             return;
         }
         self.hist.redo.clear();
+        // A stroke with the join key is never a word by itself; it is only ever looked up
+        // glued onto some of what came before, in `find_longest_match` below.
+        let joined = stroke & JOIN_BIT != 0;
         let translation = self
             // No prefix lookups (the stroke alone is already looked up)
             .find_longest_match(2, max_len, stroke, &[])
             // The stroke alone, if it is mapped
-            .or_else(|| mapping.map(|m| Translation::new(vec![stroke], Some(m))))
+            .or_else(|| {
+                (!joined)
+                    .then(|| mapping.map(|m| Translation::new(vec![stroke], Some(m))))
+                    .flatten()
+            })
             // No direct match: try with suffixes
             .or_else(|| self.find_longest_match(1, max_len, stroke, &SUFFIX_KEYS))
             // Nothing: the stroke as its keys
@@ -490,7 +509,13 @@ impl Translator {
             "again" => self.macro_again(),
             "swap" => self.macro_swap(),
             "repeat_last_stroke" => {
-                let Some(last) = self.hist.state.translations.last().and_then(|t| t.strokes.last()) else {
+                let Some(last) = self
+                    .hist
+                    .state
+                    .translations
+                    .last()
+                    .and_then(|t| t.strokes.last())
+                else {
                     return;
                 };
                 let stroke = *last;
@@ -514,8 +539,12 @@ impl Translator {
             "repeat_last_word" | "repeat_last_fragment" | "repeat_last_character" => {
                 self.macro_repeat_text(&found.name, &found.cmdline, found.stroke);
             }
-            "retro_delete_space" | "retrospective_delete_space" => self.macro_delete_space(found.stroke),
-            "retro_insert_space" | "retrospective_insert_space" => self.macro_insert_space(found.stroke),
+            "retro_delete_space" | "retrospective_delete_space" => {
+                self.macro_delete_space(found.stroke)
+            }
+            "retro_insert_space" | "retrospective_insert_space" => {
+                self.macro_insert_space(found.stroke)
+            }
             "retrospective_toggle_asterisk" => {
                 let Some(last) = self.hist.state.translations.last().cloned() else {
                     return;
@@ -606,7 +635,15 @@ impl Translator {
 
     /// Say the last thing again: the strokes of the last translation, or the text typed by hand.
     fn macro_again(&mut self) {
-        let Some(last) = self.hist.state.translations.iter().rev().find(|t| t.has_undo()).cloned() else {
+        let Some(last) = self
+            .hist
+            .state
+            .translations
+            .iter()
+            .rev()
+            .find(|t| t.has_undo())
+            .cloned()
+        else {
             return;
         };
         let again = match &last.origin {
@@ -626,12 +663,18 @@ impl Translator {
     /// and capitals are made again for where they are now.
     fn macro_swap(&mut self) {
         let translations = &self.hist.state.translations;
-        let Some([first, second]) = translations.len().checked_sub(2).map(|from| &translations[from..]) else {
+        let Some([first, second]) = translations
+            .len()
+            .checked_sub(2)
+            .map(|from| &translations[from..])
+        else {
             return;
         };
         let (first, second) = (first.clone(), second.clone());
         let swapped = match (&first.origin, &second.origin) {
-            (Origin::Stroke, Origin::Stroke) if !first.is_retrospective_command && !second.is_retrospective_command => {
+            (Origin::Stroke, Origin::Stroke)
+                if !first.is_retrospective_command && !second.is_retrospective_command =>
+            {
                 [
                     Translation::new(second.strokes.clone(), second.english.clone()),
                     Translation::new(first.strokes.clone(), first.english.clone()),
@@ -649,7 +692,10 @@ impl Translator {
                     translation.origin = Origin::Typed(text);
                     translation
                 };
-                [typed(format!("{b_word}{a_space}")), typed(format!("{a_word}{b_space}"))]
+                [
+                    typed(format!("{b_word}{a_space}")),
+                    typed(format!("{a_word}{b_space}")),
+                ]
             }
             _ => return,
         };
@@ -661,7 +707,11 @@ impl Translator {
 
     /// How many to repeat: the first of the comma-separated arguments, or one.
     fn repeat_count(cmdline: &str) -> usize {
-        cmdline.split(',').next().and_then(|n| n.trim().parse().ok()).unwrap_or(1)
+        cmdline
+            .split(',')
+            .next()
+            .and_then(|n| n.trim().parse().ok())
+            .unwrap_or(1)
     }
 
     /// `=repeat_last_translation:n`: the last `n` translations again.
@@ -672,7 +722,11 @@ impl Translator {
         }
         let count = Self::repeat_count(cmdline);
         // `translations[-0:]` is the whole list in Python
-        let from = if count == 0 { 0 } else { translations.len().saturating_sub(count) };
+        let from = if count == 0 {
+            0
+        } else {
+            translations.len().saturating_sub(count)
+        };
         let again: Vec<Translation> = translations[from..]
             .iter()
             .filter(|t| t.origin.is_stroke())
@@ -832,16 +886,29 @@ impl Translator {
             }
             count += 1;
         }
-        let translations = &self.hist.state.translations[self.hist.state.translations.len() - count..];
+        let translations =
+            &self.hist.state.translations[self.hist.state.translations.len() - count..];
+        // A stroke with the join key declares itself a continuation outright, so it is never
+        // tried on its own (`i == translations.len()`, no history involved): doing that would
+        // let it be mistaken for a fresh word the moment nothing glues onto it matches.
+        let joined = stroke & JOIN_BIT != 0;
         // The new stroke makes a new translation, or replaces earlier ones by matching a longer one
         for i in 0..=translations.len() {
+            if joined && i == translations.len() {
+                continue;
+            }
             let replaced = &translations[i..];
-            let mut strokes: Vec<u32> = replaced.iter().flat_map(|t| t.strokes.iter().copied()).collect();
+            let mut strokes: Vec<u32> = replaced
+                .iter()
+                .flat_map(|t| t.strokes.iter().copied())
+                .collect();
             strokes.push(stroke);
             if strokes.len() < min_len {
                 continue;
             }
-            if let Some(mapping) = self.lookup_with_prefix(max_len, &translations[..i], &strokes, &suffixes) {
+            if let Some(mapping) =
+                self.lookup_with_prefix(max_len, &translations[..i], &strokes, &suffixes)
+            {
                 let mut translation = Translation::new(strokes, Some(mapping));
                 translation.replaced = replaced.to_vec();
                 return Some(translation);
@@ -945,7 +1012,9 @@ impl Translator {
             if let Some(extra) = extra.as_mut() {
                 doing.push(extra);
             }
-            self.hist.formatter.format(&undo, &mut doing, prev, self.dict.orthography())
+            self.hist
+                .formatter
+                .format(&undo, &mut doing, prev, self.dict.orthography())
         } else {
             Vec::new()
         };
@@ -982,7 +1051,8 @@ mod tests {
         t.text()
     }
 
-    const BACK_DICT: &str = r#"{"KAT": "cat", "TKOG": "dog", "SPW": "{:back}", "PW-FP": "{:back:3}"}"#;
+    const BACK_DICT: &str =
+        r#"{"KAT": "cat", "TKOG": "dog", "SPW": "{:back}", "PW-FP": "{:back:3}"}"#;
 
     #[test]
     fn back_erases_a_character_and_undo_types_it_again() {
@@ -1010,6 +1080,25 @@ mod tests {
         assert_eq!(t.text(), "cat ");
         t.stroke(stroke("*"));
         assert_eq!(t.text(), "cat dog");
+    }
+
+    const JOIN_DICT: &str = r#"{"KAT": "cat", "KAT/^-G": "catting", "-G": "ging"}"#;
+
+    #[test]
+    fn a_join_key_stroke_only_matches_glued_onto_what_came_before() {
+        // The plain stroke on its own still means what it always did
+        assert_eq!(type_strokes(JOIN_DICT, &["KAT", "-G"]), "cat ging");
+        // With the join key down, the same keys glue onto "cat" instead
+        assert_eq!(type_strokes(JOIN_DICT, &["KAT", "^-G"]), "catting");
+    }
+
+    #[test]
+    fn a_join_key_stroke_is_never_a_word_by_itself() {
+        // Nothing comes before it to glue onto, and "-G" alone (without the join key) is a
+        // different stroke, so this matches nothing: raw keys, not "ging"
+        let mut t = translator(JOIN_DICT);
+        t.stroke(stroke("^-G"));
+        assert_eq!(t.text(), "^-G");
     }
 
     #[test]
@@ -1189,7 +1278,10 @@ mod tests {
         };
         (
             make(r#"{"KAT": "cat"}"#, 1),
-            make(r#"{"KAT/TKOG": "joined", "TKOG": "dog", "PWEUPBG": "big"}"#, 2),
+            make(
+                r#"{"KAT/TKOG": "joined", "TKOG": "dog", "PWEUPBG": "big"}"#,
+                2,
+            ),
         )
     }
 
@@ -1278,7 +1370,8 @@ mod tests {
     #[test]
     #[allow(clippy::literal_string_with_formatting_args)] // a command, not a format
     fn engine_commands_are_told_from_other_entries() {
-        let t = translator(r#"{"KAT": "cat", "TKOG": "{plover:toggle}", "H-L": "{PLOVER:lookup}"}"#);
+        let t =
+            translator(r#"{"KAT": "cat", "TKOG": "{plover:toggle}", "H-L": "{PLOVER:lookup}"}"#);
         assert!(!t.is_command(stroke("KAT")));
         assert!(t.is_command(stroke("TKOG")));
         assert!(t.is_command(stroke("H-L")));

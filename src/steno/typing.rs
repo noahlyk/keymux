@@ -286,7 +286,10 @@ mod tests {
     #[test]
     fn dvorak_and_colemak_move_the_letters() {
         use KeyCode::*;
-        for (layout, expected) in [(TypingLayout::Dvorak, "aoeu"), (TypingLayout::Colemak, "arst")] {
+        for (layout, expected) in [
+            (TypingLayout::Dvorak, "aoeu"),
+            (TypingLayout::Colemak, "arst"),
+        ] {
             let mut typist = Typist::new(layout);
             let mut h = history();
             press(&mut typist, &mut h, &[KC_A, KC_S, KC_D, KC_F]);
@@ -301,7 +304,10 @@ mod tests {
         let mut h = history();
         press(&mut typist, &mut h, &[KC_C, KC_A, KC_T, KC_BSPC]);
         assert_eq!(h.screen, "ca");
-        assert_eq!(h.state.translations.last().unwrap().origin, Origin::Typed("ca".into()));
+        assert_eq!(
+            h.state.translations.last().unwrap().origin,
+            Origin::Typed("ca".into())
+        );
     }
 
     #[test]

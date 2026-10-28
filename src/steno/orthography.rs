@@ -36,7 +36,10 @@ const RULES: &[(&str, &str)] = &[
     // establish + s = establishes (sibilant pluralization)
     (r"^(.*(?:s|sh|x|z|zh)) \^ s$", r"\1es"),
     // speech + s = speeches (soft ch pluralization)
-    (r"^(.*(?:oa|ea|i|ee|oo|au|ou|l|n|(?<![gin]a)r|t)ch) \^ s$", r"\1es"),
+    (
+        r"^(.*(?:oa|ea|i|ee|oo|au|ou|l|n|(?<![gin]a)r|t)ch) \^ s$",
+        r"\1es",
+    ),
     // cherry + s = cherries (consonant + y pluralization)
     (r"^(.+[bcdfghjklmnpqrstvwxz])y \^ s$", r"\1ies"),
     // == y ==
@@ -58,7 +61,10 @@ const RULES: &[(&str, &str)] = &[
     // spaghetti +ification = spaghettification (*spaghettiification)
     // pretty +ify = prettify (*prettyify)
     (r"^(.+i) \^ if(y|ying|ied|ies|ication|ications)$", r"\1f\2"),
-    (r"^(.*[^aeiou])y \^ if(y|ying|ied|ies|ication|ications)$", r"\1if\2"),
+    (
+        r"^(.*[^aeiou])y \^ if(y|ying|ied|ies|ication|ications)$",
+        r"\1if\2",
+    ),
     // == +ical ==
     // fantastic +ical = fantastical (*fantasticcal)
     (r"^(.+)ic \^ (ical|ically)$", r"\1\2"),
@@ -82,8 +88,14 @@ const RULES: &[(&str, &str)] = &[
     // == +ize ==
     // token +ize = tokenize (*tokennize)
     // token +ise = tokenise (*tokennise)
-    (r"^(.+)y \^ iz(e|es|ing|ed|er|ers|ation|ations|able|ability)$", r"\1iz\2"),
-    (r"^(.+)y \^ is(e|es|ing|ed|er|ers|ation|ations|able|ability)$", r"\1is\2"),
+    (
+        r"^(.+)y \^ iz(e|es|ing|ed|er|ers|ation|ations|able|ability)$",
+        r"\1iz\2",
+    ),
+    (
+        r"^(.+)y \^ is(e|es|ing|ed|er|ers|ation|ations|able|ability)$",
+        r"\1is\2",
+    ),
     // conditional +ize = conditionalize (*conditionallize)
     (
         r"^(.+)al \^ iz(e|ed|es|ing|er|ers|ation|ations|m|ms|able|ability|abilities)$",
@@ -94,8 +106,14 @@ const RULES: &[(&str, &str)] = &[
         r"\1alis\2",
     ),
     // spectacular +ization = spectacularization (*spectacularrization)
-    (r"^(.+)ar \^ iz(e|ed|es|ing|er|ers|ation|ations|m|ms)$", r"\1ariz\2"),
-    (r"^(.+)ar \^ is(e|ed|es|ing|er|ers|ation|ations|m|ms)$", r"\1aris\2"),
+    (
+        r"^(.+)ar \^ iz(e|ed|es|ing|er|ers|ation|ations|m|ms)$",
+        r"\1ariz\2",
+    ),
+    (
+        r"^(.+)ar \^ is(e|ed|es|ing|er|ers|ation|ations|m|ms)$",
+        r"\1aris\2",
+    ),
     // category +ize/+ise = categorize/categorise (*categoryize/*categoryise)
     // custom +izable/+isable = customizable/customisable (*custommizable/*custommisable)
     // fantasy +ize = fantasize (*fantasyize)
@@ -229,7 +247,9 @@ impl Orthography {
     /// is kept as it is.
     #[must_use]
     pub fn add_suffix(&self, word: &str, suffix: &str) -> String {
-        let (head, rest) = suffix.split_once(' ').map_or((suffix, None), |(h, r)| (h, Some(r)));
+        let (head, rest) = suffix
+            .split_once(' ')
+            .map_or((suffix, None), |(h, r)| (h, Some(r)));
         let mut out = self.add_suffix_to_word(word, head);
         if let Some(rest) = rest {
             out.push(' ');
@@ -414,7 +434,8 @@ mod plover_tests {
     /// looked at. See `tools/plover-golden`.
     #[test]
     fn suffixes_attach_exactly_as_plover_does() {
-        let orthography = Orthography::from_wordlist(include_str!("testdata/orthography_words.txt"));
+        let orthography =
+            Orthography::from_wordlist(include_str!("testdata/orthography_words.txt"));
         assert!(orthography.has_words());
         let cases: Vec<(String, String, String)> =
             serde_json::from_str(include_str!("testdata/orthography_golden.json")).unwrap();
@@ -422,7 +443,8 @@ mod plover_tests {
             .iter()
             .filter_map(|(word, suffix, expected)| {
                 let got = orthography.add_suffix(word, suffix);
-                (&got != expected).then(|| format!("{word} + {suffix}: Plover {expected:?}, keymux {got:?}"))
+                (&got != expected)
+                    .then(|| format!("{word} + {suffix}: Plover {expected:?}, keymux {got:?}"))
             })
             .collect();
         assert!(
@@ -430,7 +452,12 @@ mod plover_tests {
             "{} of {} differ from Plover, such as:\n{}",
             wrong.len(),
             cases.len(),
-            wrong.iter().take(25).cloned().collect::<Vec<_>>().join("\n")
+            wrong
+                .iter()
+                .take(25)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
 

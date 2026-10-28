@@ -173,9 +173,14 @@ fn run_event_processor(
                 for ev in events {
                     // Alt+F12 releases this keyboard from keymux. It's checked on the raw key,
                     // before the keymap, so no layer or remap can swallow it.
-                    if ev.event_type() == EventType::KEY && alt_f12.feed(Key::new(ev.code()), ev.value()) {
+                    if ev.event_type() == EventType::KEY
+                        && alt_f12.feed(Key::new(ev.code()), ev.value())
+                    {
                         // Let go of anything keymux is holding down before the keyboard is given back
-                        warn!("Alt+F12 pressed on {}; releasing it from keymux", keyboard_name);
+                        warn!(
+                            "Alt+F12 pressed on {}; releasing it from keymux",
+                            keyboard_name
+                        );
                         let _ = keymap.save_adaptive_stats(user_id);
                         release_all_keys(&mut virtual_device, &keymap);
                         escaped = true;
@@ -257,7 +262,6 @@ fn run_event_processor(
                         virtual_device.emit(&[ev])?;
                     }
                 }
-
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // No events available - check for DT timeouts
@@ -310,7 +314,9 @@ fn run_event_processor(
             crate::steno::setup::notify_user(
                 user_id,
                 "keymux released a keyboard",
-                &format!("Alt+F12 released {keyboard_name} from keymux. Replug it to use keymux again."),
+                &format!(
+                    "Alt+F12 released {keyboard_name} from keymux. Replug it to use keymux again."
+                ),
             );
             return Ok(());
         }
@@ -662,7 +668,11 @@ fn emit_ops(virtual_device: &mut VirtualDevice, pacer: &mut Pacer, ops: &[Output
                     .iter()
                     .map(|(key, pressed)| {
                         vec![
-                            InputEvent::new_now(EventType::KEY, Key::new(key.code()).code(), i32::from(*pressed)),
+                            InputEvent::new_now(
+                                EventType::KEY,
+                                Key::new(key.code()).code(),
+                                i32::from(*pressed),
+                            ),
                             InputEvent::new_now(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT),
                         ]
                     })
@@ -824,7 +834,11 @@ mod alt_f12_tests {
 
     #[test]
     fn alt_released_before_f12_does_not_fire() {
-        assert!(!fires(&[(Key::KEY_LEFTALT, 1), (Key::KEY_LEFTALT, 0), (Key::KEY_F12, 1)]));
+        assert!(!fires(&[
+            (Key::KEY_LEFTALT, 1),
+            (Key::KEY_LEFTALT, 0),
+            (Key::KEY_F12, 1)
+        ]));
     }
 
     #[test]
@@ -846,23 +860,41 @@ mod alt_f12_tests {
 
     #[test]
     fn alt_f12_after_another_key_press_does_not_fire() {
-        assert!(!fires(&[(Key::KEY_A, 1), (Key::KEY_A, 0), (Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
+        assert!(!fires(&[
+            (Key::KEY_A, 1),
+            (Key::KEY_A, 0),
+            (Key::KEY_LEFTALT, 1),
+            (Key::KEY_F12, 1)
+        ]));
     }
 
     #[test]
     fn alt_f12_after_a_modifier_press_does_not_fire() {
         // Ctrl+Alt+F12 is not the escape: Ctrl was the first press
-        assert!(!fires(&[(Key::KEY_LEFTCTRL, 1), (Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
+        assert!(!fires(&[
+            (Key::KEY_LEFTCTRL, 1),
+            (Key::KEY_LEFTALT, 1),
+            (Key::KEY_F12, 1)
+        ]));
     }
 
     #[test]
     fn alt_f12_after_a_long_gap_still_needs_to_be_first() {
         // Any press in between disarms it, even after the keyboard has been quiet
-        assert!(!fires(&[(Key::KEY_LEFTSHIFT, 1), (Key::KEY_LEFTSHIFT, 0), (Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
+        assert!(!fires(&[
+            (Key::KEY_LEFTSHIFT, 1),
+            (Key::KEY_LEFTSHIFT, 0),
+            (Key::KEY_LEFTALT, 1),
+            (Key::KEY_F12, 1)
+        ]));
     }
 
     #[test]
     fn a_release_before_the_chord_does_not_disarm_it() {
-        assert!(fires(&[(Key::KEY_A, 0), (Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
+        assert!(fires(&[
+            (Key::KEY_A, 0),
+            (Key::KEY_LEFTALT, 1),
+            (Key::KEY_F12, 1)
+        ]));
     }
 }

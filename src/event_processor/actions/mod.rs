@@ -26,7 +26,10 @@ pub enum ProcessResult {
     MultipleEvents(Vec<(KeyCode, bool)>),
     TypeString(String, bool),
     /// Delete `backspaces` characters, then type `text` (used for undo)
-    Retype { backspaces: usize, text: String },
+    Retype {
+        backspaces: usize,
+        text: String,
+    },
     /// Several things in order: typing, deleting, key presses (what a steno stroke can ask for)
     Ops(Vec<crate::steno::translate::OutputOp>),
     None,
@@ -164,10 +167,7 @@ fn emit_multi(
         results.push(result);
         held.push((child.clone(), child_held));
     }
-    (
-        merge_results(results),
-        Some(HeldAction::MultiManaged(held)),
-    )
+    (merge_results(results), Some(HeldAction::MultiManaged(held)))
 }
 
 /// Release each child of a MULTI that still holds something, in the order it was pressed.
@@ -334,17 +334,11 @@ mod multi_tests {
         let mut p = processor();
         assert_eq!(
             p.process_key(KeyCode::KC_F1, true),
-            ProcessResult::MultipleEvents(vec![
-                (KeyCode::KC_LSFT, true),
-                (KeyCode::KC_A, true),
-            ])
+            ProcessResult::MultipleEvents(vec![(KeyCode::KC_LSFT, true), (KeyCode::KC_A, true),])
         );
         assert_eq!(
             p.process_key(KeyCode::KC_F1, false),
-            ProcessResult::MultipleEvents(vec![
-                (KeyCode::KC_LSFT, false),
-                (KeyCode::KC_A, false),
-            ])
+            ProcessResult::MultipleEvents(vec![(KeyCode::KC_LSFT, false), (KeyCode::KC_A, false),])
         );
     }
 

@@ -7,8 +7,8 @@
 
 use super::dict::Dictionary;
 use super::layout::parse_stroke;
-use super::setup::LAPWING_FILES;
 use super::numbers::NUMBER_BIT;
+use super::setup::LAPWING_FILES;
 use super::translate::{OutputOp, StenoOutput, Translator, UNDO_STROKE};
 use crate::keycode::KeyCode;
 use std::path::PathBuf;
@@ -65,10 +65,7 @@ fn every_book_vector_types_its_word() {
 fn lapwing_dictionary() -> Dictionary {
     let home = std::env::var("HOME").unwrap();
     let dir = PathBuf::from(home).join(".config/keymux/steno/lapwing");
-    let paths: Vec<PathBuf> = LAPWING_FILES
-        .iter()
-        .map(|file| dir.join(file))
-        .collect();
+    let paths: Vec<PathBuf> = LAPWING_FILES.iter().map(|file| dir.join(file)).collect();
     Dictionary::load(&paths)
 }
 
@@ -193,7 +190,9 @@ fn book_worked_examples_type_what_the_book_shows() {
         let strokes: Vec<&str> = stroke.split('/').collect();
         let typed = type_with(dict.clone(), &strokes);
         if typed.trim() != expected.trim() {
-            failures.push(format!("{chapter} {stroke}: book says {expected:?}, typed {typed:?}"));
+            failures.push(format!(
+                "{chapter} {stroke}: book says {expected:?}, typed {typed:?}"
+            ));
         }
     }
     assert!(
@@ -364,7 +363,9 @@ fn real_lapwing_movement_table_presses_its_keys() {
         let mut translator = Translator::new(dict.clone());
         let output = translator.stroke(parse_stroke(stroke).unwrap());
         let Some(OutputOp::Keys(events)) = output.clone().and_then(|o| {
-            o.into_ops().into_iter().find(|op| matches!(op, OutputOp::Keys(_)))
+            o.into_ops()
+                .into_iter()
+                .find(|op| matches!(op, OutputOp::Keys(_)))
         }) else {
             panic!("{stroke} should press a key, got {output:?}");
         };

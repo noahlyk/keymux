@@ -161,7 +161,10 @@ fn look(root: &Path, dir: &Path, theory: &str, depth: usize, found: &mut Vec<Fou
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let hidden = entry.file_name().to_str().is_some_and(|name| name.starts_with('.'));
+        let hidden = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with('.'));
         if !path.is_dir() || hidden || path == root.join("cache") {
             continue;
         }
@@ -287,8 +290,8 @@ fn migrate_older_layout(dir: &Path, config_text: &str) {
     let theory_file = dir.join("theory");
     let main = dir.join("main.json");
     if (theory_file.is_file() || main.is_file()) && !config_text.contains("main.json") {
-        let chose_lapwing = std::fs::read_to_string(&theory_file)
-            .is_ok_and(|text| text.trim() == "lapwing");
+        let chose_lapwing =
+            std::fs::read_to_string(&theory_file).is_ok_and(|text| text.trim() == "lapwing");
         let _ = std::fs::remove_file(&theory_file);
         // Plover's folder is the active one unless Lapwing was chosen
         let plover = if chose_lapwing {
@@ -296,7 +299,10 @@ fn migrate_older_layout(dir: &Path, config_text: &str) {
         } else {
             theory_folder("plover")
         };
-        if main.is_file() && !dir.join(&plover).exists() && install_state(dir, "plover") == Install::Missing {
+        if main.is_file()
+            && !dir.join(&plover).exists()
+            && install_state(dir, "plover") == Install::Missing
+        {
             let moved = std::fs::create_dir(dir.join(&plover))
                 .and_then(|()| std::fs::rename(&main, dir.join(&plover).join("main.json")));
             if let Err(e) = moved {
@@ -307,9 +313,22 @@ fn migrate_older_layout(dir: &Path, config_text: &str) {
         // Marks first, so the folder is found whatever it is called
         stamp_older_folders(dir);
         if !chose_lapwing {
-            for folder in find_theory(dir, "lapwing").into_iter().filter(|folder| folder.active) {
-                let name = folder.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                let _ = std::fs::rename(&folder.path, folder.path.with_file_name(format!("{DISABLED_PREFIX}_{name}")));
+            for folder in find_theory(dir, "lapwing")
+                .into_iter()
+                .filter(|folder| folder.active)
+            {
+                let name = folder
+                    .path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                let _ = std::fs::rename(
+                    &folder.path,
+                    folder
+                        .path
+                        .with_file_name(format!("{DISABLED_PREFIX}_{name}")),
+                );
             }
         }
         tracing::info!("steno folder {} moved to the current layout", dir.display());
@@ -319,7 +338,9 @@ fn migrate_older_layout(dir: &Path, config_text: &str) {
         // An older setup left `{}` there. The starter entries show what the file is for.
         let empty = std::fs::read_to_string(&old)
             .ok()
-            .and_then(|text| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text).ok())
+            .and_then(|text| {
+                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text).ok()
+            })
             .is_some_and(|entries| entries.is_empty());
         if std::fs::rename(&old, &new).is_ok() && empty {
             let _ = std::fs::write(&new, STARTER_DICTIONARY);
@@ -402,13 +423,27 @@ pub fn run_theory(config_dir: &Path, choice: Option<&str>) -> Result<()> {
 /// with `download` (into a folder that is switched off until it is complete, so a failed
 /// download leaves things as they were), then switch off the other theory's folder. Folders are
 /// found by their marker, so they can be called anything.
-fn switch_theory(dir: &Path, choice: &str, download: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+fn switch_theory(
+    dir: &Path,
+    choice: &str,
+    download: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
     // Where each folder that has to go off goes: its own name with `disabled_` in front
     let mut parking = Vec::new();
     for other in THEORIES.iter().filter(|other| **other != choice) {
-        for folder in find_theory(dir, other).into_iter().filter(|folder| folder.active) {
-            let name = folder.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-            let parked = folder.path.with_file_name(format!("{DISABLED_PREFIX}_{name}"));
+        for folder in find_theory(dir, other)
+            .into_iter()
+            .filter(|folder| folder.active)
+        {
+            let name = folder
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let parked = folder
+                .path
+                .with_file_name(format!("{DISABLED_PREFIX}_{name}"));
             if parked.exists() {
                 bail!(
                     "can't switch {other} off: {} is already there. Remove or rename one.",
@@ -423,7 +458,12 @@ fn switch_theory(dir: &Path, choice: &str, download: impl FnOnce(&Path) -> Resul
     if !found.iter().any(|folder| folder.active) {
         if let Some(parked) = found.first() {
             // Back to the name it had before it was switched off
-            let name = parked.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let name = parked
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
             let back = if is_disabled(std::ffi::OsStr::new(&name)) {
                 parked.path.with_file_name(switched_on_name(&name, choice))
             } else {
@@ -431,7 +471,10 @@ fn switch_theory(dir: &Path, choice: &str, download: impl FnOnce(&Path) -> Resul
                 dir.join(theory_folder(choice))
             };
             if back.exists() {
-                bail!("can't switch {choice} on: {} is in the way. Remove or rename it.", back.display());
+                bail!(
+                    "can't switch {choice} on: {} is in the way. Remove or rename it.",
+                    back.display()
+                );
             }
             std::fs::rename(&parked.path, &back)
                 .with_context(|| format!("switching {choice} on"))?;
@@ -480,7 +523,9 @@ fn ensure_wordlist(dir: &Path) {
     let roots = [dir.to_path_buf()];
     let found = super::source::expand(&roots, &dir.join("cache"))
         .iter()
-        .any(|file| file.file_name().and_then(|n| n.to_str()) == Some(super::orthography::WORDLIST_FILE));
+        .any(|file| {
+            file.file_name().and_then(|n| n.to_str()) == Some(super::orthography::WORDLIST_FILE)
+        });
     if found {
         return;
     }
@@ -488,7 +533,15 @@ fn ensure_wordlist(dir: &Path) {
     let target = dir.join(super::orthography::WORDLIST_FILE);
     let partial = dir.join(format!("{}.part", super::orthography::WORDLIST_FILE));
     let fetched = Command::new("curl")
-        .args(["--silent", "--show-error", "--fail", "--location", "--max-time", "120", "--output"])
+        .args([
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--location",
+            "--max-time",
+            "120",
+            "--output",
+        ])
         .arg(&partial)
         .arg(WORDLIST_URL)
         .status();
@@ -510,7 +563,7 @@ fn download_plover(folder: &Path) -> Result<()> {
     let (entries, checksum) = download_dictionary(MAIN_DICT_URL, &folder.join("main.json"))?;
     println!("installed {entries} entries");
     let (commands, _) = download_dictionary(COMMANDS_DICT_URL, &folder.join("commands.json"))?;
-    println!("installed {commands} commands"); 
+    println!("installed {commands} commands");
     if checksum != MAIN_DICT_SHA256 {
         println!(
             "warning: Plover's dictionary changed since this keymux release.\n  \
@@ -526,7 +579,8 @@ fn download_plover(folder: &Path) -> Result<()> {
 fn download_lapwing(folder: &Path) -> Result<()> {
     for file in LAPWING_FILES {
         println!("downloading {file}...");
-        let (entries, _) = download_dictionary(&format!("{LAPWING_BASE_URL}{file}"), &folder.join(file))?;
+        let (entries, _) =
+            download_dictionary(&format!("{LAPWING_BASE_URL}{file}"), &folder.join(file))?;
         println!("installed {entries} entries");
     }
     println!(
@@ -752,7 +806,9 @@ mod tests {
         switch_theory(&dir, "plover", fake_download).unwrap();
         assert!(dir.join("plover/fake.json").is_file());
         assert_eq!(
-            fs::read_to_string(dir.join("plover").join(MARKER)).unwrap().trim(),
+            fs::read_to_string(dir.join("plover").join(MARKER))
+                .unwrap()
+                .trim(),
             "plover",
             "marked, so it can be found by what it is rather than what it is called"
         );
@@ -760,7 +816,10 @@ mod tests {
         switch_theory(&dir, "lapwing", fake_download).unwrap();
         assert!(dir.join("lapwing/fake.json").is_file());
         assert!(!dir.join("plover").exists());
-        assert!(dir.join("disabled_plover/fake.json").is_file(), "kept, not deleted");
+        assert!(
+            dir.join("disabled_plover/fake.json").is_file(),
+            "kept, not deleted"
+        );
 
         // Back again: nothing is downloaded, the folders just trade places
         switch_theory(&dir, "plover", |_| bail!("must not download again")).unwrap();
@@ -823,7 +882,10 @@ mod tests {
         // A folder of yours is already sitting where the theory would be switched off to
         fs::create_dir_all(dir.join("disabled_plover")).unwrap();
         let result = switch_theory(&dir, "lapwing", |_| bail!("must not download"));
-        assert!(result.unwrap_err().to_string().contains("Remove or rename one"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Remove or rename one"));
         assert!(dir.join("plover/fake.json").is_file(), "nothing was moved");
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -837,9 +899,15 @@ mod tests {
             bail!("no network")
         });
         assert!(result.is_err());
-        assert!(dir.join("plover/fake.json").is_file(), "the working theory is still on");
+        assert!(
+            dir.join("plover/fake.json").is_file(),
+            "the working theory is still on"
+        );
         assert!(!dir.join("lapwing").exists());
-        assert!(!dir.join("disabled_lapwing.part").exists(), "no half download left");
+        assert!(
+            !dir.join("disabled_lapwing.part").exists(),
+            "no half download left"
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -858,7 +926,10 @@ mod tests {
         // Switching to Lapwing switches Plover's folder off under its own name
         switch_theory(&dir, "lapwing", |_| bail!("must not download")).unwrap();
         assert!(dir.join("disabled_plover/main.json").is_file());
-        assert!(dir.join("lapwing/lapwing-base.json").is_file(), "back under its own name");
+        assert!(
+            dir.join("lapwing/lapwing-base.json").is_file(),
+            "back under its own name"
+        );
         fs::remove_dir_all(&config).unwrap();
     }
 
@@ -878,7 +949,10 @@ mod tests {
         assert!(dir.join("disabled_lapwing/lapwing-base.json").is_file());
         assert!(!dir.join("theory").exists());
         assert!(dir.join("00-user.json").is_file());
-        assert!(dir.join("test.json").is_file(), "your own files stay where they are");
+        assert!(
+            dir.join("test.json").is_file(),
+            "your own files stay where they are"
+        );
         assert!(!dir.join("main.json").exists());
         assert_eq!(install_state(&dir, "plover"), Install::Active);
         assert_eq!(install_state(&dir, "lapwing"), Install::Parked);

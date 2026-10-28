@@ -36,6 +36,35 @@ pub const SLOTS: [(char, &str); 23] = [
 
 /// Slot index of the number key `#`.
 const NUMBER_SLOT: usize = 22;
+
+/// Extra stroke keys beyond the standard 23, for a theory that needs one.
+///
+/// Each is written before the regular letters, independent of hand and steno order, the same
+/// way `#` is: a mark on the stroke as a whole, not a sound at some position in it. Bit
+/// `EXTRA_START + i` of a stroke is entry `i`.
+///
+/// Unlike the 23 slots above, these need no physical key: a layout with none configured never
+/// sees a difference. A theory asks for one with an ordinary `layout_overrides` entry, such as
+/// `"^": Key(KC_Q)`; nothing else changes it, and no key is required to have one.
+///
+/// This is the extension point for a theory key that doesn't fit Plover's own 23: a join key
+/// that marks a stroke as continuing the word before it, for instance, rather than a sound.
+/// Adding a key to this list does not touch the 23 above or their steno-order rules at all.
+pub const EXTRA_KEYS: &[(char, &str)] = &[('^', "^")];
+
+/// Slot index of the first extra key.
+const EXTRA_START: usize = SLOTS.len();
+
+/// The join key's bit.
+///
+/// A stroke marks itself as continuing the one before it, rather than starting a word of its
+/// own, by setting this. The translator reads it before trying to match anything, so a
+/// dictionary that uses it never needs the engine to guess how many strokes make up a word; it
+/// is told outright, stroke by stroke, as they come in.
+///
+/// This is the first extra key, `"^"`. A theory earns the behaviour by giving a physical key to
+/// that name in its layout; nothing changes for one that does not.
+pub const JOIN_BIT: u32 = 1 << EXTRA_START;
 /// Slot index of the star, which sits between the left and right hands.
 const STAR_SLOT: usize = 9;
 /// Slots `0..LEFT_END` are the left hand; the vowels, star and right thumb follow, then the right hand.
@@ -76,7 +105,18 @@ fn parse_stroke_bits(text: &str) -> Option<u32> {
     let mut cursor = 0usize;
     let mut number = false;
     let mut hash_seen = false;
+    let mut extras_seen = 0u32;
     for ch in text.chars() {
+        // An extra key marks the stroke as a whole, wherever it falls in the text, and does
+        // not move the cursor that the 23 standard keys parse against
+        if let Some(i) = EXTRA_KEYS.iter().position(|&(c, _)| c == ch) {
+            if extras_seen & (1 << i) != 0 {
+                return None;
+            }
+            extras_seen |= 1 << i;
+            bits |= 1 << (EXTRA_START + i);
+            continue;
+        }
         match ch {
             '#' => {
                 if hash_seen {
@@ -164,6 +204,11 @@ pub fn render_stroke(bits: u32) -> String {
         SLOTS[slot].0
     };
     let mut out = String::new();
+    for (i, &(ch, _)) in EXTRA_KEYS.iter().enumerate() {
+        if down(EXTRA_START + i) {
+            out.push(ch);
+        }
+    }
     if number && !digits {
         out.push('#');
     }
@@ -192,11 +237,25 @@ pub fn render_raw_stroke(bits: u32) -> String {
             .map(|i| SLOTS[i].0)
             .collect()
     };
-    let number = if bits & (1 << NUMBER_SLOT) != 0 { "#" } else { "" };
+    let extras: String = EXTRA_KEYS
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| bits & (1 << (EXTRA_START + i)) != 0)
+        .map(|(_, &(ch, _))| ch)
+        .collect();
+    let number = if bits & (1 << NUMBER_SLOT) != 0 {
+        "#"
+    } else {
+        ""
+    };
     // The star is written first in the right hand, where it sits between the thumbs
-    let star = if bits & (1 << STAR_SLOT) != 0 { "*" } else { "" };
+    let star = if bits & (1 << STAR_SLOT) != 0 {
+        "*"
+    } else {
+        ""
+    };
     format!(
-        "{number}{}-{star}{}",
+        "{extras}{number}{}-{star}{}",
         letters(0..STAR_SLOT),
         letters(STAR_SLOT + 1..NUMBER_SLOT)
     )
@@ -212,7 +271,15 @@ pub const SLOT_SOUNDS: [&str; 23] = [
 /// Look up a stroke slot by its config name (`"S-"`, `"*"`, `"-E"`, ...).
 #[must_use]
 pub fn slot_by_name(name: &str) -> Option<usize> {
-    SLOTS.iter().position(|(_, slot_name)| *slot_name == name)
+    SLOTS
+        .iter()
+        .position(|(_, slot_name)| *slot_name == name)
+        .or_else(|| {
+            EXTRA_KEYS
+                .iter()
+                .position(|(_, slot_name)| *slot_name == name)
+                .map(|i| EXTRA_START + i)
+        })
 }
 
 /// Load a built-in layout preset by name.
@@ -261,7 +328,10 @@ pub fn extra_keys(preset: &HashMap<String, KeyCode>) -> Vec<(usize, KeyCode)> {
         .filter_map(|(name, &key)| extra_key_slot(name).map(|slot| (name, slot, key)))
         .collect();
     named.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
-    named.into_iter().map(|(_, slot, key)| (slot, key)).collect()
+    named
+        .into_iter()
+        .map(|(_, slot, key)| (slot, key))
+        .collect()
 }
 
 /// A preset with only its main key for each stroke key, no extra keys. What the
@@ -315,6 +385,22 @@ pub fn build_key_map(
         keys.insert(key, 1 << slot_index);
     }
 
+    // An extra key beyond the standard 23 gets a physical key only if something gave it one;
+    // no error if not, since most layouts have no use for it. Checked before the preset's own
+    // "|" extras below, so a user override onto one of those keys takes it over cleanly.
+    for (i, &(_, name)) in EXTRA_KEYS.iter().enumerate() {
+        let Some(&key) = assigned.get(name) else {
+            continue;
+        };
+        if let Some(other) = owners.insert(key, name) {
+            errors.push(format!(
+                "{key:?} is used by both \"{other}\" and \"{name}\""
+            ));
+            continue;
+        }
+        keys.insert(key, 1 << (EXTRA_START + i));
+    }
+
     // A combined key presses several stroke keys at once, e.g. "A-+O-" on V.
     // Its bits are the union of its parts.
     let mut combined: Vec<(&String, KeyCode)> = assigned
@@ -329,7 +415,9 @@ pub fn build_key_map(
             .map(|part| slot_by_name(part).map(|index| 1 << index))
             .try_fold(0, |mask, bit| bit.map(|bit| mask | bit))
         else {
-            errors.push(format!("combined key \"{name}\" names an unknown steno key"));
+            errors.push(format!(
+                "combined key \"{name}\" names an unknown steno key"
+            ));
             continue;
         };
         if let Some(other) = owners.insert(key, name.as_str()) {
@@ -401,7 +489,10 @@ mod tests {
         let two = parse_stroke("AER").unwrap();
         assert_eq!(parse_strokes("HRAOUP"), Some(vec![one]));
         assert_eq!(parse_strokes("HRAOUP/AER"), Some(vec![one, two]));
-        assert_eq!(parse_strokes("HRAOUP/AER/HRAOUP"), Some(vec![one, two, one]));
+        assert_eq!(
+            parse_strokes("HRAOUP/AER/HRAOUP"),
+            Some(vec![one, two, one])
+        );
         // Spaces around a slash are not part of the stroke, though Plover itself would refuse them
         assert_eq!(parse_strokes_trimmed("HRAOUP / AER"), Some(vec![one, two]));
         assert_eq!(parse_strokes("HRAOUP / AER"), None);
@@ -460,11 +551,9 @@ mod tests {
         let data: serde_json::Value =
             serde_json::from_str(include_str!("testdata/stroke_golden.json")).unwrap();
         for case in data["render"].as_array().unwrap() {
-            let bits = case[0]
-                .as_array()
-                .unwrap()
-                .iter()
-                .fold(0u32, |bits, key| bits | 1 << slot_by_name(key.as_str().unwrap()).unwrap());
+            let bits = case[0].as_array().unwrap().iter().fold(0u32, |bits, key| {
+                bits | 1 << slot_by_name(key.as_str().unwrap()).unwrap()
+            });
             let steno = case[1].as_str().unwrap();
             assert_eq!(render_stroke(bits), steno, "writing {:?}", case[0]);
             assert_eq!(parse_strokes(steno), Some(vec![bits]), "reading {steno}");
@@ -477,7 +566,10 @@ mod tests {
                 continue;
             }
             let expected: Option<Vec<String>> = case[1].as_array().map(|strokes| {
-                strokes.iter().map(|s| s.as_str().unwrap().to_string()).collect()
+                strokes
+                    .iter()
+                    .map(|s| s.as_str().unwrap().to_string())
+                    .collect()
             });
             let got = parse_strokes(text)
                 .map(|strokes| strokes.into_iter().map(render_stroke).collect::<Vec<_>>());
@@ -489,7 +581,12 @@ mod tests {
             mismatches.is_empty(),
             "{} spellings read differently from Plover, such as:\n{}",
             mismatches.len(),
-            mismatches.iter().take(25).cloned().collect::<Vec<_>>().join("\n")
+            mismatches
+                .iter()
+                .take(25)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
 
@@ -610,5 +707,50 @@ mod tests {
         );
         let errors = build_key_map(&preset("qwerty").unwrap(), &overrides).unwrap_err();
         assert!(errors.iter().any(|e| e.contains("must be Key(KC_*)")));
+    }
+
+    #[test]
+    fn an_extra_key_parses_and_renders_like_the_number_key_does() {
+        let bit = |name: &str| 1 << slot_by_name(name).unwrap();
+        // Marks the whole stroke, wherever it falls in the text; round-trips the same way
+        assert_eq!(
+            parse_stroke("^HR"),
+            Some((1 << EXTRA_START) | bit("H-") | bit("R-"))
+        );
+        assert_eq!(render_stroke(parse_stroke("^HR").unwrap()), "^HR");
+        assert_eq!(parse_stroke("^-G"), Some((1 << EXTRA_START) | bit("-G")));
+        assert_eq!(render_stroke(parse_stroke("^-G").unwrap()), "^-G");
+        // Multi-stroke dictionary keys carry it on whichever stroke has it
+        assert_eq!(
+            parse_strokes("KAT/^-G"),
+            Some(vec![
+                parse_stroke("KAT").unwrap(),
+                parse_stroke("^-G").unwrap()
+            ])
+        );
+        // Twice in one stroke is not a stroke
+        assert_eq!(parse_stroke("^KAT^"), None);
+    }
+
+    #[test]
+    fn an_extra_key_needs_no_physical_key_unless_something_gives_it_one() {
+        // No layout anywhere assigns "^" a key: the default preset still builds, and the
+        // 23 standard keys are exactly what's bound, as before this existed
+        let map = build_key_map(&preset("qwerty").unwrap(), &HashMap::new()).unwrap();
+        assert!(!map.values().any(|&bits| bits == 1 << EXTRA_START));
+
+        // An override gives it one, and it works like any other steno key
+        let mut overrides = HashMap::new();
+        overrides.insert("^".to_string(), KeyAction::Key(KeyCode::KC_Q));
+        let map = build_key_map(&preset("qwerty").unwrap(), &overrides).unwrap();
+        assert_eq!(map[&KeyCode::KC_Q], 1 << EXTRA_START);
+        // Q was S-'s extra key; giving it to "^" instead means only A presses S- now
+        assert_eq!(
+            map.get(&KeyCode::KC_A),
+            Some(&(1 << slot_by_name("S-").unwrap()))
+        );
+        assert_eq!(map[&KeyCode::KC_Q], 1 << EXTRA_START, "not S- any more");
+        // Still the same number of physical keys bound; Q just presses something else now
+        assert_eq!(map.len(), SLOTS.len() + 1 + 3 + 9);
     }
 }

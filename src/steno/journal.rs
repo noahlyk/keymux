@@ -288,10 +288,18 @@ mod tests {
     fn typed_text_is_recorded_a_word_at_a_time() {
         let mut h = history();
         type_text(&mut h, "hello world");
-        let words: Vec<_> = h.state.translations.iter().map(|t| t.origin.clone()).collect();
+        let words: Vec<_> = h
+            .state
+            .translations
+            .iter()
+            .map(|t| t.origin.clone())
+            .collect();
         assert_eq!(
             words,
-            vec![Origin::Typed("hello ".into()), Origin::Typed("world".into())]
+            vec![
+                Origin::Typed("hello ".into()),
+                Origin::Typed("world".into())
+            ]
         );
         assert_eq!(h.screen, "hello world");
     }
@@ -302,11 +310,17 @@ mod tests {
         type_text(&mut h, "hello wor");
         h.backspace();
         assert_eq!(h.screen, "hello wo");
-        assert_eq!(h.state.translations.last().unwrap().origin, Origin::Typed("wo".into()));
+        assert_eq!(
+            h.state.translations.last().unwrap().origin,
+            Origin::Typed("wo".into())
+        );
         // Backspacing a word away leaves the one before it
         h.backspace();
         h.backspace();
-        assert_eq!(h.state.translations.last().unwrap().origin, Origin::Typed("hello ".into()));
+        assert_eq!(
+            h.state.translations.last().unwrap().origin,
+            Origin::Typed("hello ".into())
+        );
     }
 
     #[test]

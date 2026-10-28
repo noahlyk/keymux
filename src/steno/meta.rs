@@ -4,9 +4,7 @@
 //! `{^ing}` is the attach meta with `^ing`, `{-|}` the case meta with `cap_first_word`, and so on.
 //! The parser tries the shapes in Plover's order, and the first that fits the whole text wins.
 
-use super::action::{
-    apply_case, has_word_boundary, is_space, rightmost_word, Action, Case, SPACE,
-};
+use super::action::{apply_case, has_word_boundary, is_space, rightmost_word, Action, Case, SPACE};
 use super::formatter::Context;
 
 const ATTACH: char = '^';
@@ -21,32 +19,57 @@ pub struct Meta<'a> {
 
 fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
     let head = text.get(..prefix.len())?;
-    head.eq_ignore_ascii_case(prefix).then(|| &text[prefix.len()..])
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &text[prefix.len()..])
 }
 
 /// Which meta `meta` (the text between the braces) is, and its argument. `None` when it is
 /// nothing Plover knows, which does nothing.
 #[must_use]
 pub fn parse_meta(meta: &str) -> Option<Meta<'_>> {
-    let found = |name: &str, param: &'static str| Some(Meta { name: name.to_string(), param });
+    let found = |name: &str, param: &'static str| {
+        Some(Meta {
+            name: name.to_string(),
+            param,
+        })
+    };
     // Generic `{:name:argument}`
     if let Some(rest) = meta.strip_prefix(':') {
         let end = rest.find(':').unwrap_or(rest.len());
         if end > 0 {
             let after = &rest[end..];
             let param = after.strip_prefix(':').unwrap_or(after);
-            return Some(Meta { name: rest[..end].to_string(), param });
+            return Some(Meta {
+                name: rest[..end].to_string(),
+                param,
+            });
         }
     }
     if let Some(command) = strip_prefix_ignore_case(meta, "PLOVER:") {
-        return Some(Meta { name: "command".into(), param: command });
+        return Some(Meta {
+            name: "command".into(),
+            param: command,
+        });
     }
     if let Some(combo) = meta.strip_prefix('#') {
-        return Some(Meta { name: "key_combo".into(), param: combo });
+        return Some(Meta {
+            name: "key_combo".into(),
+            param: combo,
+        });
     }
     match meta {
-        "," | ":" | ";" => return Some(Meta { name: "comma".into(), param: meta }),
-        "." | "!" | "?" => return Some(Meta { name: "stop".into(), param: meta }),
+        "," | ":" | ";" => {
+            return Some(Meta {
+                name: "comma".into(),
+                param: meta,
+            })
+        }
+        "." | "!" | "?" => {
+            return Some(Meta {
+                name: "stop".into(),
+                param: meta,
+            })
+        }
         "-|" => return found("case", "cap_first_word"),
         ">" => return found("case", "lower_first_char"),
         "<" => return found("case", "upper_first_word"),
@@ -57,24 +80,45 @@ pub fn parse_meta(meta: &str) -> Option<Meta<'_>> {
         _ => {}
     }
     if let Some(pattern) = meta.strip_prefix('=') {
-        return Some(Meta { name: "if_next_matches".into(), param: pattern });
+        return Some(Meta {
+            name: "if_next_matches".into(),
+            param: pattern,
+        });
     }
     if let Some(mode) = strip_prefix_ignore_case(meta, "MODE:") {
-        return Some(Meta { name: "mode".into(), param: mode });
+        return Some(Meta {
+            name: "mode".into(),
+            param: mode,
+        });
     }
-    if let Some(format) = meta.strip_prefix("*(").and_then(|rest| rest.strip_suffix(')')) {
-        return Some(Meta { name: "retro_currency".into(), param: format });
+    if let Some(format) = meta
+        .strip_prefix("*(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        return Some(Meta {
+            name: "retro_currency".into(),
+            param: format,
+        });
     }
     if let Some(text) = meta.strip_prefix('&') {
-        return Some(Meta { name: "glue".into(), param: text });
+        return Some(Meta {
+            name: "glue".into(),
+            param: text,
+        });
     }
     // `^?~|text^?`: carry the capitalization over the text
     let after_attach = meta.strip_prefix(ATTACH).unwrap_or(meta);
     if after_attach.starts_with(CARRY) {
-        return Some(Meta { name: "carry_capitalize".into(), param: meta });
+        return Some(Meta {
+            name: "carry_capitalize".into(),
+            param: meta,
+        });
     }
     if meta.starts_with(ATTACH) || meta.ends_with(ATTACH) {
-        return Some(Meta { name: "attach".into(), param: meta });
+        return Some(Meta {
+            name: "attach".into(),
+            param: meta,
+        });
     }
     None
 }
@@ -409,14 +453,21 @@ fn group_thousands(digits: &str) -> String {
 
 fn format_int(value: i128) -> String {
     let sign = if value < 0 { "-" } else { "" };
-    format!("{sign}{}", group_thousands(&value.unsigned_abs().to_string()))
+    format!(
+        "{sign}{}",
+        group_thousands(&value.unsigned_abs().to_string())
+    )
 }
 
 fn format_float(value: f64) -> String {
     // Python's `{:,.2f}`
     let text = format!("{:.2}", value.abs());
     let (whole, fraction) = text.split_once('.').unwrap_or((&text, "00"));
-    let sign = if value.is_sign_negative() && text != "0.00" { "-" } else { "" };
+    let sign = if value.is_sign_negative() && text != "0.00" {
+        "-"
+    } else {
+        ""
+    };
     format!("{sign}{}.{fraction}", group_thousands(whole))
 }
 
@@ -472,15 +523,42 @@ mod tests {
             let got = name_and_param(meta);
             assert_eq!(got, Some((name.to_string(), param.to_string())), "{meta}");
         }
-        assert_eq!(name_and_param("#Return"), Some(("key_combo".into(), "Return".into())));
-        assert_eq!(name_and_param("PLOVER:TOGGLE"), Some(("command".into(), "TOGGLE".into())));
-        assert_eq!(name_and_param("plover:lookup"), Some(("command".into(), "lookup".into())));
-        assert_eq!(name_and_param("mode:caps"), Some(("mode".into(), "caps".into())));
-        assert_eq!(name_and_param("*($c)"), Some(("retro_currency".into(), "$c".into())));
-        assert_eq!(name_and_param("=a/b/c"), Some(("if_next_matches".into(), "a/b/c".into())));
-        assert_eq!(name_and_param("~|\"^"), Some(("carry_capitalize".into(), "~|\"^".into())));
-        assert_eq!(name_and_param("^~|\""), Some(("carry_capitalize".into(), "^~|\"".into())));
-        assert_eq!(name_and_param("$"), Some(("word_end".into(), String::new())));
+        assert_eq!(
+            name_and_param("#Return"),
+            Some(("key_combo".into(), "Return".into()))
+        );
+        assert_eq!(
+            name_and_param("PLOVER:TOGGLE"),
+            Some(("command".into(), "TOGGLE".into()))
+        );
+        assert_eq!(
+            name_and_param("plover:lookup"),
+            Some(("command".into(), "lookup".into()))
+        );
+        assert_eq!(
+            name_and_param("mode:caps"),
+            Some(("mode".into(), "caps".into()))
+        );
+        assert_eq!(
+            name_and_param("*($c)"),
+            Some(("retro_currency".into(), "$c".into()))
+        );
+        assert_eq!(
+            name_and_param("=a/b/c"),
+            Some(("if_next_matches".into(), "a/b/c".into()))
+        );
+        assert_eq!(
+            name_and_param("~|\"^"),
+            Some(("carry_capitalize".into(), "~|\"^".into()))
+        );
+        assert_eq!(
+            name_and_param("^~|\""),
+            Some(("carry_capitalize".into(), "^~|\"".into()))
+        );
+        assert_eq!(
+            name_and_param("$"),
+            Some(("word_end".into(), String::new()))
+        );
         assert_eq!(name_and_param("nothing"), None);
     }
 

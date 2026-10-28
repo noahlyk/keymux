@@ -72,7 +72,11 @@ pub struct Context<'a> {
 
 impl<'a> Context<'a> {
     #[must_use]
-    pub const fn new(previous: &'a [Translation], last_action: Action, orthography: &'a Orthography) -> Self {
+    pub const fn new(
+        previous: &'a [Translation],
+        last_action: Action,
+        orthography: &'a Orthography,
+    ) -> Self {
         Self {
             previous,
             last_action,
@@ -104,7 +108,12 @@ impl<'a> Context<'a> {
         self.translated
             .iter()
             .rev()
-            .chain(self.previous.iter().rev().flat_map(|t| t.formatting.iter().rev()))
+            .chain(
+                self.previous
+                    .iter()
+                    .rev()
+                    .flat_map(|t| t.formatting.iter().rev()),
+            )
             .collect()
     }
 
@@ -132,7 +141,8 @@ fn unescape_atom(atom: &str) -> String {
 }
 
 fn get_meta(atom: &str) -> Option<&str> {
-    atom.strip_prefix('{').and_then(|rest| rest.strip_suffix('}'))
+    atom.strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
 }
 
 /// The actions for a translation: a word, or `{...}` operators, or a mix.
@@ -213,7 +223,10 @@ fn finalize_action(action: &mut Action, ctx: &Context) {
         } else {
             None
         };
-        action.word = Some(rightmost_word(&format!("{}{text}", last_word.unwrap_or_default())));
+        action.word = Some(rightmost_word(&format!(
+            "{}{text}",
+            last_word.unwrap_or_default()
+        )));
     }
     let mut case = ctx.last_action.next_case;
     if case.is_none() && action.prev_attach && ctx.last_action.upper_carry {
@@ -223,7 +236,13 @@ fn finalize_action(action: &mut Action, ctx: &Context) {
     if case == Some(Case::UpperFirstWord) {
         action.upper_carry = !has_word_boundary(&text);
     }
-    action.text = Some(apply_mode(&text, action.case, &action.space_char, action.prev_attach, &ctx.last_action));
+    action.text = Some(apply_mode(
+        &text,
+        action.case,
+        &action.space_char,
+        action.prev_attach,
+        &ctx.last_action,
+    ));
     action.trailing_space = if action.next_attach {
         String::new()
     } else {
@@ -270,7 +289,8 @@ impl TextFormatter {
 
     fn render_action(&mut self, action: &Action) {
         if self.spaces_after && !self.trailing_space.is_empty() {
-            self.appended_text = without_last_chars(&self.appended_text, char_len(&self.trailing_space));
+            self.appended_text =
+                without_last_chars(&self.appended_text, char_len(&self.trailing_space));
         }
         if !action.prev_replace.is_empty() {
             let mut replaced = char_len(&action.prev_replace);
@@ -281,7 +301,8 @@ impl TextFormatter {
                     self.replaced_text = first_chars(&action.prev_replace, replaced);
                 } else {
                     self.replaced_text = without_last_chars(&self.replaced_text, replaced);
-                    self.replaced_text.push_str(&first_chars(&action.prev_replace, replaced));
+                    self.replaced_text
+                        .push_str(&first_chars(&action.prev_replace, replaced));
                 }
                 self.appended_text.clear();
             } else {
@@ -291,7 +312,8 @@ impl TextFormatter {
         if !action.prev_attach {
             self.appended_text.push_str(&action.space_char);
         }
-        self.appended_text.push_str(action.text.as_deref().unwrap_or_default());
+        self.appended_text
+            .push_str(action.text.as_deref().unwrap_or_default());
         if self.spaces_after && !action.next_attach {
             self.appended_text.push_str(&action.space_char);
             self.trailing_space = action.space_char.clone();
@@ -342,11 +364,18 @@ impl OutputHelper {
             after_replaced.clone()
         };
         let keep = |own: &str| {
-            first_chars(&replaced_text, char_len(&replaced_text).saturating_sub(char_len(own)))
+            first_chars(
+                &replaced_text,
+                char_len(&replaced_text).saturating_sub(char_len(own)),
+            )
         };
         let before = format!("{}{}", keep(before_replaced), self.before.appended_text);
         let after = format!("{}{}", keep(after_replaced), self.after.appended_text);
-        let common = before.chars().zip(after.chars()).take_while(|(b, a)| b == a).count();
+        let common = before
+            .chars()
+            .zip(after.chars())
+            .take_while(|(b, a)| b == a)
+            .count();
         let erased = char_len(&before) - common;
         if erased > 0 {
             self.ops.push(Op::Backspaces(erased));
@@ -441,13 +470,16 @@ impl Formatter {
             for translation in do_.iter_mut() {
                 if !translation.origin.is_stroke() {
                     // Text typed or erased by hand is not translated: it is what it says
-                    let action = super::journal::recorded_action(&translation.origin, &ctx.last_action);
+                    let action =
+                        super::journal::recorded_action(&translation.origin, &ctx.last_action);
                     ctx.translated(action.clone());
                     translation.formatting = vec![action];
                     continue;
                 }
                 translation.formatting = match translation.english.as_deref() {
-                    Some(english) if !english.is_empty() => translation_to_actions(english, &mut ctx),
+                    Some(english) if !english.is_empty() => {
+                        translation_to_actions(english, &mut ctx)
+                    }
                     _ => {
                         let stroke = translation.strokes.first().copied().unwrap_or(0);
                         raw_to_actions(&render_stroke(stroke), &render_raw_stroke(stroke), &mut ctx)
@@ -456,7 +488,10 @@ impl Formatter {
             }
             ctx.translated
         };
-        let mut old: Vec<Action> = undo.iter().flat_map(|t| t.formatting.iter().cloned()).collect();
+        let mut old: Vec<Action> = undo
+            .iter()
+            .flat_map(|t| t.formatting.iter().cloned())
+            .collect();
 
         // Take into account earlier look-ahead actions: the text now known may change them
         if !prev.is_empty() {
@@ -496,7 +531,11 @@ impl Formatter {
         }
 
         // Figure out what really changed
-        let same = old.iter().zip(new.iter()).take_while(|(o, n)| o == n).count();
+        let same = old
+            .iter()
+            .zip(new.iter())
+            .take_while(|(o, n)| o == n)
+            .count();
         let optimized_away: Vec<Action> = old.drain(..same).collect();
         new.drain(..same);
 
@@ -560,7 +599,13 @@ mod tests {
         let texts: Vec<_> = list.iter().map(|a| a.text.clone()).collect();
         assert_eq!(
             texts,
-            [None, Some("Hello".into()), Some(String::new()), Some("world".into()), Some(".".into())]
+            [
+                None,
+                Some("Hello".into()),
+                Some(String::new()),
+                Some("world".into()),
+                Some(".".into())
+            ]
         );
     }
 
