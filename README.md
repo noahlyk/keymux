@@ -661,9 +661,10 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
 
 ### Live lookup
 
-Midway through a sentence and can't remember the stroke for a word? Set `lookup_stroke` (a
-stroke in Plover notation, for example `lookup_stroke: Some("HRAOUP")`) on the steno layer and
-hit that stroke:
+Midway through a sentence and can't remember the stroke for a word? Write the stroke that
+opens a lookup. It is an ordinary dictionary entry, as in Plover: `{PLOVER:LOOKUP}`. Lapwing
+already has it as `PHRUP` and `PHR*UP`, and you can add your own to any dictionary, for example
+`"HRAOUP": "{PLOVER:LOOKUP}"` in `00-user.json`.
 
 - You stay on the steno layer, but its keys go back to **QWERTY** for a moment. They type the
   word you're after into a query, shown as `LOOKUP` on the [overlay](#on-screen-overlay).
@@ -676,20 +677,11 @@ hit that stroke:
 - Other keys your steno layer remaps (such as one that leaves steno) still work, and leave the
   lookup behind.
 
-The lookup stroke is used up by this, so it no longer types its dictionary entry; pick one you
-don't write with. `keymux steno stroke HRAOUP` shows what a stroke types now, and "has no
-translation" means it's free. `keymux validate` checks the setting. It needs the overlay
-running to show anything (`keymux overlay`), since that is where the query and results appear.
-`keymux steno keys "word"` does the same lookup from a terminal.
-
-**Several strokes.** `lookup_stroke` can be more than one stroke, separated by `/` like a
-multi-stroke dictionary entry: `lookup_stroke: Some("HRAOUP/AER")`. The lookup opens after the
-last stroke. The earlier strokes are held back, typing nothing and not on the tape, until the
-next stroke shows whether it is the rest of the trigger. If it isn't, they're typed as normal,
-in order. That means the first stroke of a multi-stroke trigger is delayed by one stroke
-whenever you write it as an ordinary word, so a first stroke that is a common word makes that
-word feel laggy. A single stroke has no such delay, which is why it's the better default.
-Backspace and Space do nothing while a stroke is held back.
+Like any command, the stroke fires on its own, so it can't be the start of a longer outline.
+`keymux steno stroke HRAOUP` shows what a stroke types now, and "has no translation" means
+it's free. It needs the overlay running to show anything (`keymux overlay`), since that is
+where the query and results appear. `keymux steno keys "word"` does the same lookup from a
+terminal.
 
 ### Steno commands
 

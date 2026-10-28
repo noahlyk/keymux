@@ -1,6 +1,6 @@
 //! Live lookup: "I'm mid-sentence and forgot the stroke for a word."
 //!
-//! A configured stroke (`lookup_stroke`) opens a lookup. The steno layer stays on, but its
+//! A dictionary entry for `{PLOVER:LOOKUP}` opens a lookup. The steno layer stays on, but its
 //! keys go back to plain QWERTY: they type into a query that is shown on the overlay and
 //! never reaches the application. The overlay lists the outlines that type the word, best
 //! first, and lights the first stroke of the best one on its keyboard. Esc or Enter closes it.
