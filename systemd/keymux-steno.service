@@ -1,9 +1,9 @@
 [Unit]
-Description=Keyboard Middleware On-Screen Steno Overlay
+Description=Keyboard Middleware Steno (on-screen keyboard and tape)
 Documentation=https://github.com/noahlyk/keymux
 After=graphical-session.target
 Requires=graphical-session.target
-# The overlay exits when the compositor has no layer-shell (GNOME). Don't retry forever.
+# It exits when the compositor has no layer-shell (GNOME). Don't retry forever.
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
