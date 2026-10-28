@@ -276,7 +276,7 @@ fn stroke_released_after_layer_exit_still_types() {
 }
 
 #[test]
-fn reentering_a_steno_layer_starts_without_a_leading_space() {
+fn reentering_a_steno_layer_carries_on_from_what_was_typed() {
     let fixture = Fixture::new("reenter");
     let mut p = fixture.processor();
     enter_steno(&mut p);
@@ -286,12 +286,101 @@ fn reentering_a_steno_layer_starts_without_a_leading_space() {
         ProcessResult::TypeString("cat".to_string(), false)
     );
 
-    // Leaving and coming back starts a new sentence, so "cat" gets no leading space
+    // Leaving and coming back carries on: the cursor is still after "cat"
+    p.deactivate_layer_for_test(&Layer("chords".to_string()));
+    enter_steno(&mut p);
+    assert_eq!(
+        chord(&mut p, &cat),
+        ProcessResult::TypeString(" cat".to_string(), false)
+    );
+}
+
+#[test]
+fn a_layer_can_start_a_fresh_sentence_each_time_it_is_entered() {
+    let fixture = Fixture::new("reenter-fresh");
+    let mut p = fixture.processor_from(&CONFIG.replace(
+        "dictionaries: [\"DICT\"],",
+        "dictionaries: [\"DICT\"], fresh_on_enter: true,",
+    ));
+    enter_steno(&mut p);
+    let cat = [KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P];
+    assert_eq!(
+        chord(&mut p, &cat),
+        ProcessResult::TypeString("cat".to_string(), false)
+    );
     p.deactivate_layer_for_test(&Layer("chords".to_string()));
     enter_steno(&mut p);
     assert_eq!(
         chord(&mut p, &cat),
         ProcessResult::TypeString("cat".to_string(), false)
+    );
+}
+
+fn tap(p: &mut KeymapProcessor, key: KeyCode) {
+    p.process_key(key, true);
+    p.process_key(key, false);
+}
+
+#[test]
+fn words_typed_by_hand_are_undone_by_steno_a_word_at_a_time() {
+    let fixture = Fixture::new("typed-undo");
+    let mut p = fixture.processor();
+    // "hi yo" on the base layer
+    for key in [KeyCode::KC_H, KeyCode::KC_I, KeyCode::KC_SPC, KeyCode::KC_Y, KeyCode::KC_O] {
+        tap(&mut p, key);
+    }
+    enter_steno(&mut p);
+    let cat = [KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P];
+    // The word after a word typed by hand is spaced from it
+    assert_eq!(
+        chord(&mut p, &cat),
+        ProcessResult::TypeString(" cat".to_string(), false)
+    );
+    assert_eq!(
+        chord(&mut p, &[KeyCode::KC_T]),
+        ProcessResult::Retype { backspaces: 4, text: String::new() }
+    );
+    // Then the word typed by hand goes whole
+    assert_eq!(
+        chord(&mut p, &[KeyCode::KC_T]),
+        ProcessResult::Retype { backspaces: 2, text: String::new() }
+    );
+}
+
+#[test]
+fn a_caret_key_makes_steno_forget_what_was_typed_by_hand() {
+    let fixture = Fixture::new("typed-fence");
+    let mut p = fixture.processor();
+    for key in [KeyCode::KC_H, KeyCode::KC_I, KeyCode::KC_LEFT] {
+        tap(&mut p, key);
+    }
+    enter_steno(&mut p);
+    // Where the caret is now is unknown, so nothing is undone by guessing
+    assert_eq!(
+        chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]),
+        ProcessResult::TypeString("cat".to_string(), false)
+    );
+}
+
+#[test]
+fn two_keyboards_share_what_was_typed_and_either_can_undo_it() {
+    let fixture = Fixture::new("shared-history");
+    let mut a = fixture.processor();
+    let config_path = fixture.dir.join("config.ron");
+    let config = Config::load(&config_path).unwrap();
+    let mut b = KeymapProcessor::with_history(&config, config_path, 0, a.shared_history());
+    b.wait_for_steno_dictionaries();
+    enter_steno(&mut a);
+    enter_steno(&mut b);
+    let cat = [KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P];
+    assert_eq!(
+        chord(&mut a, &cat),
+        ProcessResult::TypeString("cat".to_string(), false)
+    );
+    // The other keyboard takes it back
+    assert_eq!(
+        chord(&mut b, &[KeyCode::KC_T]),
+        ProcessResult::Retype { backspaces: 3, text: String::new() }
     );
 }
 
@@ -356,7 +445,7 @@ fn undo_with_nothing_on_the_tape_presses_ctrl_backspace() {
 }
 
 #[test]
-fn toggling_back_into_steno_starts_without_a_prefix_space() {
+fn toggling_back_into_steno_carries_on_from_what_was_typed_between() {
     let fixture = Fixture::new("toggle-reenter");
     let dict = fixture.dir.join("main.json");
     std::fs::write(&dict, r#"{"KAT": "cat"}"#).unwrap();
@@ -378,7 +467,7 @@ fn toggling_back_into_steno_starts_without_a_prefix_space() {
     p.process_key(KeyCode::KC_RCTL, false);
     assert_eq!(p.current_layer_name(), "base");
 
-    // Some typing on base, then back into steno: "cat" still gets no prefix space
+    // A "q" typed on base, then back into steno: "cat" follows it, with a space between
     p.process_key(KeyCode::KC_Q, true);
     p.process_key(KeyCode::KC_Q, false);
     p.process_key(KeyCode::KC_RCTL, true);
@@ -386,7 +475,7 @@ fn toggling_back_into_steno_starts_without_a_prefix_space() {
     assert_eq!(p.current_layer_name(), "steno");
     assert_eq!(
         chord(&mut p, &cat),
-        ProcessResult::TypeString("cat".to_string(), false)
+        ProcessResult::TypeString(" cat".to_string(), false)
     );
 }
 
@@ -545,7 +634,8 @@ fn leaving_steno_in_the_middle_of_a_lookup_closes_it_and_does_not_keep_eating_ke
     assert_eq!(hub.snapshot().lookup, None);
     assert_eq!(
         chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C]),
-        ProcessResult::TypeString("KA-".to_string(), false),
+        // After the "a" typed on the base layer
+        ProcessResult::TypeString(" KA-".to_string(), false),
         "a stroke, not lookup letters"
     );
 }

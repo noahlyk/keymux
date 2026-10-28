@@ -9,6 +9,7 @@
 use super::action::Action;
 use super::dict::Dictionary;
 use super::formatter::{Formatter, Op, Options};
+use super::journal::{self, History, MachineId, Origin, SharedHistory};
 use super::keycombo::key_events;
 use super::layout::render_stroke;
 use crate::keycode::KeyCode;
@@ -26,7 +27,7 @@ const STAR: u32 = 1 << 9;
 pub const SUFFIX_KEYS: [u32; 4] = [1 << 21, 1 << 20, 1 << 19, 1 << 17];
 
 /// How many translations stay undoable at least. Plover's default.
-const UNDO_LENGTH: usize = 100;
+pub(crate) const UNDO_LENGTH: usize = 100;
 
 /// What undo does when there is nothing left of the steno output to take back: delete a word
 /// with the keys that do it.
@@ -43,6 +44,10 @@ pub struct Translation {
     /// What the formatter made of it
     pub formatting: Vec<Action>,
     pub is_retrospective_command: bool,
+    /// Which set of dictionaries made it
+    pub machine: MachineId,
+    /// Strokes, or text that was typed or erased by hand
+    pub origin: Origin,
 }
 
 impl Translation {
@@ -54,6 +59,8 @@ impl Translation {
             replaced: Vec::new(),
             formatting: Vec::new(),
             is_retrospective_command: false,
+            machine: 0,
+            origin: Origin::Stroke,
         }
     }
 
@@ -154,6 +161,10 @@ impl StenoOutput {
     }
 }
 
+/// The macros keymux adds to Plover's, which work on the history as a whole: undo some or a
+/// word, redo, say it again, swap the last two.
+const HISTORY_MACROS: [&str; 5] = ["undo", "undo_word", "redo", "again", "swap"];
+
 /// Plover's `Macro`: a translation that is an action on the translator, not text.
 struct Macro {
     name: String,
@@ -185,6 +196,17 @@ fn mapping_to_macro(mapping: Option<&str>, stroke: u32) -> Option<Macro> {
             cmdline: String::new(),
         });
     }
+    // keymux's own, also written like its metas: `{:redo}`, `{:undo:3}`
+    if let Some(inner) = mapping.strip_prefix("{:").and_then(|rest| rest.strip_suffix('}')) {
+        let (name, cmdline) = inner.split_once(':').unwrap_or((inner, ""));
+        if HISTORY_MACROS.contains(&name) {
+            return Some(Macro {
+                name: name.to_string(),
+                stroke,
+                cmdline: cmdline.to_string(),
+            });
+        }
+    }
     // `=name` or `=name:arguments`
     let rest = mapping.strip_prefix('=')?;
     let name_len = rest
@@ -200,45 +222,32 @@ fn mapping_to_macro(mapping: Option<&str>, stroke: u32) -> Option<Macro> {
     })
 }
 
-/// The translations still undoable, and the one before them for context.
-#[derive(Debug, Clone, Default)]
-struct State {
-    translations: Vec<Translation>,
-    /// The oldest translation still kept, no longer undoable
-    tail: Option<Translation>,
-}
-
-impl State {
-    /// Reduce the history to about `n` strokes.
-    fn restrict_size(&mut self, n: usize) {
-        let mut strokes = 0;
-        let mut count = 0;
-        for translation in self.translations.iter().rev() {
-            strokes += translation.strokes.len();
-            count += 1;
-            if strokes >= n {
-                break;
-            }
-        }
-        let index = self.translations.len() - count;
-        if index > 0 {
-            self.tail = Some(self.translations[index - 1].clone());
-        }
-        self.translations.drain(..index);
-    }
-}
-
 /// Converts a stream of strokes into typing.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Translator {
     dict: Arc<Dictionary>,
-    state: State,
-    to_undo: Vec<Translation>,
-    to_do: usize,
-    formatter: Formatter,
+    /// Which set of dictionaries this is, stamped on what it makes
+    machine: MachineId,
+    /// What every translator of the user shares: what was typed, and what can be undone
+    shared: SharedHistory,
+    /// The shared history while a stroke is being translated, and empty otherwise
+    hist: History,
     unmatched: bool,
-    /// What is on screen, as far as this translator has typed it
-    screen: String,
+}
+
+/// A copy of a translator has a copy of the history too, so trying strokes on it (a lookup
+/// does) doesn't touch what the original has typed.
+impl Clone for Translator {
+    fn clone(&self) -> Self {
+        let history = journal::lock(&self.shared).clone();
+        Self {
+            dict: Arc::clone(&self.dict),
+            machine: self.machine,
+            shared: Arc::new(std::sync::Mutex::new(history)),
+            hist: History::default(),
+            unmatched: self.unmatched,
+        }
+    }
 }
 
 impl Translator {
@@ -254,29 +263,45 @@ impl Translator {
         )
     }
 
-    /// A translator over a dictionary others share, with these options.
+    /// A translator over a dictionary others share, with these options. Its history is its own.
     #[must_use]
     pub fn with_shared(dict: Arc<Dictionary>, options: Options) -> Self {
+        Self::with_history(dict, journal::new_shared(Formatter::new(options)), 0)
+    }
+
+    /// A translator over the history `shared`, which other translators write to as well.
+    #[must_use]
+    pub fn with_history(dict: Arc<Dictionary>, shared: SharedHistory, machine: MachineId) -> Self {
         Self {
             dict,
-            state: State::default(),
-            to_undo: Vec::new(),
-            to_do: 0,
-            formatter: Formatter::new(options),
+            machine,
+            shared,
+            hist: History::default(),
             unmatched: false,
-            screen: String::new(),
         }
     }
 
-    /// A translator over the same dictionary with nothing typed. Cheap: the dictionary is shared.
+    /// The history this translator writes to.
+    #[must_use]
+    pub fn history(&self) -> SharedHistory {
+        Arc::clone(&self.shared)
+    }
+
+    /// Which set of dictionaries this translator stands for.
+    pub const fn set_machine(&mut self, machine: MachineId) {
+        self.machine = machine;
+    }
+
+    /// A translator over the same dictionary with nothing typed, and a history of its own. Cheap:
+    /// the dictionary is shared.
     #[must_use]
     pub fn fresh(&self) -> Self {
-        Self::with_shared(Arc::clone(&self.dict), self.formatter.options.clone())
+        Self::with_shared(Arc::clone(&self.dict), self.options())
     }
 
     /// Forget what was typed, as when the layer is entered: the next word starts a sentence.
     pub fn start_fresh(&mut self) {
-        *self = self.fresh();
+        journal::lock(&self.shared).fence();
     }
 
     /// Swap in the dictionary. What was typed stays undoable.
@@ -292,13 +317,13 @@ impl Translator {
 
     /// Change how spaces are placed and how a session starts.
     pub fn set_options(&mut self, options: Options) {
-        self.formatter.options = options;
+        journal::lock(&self.shared).formatter.options = options;
     }
 
     /// How spaces are placed and how a session starts.
     #[must_use]
-    pub const fn options(&self) -> &Options {
-        &self.formatter.options
+    pub fn options(&self) -> Options {
+        journal::lock(&self.shared).formatter.options.clone()
     }
 
     /// The dictionary strokes are translated with.
@@ -311,6 +336,12 @@ impl Translator {
     #[must_use]
     pub fn has_dictionary(&self) -> bool {
         !self.dict.is_empty()
+    }
+
+    /// The dictionary, to look things up on another thread. `None` when nothing loaded.
+    #[must_use]
+    pub fn dictionary_handle(&self) -> Option<Arc<Dictionary>> {
+        (!self.dict.is_empty()).then(|| Arc::clone(&self.dict))
     }
 
     /// How many entries the dictionary has.
@@ -327,8 +358,8 @@ impl Translator {
 
     /// The text on screen, as far as this translator knows it.
     #[must_use]
-    pub fn text(&self) -> &str {
-        &self.screen
+    pub fn text(&self) -> String {
+        journal::lock(&self.shared).screen.clone()
     }
 
     /// Whether the dictionary entry for this stroke alone carries `{:firstup}`: that stroke is
@@ -352,10 +383,25 @@ impl Translator {
     /// Translate a finished stroke and say what to do with the keyboard.
     pub fn stroke(&mut self, stroke: u32) -> Option<StenoOutput> {
         self.unmatched = false;
+        self.check_out();
         let mut ops = Vec::new();
         self.translate_stroke(stroke, &mut ops);
         ops.extend(self.flush(None));
-        self.finish(ops)
+        let output = self.finish(ops);
+        self.check_in();
+        output
+    }
+
+    /// Take the shared history to work on. Nothing else uses it until [`Self::check_in`].
+    fn check_out(&mut self) {
+        let mut shared = journal::lock(&self.shared);
+        std::mem::swap(&mut self.hist, &mut *shared);
+    }
+
+    /// Hand the history back.
+    fn check_in(&mut self) {
+        let mut shared = journal::lock(&self.shared);
+        std::mem::swap(&mut self.hist, &mut *shared);
     }
 
     /// The operations a stroke makes, before key combinations become key events. Tests use this
@@ -363,19 +409,21 @@ impl Translator {
     #[cfg(test)]
     pub(crate) fn stroke_ops(&mut self, stroke: u32) -> Vec<Op> {
         self.unmatched = false;
+        self.check_out();
         let mut ops = Vec::new();
         self.translate_stroke(stroke, &mut ops);
         ops.extend(self.flush(None));
         for op in &ops {
             match op {
                 Op::Backspaces(count) => {
-                    let keep = self.screen.chars().count().saturating_sub(*count);
-                    self.screen = self.screen.chars().take(keep).collect();
+                    let keep = self.hist.screen.chars().count().saturating_sub(*count);
+                    self.hist.screen = self.hist.screen.chars().take(keep).collect();
                 }
-                Op::Text(text) => self.screen.push_str(text),
+                Op::Text(text) => self.hist.screen.push_str(text),
                 Op::Combo(_) | Op::Command(_) => {}
             }
         }
+        self.check_in();
         ops
     }
 
@@ -385,12 +433,12 @@ impl Translator {
         for op in ops {
             match op {
                 Op::Backspaces(count) => {
-                    let keep = self.screen.chars().count().saturating_sub(count);
-                    self.screen = self.screen.chars().take(keep).collect();
+                    let keep = self.hist.screen.chars().count().saturating_sub(count);
+                    self.hist.screen = self.hist.screen.chars().take(keep).collect();
                     out.push(OutputOp::Backspaces(count));
                 }
                 Op::Text(text) => {
-                    self.screen.push_str(&text);
+                    self.hist.screen.push_str(&text);
                     out.push(OutputOp::Text(text));
                 }
                 Op::Combo(combo) => match key_events(&combo) {
@@ -405,11 +453,16 @@ impl Translator {
 
     fn translate_stroke(&mut self, stroke: u32, ops: &mut Vec<Op>) {
         let max_len = self.dict.longest_key();
-        let mapping = self.lookup_with_prefix(max_len, &self.state.translations, &[stroke], &[]);
+        let mapping = self.lookup_with_prefix(max_len, &self.hist.state.translations, &[stroke], &[]);
         if let Some(found) = mapping_to_macro(mapping.as_deref(), stroke) {
+            // Taking back and putting back keep the redo history; anything else is new input
+            if !matches!(found.name.as_str(), "undo" | "undo_word" | "redo") {
+                self.hist.redo.clear();
+            }
             self.translate_macro(&found, ops);
             return;
         }
+        self.hist.redo.clear();
         let translation = self
             // No prefix lookups (the stroke alone is already looked up)
             .find_longest_match(2, max_len, stroke, &[])
@@ -428,18 +481,28 @@ impl Translator {
 
     fn translate_macro(&mut self, found: &Macro, ops: &mut Vec<Op>) {
         match found.name.as_str() {
-            "undo" => self.macro_undo(found.stroke, ops),
+            "undo" => {
+                let count = Self::repeat_count(&found.cmdline).max(1);
+                self.macro_undo(found.stroke, count, ops);
+            }
+            "undo_word" => self.macro_undo_word(found.stroke, ops),
+            "redo" => self.macro_redo(Self::repeat_count(&found.cmdline).max(1)),
+            "again" => self.macro_again(),
+            "swap" => self.macro_swap(),
             "repeat_last_stroke" => {
-                let Some(last) = self.state.translations.last().and_then(|t| t.strokes.last()) else {
+                let Some(last) = self.hist.state.translations.last().and_then(|t| t.strokes.last()) else {
                     return;
                 };
                 let stroke = *last;
                 self.translate_stroke(stroke, ops);
             }
             "retro_toggle_asterisk" => {
-                let Some(last) = self.state.translations.last().cloned() else {
+                let Some(last) = self.hist.state.translations.last().cloned() else {
                     return;
                 };
+                if !last.origin.is_stroke() {
+                    return;
+                }
                 self.untranslate_translation(&last);
                 let Some(&stroke) = last.strokes.last() else {
                     return;
@@ -454,9 +517,12 @@ impl Translator {
             "retro_delete_space" | "retrospective_delete_space" => self.macro_delete_space(found.stroke),
             "retro_insert_space" | "retrospective_insert_space" => self.macro_insert_space(found.stroke),
             "retrospective_toggle_asterisk" => {
-                let Some(last) = self.state.translations.last().cloned() else {
+                let Some(last) = self.hist.state.translations.last().cloned() else {
                     return;
                 };
+                if !last.origin.is_stroke() {
+                    return;
+                }
                 self.untranslate_translation(&last);
                 let Some(&stroke) = last.strokes.last() else {
                     return;
@@ -467,19 +533,130 @@ impl Translator {
         }
     }
 
-    /// Undo: take back translations until one that had an effect, or if there are none left,
-    /// delete a word with the keys that do it.
-    fn macro_undo(&mut self, stroke: u32, ops: &mut Vec<Op>) {
-        let all: Vec<Translation> = self.state.translations.clone();
+    /// Take translations back from the end, last first, until `stop` says so for one that had an
+    /// effect. What was taken back can be put back by redo. Returns whether anything had an effect.
+    fn take_back(&mut self, mut stop: impl FnMut(&Translation) -> bool) -> bool {
+        let all: Vec<Translation> = self.hist.state.translations.clone();
+        let mut group = Vec::new();
+        let mut effective = false;
         for translation in all.iter().rev() {
             self.untranslate_translation(translation);
+            group.push(translation.clone());
             if translation.has_undo() {
-                return;
+                effective = true;
+                if stop(translation) {
+                    break;
+                }
             }
         }
-        // Nothing left of the output to take back. Delete a word, without keeping it in the history.
+        if effective {
+            group.reverse();
+            self.hist.redo.push(group);
+        }
+        effective
+    }
+
+    /// Nothing left of the output to take back. Delete a word, without keeping it in the history.
+    fn undo_fallback(&mut self, stroke: u32, ops: &mut Vec<Op>) {
         let extra = Translation::new(vec![stroke], Some(BACK_STRING.to_string()));
         ops.extend(self.flush(Some(extra)));
+    }
+
+    /// Undo: take back `count` translations that had an effect, or if there are none left,
+    /// delete a word with the keys that do it.
+    fn macro_undo(&mut self, stroke: u32, count: usize, ops: &mut Vec<Op>) {
+        let mut left = count;
+        let found = self.take_back(|_| {
+            left -= 1;
+            left == 0
+        });
+        if !found {
+            self.undo_fallback(stroke, ops);
+        }
+    }
+
+    /// Undo a whole word: back to the translation that started it, so a stem and the suffixes
+    /// glued after it go together, and so does a word typed by hand.
+    fn macro_undo_word(&mut self, stroke: u32, ops: &mut Vec<Op>) {
+        let found = self.take_back(|translation| {
+            !translation.origin.is_stroke()
+                || translation
+                    .formatting
+                    .iter()
+                    .map(Action::effective)
+                    .find(|action| action.text.as_deref().is_some_and(|text| !text.is_empty()))
+                    .is_none_or(|action| !action.prev_attach)
+        });
+        if !found {
+            self.undo_fallback(stroke, ops);
+        }
+    }
+
+    /// Redo: put back what undo took back, `count` times over. Nothing to redo does nothing.
+    fn macro_redo(&mut self, count: usize) {
+        for _ in 0..count {
+            let Some(group) = self.hist.redo.pop() else {
+                return;
+            };
+            for translation in group {
+                self.translate_translation(translation);
+            }
+        }
+    }
+
+    /// Say the last thing again: the strokes of the last translation, or the text typed by hand.
+    fn macro_again(&mut self) {
+        let Some(last) = self.hist.state.translations.iter().rev().find(|t| t.has_undo()).cloned() else {
+            return;
+        };
+        let again = match &last.origin {
+            Origin::Stroke => Translation::new(last.strokes.clone(), last.english.clone()),
+            Origin::Typed(text) => {
+                let mut typed = Translation::new(Vec::new(), None);
+                typed.origin = Origin::Typed(text.clone());
+                typed
+            }
+            // Erasing again would erase something else
+            Origin::Erased(_) => return,
+        };
+        self.translate_translation(again);
+    }
+
+    /// Swap the last two words: take both back and say them the other way round, so the spacing
+    /// and capitals are made again for where they are now.
+    fn macro_swap(&mut self) {
+        let translations = &self.hist.state.translations;
+        let Some([first, second]) = translations.len().checked_sub(2).map(|from| &translations[from..]) else {
+            return;
+        };
+        let (first, second) = (first.clone(), second.clone());
+        let swapped = match (&first.origin, &second.origin) {
+            (Origin::Stroke, Origin::Stroke) if !first.is_retrospective_command && !second.is_retrospective_command => {
+                [
+                    Translation::new(second.strokes.clone(), second.english.clone()),
+                    Translation::new(first.strokes.clone(), first.english.clone()),
+                ]
+            }
+            (Origin::Typed(a), Origin::Typed(b)) => {
+                // The space after a word stays where it was: it separates the two
+                let split = |text: &str| {
+                    let core = text.trim_end().len();
+                    (text[..core].to_string(), text[core..].to_string())
+                };
+                let ((a_word, a_space), (b_word, b_space)) = (split(a), split(b));
+                let typed = |text: String| {
+                    let mut translation = Translation::new(Vec::new(), None);
+                    translation.origin = Origin::Typed(text);
+                    translation
+                };
+                [typed(format!("{b_word}{a_space}")), typed(format!("{a_word}{b_space}"))]
+            }
+            _ => return,
+        };
+        self.undo_all(&[first, second]);
+        for translation in swapped {
+            self.translate_translation(translation);
+        }
     }
 
     /// How many to repeat: the first of the comma-separated arguments, or one.
@@ -489,7 +666,7 @@ impl Translator {
 
     /// `=repeat_last_translation:n`: the last `n` translations again.
     fn macro_repeat_translations(&mut self, cmdline: &str) {
-        let translations = &self.state.translations;
+        let translations = &self.hist.state.translations;
         if translations.is_empty() {
             return;
         }
@@ -498,6 +675,7 @@ impl Translator {
         let from = if count == 0 { 0 } else { translations.len().saturating_sub(count) };
         let again: Vec<Translation> = translations[from..]
             .iter()
+            .filter(|t| t.origin.is_stroke())
             .map(|t| Translation::new(t.strokes.clone(), t.english.clone()))
             .collect();
         for translation in again {
@@ -508,11 +686,12 @@ impl Translator {
     /// `=repeat_last_word:n`, `=repeat_last_fragment:n`, `=repeat_last_character:n`: the text
     /// again, typed as a translation of this stroke.
     fn macro_repeat_text(&mut self, name: &str, cmdline: &str, stroke: u32) {
-        if self.state.translations.is_empty() {
+        if self.hist.state.translations.is_empty() {
             return;
         }
         let count = Self::repeat_count(cmdline);
         let actions: Vec<&Action> = self
+            .hist
             .state
             .translations
             .iter()
@@ -530,12 +709,12 @@ impl Translator {
     }
 
     fn macro_delete_space(&mut self, stroke: u32) {
-        let translations = &self.state.translations;
+        let translations = &self.hist.state.translations;
         if translations.len() < 2 {
             return;
         }
         let replaced: Vec<Translation> = translations[translations.len() - 2..].to_vec();
-        if replaced[1].is_retrospective_command {
+        if replaced[1].is_retrospective_command || replaced.iter().any(|t| !t.origin.is_stroke()) {
             return;
         }
         let mut english = Vec::new();
@@ -558,10 +737,10 @@ impl Translator {
     }
 
     fn macro_insert_space(&mut self, stroke: u32) {
-        let Some(last) = self.state.translations.last().cloned() else {
+        let Some(last) = self.hist.state.translations.last().cloned() else {
             return;
         };
-        if last.is_retrospective_command {
+        if last.is_retrospective_command || !last.origin.is_stroke() {
             return;
         }
         let Some(&lookup_stroke) = last.strokes.last() else {
@@ -587,7 +766,10 @@ impl Translator {
         }
     }
 
-    fn translate_translation(&mut self, translation: Translation) {
+    fn translate_translation(&mut self, mut translation: Translation) {
+        if translation.origin.is_stroke() {
+            translation.machine = self.machine;
+        }
         let replaced = translation.replaced.clone();
         self.undo_all(&replaced);
         self.do_all(vec![translation]);
@@ -601,21 +783,21 @@ impl Translator {
     /// Take the translations off the end of the history, last first.
     fn undo_all(&mut self, translations: &[Translation]) {
         for expected in translations.iter().rev() {
-            let Some(popped) = self.state.translations.pop() else {
+            let Some(popped) = self.hist.state.translations.pop() else {
                 return;
             };
             debug_assert!(popped.same(expected));
-            if self.to_do > 0 {
-                self.to_do -= 1;
+            if self.hist.to_do > 0 {
+                self.hist.to_do -= 1;
             } else {
-                self.to_undo.insert(0, popped);
+                self.hist.to_undo.insert(0, popped);
             }
         }
     }
 
     fn do_all(&mut self, translations: Vec<Translation>) {
-        self.to_do += translations.len();
-        self.state.translations.extend(translations);
+        self.hist.to_do += translations.len();
+        self.hist.state.translations.extend(translations);
     }
 
     /// Find the translation with the longest outline that ends in `stroke`: the strokes of the
@@ -638,14 +820,19 @@ impl Translator {
         // How much of the history can be involved
         let mut num_strokes = 1;
         let mut count = 0;
-        for t in self.state.translations.iter().rev() {
+        for t in self.hist.state.translations.iter().rev() {
+            // Outlines are written for one set of dictionaries: strokes made by another, or text
+            // typed by hand, end the run
+            if !t.origin.is_stroke() || t.machine != self.machine {
+                break;
+            }
             num_strokes += t.strokes.len();
             if num_strokes > max_len {
                 break;
             }
             count += 1;
         }
-        let translations = &self.state.translations[self.state.translations.len() - count..];
+        let translations = &self.hist.state.translations[self.hist.state.translations.len() - count..];
         // The new stroke makes a new translation, or replaces earlier ones by matching a longer one
         for i in 0..=translations.len() {
             let replaced = &translations[i..];
@@ -737,12 +924,12 @@ impl Translator {
     /// Format what was done and undone since the last flush, and return what to type to match.
     /// `extra` is typed too but not kept in the history.
     fn flush(&mut self, extra: Option<Translation>) -> Vec<Op> {
-        let to_do = self.to_do;
-        let undo = std::mem::take(&mut self.to_undo);
-        self.to_do = 0;
+        let to_do = self.hist.to_do;
+        let undo = std::mem::take(&mut self.hist.to_undo);
+        self.hist.to_do = 0;
         let mut extra = extra;
         let ops = if !undo.is_empty() || to_do > 0 || extra.is_some() {
-            let State { translations, tail } = &mut self.state;
+            let journal::State { translations, tail } = &mut self.hist.state;
             let split = translations.len() - to_do;
             let (before, rest) = translations.split_at_mut(split);
             let mut tail_holder;
@@ -758,12 +945,12 @@ impl Translator {
             if let Some(extra) = extra.as_mut() {
                 doing.push(extra);
             }
-            self.formatter.format(&undo, &mut doing, prev, self.dict.orthography())
+            self.hist.formatter.format(&undo, &mut doing, prev, self.dict.orthography())
         } else {
             Vec::new()
         };
         let keep = self.dict.longest_key().max(UNDO_LENGTH);
-        self.state.restrict_size(keep);
+        self.hist.state.restrict_size(keep);
         ops
     }
 }
@@ -792,7 +979,7 @@ mod tests {
         for s in strokes {
             t.stroke(stroke(s));
         }
-        t.text().to_string()
+        t.text()
     }
 
     const BACK_DICT: &str = r#"{"KAT": "cat", "TKOG": "dog", "SPW": "{:back}", "PW-FP": "{:back:3}"}"#;
@@ -830,6 +1017,200 @@ mod tests {
         let mut t = translator(BACK_DICT);
         let ops = t.stroke_ops(stroke("SPW"));
         assert_eq!(ops, vec![Op::Combo("BackSpace".to_string())]);
+    }
+
+    const HISTORY_DICT: &str = r#"{
+        "KAT": "cat", "TKOG": "dog", "-G": "{^ing}", "PWEUPBG": "big",
+        "R*": "{:redo}", "A*": "=undo:2", "*U": "{:undo_word}", "KWR*": "{:again}", "S*": "{:swap}"
+    }"#;
+
+    /// Type text on a plain layer: the translator is told afterwards, as the keyboard does.
+    fn type_by_hand(t: &Translator, text: &str) {
+        let shared = t.history();
+        let mut history = journal::lock(&shared);
+        for ch in text.chars() {
+            history.typed(ch);
+        }
+    }
+
+    #[test]
+    fn redo_puts_back_what_undo_took_back() {
+        let mut t = translator(HISTORY_DICT);
+        for s in ["KAT", "TKOG", "*", "*"] {
+            t.stroke(stroke(s));
+        }
+        assert_eq!(t.text(), "");
+        t.stroke(stroke("R*"));
+        assert_eq!(t.text(), "cat");
+        t.stroke(stroke("R*"));
+        assert_eq!(t.text(), "cat dog");
+        // Nothing more to redo
+        t.stroke(stroke("R*"));
+        assert_eq!(t.text(), "cat dog");
+    }
+
+    #[test]
+    fn new_input_empties_the_redo_history() {
+        let mut t = translator(HISTORY_DICT);
+        for s in ["KAT", "TKOG", "*", "PWEUPBG", "R*"] {
+            t.stroke(stroke(s));
+        }
+        assert_eq!(t.text(), "cat big");
+    }
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // a translation marker, not a format
+    fn redo_restores_a_longer_outline_that_replaced_earlier_strokes() {
+        let mut t = translator(r#"{"KAT": "cat", "KAT/TKOG": "catalog", "R*": "{:redo}"}"#);
+        for s in ["KAT", "TKOG", "*"] {
+            t.stroke(stroke(s));
+        }
+        assert_eq!(t.text(), "cat");
+        t.stroke(stroke("R*"));
+        assert_eq!(t.text(), "catalog");
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "cat");
+    }
+
+    #[test]
+    fn undo_with_a_count_takes_back_that_many() {
+        let mut t = translator(HISTORY_DICT);
+        for s in ["KAT", "TKOG", "PWEUPBG", "A*"] {
+            t.stroke(stroke(s));
+        }
+        assert_eq!(t.text(), "cat");
+        t.stroke(stroke("R*"));
+        assert_eq!(t.text(), "cat dog big");
+    }
+
+    #[test]
+    fn undo_word_takes_a_stem_and_its_suffix_together() {
+        let mut t = translator(HISTORY_DICT);
+        for s in ["KAT", "TKOG", "-G", "*U"] {
+            t.stroke(stroke(s));
+        }
+        assert_eq!(t.text(), "cat");
+    }
+
+    #[test]
+    fn again_says_the_last_translation_once_more() {
+        let mut t = translator(HISTORY_DICT);
+        for s in ["KAT", "KWR*"] {
+            t.stroke(stroke(s));
+        }
+        assert_eq!(t.text(), "cat cat");
+    }
+
+    #[test]
+    fn swap_exchanges_the_last_two_words() {
+        let mut t = translator(HISTORY_DICT);
+        for s in ["KAT", "TKOG", "S*"] {
+            t.stroke(stroke(s));
+        }
+        assert_eq!(t.text(), "dog cat");
+        // Undoing the swap's last word leaves the first
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "dog");
+    }
+
+    #[test]
+    fn steno_carries_on_from_text_typed_by_hand_and_undo_walks_back_through_it() {
+        let mut t = translator(HISTORY_DICT);
+        type_by_hand(&t, "hello world");
+        t.stroke(stroke("KAT"));
+        assert_eq!(t.text(), "hello world cat");
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "hello world");
+        // The word typed by hand goes as one piece
+        let ops = t.stroke_ops(stroke("*"));
+        assert_eq!(ops, vec![Op::Backspaces(5)]);
+        assert_eq!(t.text(), "hello ");
+    }
+
+    #[test]
+    fn a_space_typed_by_hand_attaches_the_next_word_and_a_full_stop_capitalises_it() {
+        let mut t = translator(HISTORY_DICT);
+        type_by_hand(&t, "Hi. ");
+        t.stroke(stroke("KAT"));
+        assert_eq!(t.text(), "Hi. Cat");
+    }
+
+    #[test]
+    fn redo_works_for_text_typed_by_hand() {
+        let mut t = translator(HISTORY_DICT);
+        type_by_hand(&t, "hello world");
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "hello ");
+        t.stroke(stroke("R*"));
+        assert_eq!(t.text(), "hello world");
+    }
+
+    #[test]
+    fn swap_exchanges_words_typed_by_hand() {
+        let mut t = translator(HISTORY_DICT);
+        type_by_hand(&t, "hello world");
+        t.stroke(stroke("S*"));
+        assert_eq!(t.text(), "world hello");
+    }
+
+    #[test]
+    fn a_backspace_by_hand_over_a_stroke_is_put_back_by_undo() {
+        let mut t = translator(HISTORY_DICT);
+        t.stroke(stroke("KAT"));
+        t.stroke(stroke("TKOG"));
+        {
+            let shared = t.history();
+            assert!(journal::lock(&shared).backspace());
+        }
+        assert_eq!(t.text(), "cat do");
+        let ops = t.stroke_ops(stroke("*"));
+        assert_eq!(ops, vec![Op::Text("g".to_string())]);
+        assert_eq!(t.text(), "cat dog");
+    }
+
+    #[test]
+    fn a_fence_makes_the_next_word_start_fresh_and_nothing_undoable() {
+        let mut t = translator(HISTORY_DICT);
+        t.stroke(stroke("KAT"));
+        t.start_fresh();
+        let ops = t.stroke_ops(stroke("TKOG"));
+        assert_eq!(ops, vec![Op::Text("dog".to_string())]);
+    }
+
+    fn two_machines() -> (Translator, Translator) {
+        let shared = journal::new_shared(Formatter::new(Options {
+            start_attached: true,
+            ..Options::default()
+        }));
+        let make = |json: &str, machine| {
+            let mut dict = Dictionary::default();
+            dict.merge_json(json).unwrap();
+            Translator::with_history(Arc::new(dict), Arc::clone(&shared), machine)
+        };
+        (
+            make(r#"{"KAT": "cat"}"#, 1),
+            make(r#"{"KAT/TKOG": "joined", "TKOG": "dog", "PWEUPBG": "big"}"#, 2),
+        )
+    }
+
+    #[test]
+    fn another_machine_can_undo_what_this_one_typed() {
+        let (mut a, mut b) = two_machines();
+        a.stroke(stroke("KAT"));
+        b.stroke(stroke("PWEUPBG"));
+        assert_eq!(b.text(), "cat big");
+        b.stroke(stroke("*"));
+        b.stroke(stroke("*"));
+        assert_eq!(a.text(), "");
+    }
+
+    #[test]
+    fn strokes_only_join_with_strokes_of_their_own_machine() {
+        let (mut a, mut b) = two_machines();
+        a.stroke(stroke("KAT"));
+        // `KAT/TKOG` is an outline of the second machine, but the KAT was not written with it
+        b.stroke(stroke("TKOG"));
+        assert_eq!(b.text(), "cat dog");
     }
 
     #[test]

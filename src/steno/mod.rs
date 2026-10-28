@@ -12,6 +12,7 @@ pub mod commands;
 pub mod dict;
 pub mod engine;
 pub mod formatter;
+pub mod journal;
 pub mod keycombo;
 pub mod layout;
 pub mod live;
@@ -26,6 +27,7 @@ pub mod source;
 pub mod shortest;
 pub mod tape;
 pub mod translate;
+pub mod typing;
 
 #[cfg(test)]
 mod lapwing_tests;
