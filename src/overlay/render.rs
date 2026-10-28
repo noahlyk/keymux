@@ -27,7 +27,8 @@ const PAD_Y: f32 = 14.0;
 const SECTION_GAP: f32 = 20.0;
 /// Outline of an unlit key, logical px
 const OUTLINE: f32 = 1.0;
-/// Radius of a pad's top corners relative to its width. The bottom is fully round.
+/// Radius of a pad's top corners relative to its width. The bottom is fully round, except on
+/// the top-row finger keys (see [`has_square_bottom`]), which are the same as the top.
 const PAD_TOP_ROUND: f32 = 0.2;
 /// Slot of the `#` number bar
 const NUMBER_SLOT: usize = 22;
@@ -207,7 +208,8 @@ impl Renderer {
         };
 
         // Steno pads: a squarish top with slightly softened corners, and a fully round
-        // bottom. The `#` bar is a plain pill. Radii are clamped to fit by `rounded_rect`.
+        // bottom, except on the top-row finger keys, whose bottom matches their top. The `#`
+        // bar is a plain pill. Radii are clamped to fit by `rounded_rect`.
         let key_shapes = keyboard.as_ref().map_or_else(Vec::new, |k| {
             k.keys
                 .iter()
@@ -215,6 +217,8 @@ impl Renderer {
                 .filter_map(|(slot, r)| {
                     if slot == NUMBER_SLOT {
                         rounded_rect(*r, f32::MAX, f32::MAX)
+                    } else if has_square_bottom(slot) {
+                        rounded_rect(*r, r.w * PAD_TOP_ROUND, r.w * PAD_TOP_ROUND)
                     } else {
                         rounded_rect(*r, r.w * PAD_TOP_ROUND, f32::MAX)
                     }
@@ -567,6 +571,12 @@ fn fill(pixmap: &mut PixmapMut, path: &Path, color: [u8; 4]) {
 
 fn stroke(pixmap: &mut PixmapMut, path: &Path, color: [u8; 4], style: &Stroke) {
     pixmap.stroke_path(path, &paint(color), style, Transform::identity(), None);
+}
+
+/// Whether a key's bottom is softened like its top instead of fully round: the top-row finger
+/// keys, `TPH` and `FPLTD`.
+const fn has_square_bottom(slot: usize) -> bool {
+    matches!(slot, 1 | 3 | 5 | 12 | 14 | 16 | 18 | 20)
 }
 
 /// A rectangle whose top corners have radius `top_radius` and bottom corners `bottom_radius`
@@ -978,16 +988,38 @@ mod tests {
         let (w, h) = renderer.size();
         let mut pixmap = Pixmap::new(w, h).unwrap();
         renderer.draw(&OverlaySnapshot::default(), &mut pixmap.as_mut());
-        let t = renderer.keyboard.as_ref().unwrap().keys[1];
+        // K-, a bottom-row key: the top-row finger keys are squarer at the bottom (see below)
+        let t = renderer.keyboard.as_ref().unwrap().keys[2];
         let alpha_at = |dx: f32, y: f32| pixmap.pixel((t.x + dx) as u32, y as u32).unwrap().alpha();
 
-        // Just inside each corner of T-'s bounding box: the top is nearly square, so that
+        // Just inside each corner of K-'s bounding box: the top is nearly square, so that
         // spot is part of the pad; the bottom is fully round, so it is empty
         let top_corner = alpha_at(2.0, t.y + 2.0);
         let bottom_corner = alpha_at(2.0, t.bottom() - 3.0);
         assert!(top_corner > 0, "top corner is only slightly rounded");
         assert_eq!(bottom_corner, 0, "bottom is a round end");
         assert!(alpha_at(2.0, t.y + t.h / 2.0) > 0, "body of the pad");
+    }
+
+    #[test]
+    fn the_top_row_finger_keys_have_the_same_corners_at_the_bottom_as_the_top() {
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let (w, h) = renderer.size();
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        renderer.draw(&OverlaySnapshot::default(), &mut pixmap.as_mut());
+        let keys = renderer.keyboard.as_ref().unwrap().keys;
+        let alpha_at = |slot: usize, y: f32| {
+            let k = keys[slot];
+            pixmap.pixel((k.x + 2.0) as u32, y as u32).unwrap().alpha()
+        };
+        // T P H and F P L T D: the bottom corner is part of the pad, as the top corner is
+        for slot in [1, 3, 5, 12, 14, 16, 18, 20] {
+            assert!(alpha_at(slot, keys[slot].bottom() - 3.0) > 0, "slot {slot}");
+        }
+        // The rest keep their round ends: K W R, -R -B -G -S -Z, and the tall S and *
+        for slot in [0, 2, 4, 6, 9, 13, 15, 17, 19, 21] {
+            assert_eq!(alpha_at(slot, keys[slot].bottom() - 3.0), 0, "slot {slot}");
+        }
     }
 
     #[test]
