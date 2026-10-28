@@ -36,6 +36,8 @@ pub const SLOTS: [(char, &str); 23] = [
 
 /// Slot index of the number key `#`.
 const NUMBER_SLOT: usize = 22;
+/// Slot index of the star, which sits between the left and right hands.
+const STAR_SLOT: usize = 9;
 /// Slots `0..LEFT_END` are the left hand, `LEFT_END..MIDDLE_END` the vowels and star.
 const LEFT_END: usize = 7;
 const MIDDLE_END: usize = 12;
@@ -101,6 +103,29 @@ pub fn render_stroke(bits: u32) -> String {
     out.push_str(&middle);
     out.push_str(&right);
     out
+}
+
+/// A stroke as typed text when it has no translation, such as `STPHA-UBGS`.
+///
+/// The left hand and its thumb come first, then a hyphen, then the star, the right thumb and
+/// the right hand. The hyphen is always there, so the two hands read the same whatever keys
+/// are down.
+#[must_use]
+pub fn render_raw_stroke(bits: u32) -> String {
+    let letters = |range: std::ops::Range<usize>| -> String {
+        range
+            .filter(|i| bits & (1 << i) != 0)
+            .map(|i| SLOTS[i].0)
+            .collect()
+    };
+    let number = if bits & (1 << NUMBER_SLOT) != 0 { "#" } else { "" };
+    // The star is written first in the right hand, where it sits between the thumbs
+    let star = if bits & (1 << STAR_SLOT) != 0 { "*" } else { "" };
+    format!(
+        "{number}{}-{star}{}",
+        letters(0..STAR_SLOT),
+        letters(STAR_SLOT + 1..NUMBER_SLOT)
+    )
 }
 
 /// The sound each stroke key stands for, in the same order as [`SLOTS`]. This is the
@@ -328,6 +353,24 @@ mod tests {
         ] {
             let bits = parse_stroke(text).unwrap_or_else(|| panic!("{text} should parse"));
             assert_eq!(render_stroke(bits), text, "rendering {text}");
+        }
+    }
+
+    #[test]
+    fn a_raw_stroke_has_one_hyphen_between_the_hands_and_the_star_on_the_right() {
+        for (text, raw) in [
+            // Left hand and its thumb, a hyphen, then the right thumb and right hand
+            ("STPWHAUBGSZ", "STPWHA-UBGSZ"),
+            ("KAT", "KA-T"),
+            ("-PB", "-PB"),
+            ("TEFT", "T-EFT"),
+            ("*", "-*"),
+            ("STPHAO*EUFRPB", "STPHAO-*EUFRPB"),
+            ("#T", "#T-"),
+            ("#*", "#-*"),
+        ] {
+            let bits = parse_stroke(text).unwrap_or_else(|| panic!("{text} should parse"));
+            assert_eq!(render_raw_stroke(bits), raw, "rendering {text}");
         }
     }
 

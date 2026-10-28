@@ -221,8 +221,12 @@ fn unmapped_keys_are_swallowed_not_leaked_to_base() {
     // KC_CAPS remaps to Escape on the base layer, but the steno layer must not leak it
     assert_eq!(p.process_key(KeyCode::KC_CAPS, true), ProcessResult::None);
     assert_eq!(p.process_key(KeyCode::KC_CAPS, false), ProcessResult::None);
+    // Q is a stroke key, so it types the stroke it makes, with no entry, as its keys
     assert_eq!(p.process_key(KeyCode::KC_Q, true), ProcessResult::None);
-    assert_eq!(p.process_key(KeyCode::KC_Q, false), ProcessResult::None);
+    assert_eq!(
+        p.process_key(KeyCode::KC_Q, false),
+        ProcessResult::TypeString("S-".to_string(), false)
+    );
 }
 
 #[test]
@@ -541,7 +545,7 @@ fn leaving_steno_in_the_middle_of_a_lookup_closes_it_and_does_not_keep_eating_ke
     assert_eq!(hub.snapshot().lookup, None);
     assert_eq!(
         chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C]),
-        ProcessResult::None,
+        ProcessResult::TypeString("KA-".to_string(), false),
         "a stroke, not lookup letters"
     );
 }
@@ -663,11 +667,14 @@ fn a_two_stroke_word_still_combines_after_a_stroke_that_matched_nothing() {
     );
     enter_steno(&mut p);
 
-    // A stroke with no entry (just K-): it types nothing
-    assert_eq!(chord(&mut p, &[KeyCode::KC_S]), ProcessResult::None);
+    // A stroke with no entry (just K-): it types its keys
+    assert_eq!(
+        chord(&mut p, &[KeyCode::KC_S]),
+        ProcessResult::TypeString("K-".to_string(), false)
+    );
     assert_eq!(
         chord(&mut p, &[KeyCode::KC_E, KeyCode::KC_N, KeyCode::KC_J]),
-        ProcessResult::TypeString("per".to_string(), false)
+        ProcessResult::TypeString(" per".to_string(), false)
     );
     let tpebgt = [
         KeyCode::KC_W,

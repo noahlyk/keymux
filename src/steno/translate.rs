@@ -10,6 +10,7 @@
 
 use super::dict::Dictionary;
 use super::format::{capitalize_word, lowercase_word, render, FormatState, KeyPress, Piece};
+use super::layout::render_raw_stroke;
 use super::numbers::{number_text, NUMBER_BIT};
 use super::orthography;
 use crate::keycode::KeyCode;
@@ -21,10 +22,6 @@ pub const UNDO_STROKE: u32 = 1 << 9;
 
 /// How many translations stay undoable. Older output is never touched again.
 const MAX_HISTORY: usize = 4096;
-
-/// Typed for a stroke that is incomplete, so it shows the stroke registered. The next
-/// stroke replaces it or takes it back. ASCII only, since keyboard output can't type more.
-const PENDING_MARK: &str = "_";
 
 /// What the caller should do with the keyboard after a stroke.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,8 +49,6 @@ struct Emitted {
     consumed: Vec<Self>,
     /// A key press rather than text. Undo consumes it without retyping anything.
     presses: bool,
-    /// The placeholder for an incomplete stroke, see [`PENDING_MARK`]
-    pending: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -141,8 +136,6 @@ impl Translator {
     /// The user typed a space on the steno layer. The space goes into the buffer as
     /// its own step, so the next word doesn't add another one. `*` takes it back.
     pub fn space(&mut self) -> StenoOutput {
-        // The stroke this placeholder stood for never finished, so it is taken back first
-        let removed = self.drop_pending();
         let start = self.output.len();
         self.output.push(' ');
         let state_before = self.state;
@@ -155,14 +148,7 @@ impl Translator {
             state_before,
             self.state,
         );
-        if removed == 0 {
-            StenoOutput::Type(" ".to_string())
-        } else {
-            StenoOutput::Retype {
-                backspaces: removed,
-                text: " ".to_string(),
-            }
-        }
+        StenoOutput::Type(" ".to_string())
     }
 
     /// Whether any dictionary entries loaded. False means steno isn't set up yet.
@@ -190,27 +176,7 @@ impl Translator {
         if stroke == NUMBER_BIT && self.best_match(stroke).is_none() {
             return self.repeat_last();
         }
-        // What is on screen before this stroke, placeholder included
-        let screen = self.output.clone();
-        // A placeholder is replaced only by a stroke that joins it. Any other stroke takes it back first.
-        let pending = self.history.last().is_some_and(|entry| entry.pending);
-        let joins = pending && matches!(self.best_match(stroke), Some((consume, _)) if consume > 0);
-        let removed = if joins { 0 } else { self.drop_pending() };
-        let output = self.place(stroke);
-        if removed == 0 {
-            return output;
-        }
-        match output {
-            Some(StenoOutput::Keys(presses)) => {
-                // The placeholder is on screen, so delete it before the keys are pressed
-                let backspaces = (0..removed).map(|_| KeyPress {
-                    modifiers: Vec::new(),
-                    key: KeyCode::KC_BSPC,
-                });
-                Some(StenoOutput::Keys(backspaces.chain(presses).collect()))
-            }
-            _ => diff(&screen, &self.output),
-        }
+        self.place(stroke)
     }
 
     /// Translate a stroke that is neither undo nor a repeat. See [`Translator::stroke`].
@@ -228,33 +194,26 @@ impl Translator {
                 diff(&screen, &self.output)
             }
             Some((consume, pieces)) => self.apply(stroke, consume, &pieces),
-            None if self.dict.opens_longer_entry(stroke) => self.hold(stroke),
+            // Incomplete: it starts a longer entry, which the next stroke completes by
+            // replacing this text. Until then, or if it never does, `*` takes it back.
+            None if self.dict.opens_longer_entry(stroke) => self.type_raw(stroke),
             None => {
                 self.unmatched = true;
                 info!("steno stroke {stroke:#x} not in dictionary");
-                // Recorded with no text, so strokes on either side can't combine across it
-                let start = self.output.len();
-                self.record(
-                    vec![stroke],
-                    start,
-                    String::new(),
-                    Vec::new(),
-                    self.state,
-                    self.state,
-                );
-                None
+                self.type_raw(stroke)
             }
         }
     }
 
-    /// A stroke that matches nothing alone, but starts a longer entry, so it is incomplete.
-    /// Types a placeholder in its place, which the next stroke replaces or takes back.
-    fn hold(&mut self, stroke: u32) -> Option<StenoOutput> {
+    /// Type a stroke as the keys it is made of, such as `STPHA-UBGS`, for a stroke that has no
+    /// translation yet or at all. It is a step like any word: later strokes can join it, and
+    /// `*` takes it back.
+    fn type_raw(&mut self, stroke: u32) -> Option<StenoOutput> {
         let start = self.output.len();
         let state_before = self.state;
         let mut state = self.state;
         // Spaced like a word, so it doesn't run into the word before it
-        let text = render(&[Piece::Text(PENDING_MARK.to_string())], &mut state);
+        let text = render(&[Piece::Text(render_raw_stroke(stroke))], &mut state);
         self.output.push_str(&text);
         self.state = state;
         self.record(
@@ -265,24 +224,7 @@ impl Translator {
             state_before,
             self.state,
         );
-        if let Some(entry) = self.history.last_mut() {
-            entry.pending = true;
-        }
         Some(StenoOutput::Type(text))
-    }
-
-    /// Take back the placeholder for an incomplete stroke, if it is the last thing typed.
-    /// Returns how many characters were taken back, so the caller can delete them.
-    fn drop_pending(&mut self) -> usize {
-        let Some(entry) = self.history.last().filter(|entry| entry.pending) else {
-            return 0;
-        };
-        let (start, state) = (entry.start, entry.state_before);
-        let removed = self.output[start..].chars().count();
-        self.history.pop();
-        self.output.truncate(start);
-        self.state = state;
-        removed
     }
 
     /// The longest dictionary entry that ends with `stroke`, and how many earlier
@@ -418,7 +360,6 @@ impl Translator {
             state_after,
             consumed,
             presses: false,
-            pending: false,
         });
         self.trim_history();
     }
@@ -721,57 +662,56 @@ mod tests {
     #[test]
     fn multi_stroke_entry_replaces_its_first_stroke() {
         let mut t = translator(r#"{"KPA/TKAOEU": "example"}"#);
-        // KPA has no entry alone, but starts one, so a placeholder shows it registered
-        assert_eq!(t.stroke(stroke("KPA")), Some(StenoOutput::Type("_".into())));
+        // KPA has no entry alone, but starts one, so it is typed as its keys
+        assert_eq!(t.stroke(stroke("KPA")), Some(StenoOutput::Type("KPA-".into())));
         assert!(!t.was_unmatched());
-        // The placeholder is the first thing on screen, so the entry replaces it
+        // Those keys are the first thing on screen, so the entry replaces them
         assert_eq!(
             t.stroke(stroke("TKAOEU")),
             Some(StenoOutput::Retype {
-                backspaces: 1,
+                backspaces: 4,
                 text: "example".into(),
             })
         );
     }
 
     #[test]
-    fn an_incomplete_stroke_shows_a_placeholder_until_the_next_one_joins_it() {
+    fn an_incomplete_stroke_shows_its_keys_until_the_next_one_joins_it() {
         let json = r#"{"KPA/TKAOEU": "example"}"#;
-        assert_eq!(type_strokes(json, &["KPA"]), "_");
+        assert_eq!(type_strokes(json, &["KPA"]), "KPA-");
         assert_eq!(type_strokes(json, &["KPA", "TKAOEU"]), "example");
     }
 
     #[test]
-    fn a_stroke_that_stands_alone_takes_back_the_placeholder() {
+    fn a_stroke_that_stands_alone_leaves_the_incomplete_one_to_be_undone() {
         let json = r#"{"KAT": "cat", "KPA/TKAOEU": "example"}"#;
-        assert_eq!(type_strokes(json, &["KPA", "KAT"]), "cat");
+        assert_eq!(type_strokes(json, &["KPA", "KAT"]), "KPA- cat");
+        // `*` takes the word back, then the keys
+        assert_eq!(type_strokes(json, &["KPA", "KAT", "*"]), "KPA-");
+        assert_eq!(type_strokes(json, &["KPA", "KAT", "*", "*"]), "");
     }
 
     #[test]
-    fn a_placeholder_after_a_word_is_spaced_and_taken_back_cleanly() {
+    fn an_incomplete_stroke_after_a_word_is_spaced_and_undone_cleanly() {
         let json = r#"{"KAT": "cat", "KPA/TKAOEU": "example", "SKP": "and"}"#;
-        assert_eq!(type_strokes(json, &["KAT", "KPA"]), "cat _");
-        assert_eq!(type_strokes(json, &["KAT", "KPA", "SKP"]), "cat and");
+        assert_eq!(type_strokes(json, &["KAT", "KPA"]), "cat KPA-");
+        assert_eq!(type_strokes(json, &["KAT", "KPA", "SKP"]), "cat KPA- and");
+        assert_eq!(type_strokes(json, &["KAT", "KPA", "*"]), "cat");
+        assert_eq!(type_strokes(json, &["KAT", "KPA", "TKAOEU"]), "cat example");
     }
 
     #[test]
-    fn a_space_takes_back_an_incomplete_stroke() {
+    fn a_space_after_an_incomplete_stroke_keeps_it() {
         let mut t = translator(r#"{"KAT": "cat", "KPA/TKAOEU": "example"}"#);
         let mut typed = String::new();
         for chord in ["KAT", "KPA"] {
             apply(&mut typed, t.stroke(stroke(chord)));
         }
-        assert_eq!(typed, "cat _");
+        assert_eq!(typed, "cat KPA-");
         let space = t.space();
-        assert_eq!(
-            space,
-            StenoOutput::Retype {
-                backspaces: 2,
-                text: " ".into(),
-            }
-        );
+        assert_eq!(space, StenoOutput::Type(" ".into()));
         apply(&mut typed, Some(space));
-        assert_eq!(typed, "cat ");
+        assert_eq!(typed, "cat KPA- ");
     }
 
     #[test]
@@ -779,10 +719,11 @@ mod tests {
         let mut t = translator(r#"{"KAT": "cat", "KPA/TKAOEU": "example"}"#);
         t.stroke(stroke("KAT"));
         t.stroke(stroke("KPA"));
+        // The space before the keys goes with them
         assert_eq!(
             t.stroke(UNDO_STROKE),
             Some(StenoOutput::Retype {
-                backspaces: 2,
+                backspaces: 5,
                 text: String::new(),
             })
         );
@@ -829,14 +770,11 @@ mod tests {
     #[test]
     fn a_stroke_that_does_not_extend_the_prefix_is_translated_alone() {
         let mut t = translator(r#"{"KPA/TKAOEU": "example", "KAT": "cat"}"#);
-        assert_eq!(t.stroke(stroke("KPA")), Some(StenoOutput::Type("_".into())));
-        // KAT takes the placeholder's place rather than joining KPA
+        assert_eq!(t.stroke(stroke("KPA")), Some(StenoOutput::Type("KPA-".into())));
+        // KAT is its own word after KPA's keys, rather than joining KPA
         assert_eq!(
             t.stroke(stroke("KAT")),
-            Some(StenoOutput::Retype {
-                backspaces: 1,
-                text: "cat".into(),
-            })
+            Some(StenoOutput::Type(" cat".into()))
         );
     }
 
@@ -934,11 +872,17 @@ mod tests {
     #[test]
     fn a_stroke_that_matched_nothing_does_not_stop_the_next_entry_combining() {
         let mut t = translator(PERFECT);
-        // HRAOEUP has no entry. It types nothing, so the text is still empty and the next
-        // word starts in the same place: that must not fold HRAOEUP into the word's strokes
-        assert_eq!(t.stroke(stroke("HRAOEUP")), None);
+        // HRAOEUP has no entry, so it is typed as its keys. The next word follows it and must
+        // not fold HRAOEUP into the word's strokes
+        assert_eq!(
+            t.stroke(stroke("HRAOEUP")),
+            Some(StenoOutput::Type("HRAO-EUP".into()))
+        );
         assert!(t.was_unmatched());
-        assert_eq!(t.stroke(stroke("PER")), Some(StenoOutput::Type("per".into())));
+        assert_eq!(
+            t.stroke(stroke("PER")),
+            Some(StenoOutput::Type(" per".into()))
+        );
         // PER/TPEBGT is "perfect", so this adds "fect", not " effect"
         assert_eq!(
             t.stroke(stroke("TPEBGT")),
@@ -947,15 +891,15 @@ mod tests {
     }
 
     #[test]
-    fn an_unmatched_stroke_then_an_undo_that_empties_the_text_still_combines_after() {
+    fn an_unmatched_stroke_then_an_undo_still_combines_after() {
         // The sequence from a real tape: an unmatched stroke, a word taken back with `*`, and
-        // then a two-stroke word, with nothing on screen in between
+        // then a two-stroke word
         let mut t = translator(PERFECT);
         let mut typed = String::new();
         for text in ["HRAOEUP", "PUR", "*", "PER", "TPEBGT"] {
             apply(&mut typed, t.stroke(stroke(text)));
         }
-        assert_eq!(typed, "perfect");
+        assert_eq!(typed, "HRAO-EUP perfect");
     }
 
     #[test]
@@ -965,24 +909,30 @@ mod tests {
         for text in ["HRAOEUP", "PER", "TPEBGT"] {
             apply(&mut typed, t.stroke(stroke(text)));
         }
-        assert_eq!(typed, "perfect");
+        assert_eq!(typed, "HRAO-EUP perfect");
         // `*` takes "perfect" back to "per", then "per" away, as it does with no stroke before
         assert_eq!(
             t.stroke(UNDO_STROKE),
             Some(StenoOutput::Retype {
-                backspaces: 7,
-                text: "per".into(),
+                backspaces: 8,
+                text: " per".into(),
             })
         );
         assert_eq!(
             t.stroke(UNDO_STROKE),
             Some(StenoOutput::Retype {
-                backspaces: 3,
+                backspaces: 4,
                 text: String::new(),
             })
         );
-        // Nothing but the unmatched stroke is left, and it has nothing to take back
-        assert_eq!(t.stroke(UNDO_STROKE), None);
+        // The unmatched stroke is typed text too, so `*` takes it back
+        assert_eq!(
+            t.stroke(UNDO_STROKE),
+            Some(StenoOutput::Retype {
+                backspaces: 8,
+                text: String::new(),
+            })
+        );
         // Now the tape is empty
         assert!(matches!(t.stroke(UNDO_STROKE), Some(StenoOutput::Keys(_))));
     }

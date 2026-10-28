@@ -454,12 +454,12 @@ mod tests {
     }
 
     #[test]
-    fn unknown_stroke_types_nothing() {
+    fn unknown_stroke_types_its_keys() {
         let mut engine = engine_with_dict(r#"{"KAT": "cat"}"#);
         let now = Instant::now();
         let k = key_for(&engine, 1 << 2);
         engine.press(k, now);
-        assert_eq!(engine.release(k), None);
+        assert_eq!(engine.release(k), Some(StenoOutput::Type("K-".into())));
     }
 
     #[test]

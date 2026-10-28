@@ -555,8 +555,8 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
 - Space and Backspace do nothing on a steno layer, so an accidental press can't wipe text. `*` is the way to take it back.
 - With nothing on the tape, `*` presses Ctrl+Backspace, which deletes the word before the cursor in nearly every app.
 - `#` repeats the last stroke.
-- A stroke that matches nothing on its own, but starts a longer entry, types a `_` placeholder. The next stroke completes the entry and replaces the `_`, or the `_` is removed.
-- A stroke that matches nothing types nothing, and is marked `?` on the tape.
+- A stroke that matches nothing on its own, but starts a longer entry, is typed as its keys, such as `KPA-`. The next stroke completes the entry and replaces them. If it doesn't, they stay until `*` takes them back.
+- A stroke that matches nothing is typed as its keys too, in capitals with one hyphen between the hands and the star on the right (`STPWHA-UBGSZ`), and is marked `?` on the tape. `*` takes it back like any word.
 
 ### Live lookup
 

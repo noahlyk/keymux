@@ -18,6 +18,10 @@ pub fn default_path(home: &Path) -> PathBuf {
 /// One tape line's description of what a stroke did.
 #[must_use]
 pub fn describe(output: Option<&StenoOutput>, unmatched: bool) -> String {
+    // The stroke is typed as its keys, but the tape marks it as one that matched nothing
+    if unmatched {
+        return "?".to_string();
+    }
     match output {
         Some(StenoOutput::Type(text)) => format!("{text:?}"),
         Some(StenoOutput::Retype { backspaces, text }) => {
@@ -28,7 +32,6 @@ pub fn describe(output: Option<&StenoOutput>, unmatched: bool) -> String {
             .map(|press| format!("{:?}", press.key))
             .collect::<Vec<_>>()
             .join(" "),
-        None if unmatched => "?".to_string(),
         None => String::new(),
     }
 }
