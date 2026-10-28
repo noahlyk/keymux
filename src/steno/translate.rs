@@ -12,9 +12,14 @@ use super::formatter::{Formatter, Op, Options};
 use super::journal::{self, History, MachineId, Origin, SharedHistory};
 use super::keycombo::key_events;
 use super::layout::{render_stroke, JOIN_BIT};
+use super::plugin::Plugin;
 use crate::keycode::KeyCode;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
+
+/// Plugins shared by every translator of the user, the same way [`SharedHistory`] is: loaded
+/// once, asked only once a stroke has missed every dictionary outright.
+pub type SharedPlugins = Arc<Mutex<Vec<Plugin>>>;
 
 /// The stroke that undoes the last translation: the star on its own.
 pub const UNDO_STROKE: u32 = 1 << 9;
@@ -244,10 +249,13 @@ pub struct Translator {
     /// The shared history while a stroke is being translated, and empty otherwise
     hist: History,
     unmatched: bool,
+    /// Loaded once for the user, asked for a reading only once a stroke misses every dictionary
+    plugins: SharedPlugins,
 }
 
 /// A copy of a translator has a copy of the history too, so trying strokes on it (a lookup
-/// does) doesn't touch what the original has typed.
+/// does) doesn't touch what the original has typed. Plugins are shared, not copied: there is
+/// one loaded set, same as the dictionary.
 impl Clone for Translator {
     fn clone(&self) -> Self {
         let history = journal::lock(&self.shared).clone();
@@ -257,6 +265,7 @@ impl Clone for Translator {
             shared: Arc::new(std::sync::Mutex::new(history)),
             hist: History::default(),
             unmatched: self.unmatched,
+            plugins: Arc::clone(&self.plugins),
         }
     }
 }
@@ -289,6 +298,7 @@ impl Translator {
             shared,
             hist: History::default(),
             unmatched: false,
+            plugins: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -296,6 +306,19 @@ impl Translator {
     #[must_use]
     pub fn history(&self) -> SharedHistory {
         Arc::clone(&self.shared)
+    }
+
+    /// Use these plugins for a reading when a stroke misses every dictionary, instead of none.
+    #[must_use]
+    pub fn with_plugins(mut self, plugins: SharedPlugins) -> Self {
+        self.plugins = plugins;
+        self
+    }
+
+    fn plugins(&self) -> std::sync::MutexGuard<'_, Vec<Plugin>> {
+        self.plugins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Which set of dictionaries this translator stands for.
@@ -489,6 +512,14 @@ impl Translator {
             })
             // No direct match: try with suffixes
             .or_else(|| self.find_longest_match(1, max_len, stroke, &SUFFIX_KEYS))
+            // No dictionary entry at all: a plugin's own reading, unless the stroke already
+            // declared itself a continuation, which was never meant to stand alone either
+            .or_else(|| {
+                (!joined)
+                    .then(|| super::plugin::fallback(&mut self.plugins(), &render_stroke(stroke)))
+                    .flatten()
+                    .map(|text| Translation::new(vec![stroke], Some(text)))
+            })
             // Nothing: the stroke as its keys
             .unwrap_or_else(|| Translation::new(vec![stroke], None));
         if translation.english.is_none() {
@@ -1028,6 +1059,7 @@ impl Translator {
 mod tests {
     use super::*;
     use crate::steno::layout::parse_stroke;
+    use std::fs;
 
     fn stroke(text: &str) -> u32 {
         if text == "*" {
@@ -1080,6 +1112,72 @@ mod tests {
         assert_eq!(t.text(), "cat ");
         t.stroke(stroke("*"));
         assert_eq!(t.text(), "cat dog");
+    }
+
+    /// A real plugin: upper-cases the stroke notation it's given, so there is no mistaking its
+    /// answer for a coincidence. Compiled by `rustc` to `wasm32-unknown-unknown` for real.
+    const SHOUT_PLUGIN: &str = r#"
+#[no_mangle]
+pub extern "C" fn alloc(len: i32) -> i32 {
+    let mut v: Vec<u8> = vec![0u8; len as usize];
+    let ptr = v.as_mut_ptr();
+    std::mem::forget(v);
+    ptr as i32
+}
+
+#[no_mangle]
+pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
+    let input = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let text = std::str::from_utf8(input).unwrap_or("");
+    let mut out: Vec<u8> = text.to_uppercase().into_bytes();
+    let out_len = out.len();
+    let out_ptr = out.as_mut_ptr();
+    std::mem::forget(out);
+    (i64::from(out_ptr as i32) << 32) | i64::from(out_len as i32)
+}
+"#;
+
+    fn with_shout_plugin(dict: &str, test_name: &str) -> Translator {
+        let plugins_root = std::env::temp_dir().join(format!(
+            "keymux-translate-plugin-test-{}-{test_name}",
+            std::process::id()
+        ));
+        let plugins = super::super::plugin::plugins_dir(&plugins_root);
+        fs::create_dir_all(&plugins).unwrap();
+        fs::write(plugins.join("shout.rs"), SHOUT_PLUGIN).unwrap();
+        let loaded = super::super::plugin::load_all(&plugins_root);
+        assert_eq!(
+            loaded.len(),
+            1,
+            "the plugin should have compiled and loaded"
+        );
+        translator(dict).with_plugins(Arc::new(Mutex::new(loaded)))
+    }
+
+    #[test]
+    fn a_plugin_answers_a_stroke_that_misses_every_dictionary() {
+        let mut t = with_shout_plugin(r#"{"KAT": "cat"}"#, "answers_a_miss");
+        t.stroke(stroke("KAT"));
+        // TKOG misses the dictionary outright: the plugin's own reading is used instead of
+        // the stroke's raw keys
+        t.stroke(stroke("TKOG"));
+        assert_eq!(t.text(), "cat TKOG");
+    }
+
+    #[test]
+    fn a_dictionary_hit_is_never_overridden_by_a_plugin() {
+        let mut t = with_shout_plugin(r#"{"KAT": "cat", "TKOG": "dog"}"#, "never_overridden");
+        t.stroke(stroke("KAT"));
+        t.stroke(stroke("TKOG"));
+        assert_eq!(t.text(), "cat dog");
+    }
+
+    #[test]
+    fn a_join_key_stroke_with_nothing_to_glue_onto_is_not_given_to_a_plugin_either() {
+        let mut t = with_shout_plugin(r#"{"KAT": "cat"}"#, "join_key_not_given");
+        // Nothing precedes it, so it is never a word by itself, plugin included
+        t.stroke(stroke("^-G"));
+        assert_eq!(t.text(), "^-G");
     }
 
     const JOIN_DICT: &str = r#"{"KAT": "cat", "KAT/^-G": "catting", "-G": "ging"}"#;

@@ -133,7 +133,10 @@ impl StenoEngine {
             Arc::new(Dictionary::default()),
             Arc::clone(history),
             machine,
-        );
+        )
+        .with_plugins(Arc::new(std::sync::Mutex::new(super::plugin::load_all(
+            config_dir,
+        ))));
         translator.set_options(super::formatter::Options {
             spaces_after: config.spaces_after,
             start_attached: config.start_attached,
