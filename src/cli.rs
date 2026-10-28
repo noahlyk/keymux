@@ -150,17 +150,6 @@ pub enum Commands {
         always: bool,
     },
 
-    /// Tell the daemon what the focused text box holds, so steno can stop guessing
-    Textbox {
-        /// Print what the focused text box reports instead of sending it to the daemon
-        #[arg(long)]
-        dump: bool,
-    },
-
-    /// Run everything steno needs from your graphical session: the overlay and the text box
-    /// reader. This is what `keymux-steno.service` runs
-    StenoSession,
-
     /// Run the hyprland window watcher daemon
     #[command(hide = true)]
     HyprlandDaemon,

@@ -26,7 +26,7 @@ pub enum Source {
 }
 
 pub fn run(dump: bool, demo: bool, always: bool) -> Result<()> {
-    let _ = tracing_subscriber::fmt().with_target(false).try_init();
+    tracing_subscriber::fmt().with_target(false).init();
     if dump {
         return dump_frames();
     }

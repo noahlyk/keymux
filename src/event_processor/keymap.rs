@@ -15,9 +15,6 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tracing::error;
 
-/// Hands out [`KeymapProcessor::id`]. Starts at 1: the hub's 0 means no keyboard yet.
-static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
 /// Keys that always reach the screen on a steno layer, without a remap.
 const STENO_PASSTHROUGH: [KeyCode; 1] = [KeyCode::KC_DEL];
 
@@ -85,9 +82,6 @@ pub struct KeymapProcessor {
     /// Where this keyboard's steno state is published for the overlay. One hub is shared by
     /// every keyboard: the overlay follows whichever was touched last.
     overlay_hub: &'static OverlayHub,
-    /// Tells this keyboard from the others to the overlay hub, which remembers the last one
-    /// touched
-    id: u64,
     /// Whether a Shift key is down, for the capital letters of a live lookup
     shift_down: bool,
     /// Limits the "steno isn't set up" notification
@@ -135,7 +129,6 @@ impl KeymapProcessor {
             steno_engines,
             steno_active: None,
             overlay_hub: OverlayHub::global(),
-            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             shift_down: false,
             setup_hint: Cooldown::new(Duration::from_secs(3)),
             config_dir,
@@ -181,14 +174,6 @@ impl KeymapProcessor {
     /// Finish any steno stroke that has been held past its timeout, or translate
     /// held strokes that have gone idle. Returns what to type, if anything.
     pub fn check_steno_timeouts(&mut self) -> ProcessResult {
-        // The tape follows the text box when the cursor lands somewhere new, but only for the
-        // keyboard in use: the others have no say over what the overlay shows
-        if self.overlay_hub.touched_last_by(self.id) && self.overlay_layer_name().is_some() {
-            let top = self.layer_stack.current_layer();
-            if let Some(engine) = self.steno_engines.get_mut(&top) {
-                engine.sync_idle();
-            }
-        }
         let now = Instant::now();
         let output = self
             .steno_engines
@@ -252,7 +237,6 @@ impl KeymapProcessor {
     /// press that switches into steno, not on the next stroke. The hub ignores a repeat of
     /// what it already has, so the common case is one uncontended lock and a comparison.
     fn publish_overlay_layer(&self) {
-        self.overlay_hub.touch(self.id);
         self.overlay_hub.set_layer(self.overlay_layer_name());
     }
 

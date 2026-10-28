@@ -4,7 +4,6 @@
 //! chords, and types the dictionary text for each completed stroke. Plover's JSON
 //! dictionaries provide the translations.
 
-pub mod adopt;
 pub mod chord;
 pub mod commands;
 pub mod dict;
@@ -18,7 +17,6 @@ pub mod overlay;
 pub mod setup;
 pub mod shortest;
 pub mod tape;
-pub mod textbox;
 pub mod translate;
 
 #[cfg(test)]

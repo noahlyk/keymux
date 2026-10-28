@@ -129,8 +129,8 @@ install the one matching your compositor/WM.
 **Steno overlay (optional):** `keymux overlay` draws the steno keyboard and tape on
 screen while a steno layer is on. Needs a Wayland compositor with layer-shell (niri,
 Hyprland, Sway; not GNOME). See [On-screen overlay](#on-screen-overlay).
-- Path: `/usr/lib/systemd/user/keymux-steno.service`
-- Enable: `systemctl --user enable --now keymux-steno.service`
+- Path: `/usr/lib/systemd/user/keymux-overlay.service`
+- Enable: `systemctl --user enable --now keymux-overlay.service`
 
 ## 📖 Configuration Guide
 
@@ -620,8 +620,7 @@ clicks or focus. It costs next to nothing: it only redraws when a key or the tap
 ![overlay](docs/overlay-preview.png)
 
 It runs as your user, since the daemon runs as root and can't draw on your screen. Start it
-with `systemctl --user enable --now keymux-steno.service` (one service for everything steno
-needs from your session, including the text box reader below), or run `keymux overlay` by hand.
+with `systemctl --user enable --now keymux-overlay.service`, or run `keymux overlay` by hand.
 It needs a Wayland compositor with `wlr-layer-shell`: niri, Hyprland and Sway have it, GNOME
 doesn't.
 
@@ -648,45 +647,6 @@ In niri, style it with `layer-rule { match namespace="^keymux-steno$" }`.
 draws made-up strokes to try the look without the daemon, and `keymux overlay --dump`
 prints what the daemon sends. With several keyboards, it follows the
 one you last pressed a key on.
-
-### Staying in step with the text box
-
-Steno takes words back and rewrites them (`*`, a two-stroke word that replaces its first
-stroke) by sending backspaces, so it needs to know what is on screen. It keeps its own record
-of what it typed, and that record goes wrong whenever the text changes behind its back: you
-click somewhere else, an app autocorrects, a key is dropped.
-
-Three things keep it right:
-
-- **It forgets when it can tell it's lost.** A key that reaches the application from a steno
-  layer (Delete, Enter, a remapped Space, the arrows) makes the next word start fresh, instead
-  of carrying on from text that is no longer at the cursor.
-- **It can read the text box itself.** `keymux textbox` registers as your Wayland input method,
-  which is how a focused text box tells the compositor what is around its cursor. The daemon
-  then compares the last characters before the cursor with what steno thinks it typed, and when
-  they differ, it goes by the text box: no wrong backspaces after a click or a focus change, the
-  first word after clicking into existing text gets its space and capital, and `*` never
-  deletes text steno didn't type. Only the last 240 characters before the cursor are kept, in
-  memory, and never logged. Password fields and anything marked sensitive are not read.
-- **The tape follows the text.** When the cursor lands in text you didn't write with strokes
-  (you clicked into a document, or switched windows), the tape is replaced with the strokes
-  that would have written the words before the cursor, shown dimmer than strokes you wrote.
-  It is a reverse lookup, so each word shows the dictionary's shortest outline for it, not
-  necessarily the one you would have used. Those words can be undone like any other: `*`
-  takes back the word before the cursor. Space and Backspace still do their normal jobs on
-  them.
-
-When the tape is empty, `*` presses Ctrl+Backspace instead, which deletes the word before the
-cursor in nearly every app, so it works even in apps that don't report their text.
-
-`keymux-steno.service` runs the text box reader alongside the overlay, so there is nothing more to enable; if
-one of the two can't run on your system (no layer-shell, another input method), the other
-carries on. You can also run `keymux textbox` by hand. `keymux textbox --dump` prints what the focused text box reports, to see which of your
-apps support it. It listens only: it never takes keys, never types and has no window, so
-nothing changes for apps that don't support it, which carry on with the record steno keeps (a
-text box has to support `zwp_text_input_v3`: GTK, Qt and Firefox do; many terminals don't).
-Only one input method can have a seat, so it can't run next to fcitx or ibus. A compositor
-needs `zwp_input_method_v2`; niri and Sway have it, GNOME doesn't.
 
 ## 🎮 Usage
 

@@ -8,7 +8,6 @@
 //! replaced, so the bare `*` stroke can undo any step exactly, including
 //! corrections that reached back into earlier words.
 
-use super::adopt::segment;
 use super::dict::Dictionary;
 use super::format::{capitalize_word, lowercase_word, render, FormatState, KeyPress, Piece};
 use super::numbers::{number_text, NUMBER_BIT};
@@ -55,8 +54,6 @@ struct Emitted {
     presses: bool,
     /// The placeholder for an incomplete stroke, see [`PENDING_MARK`]
     pending: bool,
-    /// Text that was already there, not typed by a stroke (see [`Translator::adopt`])
-    adopted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -91,52 +88,6 @@ impl Translator {
         self.unmatched = false;
     }
 
-    /// Take `before`, the text really before the cursor as the application reports it, as the
-    /// record of what is on screen. Each word of it becomes a step that `*` can take back, so
-    /// words that were already there can be undone like any other. Nothing typed earlier can
-    /// be undone any more, and the next word is spaced and capitalized to follow `before`,
-    /// which a fresh start can't know.
-    ///
-    /// With `truncated`, `before` starts partway through a word, which is kept but not undoable.
-    /// Returns the tape rows, as `(stroke, text)`, for the strokes that would have typed it.
-    pub fn adopt(&mut self, before: &str, truncated: bool) -> Vec<(u32, String)> {
-        self.start_fresh();
-        self.output.push_str(before);
-        let mut rows = Vec::new();
-        for segment in segment(&self.dict, before, truncated) {
-            self.history.push(Emitted {
-                strokes: Vec::new(),
-                start: segment.start,
-                replaced: String::new(),
-                state_before: seed_state(&before[..segment.start]),
-                state_after: seed_state(&before[..segment.end]),
-                consumed: Vec::new(),
-                presses: false,
-                pending: false,
-                adopted: true,
-            });
-            rows.extend(segment.rows);
-        }
-        self.state = seed_state(before);
-        rows
-    }
-
-    /// What Ctrl+Backspace does to the text: the whitespace before the cursor goes, then the
-    /// word in front of it. Done to the record, for when the keys were pressed.
-    fn delete_word_back(&mut self) {
-        let trimmed = self.output.trim_end_matches(char::is_whitespace);
-        let cut = trimmed
-            .char_indices()
-            .rev()
-            .find(|(_, ch)| ch.is_whitespace())
-            .map_or(0, |(index, ch)| index + ch.len_utf8());
-        self.output.truncate(cut);
-        while self.history.last().is_some_and(|entry| entry.start >= cut) {
-            self.history.pop();
-        }
-        self.state = seed_state(&self.output);
-    }
-
     /// Swap in dictionaries that finished loading in the background.
     pub fn set_dictionary(&mut self, dict: Dictionary) {
         self.dict = Arc::new(dict);
@@ -167,11 +118,10 @@ impl Translator {
         &self.output
     }
 
-    /// Nothing typed on this layer is left to undo. Words that were already in the text box
-    /// don't count: they can be undone, but Space and Backspace still do their own jobs.
+    /// Nothing typed on this layer is left to undo.
     #[must_use]
-    pub fn tape_is_empty(&self) -> bool {
-        self.history.iter().all(|entry| entry.adopted)
+    pub const fn tape_is_empty(&self) -> bool {
+        self.history.is_empty()
     }
 
     /// The user pressed Backspace, which deleted the last character on screen.
@@ -469,7 +419,6 @@ impl Translator {
             consumed,
             presses: false,
             pending: false,
-            adopted: false,
         });
         self.trim_history();
     }
@@ -490,27 +439,14 @@ impl Translator {
     }
 
     fn undo(&mut self) -> Option<StenoOutput> {
-        // A stroke that matched nothing is on the tape, so taking it back is this press's job
-        let mut took_back_a_stroke = false;
         loop {
-            // Nothing left to undo: take back a word with the keys that do it
-            let Some((removed, replaced, presses)) = self.pop_translation() else {
-                if took_back_a_stroke {
-                    return None;
-                }
-                self.delete_word_back();
-                return Some(StenoOutput::Keys(vec![KeyPress {
-                    modifiers: vec![KeyCode::KC_LCTL],
-                    key: KeyCode::KC_BSPC,
-                }]));
-            };
+            let (removed, replaced, presses) = self.pop_translation()?;
             // A key press has no text to take back, so undo ends here without touching the screen
             if presses {
                 return None;
             }
             // Barriers for unmatched strokes have nothing to undo; skip past them
             if removed.is_empty() && replaced.is_empty() {
-                took_back_a_stroke = true;
                 continue;
             }
             info!("steno undo ({} characters)", removed.chars().count());
@@ -729,18 +665,6 @@ fn shift(entry: &mut Emitted, cut: usize) {
     }
 }
 
-/// The spacing and capitalization for a word that follows `text`.
-fn seed_state(text: &str) -> FormatState {
-    let last = text.chars().last();
-    FormatState {
-        // A word follows another with a space, unless there already is one, or the text
-        // before is open (a bracket) or empty
-        has_text: last.is_some_and(|ch| !ch.is_whitespace() && !matches!(ch, '(' | '[' | '{')),
-        capitalize: text.trim_end().ends_with(['.', '!', '?']),
-        ..FormatState::default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -936,16 +860,9 @@ mod tests {
     }
 
     #[test]
-    fn undo_with_nothing_on_the_tape_deletes_a_word_with_the_keys_that_do_it() {
+    fn undo_with_nothing_to_undo_does_nothing() {
         let mut t = translator("{}");
-        // Nothing on the tape: the keys that delete a word do it instead
-        assert_eq!(
-            t.stroke(UNDO_STROKE),
-            Some(StenoOutput::Keys(vec![KeyPress {
-                modifiers: vec![KeyCode::KC_LCTL],
-                key: KeyCode::KC_BSPC,
-            }]))
-        );
+        assert_eq!(t.stroke(UNDO_STROKE), None);
     }
 
     #[test]
@@ -1046,8 +963,6 @@ mod tests {
         );
         // Nothing but the unmatched stroke is left, and it has nothing to take back
         assert_eq!(t.stroke(UNDO_STROKE), None);
-        // Now the tape is empty
-        assert!(matches!(t.stroke(UNDO_STROKE), Some(StenoOutput::Keys(_))));
     }
 
     #[test]
@@ -1239,88 +1154,4 @@ mod tests {
         assert_eq!(parse_pieces("{#NotAKey}"), None);
         assert_eq!(parse_pieces("{#Bogus(Left)}"), None);
     }
-
-    #[test]
-    fn a_word_after_adopted_text_follows_it_with_a_space() {
-        let mut t = translator(r#"{"KAT": "cat"}"#);
-        t.adopt("the", false);
-        assert_eq!(t.stroke(stroke("KAT")), Some(StenoOutput::Type(" cat".into())));
-        assert_eq!(t.text(), "the cat");
-    }
-
-    #[test]
-    fn a_word_after_adopted_space_or_nothing_has_no_space_of_its_own() {
-        let mut t = translator(r#"{"KAT": "cat"}"#);
-        t.adopt("the ", false);
-        assert_eq!(t.stroke(stroke("KAT")), Some(StenoOutput::Type("cat".into())));
-        t.adopt("line\n", false);
-        assert_eq!(t.stroke(stroke("KAT")), Some(StenoOutput::Type("cat".into())));
-        t.adopt("", false);
-        assert_eq!(t.stroke(stroke("KAT")), Some(StenoOutput::Type("cat".into())));
-        t.adopt("f(", false);
-        assert_eq!(t.stroke(stroke("KAT")), Some(StenoOutput::Type("cat".into())));
-    }
-
-    #[test]
-    fn a_word_after_adopted_text_that_ends_a_sentence_is_capitalized() {
-        let mut t = translator(r#"{"KAT": "cat"}"#);
-        t.adopt("It sat. ", false);
-        assert_eq!(t.stroke(stroke("KAT")), Some(StenoOutput::Type("Cat".into())));
-        t.adopt("Why?", false);
-        assert_eq!(t.stroke(stroke("KAT")), Some(StenoOutput::Type(" Cat".into())));
-    }
-
-    #[test]
-    fn undo_takes_back_the_last_word_of_adopted_text() {
-        let mut t = translator(r#"{"KAT": "cat"}"#);
-        t.stroke(stroke("KAT"));
-        let rows = t.adopt("a cat sat", false);
-        // The strokes typed before are gone from the record. The words that were there are the
-        // steps now, and the last one goes first.
-        assert_eq!(
-            t.stroke(UNDO_STROKE),
-            Some(StenoOutput::Retype {
-                backspaces: 4,
-                text: String::new()
-            })
-        );
-        assert_eq!(t.text(), "a cat");
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[1], (stroke("KAT"), "\"cat\"".to_string()));
-    }
-
-    #[test]
-    fn adopted_words_do_not_count_as_typed_so_backspace_and_space_stay_normal_keys() {
-        let mut t = translator(r#"{"KAT": "cat"}"#);
-        t.adopt("a cat", false);
-        assert!(t.tape_is_empty());
-        t.stroke(stroke("KAT"));
-        assert!(!t.tape_is_empty());
-    }
-
-    #[test]
-    fn undoing_past_adopted_text_falls_back_to_deleting_words() {
-        let mut t = translator(r#"{"KAT": "cat"}"#);
-        t.adopt("a cat", false);
-        t.stroke(UNDO_STROKE);
-        t.stroke(UNDO_STROKE);
-        // Both words are gone; whatever is before them is unknown
-        assert!(matches!(t.stroke(UNDO_STROKE), Some(StenoOutput::Keys(_))));
-    }
-
-    #[test]
-    fn the_keys_that_delete_a_word_leave_the_record_as_the_text_will_be() {
-        let mut t = translator(r#"{"KAT": "cat"}"#);
-        t.adopt("one two  ", true);
-        // The first word is cut short, so it can't be undone; the spaces and "two" can
-        t.stroke(UNDO_STROKE);
-        assert_eq!(t.text(), "one two");
-        t.stroke(UNDO_STROKE);
-        assert_eq!(t.text(), "one");
-        // Nothing is left to undo, so the keys that delete a word are pressed, and the record
-        // follows what they do
-        assert!(matches!(t.stroke(UNDO_STROKE), Some(StenoOutput::Keys(_))));
-        assert_eq!(t.text(), "");
-    }
-
 }

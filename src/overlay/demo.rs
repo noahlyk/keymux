@@ -37,7 +37,6 @@ pub fn spawn(frames: Sender<OverlaySnapshot>) {
                 stroke: parse_stroke(stroke).expect("demo strokes are valid"),
                 text: (*text).into(),
                 unmatched: text.is_empty(),
-                adopted: false,
             });
         }
         loop {
@@ -64,7 +63,6 @@ pub fn spawn(frames: Sender<OverlaySnapshot>) {
                     stroke: bits,
                     text: text.into(),
                     unmatched: text.is_empty(),
-                adopted: false,
                 });
                 snapshot.generation += 1;
                 snapshot.chord = 0;

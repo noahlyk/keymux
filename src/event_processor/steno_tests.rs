@@ -354,24 +354,6 @@ fn undo_takes_back_a_word_typed_after_a_space() {
 }
 
 #[test]
-fn undo_with_nothing_on_the_tape_presses_ctrl_backspace() {
-    let fixture = Fixture::new("undo-empty-tape");
-    let mut p = fixture.processor();
-    enter_steno(&mut p);
-
-    // `*` with nothing typed on this layer takes back a word with the keys that do it
-    assert_eq!(
-        chord(&mut p, &[KeyCode::KC_T]),
-        ProcessResult::MultipleEvents(vec![
-            (KeyCode::KC_LCTL, true),
-            (KeyCode::KC_BSPC, true),
-            (KeyCode::KC_BSPC, false),
-            (KeyCode::KC_LCTL, false),
-        ])
-    );
-}
-
-#[test]
 fn toggling_back_into_steno_starts_without_a_prefix_space() {
     let fixture = Fixture::new("toggle-reenter");
     let dict = fixture.dir.join("main.json");

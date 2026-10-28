@@ -55,17 +55,6 @@ fn main() -> Result<()> {
         Some(cli::Commands::Overlay { .. }) => {
             anyhow::bail!("this keymux was built without the overlay feature");
         }
-        #[cfg(feature = "textbox")]
-        Some(cli::Commands::Textbox { dump }) => {
-            keymux::textbox::run(*dump)?;
-        }
-        #[cfg(not(feature = "textbox"))]
-        Some(cli::Commands::Textbox { .. }) => {
-            anyhow::bail!("this keymux was built without the textbox feature");
-        }
-        Some(cli::Commands::StenoSession) => {
-            keymux::session::run()?;
-        }
         Some(cli::Commands::HyprlandDaemon) => {
             keymux::hyprland::run_hyprland_daemon()?;
         }
