@@ -1,8 +1,9 @@
 //! An example keymux plugin: a phonetic best guess for a stroke that missed every dictionary.
 //!
-//! This is one self-contained `.rs` file, ordinary Rust, nothing but `std`. Drop it into
-//! `~/.config/keymux/plugins/` (any name ending in `.rs`) and keymux compiles and loads it the
-//! next time it starts, or the moment the file changes while it's running. See
+//! This is one self-contained `.rs` file, ordinary Rust, nothing but `std`. Drop it into your
+//! steno folder (`~/.config/keymux/steno/`, any name ending in `.rs`), numbered after your
+//! dictionaries so it only answers what they miss, and keymux compiles and loads it the next
+//! time it starts, or the moment the file changes while it's running. See
 //! `docs/plugins/README.md` for how the interface it implements works, and
 //! `src/steno/plugin.rs` for how keymux calls it.
 //!

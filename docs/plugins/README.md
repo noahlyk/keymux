@@ -1,19 +1,24 @@
 # Plugins
 
 A plugin is one ordinary `.rs` file, real Rust, nothing else: no separate crate, no `Cargo.toml`
-to write, no build step to run by hand. Drop it into `~/.config/keymux/plugins/` (any name
-ending in `.rs`, any depth of folder) and keymux compiles and loads it, the moment it's first
-needed and again whenever the file changes, the same way a dictionary reloads live.
+to write, no build step to run by hand. It lives in your steno folder exactly where a dictionary
+file would (`~/.config/keymux/steno/`, any name ending in `.rs`, any depth of folder), and keeps
+its place in that same priority order: see `src/steno/source.rs` for how a number prefix, a
+plain file or a plain folder rank against each other. keymux compiles and loads it the moment
+it's first needed and again whenever the file changes, the same way a dictionary reloads live.
 
-What a plugin extends today: what happens when a stroke misses every dictionary outright. With
-no plugin, keymux shows the stroke's own keys, as it always has (`KAT` with no entry in any
-dictionary just shows `KAT`). With one loaded, it's asked first, and only falls back to the raw
-keys if it has no answer either.
+A plugin is asked in its own turn, exactly like a dictionary file: if nothing ahead of it in the
+folder's priority order answered, it gets a chance before whatever comes after. Numbered ahead
+of your dictionaries, it can override them outright; numbered after, or left with no number, it
+is a fallback for whatever nothing earlier in the folder could answer — typically, what happens
+when a stroke misses every dictionary outright. With no plugin at all, keymux shows the stroke's
+own keys, as it always has (`KAT` with no entry anywhere just shows `KAT`).
 
 `orthographic-fallback.rs` in this folder is a complete, working example: a phonetic best guess
 read straight off a stroke's own keys, close enough to be read, not real spelling (a stroke
-alone can't say how a word is actually spelled). Copy it into your plugins folder to try it, or
-read it as a template for a plugin of your own.
+alone can't say how a word is actually spelled). Copy it into your steno folder to try it, giving
+it a number after your dictionaries so it only answers what they miss, or read it as a template
+for a plugin of your own.
 
 ## Why WebAssembly
 
@@ -73,6 +78,8 @@ in isolation would be asking the wrong question.
 
 ## Where things are cached
 
-A compiled plugin lives in `~/.cache/keymux/plugins/`, named after its own source's content
-hash. Delete that folder to force every plugin to recompile; nothing is ever lost from it being
-gone, since it is rebuilt automatically.
+A compiled plugin lives under the same cache root a dictionary's own binary copy is kept (see
+`src/steno/setup.rs`), in a `plugins` folder next to it — for the usual `~/.config/keymux`, that
+is `~/.cache/keymux/steno/plugins/`, named after its own source's content hash. Delete that
+folder to force every plugin to recompile; nothing is ever lost from it being gone, since it is
+rebuilt automatically.

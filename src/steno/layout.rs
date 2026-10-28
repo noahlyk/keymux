@@ -224,6 +224,16 @@ pub fn render_stroke(bits: u32) -> String {
     out
 }
 
+/// Several strokes, each in Plover's canonical notation, separated by `/`: a dictionary key.
+#[must_use]
+pub fn render_strokes(strokes: &[u32]) -> String {
+    strokes
+        .iter()
+        .map(|&bits| render_stroke(bits))
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// A stroke as typed text when it has no translation, such as `STPHA-UBGS`.
 ///
 /// The left hand and its thumb come first, then a hyphen, then the star, the right thumb and

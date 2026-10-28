@@ -10,6 +10,7 @@ use super::dict::Dictionary;
 use super::formatter::{Op, Options};
 use super::layout::parse_stroke;
 use super::orthography::Orthography;
+use super::plugin::Chain;
 use super::translate::{Translator, UNDO_STROKE};
 use serde_json::Value;
 use std::sync::Arc;
@@ -57,11 +58,11 @@ fn events(ops: &[Op]) -> Vec<Value> {
 #[test]
 fn every_reference_case_types_what_plover_types() {
     let data: Value = serde_json::from_str(include_str!("testdata/plover_golden.json")).unwrap();
-    let sets: std::collections::HashMap<String, Arc<Dictionary>> = data["sets"]
+    let sets: std::collections::HashMap<String, Arc<Chain>> = data["sets"]
         .as_object()
         .unwrap()
         .iter()
-        .map(|(name, tables)| (name.clone(), Arc::new(dictionary(tables))))
+        .map(|(name, tables)| (name.clone(), Arc::new(Chain::from(dictionary(tables)))))
         .collect();
     let mut failures = Vec::new();
     let cases = data["cases"].as_array().unwrap();
@@ -119,7 +120,7 @@ fn plovers_own_dictionaries_type_what_plover_types() {
     for file in ["commands.json", "main.json", "american_english_words.txt"] {
         dict.merge_file(&assets.join(file)).unwrap();
     }
-    let dict = Arc::new(dict);
+    let dict = Arc::new(Chain::from(dict));
     let data: Value = serde_json::from_str(&std::fs::read_to_string(golden).unwrap()).unwrap();
     let cases = data["cases"].as_array().unwrap();
     let mut failures = Vec::new();

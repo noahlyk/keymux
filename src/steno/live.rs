@@ -14,7 +14,8 @@
 //! A reload that finds a file it can't read, such as one saved half-finished, keeps the
 //! dictionary already in use and tries again on the next change.
 
-use super::dict::{cache_name, fingerprint, Dictionary, Source};
+use super::dict::{fingerprint, Source};
+use super::plugin::Chain;
 use super::source::expand;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::{HashMap, HashSet};
@@ -41,9 +42,9 @@ struct Key {
 #[derive(Default)]
 struct Entry {
     /// The dictionary built from the files fingerprinted in `built_from`
-    latest: Option<Arc<Dictionary>>,
+    latest: Option<Arc<Chain>>,
     built_from: Vec<Source>,
-    subscribers: Vec<Sender<Arc<Dictionary>>>,
+    subscribers: Vec<Sender<Arc<Chain>>>,
 }
 
 /// What the watcher needs to judge an event, shared with its callback.
@@ -109,7 +110,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// now if it is loaded, otherwise as soon as it is, and again whenever any of its files change.
 /// Layers with the same `roots` share one copy.
 #[must_use]
-pub fn subscribe(roots: Vec<PathBuf>, cache_dir: PathBuf) -> Receiver<Arc<Dictionary>> {
+pub fn subscribe(roots: Vec<PathBuf>, cache_dir: PathBuf) -> Receiver<Arc<Chain>> {
     let hub = hub();
     let key = Key { roots, cache_dir };
     let (sender, receiver) = mpsc::channel();
@@ -191,13 +192,7 @@ fn refresh(key: &Key) {
     };
 
     // Parsing a large dictionary takes a moment, so it happens with nothing locked
-    let asked: Vec<String> = key
-        .roots
-        .iter()
-        .map(|root| root.display().to_string())
-        .collect();
-    let (dict, problems) =
-        Dictionary::load_cached_reporting(&files, &sources, &key.cache_dir, &cache_name(&asked));
+    let (dict, problems) = Chain::load_cached_reporting(&files, &key.cache_dir);
     if !problems.is_empty() && !first_time {
         warn!(
             "steno dictionaries not reloaded, keeping the ones in use: {}",
@@ -290,21 +285,18 @@ mod tests {
         dir
     }
 
-    fn next(updates: &Receiver<Arc<Dictionary>>) -> Arc<Dictionary> {
+    fn next(updates: &Receiver<Arc<Chain>>) -> Arc<Chain> {
         updates
             .recv_timeout(Duration::from_secs(10))
             .expect("a dictionary within 10 seconds")
     }
 
-    fn says(dict: &Dictionary, text: &str) -> bool {
+    fn says(dict: &Chain, text: &str) -> bool {
         !dict.strokes_for(text).is_empty()
     }
 
     /// Keep receiving until a dictionary that satisfies `done` arrives.
-    fn until(
-        updates: &Receiver<Arc<Dictionary>>,
-        done: impl Fn(&Dictionary) -> bool,
-    ) -> Arc<Dictionary> {
+    fn until(updates: &Receiver<Arc<Chain>>, done: impl Fn(&Chain) -> bool) -> Arc<Chain> {
         let end = Instant::now() + Duration::from_secs(10);
         loop {
             let dict = next(updates);

@@ -114,7 +114,9 @@ fn order_key(name: &std::ffi::OsStr, is_folder: bool) -> OrderKey {
     (if is_folder { 2 } else { 1 }, 0, name.to_lowercase(), name)
 }
 
-/// Whether a file is read as part of the dictionary: JSON, RTF/CRE, or the word list.
+/// Whether a file belongs in a layer's source list at all: a dictionary (JSON, RTF/CRE, or the
+/// word list) or a plugin (`.rs`), found and ordered the same way either way. [`is_plugin_file`]
+/// tells the two apart afterward.
 fn is_dictionary_file(path: &Path) -> bool {
     let kind = |wanted: &str| {
         path.extension()
@@ -122,8 +124,16 @@ fn is_dictionary_file(path: &Path) -> bool {
     };
     kind("json")
         || kind("rtf")
+        || kind("rs")
         || path.file_name().and_then(|name| name.to_str())
             == Some(super::orthography::WORDLIST_FILE)
+}
+
+/// Whether `path`, already found by [`expand`], is a plugin rather than a dictionary file.
+#[must_use]
+pub fn is_plugin_file(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
 }
 
 #[cfg(test)]
