@@ -77,8 +77,11 @@ mod tests {
     fn to_turns_off_every_other_layer_and_stays_on() {
         let mut stack = stack();
         stack.activate_layer(Layer::new("steno"));
-        let (result, held) =
-            emit_layer(&KeyAction::TO(Layer::new("nohrm")), KeyCode::KC_F9, &mut stack);
+        let (result, held) = emit_layer(
+            &KeyAction::TO(Layer::new("nohrm")),
+            KeyCode::KC_F9,
+            &mut stack,
+        );
         assert!(matches!(result, EmitResult::LayerAction(_)));
         assert!(held.is_none(), "releasing F9 must not turn nohrm off");
         assert_eq!(stack.layers(), [Layer::base(), Layer::new("nohrm")]);
@@ -87,11 +90,19 @@ mod tests {
     #[test]
     fn mo_holds_a_layer_until_it_is_released() {
         let mut stack = stack();
-        let (_, held) = emit_layer(&KeyAction::MO(Layer::new("nav")), KeyCode::KC_LALT, &mut stack);
+        let (_, held) = emit_layer(
+            &KeyAction::MO(Layer::new("nav")),
+            KeyCode::KC_LALT,
+            &mut stack,
+        );
         assert_eq!(stack.current_layer(), Layer::new("nav"));
         let held = held.expect("MO must hand back something to release");
-        unemit_layer(&KeyAction::MO(Layer::new("nav")), held, KeyCode::KC_LALT, &mut stack);
+        unemit_layer(
+            &KeyAction::MO(Layer::new("nav")),
+            held,
+            KeyCode::KC_LALT,
+            &mut stack,
+        );
         assert_eq!(stack.layers(), [Layer::base()]);
     }
-
 }

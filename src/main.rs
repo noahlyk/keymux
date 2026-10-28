@@ -137,7 +137,11 @@ fn main() -> Result<()> {
                     keymux::steno::setup::run_theory(config_dir, theory.as_deref())?;
                 }
                 cli::StenoAction::Layout => keymux::steno::commands::layout()?,
-                cli::StenoAction::Keys { text, show_keys, fast } => {
+                cli::StenoAction::Keys {
+                    text,
+                    show_keys,
+                    fast,
+                } => {
                     keymux::steno::commands::keys(config_dir, text.as_deref(), *show_keys, *fast)?;
                 }
                 cli::StenoAction::Lookup { word } => {

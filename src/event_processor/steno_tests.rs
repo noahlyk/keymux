@@ -97,7 +97,11 @@ fn tg_latches_after_release_and_toggles_off() {
     let dict = fixture.dir.join("main.json");
     std::fs::write(&dict, r#"{"KAT": "cat"}"#).unwrap();
     let config_path = fixture.dir.join("toggle.ron");
-    std::fs::write(&config_path, TOGGLE_CONFIG.replace("DICT", &path_str(&dict))).unwrap();
+    std::fs::write(
+        &config_path,
+        TOGGLE_CONFIG.replace("DICT", &path_str(&dict)),
+    )
+    .unwrap();
     let config = Config::load(&config_path).unwrap();
     let mut p = KeymapProcessor::new(&config, config_path, 0);
     p.wait_for_steno_dictionaries();
@@ -326,7 +330,13 @@ fn words_typed_by_hand_are_undone_by_steno_a_word_at_a_time() {
     let fixture = Fixture::new("typed-undo");
     let mut p = fixture.processor();
     // "hi yo" on the base layer
-    for key in [KeyCode::KC_H, KeyCode::KC_I, KeyCode::KC_SPC, KeyCode::KC_Y, KeyCode::KC_O] {
+    for key in [
+        KeyCode::KC_H,
+        KeyCode::KC_I,
+        KeyCode::KC_SPC,
+        KeyCode::KC_Y,
+        KeyCode::KC_O,
+    ] {
         tap(&mut p, key);
     }
     enter_steno(&mut p);
@@ -338,12 +348,18 @@ fn words_typed_by_hand_are_undone_by_steno_a_word_at_a_time() {
     );
     assert_eq!(
         chord(&mut p, &[KeyCode::KC_T]),
-        ProcessResult::Retype { backspaces: 4, text: String::new() }
+        ProcessResult::Retype {
+            backspaces: 4,
+            text: String::new()
+        }
     );
     // Then the word typed by hand goes whole
     assert_eq!(
         chord(&mut p, &[KeyCode::KC_T]),
-        ProcessResult::Retype { backspaces: 2, text: String::new() }
+        ProcessResult::Retype {
+            backspaces: 2,
+            text: String::new()
+        }
     );
 }
 
@@ -380,7 +396,10 @@ fn two_keyboards_share_what_was_typed_and_either_can_undo_it() {
     // The other keyboard takes it back
     assert_eq!(
         chord(&mut b, &[KeyCode::KC_T]),
-        ProcessResult::Retype { backspaces: 3, text: String::new() }
+        ProcessResult::Retype {
+            backspaces: 3,
+            text: String::new()
+        }
     );
 }
 
@@ -450,7 +469,11 @@ fn toggling_back_into_steno_carries_on_from_what_was_typed_between() {
     let dict = fixture.dir.join("main.json");
     std::fs::write(&dict, r#"{"KAT": "cat"}"#).unwrap();
     let config_path = fixture.dir.join("toggle.ron");
-    std::fs::write(&config_path, TOGGLE_CONFIG.replace("DICT", &path_str(&dict))).unwrap();
+    std::fs::write(
+        &config_path,
+        TOGGLE_CONFIG.replace("DICT", &path_str(&dict)),
+    )
+    .unwrap();
     let config = Config::load(&config_path).unwrap();
     let mut p = KeymapProcessor::new(&config, config_path, 0);
     p.wait_for_steno_dictionaries();
@@ -551,7 +574,11 @@ fn the_lookup_stroke_turns_the_keys_into_qwerty_input_to_a_query_and_nothing_is_
     );
     let open = hub.snapshot();
     assert_eq!(open.lookup.as_ref().map(|l| l.query.as_str()), Some(""));
-    assert_eq!(open.tape.len(), 1, "the stroke itself is on the tape, as any command is");
+    assert_eq!(
+        open.tape.len(),
+        1,
+        "the stroke itself is on the tape, as any command is"
+    );
 
     // Typing is QWERTY: these keys are stroke keys on the steno layer, but now they are letters
     // (C-A-N-D-Y), and none of it reaches the application
@@ -572,7 +599,11 @@ fn the_lookup_stroke_turns_the_keys_into_qwerty_input_to_a_query_and_nothing_is_
     assert_eq!(found.rows[0].outline, "KAPBD");
     // The best stroke is lit on the overlay's keyboard
     assert_eq!(found.hint, parse_stroke("KAPBD").unwrap());
-    assert_eq!(hub.snapshot().tape.len(), 1, "looking things up types nothing");
+    assert_eq!(
+        hub.snapshot().tape.len(),
+        1,
+        "looking things up types nothing"
+    );
 
     // Backspace edits the query, and now it also suggests longer words
     type_keys(&mut p, &[KeyCode::KC_BSPC, KeyCode::KC_BSPC]);
@@ -660,7 +691,10 @@ fn a_lookup_goes_through_the_remaps_mod_taps_and_layers_below_it() {
 
     // A layer held on a key changes what the keys under it type
     p.process_key(KeyCode::KC_X, true);
-    assert!(hub.snapshot().lookup.is_some(), "holding a layer keeps the lookup on screen");
+    assert!(
+        hub.snapshot().lookup.is_some(),
+        "holding a layer keeps the lookup on screen"
+    );
     let typed = type_keys(&mut p, &[KeyCode::KC_A]);
     assert!(typed.iter().all(|r| *r == ProcessResult::None), "{typed:?}");
     assert_eq!(p.process_key(KeyCode::KC_X, false), ProcessResult::None);
@@ -670,7 +704,10 @@ fn a_lookup_goes_through_the_remaps_mod_taps_and_layers_below_it() {
     assert_eq!(query(hub), "caT!t9a");
 
     // A key the base layer turns into Esc closes it
-    assert_eq!(type_keys(&mut p, &[KeyCode::KC_CAPS]), vec![ProcessResult::None; 2]);
+    assert_eq!(
+        type_keys(&mut p, &[KeyCode::KC_CAPS]),
+        vec![ProcessResult::None; 2]
+    );
     assert_eq!(hub.snapshot().lookup, None);
 }
 
@@ -695,7 +732,10 @@ fn keys_held_through_the_end_of_a_lookup_do_not_leak_their_release() {
 #[allow(clippy::literal_string_with_formatting_args)] // a command, not a format
 fn leaving_steno_in_the_middle_of_a_lookup_closes_it_and_does_not_keep_eating_keys() {
     let fixture = Fixture::new("lookup-leave");
-    let mut p = fixture.processor_with(CONFIG, r#"{"KAT": "{PLOVER:LOOKUP}", "-T": "the", "KAPB": "can"}"#);
+    let mut p = fixture.processor_with(
+        CONFIG,
+        r#"{"KAT": "{PLOVER:LOOKUP}", "-T": "the", "KAPB": "can"}"#,
+    );
     let hub = private_hub();
     p.set_overlay_hub(hub);
     enter_steno(&mut p);
@@ -923,7 +963,10 @@ fn a_long_word_waits_only_as_long_as_it_must() {
     assert_eq!(parts.len(), 3);
     assert_eq!(parts[0].0, now);
     assert_eq!(parts[2].0 - now, super::UNREAD_WINDOW * 2);
-    assert_eq!(parts.iter().map(|(_, r)| r.len()).sum::<usize>(), word.len());
+    assert_eq!(
+        parts.iter().map(|(_, r)| r.len()).sum::<usize>(),
+        word.len()
+    );
 }
 
 #[test]
@@ -932,11 +975,16 @@ fn nothing_in_flight_ever_goes_over_the_budget() {
     let mut pacer = super::Pacer::default();
     // Words arriving 1 ms apart, long and short, some with shifted letters and backspaces
     let mut all = Vec::new();
-    for (i, text) in ["Hello World", "supercalifragilisticexpialidocious", "ab", "XYZXYZXYZ"]
-        .iter()
-        .cycle()
-        .take(40)
-        .enumerate()
+    for (i, text) in [
+        "Hello World",
+        "supercalifragilisticexpialidocious",
+        "ab",
+        "XYZXYZXYZ",
+    ]
+    .iter()
+    .cycle()
+    .take(40)
+    .enumerate()
     {
         let sizes = sizes(i % 7, text);
         let at = now + std::time::Duration::from_millis(i as u64);
@@ -950,7 +998,10 @@ fn nothing_in_flight_ever_goes_over_the_budget() {
             .filter(|&&(t, _)| t <= time && time < t + super::UNREAD_WINDOW)
             .map(|&(_, events)| events)
             .sum();
-        assert!(in_window <= super::SAFE_EVENTS, "{in_window} events in one window");
+        assert!(
+            in_window <= super::SAFE_EVENTS,
+            "{in_window} events in one window"
+        );
     }
 }
 

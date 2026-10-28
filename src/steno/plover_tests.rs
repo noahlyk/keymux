@@ -92,7 +92,12 @@ fn every_reference_case_types_what_plover_types() {
         "{} of {} cases differ from Plover. The first ones:\n{}",
         failures.len(),
         cases.len(),
-        failures.iter().take(12).cloned().collect::<Vec<_>>().join("\n")
+        failures
+            .iter()
+            .take(12)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }
 
@@ -103,7 +108,10 @@ fn every_reference_case_types_what_plover_types() {
 #[test]
 #[ignore = "needs Plover's dictionaries; see PLOVER_ASSETS and PLOVER_REAL_GOLDEN"]
 fn plovers_own_dictionaries_type_what_plover_types() {
-    let (Ok(assets), Ok(golden)) = (std::env::var("PLOVER_ASSETS"), std::env::var("PLOVER_REAL_GOLDEN")) else {
+    let (Ok(assets), Ok(golden)) = (
+        std::env::var("PLOVER_ASSETS"),
+        std::env::var("PLOVER_REAL_GOLDEN"),
+    ) else {
         panic!("set PLOVER_ASSETS and PLOVER_REAL_GOLDEN");
     };
     let assets = std::path::Path::new(&assets);
@@ -140,6 +148,11 @@ fn plovers_own_dictionaries_type_what_plover_types() {
         "{} of {} cases differ from Plover. The first ones:\n{}",
         failures.len(),
         cases.len(),
-        failures.iter().take(10).cloned().collect::<Vec<_>>().join("\n")
+        failures
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }

@@ -93,10 +93,7 @@ impl AsyncDaemon {
         // every keyboard processor. Fail fast with an actionable message
         // here, instead of a raw per-keyboard OS-error log line the first
         // time a keyboard is plugged in and enabled.
-        if let Err(e) = std::fs::OpenOptions::new()
-            .write(true)
-            .open("/dev/uinput")
-        {
+        if let Err(e) = std::fs::OpenOptions::new().write(true).open("/dev/uinput") {
             return Err(anyhow::anyhow!(
                 "/dev/uinput not accessible ({e}). The uinput kernel module is required for key remapping. Try: sudo modprobe uinput"
             ));
@@ -1288,9 +1285,10 @@ impl AsyncDaemon {
         );
         // Another window has a different caret and different text, so what steno remembers of
         // the old one is no longer what is before the cursor
-        let moved = self.last_focused_window.as_ref().is_none_or(|last| {
-            last.app_id != window.app_id || last.pid != window.pid
-        });
+        let moved = self
+            .last_focused_window
+            .as_ref()
+            .is_none_or(|last| last.app_id != window.app_id || last.pid != window.pid);
         if moved {
             crate::steno::journal::fence_all();
         }
@@ -1346,23 +1344,17 @@ impl AsyncDaemon {
     async fn handle_ipc_request(&mut self, request: IpcRequest) -> IpcResponse {
         match request {
             IpcRequest::Ping => IpcResponse::Pong,
-            IpcRequest::WindowFocusChanged {
-                app_id,
-                pid,
-                title,
-            } => {
+            IpcRequest::WindowFocusChanged { app_id, pid, title } => {
                 self.handle_window_focus_changed(WindowInfo { app_id, pid, title })
                     .await;
                 IpcResponse::Ok
             }
             IpcRequest::GetFocusedWindow => {
-                IpcResponse::FocusedWindow(self.last_focused_window.clone().unwrap_or(
-                    WindowInfo {
-                        app_id: None,
-                        pid: None,
-                        title: None,
-                    },
-                ))
+                IpcResponse::FocusedWindow(self.last_focused_window.clone().unwrap_or(WindowInfo {
+                    app_id: None,
+                    pid: None,
+                    title: None,
+                }))
             }
             IpcRequest::SetWindowOverride { app_id, state } => {
                 match state {
@@ -1420,7 +1412,9 @@ impl AsyncDaemon {
                 self.recompute_and_apply_game_mode().await;
                 IpcResponse::Ok
             }
-            IpcRequest::GetGlobalOverride => IpcResponse::GlobalOverrideStatus(self.global_override),
+            IpcRequest::GetGlobalOverride => {
+                IpcResponse::GlobalOverrideStatus(self.global_override)
+            }
             IpcRequest::ListKeyboards => {
                 // Collect all enabled_keyboards entries from all user configs for annotation
                 let mut all_config_entries: Vec<(String, bool)> = Vec::new(); // (pattern, is_enable)

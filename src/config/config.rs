@@ -630,8 +630,14 @@ fn renamed_layers_behave_alike(old: &Config, new: &Config) -> bool {
         names
     };
     let (old_names, new_names) = (names(&old), names(&new));
-    let gone: Vec<&String> = old_names.iter().filter(|n| !new_names.contains(n)).collect();
-    let came: Vec<&String> = new_names.iter().filter(|n| !old_names.contains(n)).collect();
+    let gone: Vec<&String> = old_names
+        .iter()
+        .filter(|n| !new_names.contains(n))
+        .collect();
+    let came: Vec<&String> = new_names
+        .iter()
+        .filter(|n| !old_names.contains(n))
+        .collect();
     if gone.is_empty() || gone.len() != came.len() || gone.len() > MAX_RENAMES {
         return false;
     }
@@ -1456,7 +1462,10 @@ mod tests {
         let left_out = parse(r#"(layers: { "nav": (kind: Remap, remaps: {}) })"#);
         let written = parse(r#"(layers: { "nav": (kind: Remap, remaps: {}, priority: 1) })"#);
         assert!(left_out.behaves_like(&written));
-        assert_eq!(left_out.layers[&Layer::new("nav")].priority, DEFAULT_LAYER_PRIORITY);
+        assert_eq!(
+            left_out.layers[&Layer::new("nav")].priority,
+            DEFAULT_LAYER_PRIORITY
+        );
     }
 
     #[test]
@@ -1540,10 +1549,7 @@ mod tests {
     #[test]
     fn renaming_a_layer_but_not_everything_that_refers_to_it_changes_how_a_config_behaves() {
         // Only the definition is renamed, so `TO("steno")` points at nothing now
-        let renamed = WITH_LAYERS.replace(
-            "\"steno\": (kind",
-            "\"stenography\": (kind",
-        );
+        let renamed = WITH_LAYERS.replace("\"steno\": (kind", "\"stenography\": (kind");
         assert!(!parse(WITH_LAYERS).behaves_like(&parse(&renamed)));
     }
 
@@ -1650,7 +1656,12 @@ mod tests {
         let glove = config.for_keyboard("16c0:27db:0111:0003@1-3");
         assert_eq!(glove.default_layer, Some(Layer::new("steno")));
         // Another keyboard keeps the global setting, which is none
-        assert_eq!(config.for_keyboard("0c45:8092:0110:0003@3-4.3").default_layer, None);
+        assert_eq!(
+            config
+                .for_keyboard("0c45:8092:0110:0003@3-4.3")
+                .default_layer,
+            None
+        );
     }
 
     #[test]
@@ -1663,7 +1674,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            config.for_keyboard("0c45:8092:0110:0003@3-4.3").default_layer,
+            config
+                .for_keyboard("0c45:8092:0110:0003@3-4.3")
+                .default_layer,
             Some(Layer::new("steno"))
         );
     }

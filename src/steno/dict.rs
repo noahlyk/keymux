@@ -94,11 +94,13 @@ pub struct MergeStats {
 /// Read bytes as text the way Plover reads a dictionary: UTF-8, or failing that Latin-1.
 #[must_use]
 pub fn decode_text(bytes: &[u8]) -> String {
-    String::from_utf8(bytes.to_vec()).unwrap_or_else(|_| bytes.iter().map(|&b| char::from(b)).collect())
+    String::from_utf8(bytes.to_vec())
+        .unwrap_or_else(|_| bytes.iter().map(|&b| char::from(b)).collect())
 }
 
 fn has_extension(path: &Path, extension: &str) -> bool {
-    path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
 }
 
 impl Dictionary {
@@ -258,7 +260,9 @@ impl Dictionary {
             .filter(|text| {
                 text.len() > prefix.len()
                     && text.starts_with(prefix)
-                    && text.chars().all(|c| c.is_alphanumeric() || c == '\'' || c == '-')
+                    && text
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '\'' || c == '-')
             })
             .collect();
         found.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
@@ -270,7 +274,10 @@ impl Dictionary {
     /// contents it had when the copy was made. Otherwise the JSON is parsed and a new copy saved.
     #[must_use]
     pub fn load_cached(paths: &[impl AsRef<Path>], cache_dir: &Path) -> Self {
-        let names: Vec<String> = paths.iter().map(|path| path.as_ref().display().to_string()).collect();
+        let names: Vec<String> = paths
+            .iter()
+            .map(|path| path.as_ref().display().to_string())
+            .collect();
         Self::load_cached_reporting(paths, &fingerprint(paths), cache_dir, &cache_name(&names)).0
     }
 
@@ -299,7 +306,9 @@ impl Dictionary {
 
     /// Every entry that is in force, for listing and search.
     pub fn iter(&self) -> impl Iterator<Item = (&Vec<u32>, &String)> {
-        self.entries.iter().filter(|(_, translation)| !is_deleted(translation))
+        self.entries
+            .iter()
+            .filter(|(_, translation)| !is_deleted(translation))
     }
 
     /// Length in strokes of the longest entry.
@@ -431,30 +440,41 @@ mod tests {
     #[test]
     fn a_deleted_entry_hides_the_same_outline_in_later_dictionaries() {
         let mut dict = Dictionary::default();
-        dict.merge_json(&format!(r#"{{"KAT": "{DELETED}"}}"#)).unwrap();
+        dict.merge_json(&format!(r#"{{"KAT": "{DELETED}"}}"#))
+            .unwrap();
         dict.merge_json(r#"{"KAT": "cat", "TKOG": "dog"}"#).unwrap();
         assert_eq!(dict.lookup(&[KAT]), None);
-        assert!(dict.strokes_for("cat").is_empty(), "a deleted entry has no reverse lookup either");
+        assert!(
+            dict.strokes_for("cat").is_empty(),
+            "a deleted entry has no reverse lookup either"
+        );
         assert_eq!(dict.iter().count(), 1);
         // In any letter case
         let mut upper = Dictionary::default();
-        upper.merge_json(&format!(r#"{{"KAT": "{}"}}"#, DELETED.to_uppercase())).unwrap();
+        upper
+            .merge_json(&format!(r#"{{"KAT": "{}"}}"#, DELETED.to_uppercase()))
+            .unwrap();
         assert_eq!(upper.lookup(&[KAT]), None);
     }
 
     #[test]
     fn number_keys_and_the_word_boundary_stroke_are_read_in_keys() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"1": "one", "1-9": "x", "/S": "{prefix^}"}"#).unwrap();
+        dict.merge_json(r#"{"1": "one", "1-9": "x", "/S": "{prefix^}"}"#)
+            .unwrap();
         assert_eq!(dict.lookup(&[parse_strokes("1").unwrap()[0]]), Some("one"));
-        assert_eq!(dict.lookup(&[0, parse_strokes("S").unwrap()[0]]), Some("{prefix^}"));
+        assert_eq!(
+            dict.lookup(&[0, parse_strokes("S").unwrap()[0]]),
+            Some("{prefix^}")
+        );
         assert_eq!(dict.longest_key(), 2);
     }
 
     #[test]
     fn within_one_file_the_later_of_two_spellings_of_an_outline_wins() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KAT": "first", "KA-T": "second"}"#).unwrap();
+        dict.merge_json(r#"{"KAT": "first", "KA-T": "second"}"#)
+            .unwrap();
         assert_eq!(dict.lookup(&[KAT]), Some("second"));
     }
 
@@ -536,7 +556,10 @@ mod tests {
         // The same folder, as its files come and go: always the one cache file
         let _ = load(&[&file]);
         let both = load(&[&file, &extra]);
-        assert_eq!(both.strokes_for("dog"), vec![vec![(1 << 1) | (1 << 2) | (1 << 8) | (1 << 17)]]);
+        assert_eq!(
+            both.strokes_for("dog"),
+            vec![vec![(1 << 1) | (1 << 2) | (1 << 8) | (1 << 17)]]
+        );
         let _ = load(&[&extra]);
         let _ = load(&[&file, &extra]);
         assert_eq!(cache_files(&cache), 1);
@@ -591,8 +614,14 @@ mod tests {
         // The first dictionary wins, whichever format it is
         let dict = Dictionary::load(&[json.as_path(), rtf.as_path(), words.as_path()]);
         assert_eq!(dict.lookup(&[KAT]), Some("kitty"));
-        assert_eq!(dict.lookup(&[parse_strokes("-S").unwrap()[0]]), Some("{^s}"));
-        assert_eq!(dict.lookup(&[parse_strokes("TKOG").unwrap()[0]]), Some("dog"));
+        assert_eq!(
+            dict.lookup(&[parse_strokes("-S").unwrap()[0]]),
+            Some("{^s}")
+        );
+        assert_eq!(
+            dict.lookup(&[parse_strokes("TKOG").unwrap()[0]]),
+            Some("dog")
+        );
         assert!(dict.orthography().has_words());
         assert_eq!(dict.orthography().add_suffix("cat", "s"), "cats");
 

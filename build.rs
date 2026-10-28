@@ -23,7 +23,8 @@ fn git_version() -> Option<String> {
     let described = git(&["describe", "--tags", "--long", "--match", "v[0-9]*"])?;
     // `status` refreshes the index first, so a file that was edited and then restored reads as clean.
     // (`describe --dirty` can report stale results for that case.)
-    let dirty = git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty());
+    let dirty =
+        git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty());
     let mut parts = described.rsplitn(3, '-');
     let hash = parts.next()?;
     let count: u32 = parts.next()?.parse().ok()?;
@@ -36,7 +37,11 @@ fn git_version() -> Option<String> {
     if dirty {
         meta.push("dirty".to_string());
     }
-    Some(if meta.is_empty() { tag.to_string() } else { format!("{tag}+{}", meta.join(".")) })
+    Some(if meta.is_empty() {
+        tag.to_string()
+    } else {
+        format!("{tag}+{}", meta.join("."))
+    })
 }
 
 fn untagged_version() -> String {
@@ -48,7 +53,12 @@ fn untagged_version() -> String {
 /// (`dirty` depends on the contents of tracked files, not just on commits).
 fn watch_git() {
     // Git internals live under .git/, so resolve them with --git-path.
-    let mut internals = vec!["HEAD".to_string(), "packed-refs".to_string(), "index".to_string(), "refs/tags".to_string()];
+    let mut internals = vec![
+        "HEAD".to_string(),
+        "packed-refs".to_string(),
+        "index".to_string(),
+        "refs/tags".to_string(),
+    ];
     if let Some(branch_ref) = git(&["symbolic-ref", "-q", "HEAD"]) {
         internals.push(branch_ref);
     }

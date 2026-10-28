@@ -44,7 +44,11 @@ pub fn run_init(full: bool, force: bool) -> Result<()> {
             .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
     }
 
-    let content = if full { FULL_EXAMPLE_CONFIG } else { MINIMAL_CONFIG };
+    let content = if full {
+        FULL_EXAMPLE_CONFIG
+    } else {
+        MINIMAL_CONFIG
+    };
     std::fs::write(&path, content)
         .with_context(|| format!("Failed to write config: {}", path.display()))?;
 

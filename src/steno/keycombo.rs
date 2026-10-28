@@ -76,11 +76,45 @@ pub fn parse_key_combo<K: PartialEq + Clone>(
 pub fn key_for_name(name: &str) -> Option<KeyCode> {
     use KeyCode as K;
     let letters = [
-        K::KC_A, K::KC_B, K::KC_C, K::KC_D, K::KC_E, K::KC_F, K::KC_G, K::KC_H, K::KC_I, K::KC_J,
-        K::KC_K, K::KC_L, K::KC_M, K::KC_N, K::KC_O, K::KC_P, K::KC_Q, K::KC_R, K::KC_S, K::KC_T,
-        K::KC_U, K::KC_V, K::KC_W, K::KC_X, K::KC_Y, K::KC_Z,
+        K::KC_A,
+        K::KC_B,
+        K::KC_C,
+        K::KC_D,
+        K::KC_E,
+        K::KC_F,
+        K::KC_G,
+        K::KC_H,
+        K::KC_I,
+        K::KC_J,
+        K::KC_K,
+        K::KC_L,
+        K::KC_M,
+        K::KC_N,
+        K::KC_O,
+        K::KC_P,
+        K::KC_Q,
+        K::KC_R,
+        K::KC_S,
+        K::KC_T,
+        K::KC_U,
+        K::KC_V,
+        K::KC_W,
+        K::KC_X,
+        K::KC_Y,
+        K::KC_Z,
     ];
-    let digits = [K::KC_0, K::KC_1, K::KC_2, K::KC_3, K::KC_4, K::KC_5, K::KC_6, K::KC_7, K::KC_8, K::KC_9];
+    let digits = [
+        K::KC_0,
+        K::KC_1,
+        K::KC_2,
+        K::KC_3,
+        K::KC_4,
+        K::KC_5,
+        K::KC_6,
+        K::KC_7,
+        K::KC_8,
+        K::KC_9,
+    ];
     let mut chars = name.chars();
     if let (Some(c), None) = (chars.next(), chars.clone().next()) {
         if c.is_ascii_lowercase() {
@@ -92,9 +126,30 @@ pub fn key_for_name(name: &str) -> Option<KeyCode> {
     }
     if let Some(number) = name.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()) {
         return [
-            K::KC_F1, K::KC_F2, K::KC_F3, K::KC_F4, K::KC_F5, K::KC_F6, K::KC_F7, K::KC_F8, K::KC_F9,
-            K::KC_F10, K::KC_F11, K::KC_F12, K::KC_F13, K::KC_F14, K::KC_F15, K::KC_F16, K::KC_F17,
-            K::KC_F18, K::KC_F19, K::KC_F20, K::KC_F21, K::KC_F22, K::KC_F23, K::KC_F24,
+            K::KC_F1,
+            K::KC_F2,
+            K::KC_F3,
+            K::KC_F4,
+            K::KC_F5,
+            K::KC_F6,
+            K::KC_F7,
+            K::KC_F8,
+            K::KC_F9,
+            K::KC_F10,
+            K::KC_F11,
+            K::KC_F12,
+            K::KC_F13,
+            K::KC_F14,
+            K::KC_F15,
+            K::KC_F16,
+            K::KC_F17,
+            K::KC_F18,
+            K::KC_F19,
+            K::KC_F20,
+            K::KC_F21,
+            K::KC_F22,
+            K::KC_F23,
+            K::KC_F24,
         ]
         .get(usize::from(number).checked_sub(1)?)
         .copied();
@@ -175,7 +230,10 @@ mod tests {
 
     #[test]
     fn a_name_is_pressed_and_released() {
-        assert_eq!(names("Return").unwrap(), [("return".into(), true), ("return".into(), false)]);
+        assert_eq!(
+            names("Return").unwrap(),
+            [("return".into(), true), ("return".into(), false)]
+        );
     }
 
     #[test]
@@ -185,7 +243,10 @@ mod tests {
             .iter()
             .map(|(name, down)| format!("{}{name}", if *down { "+" } else { "-" }))
             .collect();
-        assert_eq!(shown, ["+control", "+z", "-z", "+shift", "+z", "-z", "-shift", "-control"]);
+        assert_eq!(
+            shown,
+            ["+control", "+z", "-z", "+shift", "+z", "-z", "-shift", "-control"]
+        );
     }
 
     #[test]

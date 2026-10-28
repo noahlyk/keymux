@@ -5,9 +5,9 @@ use super::chord::ChordState;
 use super::dict::Dictionary;
 use super::journal::{MachineId, SharedHistory};
 use super::layout::{build_key_map, preset};
+use super::live;
 use super::lookup::{Lookup, LookupKey};
 use super::overlay::OverlayHub;
-use super::live;
 use super::setup::default_dictionaries;
 use super::tape;
 use super::translate::{OutputOp, StenoOutput, Translator};
@@ -129,8 +129,11 @@ impl StenoEngine {
         let updates = live::subscribe(roots, super::setup::cache_dir(config_dir));
 
         // Every layer and keyboard writes to the one history; this layer's dictionaries are its machine
-        let mut translator =
-            Translator::with_history(Arc::new(Dictionary::default()), Arc::clone(history), machine);
+        let mut translator = Translator::with_history(
+            Arc::new(Dictionary::default()),
+            Arc::clone(history),
+            machine,
+        );
         translator.set_options(super::formatter::Options {
             spaces_after: config.spaces_after,
             start_attached: config.start_attached,
@@ -284,7 +287,7 @@ impl StenoEngine {
             && self.chord.is_fresh()
             && self.chord.pending() == stroke
             && now.saturating_duration_since(at) <= self.timing.double_tap_window)
-        .then_some((stroke, now))
+            .then_some((stroke, now))
     }
 
     /// A stroke key came up. Returns output if this completed a stroke.
@@ -307,7 +310,10 @@ impl StenoEngine {
         self.arming = None;
         self.repeating = None;
         let released = bit & !still_held;
-        let finished = self.chord.release(released).or_else(|| self.sent_early(released));
+        let finished = self
+            .chord
+            .release(released)
+            .or_else(|| self.sent_early(released));
         let Some(stroke) = finished else {
             self.publish_keys();
             return None;
@@ -477,7 +483,9 @@ impl StenoEngine {
             "lookup" => {}
             "set_config" => self.set_config(args),
             "add_translation" | "suggestions" | "configure" | "focus" | "quit" => {
-                tracing::info!("steno command `{name}` has no counterpart in keymux, so it does nothing");
+                tracing::info!(
+                    "steno command `{name}` has no counterpart in keymux, so it does nothing"
+                );
             }
             other => warn!("unknown steno command `{other}`"),
         }
@@ -491,7 +499,9 @@ impl StenoEngine {
             match key.as_str() {
                 "start_attached" => options.start_attached = truth,
                 "start_capitalized" => options.start_capitalized = truth,
-                "space_placement" => options.spaces_after = value.eq_ignore_ascii_case("After Output"),
+                "space_placement" => {
+                    options.spaces_after = value.eq_ignore_ascii_case("After Output")
+                }
                 other => tracing::info!("steno option `{other}` is not one keymux has"),
             }
         }
@@ -763,8 +773,10 @@ mod tests {
             disable_typing_history: false,
             typing_layout: "us".to_string(),
         };
-        let history = crate::steno::journal::new_shared(crate::steno::formatter::Formatter::default());
-        let err = StenoEngine::from_config(&config, true, Path::new("."), None, &history, "test").unwrap_err();
+        let history =
+            crate::steno::journal::new_shared(crate::steno::formatter::Formatter::default());
+        let err = StenoEngine::from_config(&config, true, Path::new("."), None, &history, "test")
+            .unwrap_err();
         assert!(err.to_string().contains("unknown steno layout preset"));
     }
 
@@ -790,17 +802,29 @@ mod tests {
     fn backlogged_typing_that_a_later_output_deletes_is_never_sent() {
         let mut merged = Merged::default();
         merged.push(StenoOutput::Type("per".into()));
-        merged.push(StenoOutput::Retype { backspaces: 3, text: "perfect".into() });
-        merged.push(StenoOutput::Retype { backspaces: 2, text: String::new() });
+        merged.push(StenoOutput::Retype {
+            backspaces: 3,
+            text: "perfect".into(),
+        });
+        merged.push(StenoOutput::Retype {
+            backspaces: 2,
+            text: String::new(),
+        });
         assert_eq!(merged.finish(), Some(StenoOutput::Type("perfe".into())));
 
         let mut merged = Merged::default();
         merged.push(StenoOutput::Type("ab".into()));
-        merged.push(StenoOutput::Retype { backspaces: 5, text: "x".into() });
+        merged.push(StenoOutput::Retype {
+            backspaces: 5,
+            text: "x".into(),
+        });
         // Three of the five were already on screen
         assert_eq!(
             merged.finish(),
-            Some(StenoOutput::Retype { backspaces: 3, text: "x".into() })
+            Some(StenoOutput::Retype {
+                backspaces: 3,
+                text: "x".into()
+            })
         );
     }
 
@@ -887,7 +911,12 @@ mod tests {
         assert!(typed(engine.release(k)).contains("cat"));
     }
 
-    fn tap(engine: &mut StenoEngine, keys: [KeyCode; 3], down: Instant, up: Instant) -> Option<StenoOutput> {
+    fn tap(
+        engine: &mut StenoEngine,
+        keys: [KeyCode; 3],
+        down: Instant,
+        up: Instant,
+    ) -> Option<StenoOutput> {
         for key in keys {
             engine.press(key, down);
         }

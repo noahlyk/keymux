@@ -54,7 +54,10 @@ fn format_line(clock: &str, stroke: u32, description: &str, count: u32) -> Strin
     } else {
         String::new()
     };
-    format!("{clock}  {:<12} {times}{description}\n", render_stroke(stroke))
+    format!(
+        "{clock}  {:<12} {times}{description}\n",
+        render_stroke(stroke)
+    )
 }
 
 /// The tape file. A stroke repeated by holding its keys goes on the line it started, as a count,
@@ -189,7 +192,10 @@ pub fn describe_typed(dict: &super::dict::Dictionary, word: &str) -> String {
     }
     match super::shortest::shortest_outline(dict, bare) {
         Some(outline) if outline.len() <= MAX_SUGGESTED_STROKES => {
-            let strokes: Vec<String> = outline.iter().map(|&stroke| render_stroke(stroke)).collect();
+            let strokes: Vec<String> = outline
+                .iter()
+                .map(|&stroke| render_stroke(stroke))
+                .collect();
             format!("{shown}  could be {}", strokes.join("/"))
         }
         _ => shown,
@@ -300,7 +306,10 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2, "{text}");
-        assert!(lines[1].contains("KAT") && lines[1].ends_with("x5 \" cat\""), "{text}");
+        assert!(
+            lines[1].contains("KAT") && lines[1].ends_with("x5 \" cat\""),
+            "{text}"
+        );
         // A line written by someone else after it is left alone, and the repeat starts a new line
         append_note(&path, "typed", "\"hi\"");
         tape.repeat(kat, "\" cat\"");

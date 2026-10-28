@@ -191,7 +191,11 @@ fn refresh(key: &Key) {
     };
 
     // Parsing a large dictionary takes a moment, so it happens with nothing locked
-    let asked: Vec<String> = key.roots.iter().map(|root| root.display().to_string()).collect();
+    let asked: Vec<String> = key
+        .roots
+        .iter()
+        .map(|root| root.display().to_string())
+        .collect();
     let (dict, problems) =
         Dictionary::load_cached_reporting(&files, &sources, &key.cache_dir, &cache_name(&asked));
     if !problems.is_empty() && !first_time {
@@ -297,14 +301,20 @@ mod tests {
     }
 
     /// Keep receiving until a dictionary that satisfies `done` arrives.
-    fn until(updates: &Receiver<Arc<Dictionary>>, done: impl Fn(&Dictionary) -> bool) -> Arc<Dictionary> {
+    fn until(
+        updates: &Receiver<Arc<Dictionary>>,
+        done: impl Fn(&Dictionary) -> bool,
+    ) -> Arc<Dictionary> {
         let end = Instant::now() + Duration::from_secs(10);
         loop {
             let dict = next(updates);
             if done(&dict) {
                 return dict;
             }
-            assert!(Instant::now() < end, "never got the dictionary we waited for");
+            assert!(
+                Instant::now() < end,
+                "never got the dictionary we waited for"
+            );
         }
     }
 
@@ -405,10 +415,16 @@ mod tests {
         // Let the load and the cache write finish, then count what five idle seconds cost
         std::thread::sleep(Duration::from_secs(1));
         let (threads, before) = our_threads();
-        assert_eq!(threads, 2, "the worker and the inotify thread are both running");
+        assert_eq!(
+            threads, 2,
+            "the worker and the inotify thread are both running"
+        );
         std::thread::sleep(Duration::from_secs(5));
         let used = our_threads().1 - before;
-        assert_eq!(used, 0, "{used} ticks (1/100 s each) of CPU while nothing changed");
+        assert_eq!(
+            used, 0,
+            "{used} ticks (1/100 s each) of CPU while nothing changed"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -5,12 +5,12 @@ use crate::event_processor::actions::{
 };
 use crate::event_processor::layer_stack::LayerStack;
 use crate::keycode::KeyCode;
-use crate::steno::translate::StenoOutput;
+use crate::steno::journal::{self, SharedHistory};
 use crate::steno::lookup::{LookupInput, LookupKey};
 use crate::steno::overlay::OverlayHub;
-use crate::steno::journal::{self, SharedHistory};
 use crate::steno::setup::Cooldown;
-use crate::steno::typing::{Typist, TypingLayout};
+use crate::steno::translate::StenoOutput;
+use crate::steno::typing::{TypingLayout, Typist};
 use crate::steno::{self, StenoEngine};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -130,10 +130,15 @@ impl KeymapProcessor {
                 continue;
             };
             if layout.is_none() {
-                layout = Some(TypingLayout::parse(&steno.typing_layout).unwrap_or_else(|| {
-                    error!("steno typing_layout \"{}\" is not known, so us is used", steno.typing_layout);
-                    TypingLayout::Us
-                }));
+                layout = Some(
+                    TypingLayout::parse(&steno.typing_layout).unwrap_or_else(|| {
+                        error!(
+                            "steno typing_layout \"{}\" is not known, so us is used",
+                            steno.typing_layout
+                        );
+                        TypingLayout::Us
+                    }),
+                );
             }
             if typist.is_none() && !steno.disable_typing_history {
                 typist = layout.map(Typist::new);
@@ -312,7 +317,10 @@ impl KeymapProcessor {
             let path = path.clone();
             let dict = dict.clone();
             std::thread::spawn(move || {
-                let line = dict.map_or_else(|| format!("{word:?}"), |dict| steno::tape::describe_typed(&dict, &word));
+                let line = dict.map_or_else(
+                    || format!("{word:?}"),
+                    |dict| steno::tape::describe_typed(&dict, &word),
+                );
                 steno::tape::append_note(&path, "typed", &line);
             });
         }
@@ -443,7 +451,9 @@ impl KeymapProcessor {
     fn read_lookup_keys(&mut self, result: &ProcessResult) {
         let mut keys = Vec::new();
         match result {
-            ProcessResult::EmitKey(key, pressed) => keys.push(self.lookup_input.key(*key, *pressed)),
+            ProcessResult::EmitKey(key, pressed) => {
+                keys.push(self.lookup_input.key(*key, *pressed))
+            }
             ProcessResult::TapKeyPressRelease(key) => {
                 keys.push(self.lookup_input.key(*key, true));
                 keys.push(self.lookup_input.key(*key, false));

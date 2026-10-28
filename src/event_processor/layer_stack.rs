@@ -32,7 +32,10 @@ impl LayerStack {
             if stack.layer_configs.contains_key(layer) {
                 stack.activate_layer(layer.clone());
             } else {
-                warn!("default_layer \"{}\" is not defined in layers; using base", layer.0);
+                warn!(
+                    "default_layer \"{}\" is not defined in layers; using base",
+                    layer.0
+                );
             }
         }
         stack
@@ -159,10 +162,9 @@ mod tests {
 
     #[test]
     fn layers_that_do_not_say_have_priority_1_and_the_newest_is_on_top() {
-        let mut stack = LayerStack::new(&ron::from_str(
-            r#"(layers: { "a": (kind: Remap), "b": (kind: Remap) })"#,
-        )
-        .unwrap());
+        let mut stack = LayerStack::new(
+            &ron::from_str(r#"(layers: { "a": (kind: Remap), "b": (kind: Remap) })"#).unwrap(),
+        );
         stack.activate_layer(Layer::new("a"));
         stack.activate_layer(Layer::new("b"));
         assert_eq!(names(&stack), ["base", "a", "b"]);

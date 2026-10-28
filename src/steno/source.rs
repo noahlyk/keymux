@@ -122,7 +122,8 @@ fn is_dictionary_file(path: &Path) -> bool {
     };
     kind("json")
         || kind("rtf")
-        || path.file_name().and_then(|name| name.to_str()) == Some(super::orthography::WORDLIST_FILE)
+        || path.file_name().and_then(|name| name.to_str())
+            == Some(super::orthography::WORDLIST_FILE)
 }
 
 #[cfg(test)]
@@ -151,7 +152,10 @@ mod tests {
 
     #[test]
     fn plain_files_come_before_plain_folders_and_each_group_is_alphabetical() {
-        let dir = tree("order", &["b.json", "A.json", "lapwing/x.json", "zeta/y.json"]);
+        let dir = tree(
+            "order",
+            &["b.json", "A.json", "lapwing/x.json", "zeta/y.json"],
+        );
         let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
         assert_eq!(
             names(&dir, &found),
@@ -191,15 +195,24 @@ mod tests {
 
     #[test]
     fn numbers_compare_as_numbers_not_as_text() {
-        let dir = tree("natural", &["10-b.json", "2-a.json", "100-c.json", "1-z.json"]);
+        let dir = tree(
+            "natural",
+            &["10-b.json", "2-a.json", "100-c.json", "1-z.json"],
+        );
         let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
-        assert_eq!(names(&dir, &found), ["1-z.json", "2-a.json", "10-b.json", "100-c.json"]);
+        assert_eq!(
+            names(&dir, &found),
+            ["1-z.json", "2-a.json", "10-b.json", "100-c.json"]
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn the_same_number_goes_alphabetically_files_and_folders_together() {
-        let dir = tree("same-number", &["10-b.json", "10-A.json", "010-c.json", "10/x.json"]);
+        let dir = tree(
+            "same-number",
+            &["10-b.json", "10-A.json", "010-c.json", "10/x.json"],
+        );
         let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
         // 10 and 010 are the same number, so the rest of the name decides, ignoring case. A
         // folder called just "10" has nothing after the number, so it is first.
@@ -243,7 +256,10 @@ mod tests {
 
     #[test]
     fn the_only_numbered_folder_beats_everything_plain() {
-        let dir = tree("only-numbered", &["00-lapwing/base.json", "a.json", "b/c.json", "z.json"]);
+        let dir = tree(
+            "only-numbered",
+            &["00-lapwing/base.json", "a.json", "b/c.json", "z.json"],
+        );
         let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
         assert_eq!(
             names(&dir, &found),
@@ -254,7 +270,10 @@ mod tests {
 
     #[test]
     fn digits_that_are_part_of_a_word_are_not_a_number() {
-        let dir = tree("word", &["3dprinting.json", "7.json", "a.json", "2024-notes.json"]);
+        let dir = tree(
+            "word",
+            &["3dprinting.json", "7.json", "a.json", "2024-notes.json"],
+        );
         let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
         // 7 and 2024 are numbers, 3dprinting is just a plain name
         assert_eq!(
@@ -268,7 +287,10 @@ mod tests {
     fn names_the_same_but_for_case_are_ordered_by_the_exact_name_not_by_the_disk() {
         let dir = tree("case", &["b.json", "B.json", "a.json", "A.json"]);
         let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
-        assert_eq!(names(&dir, &found), ["A.json", "a.json", "B.json", "b.json"]);
+        assert_eq!(
+            names(&dir, &found),
+            ["A.json", "a.json", "B.json", "b.json"]
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -315,7 +337,10 @@ mod tests {
             ],
         );
         let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
-        assert_eq!(names(&dir, &found), ["a.json", "american_english_words.txt", "d.RTF"]);
+        assert_eq!(
+            names(&dir, &found),
+            ["a.json", "american_english_words.txt", "d.RTF"]
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

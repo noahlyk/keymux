@@ -32,9 +32,11 @@ pub fn shortest_outline(dict: &Dictionary, word: &str) -> Option<Vec<u32>> {
     let whole = whole_word_outline(dict, &target);
     let spelled = spelled_outline(&letter_strokes(dict), &target);
     match (whole, spelled) {
-        (Some(word_outline), Some(letters)) => {
-            Some(if letters.len() < word_outline.len() { letters } else { word_outline })
-        }
+        (Some(word_outline), Some(letters)) => Some(if letters.len() < word_outline.len() {
+            letters
+        } else {
+            word_outline
+        }),
         (word_outline, letters) => word_outline.or(letters),
     }
 }
@@ -61,13 +63,20 @@ fn whole_word_outline(dict: &Dictionary, target: &[char]) -> Option<Vec<u32>> {
         .filter(|(_, translation)| translation.chars().eq(target.iter().copied()))
         .map(|(strokes, _)| strokes.clone())
         .min_by_key(|strokes| {
-            (strokes.len(), strokes.iter().map(|s| s.count_ones()).sum::<u32>(), strokes.clone())
+            (
+                strokes.len(),
+                strokes.iter().map(|s| s.count_ones()).sum::<u32>(),
+                strokes.clone(),
+            )
         })
 }
 
 /// Keep `candidate` if the slot is empty or it uses fewer strokes.
 fn relax(slot: &mut Option<Vec<u32>>, candidate: Vec<u32>) {
-    if slot.as_ref().is_none_or(|best| candidate.len() < best.len()) {
+    if slot
+        .as_ref()
+        .is_none_or(|best| candidate.len() < best.len())
+    {
         *slot = Some(candidate);
     }
 }
@@ -79,7 +88,10 @@ fn letter_strokes(dict: &Dictionary) -> HashMap<char, u32> {
     for (strokes, translation) in dict.iter() {
         // `{>}` only keeps the letter lowercase, which it already is
         let body = translation.strip_prefix("{>}").unwrap_or(translation);
-        let Some(letters) = body.strip_prefix("{&").and_then(|rest| rest.strip_suffix('}')) else {
+        let Some(letters) = body
+            .strip_prefix("{&")
+            .and_then(|rest| rest.strip_suffix('}'))
+        else {
             continue;
         };
         let [stroke] = strokes.as_slice() else {
@@ -87,7 +99,9 @@ fn letter_strokes(dict: &Dictionary) -> HashMap<char, u32> {
         };
         let mut chars = letters.chars();
         if let (Some(letter), None) = (chars.next(), chars.next()) {
-            map.entry(letter).and_modify(|s| *s = (*s).min(*stroke)).or_insert(*stroke);
+            map.entry(letter)
+                .and_modify(|s| *s = (*s).min(*stroke))
+                .or_insert(*stroke);
         }
     }
     map
@@ -108,14 +122,20 @@ mod tests {
     fn nvim_is_four_letter_strokes() {
         let dict = dict(r#"{"TPH": "{&n}", "SR*": "{&v}", "SKW*": "{&i}", "PH*": "{&m}"}"#);
         let outline = shortest_outline(&dict, "nvim").unwrap();
-        let expected: Vec<u32> = ["TPH", "SR*", "SKW*", "PH*"].iter().map(|s| parse_stroke(s).unwrap()).collect();
+        let expected: Vec<u32> = ["TPH", "SR*", "SKW*", "PH*"]
+            .iter()
+            .map(|s| parse_stroke(s).unwrap())
+            .collect();
         assert_eq!(outline, expected);
     }
 
     #[test]
     fn a_word_with_a_direct_entry_uses_it() {
         let dict = dict(r#"{"KAT": "cat", "TPH": "{&n}", "SRA": "{&v}"}"#);
-        assert_eq!(shortest_outline(&dict, "cat"), Some(vec![parse_stroke("KAT").unwrap()]));
+        assert_eq!(
+            shortest_outline(&dict, "cat"),
+            Some(vec![parse_stroke("KAT").unwrap()])
+        );
     }
 
     #[test]
