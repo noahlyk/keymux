@@ -160,7 +160,8 @@ impl Overlay {
             && self.latest.chord == snapshot.chord
             && self.latest.held == snapshot.held
             && self.latest.lookup == snapshot.lookup
-            && self.latest.tape.back().map(|e| e.seq) == snapshot.tape.back().map(|e| e.seq);
+            && self.latest.tape.back().map(|e| (e.seq, e.repeats))
+                == snapshot.tape.back().map(|e| (e.seq, e.repeats));
         self.latest = snapshot;
         match (visible, self.surface.is_some()) {
             (true, false) => self.show(),

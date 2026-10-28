@@ -710,7 +710,7 @@ that light up as you press them, coloured by part of the keyboard: green for the
 yellow for the vowels, red for the right hand, light blue for `*` and `#`. Keys you've let go
 of but that are still part of the stroke are dimmer. Each finished stroke lands on the tape
 with what it typed: the steno letters tightly set in their own columns, and the word in larger
-white text. Every tape line is at full strength; only the top three fade out. There is no
+white text. A stroke you hold down to repeat stays on one line with a count (`x12`) instead of filling the tape, in `keymux steno tape` too. Every tape line is at full strength; only the top three fade out. There is no
 background by default, only the keys and text (the text has a soft shadow to read over any
 wallpaper; set `background` for a panel if your wallpaper is very busy), and it never takes
 clicks or focus. It costs next to nothing: it only redraws when a key or the tape changes.

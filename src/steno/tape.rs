@@ -4,7 +4,7 @@
 use super::layout::render_stroke;
 use super::translate::{OutputOp, StenoOutput};
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
@@ -47,28 +47,112 @@ pub fn describe(output: Option<&StenoOutput>, unmatched: bool) -> String {
     }
 }
 
-/// Add a line for `stroke`. Failures are logged, never fatal: a broken tape
-/// shouldn't stop typing.
-pub fn append(path: &Path, stroke: u32, description: &str) {
-    let line = format!(
-        "{}  {:<12} {}\n",
-        clock(),
-        render_stroke(stroke),
-        description
-    );
-    let result = path
-        .parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .and_then(|mut file| file.write_all(line.as_bytes()))
-        });
-    if let Err(e) = result {
-        warn!("steno tape {}: {e}", path.display());
+/// One tape line. A stroke that was repeated shows how many times, as `x3`, after the stroke.
+fn format_line(clock: &str, stroke: u32, description: &str, count: u32) -> String {
+    let times = if count > 1 {
+        format!("x{count} ")
+    } else {
+        String::new()
+    };
+    format!("{clock}  {:<12} {times}{description}\n", render_stroke(stroke))
+}
+
+/// The tape file. A stroke repeated by holding its keys goes on the line it started, as a count,
+/// instead of a new line for each repeat.
+#[derive(Debug)]
+pub struct Tape {
+    path: PathBuf,
+    last: Option<Written>,
+}
+
+/// The last stroke line this tape wrote, so a repeat can rewrite it.
+#[derive(Debug)]
+struct Written {
+    stroke: u32,
+    /// Where the line starts in the file
+    start: u64,
+    clock: String,
+    description: String,
+    count: u32,
+}
+
+impl Tape {
+    #[must_use]
+    pub const fn new(path: PathBuf) -> Self {
+        Self { path, last: None }
     }
+
+    /// Add a line for `stroke`. Failures are logged, never fatal: a broken tape shouldn't stop
+    /// typing.
+    pub fn stroke(&mut self, stroke: u32, description: &str) {
+        let clock = clock();
+        let line = format_line(&clock, stroke, description, 1);
+        self.last = self.append(&line).map(|start| Written {
+            stroke,
+            start,
+            clock,
+            description: description.to_owned(),
+            count: 1,
+        });
+    }
+
+    /// `stroke` was typed again by holding it. It counts on the line of the stroke before it, if
+    /// that is still the last thing on the tape.
+    pub fn repeat(&mut self, stroke: u32, description: &str) {
+        if let Some(last) = self.last.as_mut().filter(|last| last.stroke == stroke) {
+            let old = format_line(&last.clock, stroke, &last.description, last.count);
+            let new = format_line(&last.clock, stroke, &last.description, last.count + 1);
+            match rewrite_tail(&self.path, last.start, &old, &new) {
+                Ok(true) => {
+                    last.count += 1;
+                    return;
+                }
+                // Something else wrote after it: this repeat starts a line of its own
+                Ok(false) => {}
+                Err(e) => warn!("steno tape {}: {e}", self.path.display()),
+            }
+        }
+        self.stroke(stroke, description);
+    }
+
+    /// Append `line`, and say where it starts.
+    fn append(&self, line: &str) -> Option<u64> {
+        let result = self
+            .path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| {
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)?;
+                let start = file.metadata()?.len();
+                file.write_all(line.as_bytes())?;
+                Ok(start)
+            });
+        match result {
+            Ok(start) => Some(start),
+            Err(e) => {
+                warn!("steno tape {}: {e}", self.path.display());
+                None
+            }
+        }
+    }
+}
+
+/// Replace the end of the file, from `start`, with `new` if it is exactly `old`.
+fn rewrite_tail(path: &Path, start: u64, old: &str, new: &str) -> std::io::Result<bool> {
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    file.seek(SeekFrom::Start(start))?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail)?;
+    if tail != old.as_bytes() {
+        return Ok(false);
+    }
+    file.set_len(start)?;
+    file.seek(SeekFrom::Start(start))?;
+    file.write_all(new.as_bytes())?;
+    Ok(true)
 }
 
 /// Add a line that isn't a stroke, such as a word typed by hand: `kind` takes the stroke's place.
@@ -189,13 +273,40 @@ mod tests {
         let path = dir.join("tape.txt");
         let _ = std::fs::remove_dir_all(&dir);
         let kat = crate::steno::layout::parse_stroke("KAT").unwrap();
-        append(&path, kat, "\" cat\"");
-        append(&path, kat, "?");
+        let mut tape = Tape::new(path.clone());
+        tape.stroke(kat, "\" cat\"");
+        tape.stroke(kat, "?");
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text.lines().count(), 2);
         let first = text.lines().next().unwrap();
         assert!(first.contains("KAT"));
         assert!(first.ends_with("\" cat\""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repeats_count_on_the_line_of_the_stroke_instead_of_adding_lines() {
+        let dir = std::env::temp_dir().join(format!("keymux-tape-repeat-{}", std::process::id()));
+        let path = dir.join("tape.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+        let kat = crate::steno::layout::parse_stroke("KAT").unwrap();
+        let the = crate::steno::layout::parse_stroke("-T").unwrap();
+        let mut tape = Tape::new(path.clone());
+        tape.stroke(the, "\" the\"");
+        tape.stroke(kat, "\" cat\"");
+        for _ in 0..4 {
+            tape.repeat(kat, "\" cat\"");
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert!(lines[1].contains("KAT") && lines[1].ends_with("x5 \" cat\""), "{text}");
+        // A line written by someone else after it is left alone, and the repeat starts a new line
+        append_note(&path, "typed", "\"hi\"");
+        tape.repeat(kat, "\" cat\"");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 4, "{text}");
+        assert!(text.lines().nth(1).unwrap().ends_with("x5 \" cat\""));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

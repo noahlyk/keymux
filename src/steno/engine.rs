@@ -72,7 +72,7 @@ pub struct StenoEngine {
     /// Strokes finished before the dictionaries arrived. Translated once they do.
     backlog: Vec<u32>,
     /// Where each stroke is recorded. `None` when the home directory is unknown.
-    tape: Option<PathBuf>,
+    tape: Option<tape::Tape>,
     pub disabled_in_game_mode: bool,
     /// Where strokes are published for the on-screen overlay
     hub: &'static OverlayHub,
@@ -155,7 +155,7 @@ impl StenoEngine {
             updates: Some(updates),
             loading: true,
             backlog: Vec::new(),
-            tape: home.map(tape::default_path),
+            tape: home.map(|home| tape::Tape::new(tape::default_path(home))),
             disabled_in_game_mode,
             hub: OverlayHub::global(),
             lookup: None,
@@ -313,7 +313,7 @@ impl StenoEngine {
             return None;
         };
         self.last = Some((stroke, now));
-        self.on_stroke(stroke)
+        self.on_stroke(stroke, false)
     }
 
     /// A key came up with others still down. A stroke whose dictionary entry carries
@@ -340,7 +340,7 @@ impl StenoEngine {
             self.arming = None;
             self.repeating = None;
             self.last = Some((stroke, now));
-            return self.on_stroke(stroke);
+            return self.on_stroke(stroke, false);
         }
         self.repeat_tick(now)
     }
@@ -363,7 +363,7 @@ impl StenoEngine {
                     next: now + self.timing.repeat_rate,
                 });
                 self.last = Some((stroke, now));
-                return self.on_stroke(stroke);
+                return self.on_stroke(stroke, true);
             }
         }
         let repeating = self.repeating.as_mut()?;
@@ -373,7 +373,7 @@ impl StenoEngine {
         repeating.next = now + self.timing.repeat_rate;
         let stroke = repeating.stroke;
         self.last = Some((stroke, now));
-        self.on_stroke(stroke)
+        self.on_stroke(stroke, true)
     }
 
     /// Swap in a dictionary when one arrives: the first, after which the strokes queued while
@@ -409,37 +409,42 @@ impl StenoEngine {
         }
         let mut merged = Merged::default();
         for stroke in std::mem::take(&mut self.backlog) {
-            if let Some(output) = self.translate(stroke) {
+            if let Some(output) = self.translate(stroke, false) {
                 merged.push(output);
             }
         }
         merged.finish()
     }
 
-    fn on_stroke(&mut self, stroke: u32) -> Option<StenoOutput> {
-        self.type_stroke(stroke)
-    }
-
-    /// Translate a stroke, or queue it until the dictionaries have loaded.
-    fn type_stroke(&mut self, stroke: u32) -> Option<StenoOutput> {
+    /// A stroke is done. `repeated` is a repeat of the stroke before it, from holding the keys.
+    fn on_stroke(&mut self, stroke: u32, repeated: bool) -> Option<StenoOutput> {
         if self.loading {
             self.backlog.push(stroke);
             self.publish_keys();
             return None;
         }
-        self.translate(stroke)
+        self.translate(stroke, repeated)
     }
 
-    fn translate(&mut self, stroke: u32) -> Option<StenoOutput> {
+    /// Translate a stroke. A repeat counts on the stroke's tape line instead of adding lines.
+    fn translate(&mut self, stroke: u32, repeated: bool) -> Option<StenoOutput> {
         let output = self.translator.stroke(stroke);
         let output = self.run_commands(output);
         let unmatched = self.translator.was_unmatched();
         let description = tape::describe(output.as_ref(), unmatched);
-        if let Some(path) = &self.tape {
-            tape::append(path, stroke, &description);
+        if let Some(tape) = &mut self.tape {
+            if repeated {
+                tape.repeat(stroke, &description);
+            } else {
+                tape.stroke(stroke, &description);
+            }
         }
         // Same description as the tape file, so the overlay and `keymux steno tape` agree
-        self.hub.push_stroke(stroke, description, unmatched);
+        if repeated {
+            self.hub.push_repeat(stroke, description, unmatched);
+        } else {
+            self.hub.push_stroke(stroke, description, unmatched);
+        }
         output
     }
 
@@ -916,6 +921,35 @@ mod tests {
             assert_eq!(engine.release_at(key, second + ms(60_010)), None);
         }
         assert_eq!(engine.tick(second + ms(60_100)), None);
+    }
+
+    #[test]
+    fn a_held_repeat_is_one_tape_line_with_a_count() {
+        let mut engine = engine_with_dict(r#"{"KAT": "cat"}"#);
+        let hub: &'static OverlayHub = Box::leak(Box::default());
+        engine.hub = hub;
+        let keys = kat_keys(&engine);
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        tap(&mut engine, keys, t0, t0 + ms(50));
+        let second = t0 + ms(150);
+        for key in keys {
+            engine.press(key, second);
+        }
+        // The first repeat once held long enough, then three more
+        for at in [310, 360, 400, 440] {
+            assert!(typed(engine.tick(second + ms(at))).contains("cat"));
+        }
+        // One line for the tap and all its repeats, which counts them
+        let tape = hub.snapshot().tape;
+        assert_eq!(tape.len(), 1, "{tape:?}");
+        assert_eq!(tape[0].repeats, 4);
+        // Letting go ends it: tapping the stroke again is a line of its own
+        for key in keys {
+            engine.release_at(key, second + ms(450));
+        }
+        tap(&mut engine, keys, second + ms(1000), second + ms(1050));
+        assert_eq!(hub.snapshot().tape.len(), 2);
     }
 
     #[test]

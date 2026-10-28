@@ -557,11 +557,16 @@ pub fn tail_tape(home: &Path, lines: usize, follow: bool) -> Result<()> {
     for line in &all[all.len().saturating_sub(lines)..] {
         println!("{line}");
     }
-    let mut offset = existing.len() as u64;
     if !follow {
         return Ok(());
     }
 
+    // A stroke that repeats rewrites its own line, so follow from the start of the last line
+    // shown, not the end of the file
+    let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let trimmed = existing.trim_end_matches('\n');
+    let mut line_start = trimmed.rfind('\n').map_or(0, |i| i + 1);
+    let mut shown = trimmed[line_start..].to_owned();
     let mut stdout = std::io::stdout();
     loop {
         std::thread::sleep(Duration::from_millis(200));
@@ -569,19 +574,39 @@ pub fn tail_tape(home: &Path, lines: usize, follow: bool) -> Result<()> {
             continue;
         };
         let len = file.metadata().map_or(0, |m| m.len());
-        if len < offset {
+        if len < line_start as u64 {
             // The tape was cleared or replaced: start over
-            offset = 0;
+            line_start = 0;
+            shown.clear();
         }
-        if len == offset {
+        file.seek(SeekFrom::Start(line_start as u64))?;
+        let mut tail = String::new();
+        file.read_to_string(&mut tail)?;
+        // Only whole lines: the next one may still be being written
+        let Some(end) = tail.rfind('\n') else {
             continue;
+        };
+        let complete = &tail[..=end];
+        let first = format!("{shown}\n");
+        let new = if shown.is_empty() {
+            complete
+        } else if let Some(rest) = complete.strip_prefix(&first) {
+            rest
+        } else if tty {
+            // The line shown last was rewritten, such as by a stroke that repeated: draw it again
+            print!("\x1b[1A\r\x1b[2K");
+            complete
+        } else {
+            &complete[complete.find('\n').map_or(0, |i| i + 1)..]
+        };
+        if !new.is_empty() {
+            print!("{new}");
+            stdout.flush()?;
         }
-        file.seek(SeekFrom::Start(offset))?;
-        let mut new = String::new();
-        file.read_to_string(&mut new)?;
-        print!("{new}");
-        stdout.flush()?;
-        offset = len;
+        let whole = complete.trim_end_matches('\n');
+        let last = whole.rfind('\n').map_or(0, |i| i + 1);
+        line_start += last;
+        shown = whole[last..].to_owned();
     }
 }
 
