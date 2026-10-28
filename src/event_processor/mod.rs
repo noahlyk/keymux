@@ -82,6 +82,7 @@ fn run_event_processor(
     // Create virtual uinput device
     let mut virtual_device = create_virtual_device(device, keyboard_name)?;
     info!("Created virtual device for: {}", keyboard_name);
+    let mut pacer = Pacer::default();
 
     // SAFETY: Release all keys immediately on startup to prevent stuck keys
     // This fixes the hotplug bug where keys remain held after reconnection
@@ -207,11 +208,11 @@ fn run_event_processor(
                                     virtual_device.emit(&[output_event])?;
                                 }
                                 ProcessResult::Retype { backspaces, text } => {
-                                    retype(&mut virtual_device, backspaces, &text)?;
+                                    retype(&mut virtual_device, &mut pacer, backspaces, &text)?;
                                 }
                                 ProcessResult::TypeString(text, add_enter) => {
                                     // Type out the string character by character
-                                    type_string(&mut virtual_device, &text, add_enter)?;
+                                    type_string(&mut virtual_device, &mut pacer, &text, add_enter)?;
                                 }
                                 ProcessResult::TapKeyPressRelease(tap_key) => {
                                     // Emit tap key press and release
@@ -279,10 +280,10 @@ fn run_event_processor(
                 // A stroke held past its timeout, or a held prefix gone idle, is typed now
                 match keymap.check_steno_timeouts() {
                     ProcResult::TypeString(text, add_enter) => {
-                        type_string(&mut virtual_device, &text, add_enter)?;
+                        type_string(&mut virtual_device, &mut pacer, &text, add_enter)?;
                     }
                     ProcResult::Retype { backspaces, text } => {
-                        retype(&mut virtual_device, backspaces, &text)?;
+                        retype(&mut virtual_device, &mut pacer, backspaces, &text)?;
                     }
                     _ => {}
                 }
@@ -507,14 +508,69 @@ fn release_all_keys(virtual_device: &mut VirtualDevice, keymap: &KeymapProcessor
     let _ = virtual_device.emit(&[syn_event]);
 }
 
-/// Keystrokes sent in one write. A word or a short correction goes out as a single burst
-/// with no sleep, so it appears at once. Only output longer than this is split up.
-const KEYSTROKES_PER_WRITE: usize = 16;
+/// The most input events allowed unread at once. The kernel keeps 63 per reader of a
+/// keyboard (measured with a test device), and when one more arrives it throws away
+/// everything queued for that reader, so letters vanish from the middle of a word. A keystroke
+/// is 4 events, so this is 12 of them, with room left for keys sent elsewhere (modifiers).
+const SAFE_EVENTS: usize = 48;
 
-/// Pause between writes of a long output, so the consuming app's input queue can keep up
-/// instead of dropping or coalescing events and truncating the text. Never applied
-/// after the last write, nor to output that fits in one.
-const WRITE_GAP: std::time::Duration = std::time::Duration::from_millis(1);
+/// How long an event counts as possibly unread. An app or compositor busy for longer than
+/// this can still lose events, but nothing sent at once ever can: up to `SAFE_EVENTS` go out
+/// together, whatever the delay.
+const UNREAD_WINDOW: std::time::Duration = std::time::Duration::from_millis(15);
+
+/// Keeps what is sent to one virtual keyboard from outrunning whoever reads it. Output that fits
+/// goes out at once. Only what doesn't fit waits, just until earlier events are old enough
+/// to have been read.
+#[derive(Default)]
+struct Pacer {
+    /// When events were sent, and how many, for the last `UNREAD_WINDOW`
+    sent: std::collections::VecDeque<(std::time::Instant, usize)>,
+}
+
+impl Pacer {
+    /// Plan when to send keystrokes of `sizes` events each, starting at `now`. Each part is
+    /// the time to send and the keystrokes to send together. A keystroke is never split
+    /// across two parts, so shift is never left held between them.
+    fn schedule(
+        &mut self,
+        now: std::time::Instant,
+        sizes: &[usize],
+    ) -> Vec<(std::time::Instant, std::ops::Range<usize>)> {
+        let mut parts = Vec::new();
+        // Never before something already planned, so output stays in order
+        let mut at = self.sent.back().map_or(now, |&(time, _)| time.max(now));
+        let mut next = 0;
+        while next < sizes.len() {
+            while self
+                .sent
+                .front()
+                .is_some_and(|&(time, _)| time + UNREAD_WINDOW <= at)
+            {
+                self.sent.pop_front();
+            }
+            let in_flight: usize = self.sent.iter().map(|&(_, events)| events).sum();
+            let (mut end, mut used) = (next, 0);
+            while end < sizes.len() && in_flight + used + sizes[end] <= SAFE_EVENTS {
+                used += sizes[end];
+                end += 1;
+            }
+            if end == next {
+                if let Some(&(time, _)) = self.sent.front() {
+                    // Nothing fits yet: wait for the oldest events to age out
+                    at = time + UNREAD_WINDOW;
+                    continue;
+                }
+                // A keystroke bigger than the whole budget still has to go
+                (end, used) = (next + 1, sizes[next]);
+            }
+            parts.push((at, next..end));
+            self.sent.push_back((at, used));
+            next = end;
+        }
+        parts
+    }
+}
 
 /// One key press and release, each followed by a SYN_REPORT, with shift held around it if needed
 fn keystroke(key: Key, shift: bool) -> Vec<InputEvent> {
@@ -543,28 +599,18 @@ fn keystroke(key: Key, shift: bool) -> Vec<InputEvent> {
     events
 }
 
-/// Group keystrokes into writes of at most `KEYSTROKES_PER_WRITE`. A keystroke is never
-/// split across two writes, so shift is never left held between them.
-fn into_writes(keystrokes: Vec<Vec<InputEvent>>) -> Vec<Vec<InputEvent>> {
-    keystrokes
-        .chunks(KEYSTROKES_PER_WRITE)
-        .map(|group| group.concat())
-        .collect()
-}
-
-/// Emit keystrokes in order: one write if they fit, otherwise several with a short gap
-/// between them.
+/// Emit keystrokes in order, as the pacer allows
 fn emit_keystrokes(
     virtual_device: &mut VirtualDevice,
-    keystrokes: Vec<Vec<InputEvent>>,
+    pacer: &mut Pacer,
+    keystrokes: &[Vec<InputEvent>],
 ) -> Result<()> {
-    let writes = into_writes(keystrokes);
-    let last = writes.len().saturating_sub(1);
-    for (i, events) in writes.iter().enumerate() {
-        virtual_device.emit(events)?;
-        if i < last {
-            std::thread::sleep(WRITE_GAP);
+    let sizes: Vec<usize> = keystrokes.iter().map(Vec::len).collect();
+    for (at, range) in pacer.schedule(std::time::Instant::now(), &sizes) {
+        if let Some(wait) = at.checked_duration_since(std::time::Instant::now()) {
+            std::thread::sleep(wait);
         }
+        virtual_device.emit(&keystrokes[range].concat())?;
     }
     Ok(())
 }
@@ -580,13 +626,23 @@ fn retype_keystrokes(backspaces: usize, text: &str) -> Vec<Vec<InputEvent>> {
 }
 
 /// Delete `backspaces` characters before the cursor, then type `text`
-fn retype(virtual_device: &mut VirtualDevice, backspaces: usize, text: &str) -> Result<()> {
-    emit_keystrokes(virtual_device, retype_keystrokes(backspaces, text))
+fn retype(
+    virtual_device: &mut VirtualDevice,
+    pacer: &mut Pacer,
+    backspaces: usize,
+    text: &str,
+) -> Result<()> {
+    emit_keystrokes(virtual_device, pacer, &retype_keystrokes(backspaces, text))
 }
 
 /// Type a string by emitting key events for each character
-fn type_string(virtual_device: &mut VirtualDevice, text: &str, _add_enter: bool) -> Result<()> {
-    retype(virtual_device, 0, text)
+fn type_string(
+    virtual_device: &mut VirtualDevice,
+    pacer: &mut Pacer,
+    text: &str,
+    _add_enter: bool,
+) -> Result<()> {
+    retype(virtual_device, pacer, 0, text)
 }
 
 /// Convert a character to an evdev Key and whether shift is needed

@@ -844,35 +844,105 @@ fn key_events(writes: &[Vec<evdev::InputEvent>]) -> Vec<(u16, i32)> {
         .collect()
 }
 
-#[test]
-fn a_word_goes_out_as_one_write_with_nothing_to_wait_for() {
-    let writes = super::into_writes(super::retype_keystrokes(0, "about"));
-    assert_eq!(writes.len(), 1);
-    let writes = super::into_writes(super::retype_keystrokes(3, "increase"));
-    assert_eq!(writes.len(), 1);
+fn sizes(backspaces: usize, text: &str) -> Vec<usize> {
+    super::retype_keystrokes(backspaces, text)
+        .iter()
+        .map(Vec::len)
+        .collect()
 }
 
 #[test]
-fn a_long_word_is_split_into_a_few_writes_not_one_per_letter() {
+fn a_word_goes_out_at_once_with_nothing_to_wait_for() {
+    let now = std::time::Instant::now();
+    // 12 keystrokes is the most that fits, and still goes out together
+    for (backspaces, text) in [(0, "about"), (3, "increase"), (0, "abcdefghijkl")] {
+        let parts = super::Pacer::default().schedule(now, &sizes(backspaces, text));
+        assert_eq!(parts.len(), 1, "{text}");
+        assert_eq!(parts[0].0, now, "{text}");
+    }
+}
+
+#[test]
+fn a_long_word_waits_only_as_long_as_it_must() {
+    let now = std::time::Instant::now();
     let word = "supercalifragilisticexpialidocious";
-    let writes = super::into_writes(super::retype_keystrokes(0, word));
-    assert_eq!(writes.len(), 3);
-    assert_eq!(key_events(&writes).len(), word.len() * 2);
+    let parts = super::Pacer::default().schedule(now, &sizes(0, word));
+    // 12 letters now, 12 once those have been read, then the last 10
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0].0, now);
+    assert_eq!(parts[2].0 - now, super::UNREAD_WINDOW * 2);
+    assert_eq!(parts.iter().map(|(_, r)| r.len()).sum::<usize>(), word.len());
 }
 
 #[test]
-fn splitting_never_changes_the_keys_or_their_order() {
-    let text = "Hello, World";
-    let split = key_events(&super::into_writes(super::retype_keystrokes(30, text)));
-    let whole = key_events(&[super::retype_keystrokes(30, text).concat()]);
-    assert_eq!(split, whole);
+fn nothing_in_flight_ever_goes_over_the_budget() {
+    let now = std::time::Instant::now();
+    let mut pacer = super::Pacer::default();
+    // Words arriving 1 ms apart, long and short, some with shifted letters and backspaces
+    let mut all = Vec::new();
+    for (i, text) in ["Hello World", "supercalifragilisticexpialidocious", "ab", "XYZXYZXYZ"]
+        .iter()
+        .cycle()
+        .take(40)
+        .enumerate()
+    {
+        let sizes = sizes(i % 7, text);
+        let at = now + std::time::Duration::from_millis(i as u64);
+        for (time, range) in pacer.schedule(at, &sizes) {
+            all.push((time, sizes[range].iter().sum::<usize>()));
+        }
+    }
+    for &(time, _) in &all {
+        let in_window: usize = all
+            .iter()
+            .filter(|&&(t, _)| t <= time && time < t + super::UNREAD_WINDOW)
+            .map(|&(_, events)| events)
+            .sum();
+        assert!(in_window <= super::SAFE_EVENTS, "{in_window} events in one window");
+    }
 }
 
 #[test]
-fn shift_is_never_held_across_two_writes() {
-    let text = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    for write in super::into_writes(super::retype_keystrokes(5, text)) {
-        let shifts: Vec<i32> = key_events(&[write])
+fn a_second_word_straight_after_waits_for_the_first_to_be_read() {
+    let now = std::time::Instant::now();
+    let mut pacer = super::Pacer::default();
+    pacer.schedule(now, &sizes(0, "abcdefghijkl"));
+    let later = now + std::time::Duration::from_millis(1);
+    let parts = pacer.schedule(later, &sizes(0, "next"));
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0].0, now + super::UNREAD_WINDOW);
+}
+
+#[test]
+fn after_a_quiet_moment_a_full_burst_goes_out_at_once_again() {
+    let now = std::time::Instant::now();
+    let mut pacer = super::Pacer::default();
+    pacer.schedule(now, &sizes(0, "abcdefghijkl"));
+    let later = now + super::UNREAD_WINDOW;
+    let parts = pacer.schedule(later, &sizes(0, "abcdefghijkl"));
+    assert_eq!(parts, vec![(later, 0..12)]);
+}
+
+#[test]
+fn pacing_never_changes_the_keys_or_their_order() {
+    let keystrokes = super::retype_keystrokes(30, "Hello, World");
+    let sizes: Vec<usize> = keystrokes.iter().map(Vec::len).collect();
+    let parts = super::Pacer::default().schedule(std::time::Instant::now(), &sizes);
+    let paced: Vec<Vec<evdev::InputEvent>> = parts
+        .iter()
+        .map(|(_, range)| keystrokes[range.clone()].concat())
+        .collect();
+    assert_eq!(key_events(&paced), key_events(&[keystrokes.concat()]));
+}
+
+#[test]
+fn shift_is_never_held_across_two_parts() {
+    let keystrokes = super::retype_keystrokes(5, "ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+    let sizes: Vec<usize> = keystrokes.iter().map(Vec::len).collect();
+    let parts = super::Pacer::default().schedule(std::time::Instant::now(), &sizes);
+    assert!(parts.len() > 1);
+    for (_, range) in parts {
+        let shifts: Vec<i32> = key_events(&[keystrokes[range].concat()])
             .into_iter()
             .filter(|&(code, _)| code == evdev::Key::KEY_LEFTSHIFT.code())
             .map(|(_, value)| value)
