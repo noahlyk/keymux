@@ -230,23 +230,12 @@ surface gone when the process stops.
 
 ## 6. Live lookup — `src/steno/lookup.rs` [done, tested; not yet tried on real hardware]
 
-"Midway through typing, forgot the stroke for a word." A configured `lookup_stroke` opens a
+"Midway through typing, forgot the stroke for a word." A `{PLOVER:LOOKUP}` dictionary entry opens a
 submode **inside the steno engine**: the layer doesn't change, but while it is open the layer's
 keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches the app.
 
-- **Trigger.** A stroke, or several separated by `/` (`"HRAOUP/AER"`), in config, not a
-  dictionary entry: the loader skips `{PLOVER:...}` commands, so `{PLOVER:LOOKUP}` can't be
-  used. The engine intercepts it in `on_stroke`, before translating, so it doesn't type or go on
-  the tape (and shadows any entry it had).
-  - A multi-stroke trigger holds its leading strokes back in `trigger_held` while they match. If
-    the next stroke is not the one expected, the oldest held stroke is an ordinary stroke and is
-    typed, and the rest plus the new stroke are matched again from scratch (so `KAT/KAT/-T`
-    still works after a stray `KAT`). Strokes typed that way arrive as one combined edit.
-  - The cost of holding back: the first stroke of the trigger is delayed by one stroke whenever
-    you write it as a plain word. A common word as a first stroke would make that word laggy,
-    so a single stroke is the better trigger. Backspace and Space are swallowed while a stroke
-    is held (nothing is on screen to take back, and Backspace would eat what came before).
-    Leaving the layer drops a half-written trigger.
+- **Trigger.** An ordinary dictionary entry, as in Plover (`run_command` handles `lookup`).
+  There is no config setting for it any more.
 - **Keys.** `keymap.rs` routes every key to the open lookup (`lookup_key`), US QWERTY by
   keycap, Shift capitalizes (the dictionary is case-sensitive), Backspace edits, Esc/Enter
   close. Esc and Enter win over the layer's own remaps (a steno layer usually remaps Esc);

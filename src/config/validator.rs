@@ -196,16 +196,6 @@ pub fn validate_config(config_path: Option<&std::path::Path>) -> Result<()> {
                 steno_errors.push(format!("steno layer \"{}\": {}", layer.0, layout_error));
             }
         }
-        if let Some(stroke) = &steno.lookup_stroke {
-            if crate::steno::layout::parse_strokes(stroke).is_none() {
-                steno_errors.push(format!(
-                    "steno layer \"{}\": lookup_stroke {:?} is not a stroke in Plover notation \
-                     (such as \"HRAOUP\"), or strokes separated by `/` (such as \
-                     \"HRAOUP/AER\"), so lookup would be off",
-                    layer.0, stroke
-                ));
-            }
-        }
         if steno.translation_timeout_ms.is_some() {
             warnings.push(format!(
                 "steno layer \"{}\": translation_timeout_ms is no longer used and can be removed",

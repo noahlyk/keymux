@@ -529,18 +529,15 @@ fn type_keys(p: &mut KeymapProcessor, keys: &[KeyCode]) -> Vec<ProcessResult> {
 }
 
 #[test]
+#[allow(clippy::literal_string_with_formatting_args)] // a command, not a format
 fn the_lookup_stroke_turns_the_keys_into_qwerty_input_to_a_query_and_nothing_is_typed() {
     use crate::steno::layout::parse_stroke;
 
     let fixture = Fixture::new("lookup");
-    // KAT is both a word and, here, the stroke that opens a lookup: the lookup wins
-    let config = CONFIG.replace(
-        "dictionaries: [\"DICT\"],",
-        "dictionaries: [\"DICT\"], lookup_stroke: Some(\"KAT\"),",
-    );
+    // KAT opens the lookup through the dictionary, as in Plover
     let mut p = fixture.processor_with(
-        &config,
-        r#"{"KAT": "cat", "-T": "the", "KAPB": "can", "KAPBD": "candy", "KAPBL": "candle"}"#,
+        CONFIG,
+        r#"{"KAT": "{PLOVER:LOOKUP}", "-T": "the", "KAPB": "can", "KAPBD": "candy", "KAPBL": "candle"}"#,
     );
     let hub = private_hub();
     p.set_overlay_hub(hub);
@@ -554,7 +551,7 @@ fn the_lookup_stroke_turns_the_keys_into_qwerty_input_to_a_query_and_nothing_is_
     );
     let open = hub.snapshot();
     assert_eq!(open.lookup.as_ref().map(|l| l.query.as_str()), Some(""));
-    assert!(open.tape.is_empty());
+    assert_eq!(open.tape.len(), 1, "the stroke itself is on the tape, as any command is");
 
     // Typing is QWERTY: these keys are stroke keys on the steno layer, but now they are letters
     // (C-A-N-D-Y), and none of it reaches the application
@@ -575,7 +572,7 @@ fn the_lookup_stroke_turns_the_keys_into_qwerty_input_to_a_query_and_nothing_is_
     assert_eq!(found.rows[0].outline, "KAPBD");
     // The best stroke is lit on the overlay's keyboard
     assert_eq!(found.hint, parse_stroke("KAPBD").unwrap());
-    assert!(hub.snapshot().tape.is_empty(), "looking things up types nothing");
+    assert_eq!(hub.snapshot().tape.len(), 1, "looking things up types nothing");
 
     // Backspace edits the query, and now it also suggests longer words
     type_keys(&mut p, &[KeyCode::KC_BSPC, KeyCode::KC_BSPC]);
@@ -603,13 +600,10 @@ fn the_lookup_stroke_turns_the_keys_into_qwerty_input_to_a_query_and_nothing_is_
 }
 
 #[test]
+#[allow(clippy::literal_string_with_formatting_args)] // a command, not a format
 fn leaving_steno_in_the_middle_of_a_lookup_closes_it_and_does_not_keep_eating_keys() {
     let fixture = Fixture::new("lookup-leave");
-    let config = CONFIG.replace(
-        "dictionaries: [\"DICT\"],",
-        "dictionaries: [\"DICT\"], lookup_stroke: Some(\"KAT\"),",
-    );
-    let mut p = fixture.processor_with(&config, r#"{"-T": "the", "KAPB": "can"}"#);
+    let mut p = fixture.processor_with(CONFIG, r#"{"KAT": "{PLOVER:LOOKUP}", "-T": "the", "KAPB": "can"}"#);
     let hub = private_hub();
     p.set_overlay_hub(hub);
     enter_steno(&mut p);
@@ -638,111 +632,6 @@ fn leaving_steno_in_the_middle_of_a_lookup_closes_it_and_does_not_keep_eating_ke
         ProcessResult::TypeString(" KA-".to_string(), false),
         "a stroke, not lookup letters"
     );
-}
-
-/// A fixture keyboard whose steno layer opens a lookup on `trigger`, with a tiny dictionary:
-/// K-A--T is "cat" and -T is "the". On this layout those are the keys S C P and P.
-fn lookup_trigger_processor(fixture: &Fixture, trigger: &str) -> KeymapProcessor {
-    let config = CONFIG.replace(
-        "dictionaries: [\"DICT\"],",
-        &format!("dictionaries: [\"DICT\"], lookup_stroke: Some(\"{trigger}\"),"),
-    );
-    fixture.processor_with(&config, r#"{"KAT": "cat", "-T": "the"}"#)
-}
-
-const KAT: [KeyCode; 3] = [KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P];
-const THE: [KeyCode; 1] = [KeyCode::KC_P];
-
-#[test]
-fn a_two_stroke_lookup_trigger_holds_the_first_stroke_back_and_opens_after_the_second() {
-    let fixture = Fixture::new("lookup-two");
-    let mut p = lookup_trigger_processor(&fixture, "KAT/-T");
-    let hub = private_hub();
-    p.set_overlay_hub(hub);
-    enter_steno(&mut p);
-
-    // The first stroke might be the start of the trigger, so it types nothing yet and is not on
-    // the tape, and no lookup is open
-    assert_eq!(chord(&mut p, &KAT), ProcessResult::None);
-    assert!(hub.snapshot().tape.is_empty());
-    assert_eq!(hub.snapshot().lookup, None);
-
-    // The second stroke completes it: the lookup opens, and neither stroke typed or is on the tape
-    assert_eq!(chord(&mut p, &THE), ProcessResult::None);
-    assert!(hub.snapshot().lookup.is_some());
-    assert!(hub.snapshot().tape.is_empty());
-
-    // From here keys are QWERTY input to the query, as with a one-stroke trigger
-    type_keys(&mut p, &[KeyCode::KC_C, KeyCode::KC_A]);
-    assert_eq!(hub.snapshot().lookup.unwrap().query, "ca");
-}
-
-#[test]
-fn held_back_strokes_are_typed_as_normal_when_the_trigger_does_not_follow() {
-    let fixture = Fixture::new("lookup-replay");
-    let mut p = lookup_trigger_processor(&fixture, "KAT/-T");
-    let hub = private_hub();
-    p.set_overlay_hub(hub);
-    enter_steno(&mut p);
-
-    assert_eq!(chord(&mut p, &KAT), ProcessResult::None);
-    // KAT again is not -T: the first KAT was an ordinary stroke after all and types "cat". The
-    // second one is looked at again, and is held back in its turn.
-    assert_eq!(
-        chord(&mut p, &KAT),
-        ProcessResult::TypeString("cat".to_string(), false)
-    );
-    assert_eq!(hub.snapshot().tape.len(), 1);
-    assert_eq!(hub.snapshot().lookup, None);
-
-    // -T now completes KAT/-T, using the second KAT: the lookup opens, and the first "cat"
-    // is still there
-    assert_eq!(chord(&mut p, &THE), ProcessResult::None);
-    assert!(hub.snapshot().lookup.is_some());
-    assert_eq!(hub.snapshot().tape.len(), 1);
-}
-
-#[test]
-fn a_held_back_stroke_followed_by_something_else_types_both() {
-    let fixture = Fixture::new("lookup-both");
-    let mut p = lookup_trigger_processor(&fixture, "KAT/KAT");
-    enter_steno(&mut p);
-
-    assert_eq!(chord(&mut p, &KAT), ProcessResult::None);
-    // -T is not KAT: both strokes are ordinary, and arrive as one edit, in order
-    assert_eq!(
-        chord(&mut p, &THE),
-        ProcessResult::TypeString("cat the".to_string(), false)
-    );
-}
-
-#[test]
-fn a_three_stroke_trigger_opens_only_after_the_third() {
-    let fixture = Fixture::new("lookup-three");
-    let mut p = lookup_trigger_processor(&fixture, "KAT/-T/KAT");
-    let hub = private_hub();
-    p.set_overlay_hub(hub);
-    enter_steno(&mut p);
-
-    assert_eq!(chord(&mut p, &KAT), ProcessResult::None);
-    assert_eq!(chord(&mut p, &THE), ProcessResult::None);
-    assert_eq!(hub.snapshot().lookup, None, "two of three is not enough");
-    assert_eq!(chord(&mut p, &KAT), ProcessResult::None);
-    assert!(hub.snapshot().lookup.is_some());
-    assert!(hub.snapshot().tape.is_empty());
-}
-
-#[test]
-fn backspace_does_not_delete_text_before_a_held_back_stroke() {
-    let fixture = Fixture::new("lookup-bspc");
-    let mut p = lookup_trigger_processor(&fixture, "KAT/-T");
-    enter_steno(&mut p);
-    assert_eq!(chord(&mut p, &KAT), ProcessResult::None);
-
-    // Nothing has been typed for the held stroke, so Backspace would eat whatever came
-    // before it. It is swallowed instead, as it is whenever there is something to undo.
-    assert_eq!(p.process_key(KeyCode::KC_BSPC, true), ProcessResult::None);
-    assert_eq!(p.process_key(KeyCode::KC_BSPC, false), ProcessResult::None);
 }
 
 #[test]
@@ -779,25 +668,6 @@ fn a_two_stroke_word_still_combines_after_a_stroke_that_matched_nothing() {
         chord(&mut p, &tpebgt),
         ProcessResult::TypeString("fect".to_string(), false)
     );
-}
-
-#[test]
-fn half_a_trigger_is_dropped_when_you_leave_the_layer() {
-    let fixture = Fixture::new("lookup-leave-half");
-    let mut p = lookup_trigger_processor(&fixture, "KAT/-T");
-    let hub = private_hub();
-    p.set_overlay_hub(hub);
-    enter_steno(&mut p);
-    assert_eq!(chord(&mut p, &KAT), ProcessResult::None);
-
-    p.process_key(KeyCode::KC_TAB, false);
-    enter_steno(&mut p);
-    // The old KAT is gone: -T alone is just "the", and opens nothing
-    assert_eq!(
-        chord(&mut p, &THE),
-        ProcessResult::TypeString("the".to_string(), false)
-    );
-    assert_eq!(hub.snapshot().lookup, None);
 }
 
 /// A hub of its own, so these tests don't see strokes from other tests through the global one.

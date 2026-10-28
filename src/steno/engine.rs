@@ -4,7 +4,7 @@
 use super::chord::ChordState;
 use super::dict::Dictionary;
 use super::journal::{MachineId, SharedHistory};
-use super::layout::{build_key_map, parse_strokes_trimmed, preset};
+use super::layout::{build_key_map, preset};
 use super::lookup::{classify, Lookup};
 use super::overlay::OverlayHub;
 use super::live;
@@ -76,13 +76,6 @@ pub struct StenoEngine {
     pub disabled_in_game_mode: bool,
     /// Where strokes are published for the on-screen overlay
     hub: &'static OverlayHub,
-    /// The strokes that open a live lookup, in order: one stroke, or several (`HRAOUP/AER`).
-    /// Empty when no lookup is configured.
-    lookup_trigger: Vec<u32>,
-    /// The leading strokes of the lookup trigger written so far, held back unspoken: they might
-    /// be the start of the trigger, so they are neither typed nor on the tape until the next
-    /// stroke shows whether they are. Always shorter than `lookup_trigger`.
-    trigger_held: Vec<u32>,
     /// The lookup that is open right now. While it is, keys are QWERTY input to it.
     lookup: Option<Lookup>,
     /// A stroke wrote `{plover:toggle}` or `{plover:suspend}`: the layer should be left
@@ -165,21 +158,6 @@ impl StenoEngine {
             tape: home.map(tape::default_path),
             disabled_in_game_mode,
             hub: OverlayHub::global(),
-            lookup_trigger: config
-                .lookup_stroke
-                .as_deref()
-                .map(|text| {
-                    // The empty stroke of a word boundary entry is no stroke you can press
-                    parse_strokes_trimmed(text).filter(|strokes| !strokes.contains(&0)).unwrap_or_else(|| {
-                        warn!(
-                            "steno lookup_stroke {text:?} is not a stroke, or strokes separated \
-                             by `/`, in Plover notation, so lookup is off"
-                        );
-                        Vec::new()
-                    })
-                })
-                .unwrap_or_default(),
-            trigger_held: Vec::new(),
             lookup: None,
             leave_requested: false,
             fresh_on_enter: config.fresh_on_enter,
@@ -190,9 +168,8 @@ impl StenoEngine {
     /// The layer was entered. By default nothing changes: the history carries on. With
     /// `fresh_on_enter` the first word starts a new sentence, as it used to.
     pub fn enter(&mut self) {
-        // A lookup left open, or half a trigger written, before leaving the layer isn't carried over
+        // A lookup left open before leaving the layer isn't carried over
         self.lookup = None;
-        self.trigger_held.clear();
         if self.fresh_on_enter {
             self.start_fresh();
         }
@@ -271,8 +248,6 @@ impl StenoEngine {
         self.translator.start_fresh();
         // A lookup left open when the layer was left must not still be eating keys
         self.lookup = None;
-        // Half a lookup trigger written before leaving the layer is not carried over
-        self.trigger_held.clear();
     }
 
     /// A stroke key went down.
@@ -302,8 +277,7 @@ impl StenoEngine {
         (self.timing.repeat
             && self.chord.is_fresh()
             && self.chord.pending() == stroke
-            && now.saturating_duration_since(at) <= self.timing.double_tap_window
-            && !self.lookup_trigger.contains(&stroke))
+            && now.saturating_duration_since(at) <= self.timing.double_tap_window)
         .then_some((stroke, now))
     }
 
@@ -437,51 +411,10 @@ impl StenoEngine {
     }
 
     fn on_stroke(&mut self, stroke: u32) -> Option<StenoOutput> {
-        if self.lookup_trigger.is_empty() {
-            return self.type_stroke(stroke);
-        }
-        // With a lookup configured the stroke may be (the start of) its trigger. Strokes that
-        // turn out not to be are typed, possibly several at once, so they combine into one edit.
-        let mut merged = Merged::default();
-        self.feed(stroke, &mut merged);
-        merged.finish()
+        self.type_stroke(stroke)
     }
 
-    /// Match `stroke` against the lookup trigger. The trigger's strokes open a lookup and are
-    /// not typed. A stroke that continues a partial match is held back. Anything else is an
-    /// ordinary stroke: first any held-back strokes (they weren't the trigger after all), then
-    /// this one, each checked again, since the trigger might start part-way through them.
-    fn feed(&mut self, stroke: u32, merged: &mut Merged) {
-        let matched = self.trigger_held.len();
-        if self.lookup_trigger.get(matched) == Some(&stroke) {
-            self.trigger_held.push(stroke);
-            if self.trigger_held.len() == self.lookup_trigger.len() {
-                self.trigger_held.clear();
-                self.open_lookup();
-            }
-            return;
-        }
-        if self.trigger_held.is_empty() {
-            if let Some(output) = self.type_stroke(stroke) {
-                merged.push(output);
-            }
-            return;
-        }
-        // The held strokes weren't the trigger. The oldest is an ordinary stroke; the rest, and
-        // this one, are looked at again from scratch.
-        let mut again = std::mem::take(&mut self.trigger_held);
-        again.push(stroke);
-        let first = again.remove(0);
-        if let Some(output) = self.type_stroke(first) {
-            merged.push(output);
-        }
-        for stroke in again {
-            self.feed(stroke, merged);
-        }
-    }
-
-    /// A stroke that is not part of a lookup trigger: translate it, or queue it until the
-    /// dictionaries have loaded.
+    /// Translate a stroke, or queue it until the dictionaries have loaded.
     fn type_stroke(&mut self, stroke: u32) -> Option<StenoOutput> {
         if self.loading {
             self.backlog.push(stroke);
@@ -686,8 +619,6 @@ mod tests {
             tape: None,
             disabled_in_game_mode: true,
             hub: OverlayHub::global(),
-            lookup_trigger: Vec::new(),
-            trigger_held: Vec::new(),
             lookup: None,
             leave_requested: false,
             fresh_on_enter: false,
@@ -809,7 +740,6 @@ mod tests {
             dictionaries: Vec::new(),
             stroke_timeout_ms: 5000,
             translation_timeout_ms: None,
-            lookup_stroke: None,
             spaces_after: false,
             start_attached: true,
             start_capitalized: false,
