@@ -112,6 +112,9 @@ pub fn meta_to_action(meta: &str, ctx: &Context) -> Action {
             action.word_is_finished = true;
             action
         }
+        // keymux's own: `{:firstup}` marks a stroke the engine sends when its first key comes up.
+        // It types nothing and changes nothing around it.
+        "firstup" => ctx.copy_last_action(),
         // Lapwing's stitching: `{:stitch:A}` is a fingerspelled letter that joins with a dash
         "stitch" => meta_stitch(ctx, param),
         "stitch_last_word" => meta_stitch_last_word(ctx, param),

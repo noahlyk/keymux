@@ -361,6 +361,35 @@ pub struct StenoConfig {
     /// The first word of a session is capitalized. Plover's `start_capitalized`.
     #[serde(default)]
     pub start_capitalized: bool,
+    /// Tap a stroke, then press it again and hold: it repeats. How long after the first tap the
+    /// second press must come, in milliseconds.
+    #[serde(default = "default_double_tap_window_ms")]
+    pub double_tap_window_ms: u32,
+    /// How long the second press is held before the repeat starts, in milliseconds.
+    #[serde(default = "default_repeat_delay_ms")]
+    pub repeat_delay_ms: u32,
+    /// Time between repeats, in milliseconds.
+    #[serde(default = "default_repeat_rate_ms")]
+    pub repeat_rate_ms: u32,
+    /// Turn off tap-then-hold repeating.
+    #[serde(default)]
+    pub disable_repeat: bool,
+    /// Turn off sending a stroke on its first key up, for dictionary entries that carry
+    /// `{:firstup}`. Those then send on the last key up like any other.
+    #[serde(default)]
+    pub disable_first_up: bool,
+}
+
+const fn default_double_tap_window_ms() -> u32 {
+    300
+}
+
+const fn default_repeat_delay_ms() -> u32 {
+    300
+}
+
+const fn default_repeat_rate_ms() -> u32 {
+    40
 }
 
 fn default_steno_layout() -> String {

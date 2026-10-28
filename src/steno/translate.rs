@@ -331,6 +331,24 @@ impl Translator {
         &self.screen
     }
 
+    /// Whether the dictionary entry for this stroke alone carries `{:firstup}`: that stroke is
+    /// sent when its first key comes up instead of its last.
+    #[must_use]
+    #[allow(clippy::literal_string_with_formatting_args)] // a translation marker, not a format
+    pub fn wants_first_up(&self, stroke: u32) -> bool {
+        self.dict
+            .lookup(&[stroke])
+            .is_some_and(|text| text.contains("{:firstup}"))
+    }
+
+    /// Whether the stroke makes an engine command (`{plover:...}`), which must never repeat.
+    #[must_use]
+    pub fn is_command(&self, stroke: u32) -> bool {
+        self.dict
+            .lookup(&[stroke])
+            .is_some_and(|text| text.to_ascii_lowercase().contains("{plover:"))
+    }
+
     /// Translate a finished stroke and say what to do with the keyboard.
     pub fn stroke(&mut self, stroke: u32) -> Option<StenoOutput> {
         self.unmatched = false;
@@ -780,6 +798,28 @@ mod tests {
     #[test]
     fn a_stroke_types_its_translation() {
         assert_eq!(type_strokes(r#"{"KAT": "cat"}"#, &["KAT"]), "cat");
+    }
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // translation markers, not formats
+    fn the_first_up_marker_types_nothing_and_changes_nothing_around_it() {
+        let json = r#"{"KAT": "cat{:firstup}", "TKOG": "{:firstup}dog", "-S": "{^s}{:firstup}", "H-L": "{:firstup}{^}"}"#;
+        assert_eq!(type_strokes(json, &["KAT", "TKOG"]), "cat dog");
+        assert_eq!(type_strokes(json, &["KAT", "-S"]), "cats");
+        assert_eq!(type_strokes(json, &["KAT", "H-L", "TKOG"]), "catdog");
+        let t = translator(json);
+        assert!(t.wants_first_up(stroke("KAT")));
+        assert!(t.wants_first_up(stroke("TKOG")));
+        assert!(!translator(r#"{"KAT": "cat"}"#).wants_first_up(stroke("KAT")));
+    }
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // a command, not a format
+    fn engine_commands_are_told_from_other_entries() {
+        let t = translator(r#"{"KAT": "cat", "TKOG": "{plover:toggle}", "H-L": "{PLOVER:lookup}"}"#);
+        assert!(!t.is_command(stroke("KAT")));
+        assert!(t.is_command(stroke("TKOG")));
+        assert!(t.is_command(stroke("H-L")));
     }
 
     #[test]

@@ -20,12 +20,48 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::warn;
 
+/// How strokes are repeated and sent early. See `StenoConfig`.
+#[derive(Debug, Clone, Copy)]
+struct Timing {
+    double_tap_window: Duration,
+    repeat_delay: Duration,
+    repeat_rate: Duration,
+    repeat: bool,
+    first_up: bool,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Self {
+            double_tap_window: Duration::from_millis(300),
+            repeat_delay: Duration::from_millis(300),
+            repeat_rate: Duration::from_millis(40),
+            repeat: true,
+            first_up: true,
+        }
+    }
+}
+
+/// A stroke that is being sent again and again because its keys are held after a double tap.
+#[derive(Debug, Clone, Copy)]
+struct Repeating {
+    stroke: u32,
+    next: Instant,
+}
+
 #[derive(Debug)]
 pub struct StenoEngine {
     keys: HashMap<KeyCode, u32>,
     /// Stroke keys physically down, so a release can tell which of their bits are still pressed
     held_keys: HashSet<KeyCode>,
     chord: ChordState,
+    timing: Timing,
+    /// The last stroke sent and when, to tell a double tap
+    last: Option<(u32, Instant)>,
+    /// The stroke held down is the last one again, pressed within the double tap window: the
+    /// stroke and when it went down. It repeats once held for the repeat delay.
+    arming: Option<(u32, Instant)>,
+    repeating: Option<Repeating>,
     translator: Translator,
     /// The dictionary, first loaded and then again whenever its files change. `None` when
     /// there is nothing to follow.
@@ -96,6 +132,16 @@ impl StenoEngine {
             keys,
             held_keys: HashSet::new(),
             chord: ChordState::new(Duration::from_millis(u64::from(config.stroke_timeout_ms))),
+            timing: Timing {
+                double_tap_window: Duration::from_millis(u64::from(config.double_tap_window_ms)),
+                repeat_delay: Duration::from_millis(u64::from(config.repeat_delay_ms)),
+                repeat_rate: Duration::from_millis(u64::from(config.repeat_rate_ms.max(1))),
+                repeat: !config.disable_repeat,
+                first_up: !config.disable_first_up,
+            },
+            last: None,
+            arming: None,
+            repeating: None,
             translator,
             updates: Some(updates),
             loading: true,
@@ -192,7 +238,14 @@ impl StenoEngine {
     pub fn press(&mut self, key: KeyCode, now: Instant) {
         if let Some(&bit) = self.keys.get(&key) {
             self.held_keys.insert(key);
+            let before = self.chord.held();
             self.chord.press(bit, now);
+            if self.chord.held() != before {
+                // Another key ends a repeat. It starts a new one only if this is the last
+                // stroke again, pressed soon after it.
+                self.repeating = None;
+                self.arming = self.double_tap(now);
+            }
             self.publish_keys();
         }
     }
@@ -202,8 +255,24 @@ impl StenoEngine {
         self.hub.set_keys(self.chord.pending(), self.chord.held());
     }
 
+    /// The stroke held down, if it is the last stroke again and pressed within the window.
+    fn double_tap(&self, now: Instant) -> Option<(u32, Instant)> {
+        let (stroke, at) = self.last?;
+        (self.timing.repeat
+            && self.chord.is_fresh()
+            && self.chord.pending() == stroke
+            && now.saturating_duration_since(at) <= self.timing.double_tap_window
+            && !self.lookup_trigger.contains(&stroke))
+        .then_some((stroke, now))
+    }
+
     /// A stroke key came up. Returns output if this completed a stroke.
     pub fn release(&mut self, key: KeyCode) -> Option<StenoOutput> {
+        self.release_at(key, Instant::now())
+    }
+
+    /// [`Self::release`], at a given moment.
+    pub fn release_at(&mut self, key: KeyCode, now: Instant) -> Option<StenoOutput> {
         let bit = *self.keys.get(&key)?;
         self.held_keys.remove(&key);
         // A combined key (an override binding one physical key to several stroke keys at
@@ -213,11 +282,30 @@ impl StenoEngine {
             .iter()
             .filter_map(|other| self.keys.get(other))
             .fold(0, |bits, &other| bits | other);
-        let Some(stroke) = self.chord.release(bit & !still_held) else {
+        // Letting go of a key ends a repeat in progress and cancels one about to start
+        self.arming = None;
+        self.repeating = None;
+        let released = bit & !still_held;
+        let finished = self.chord.release(released).or_else(|| self.sent_early(released));
+        let Some(stroke) = finished else {
             self.publish_keys();
             return None;
         };
+        self.last = Some((stroke, now));
         self.on_stroke(stroke)
+    }
+
+    /// A key came up with others still down. A stroke whose dictionary entry carries
+    /// `{:firstup}` is sent now, and the keys still down wait for another key to go with them.
+    fn sent_early(&mut self, released: u32) -> Option<u32> {
+        (self.timing.first_up
+            && !self.loading
+            && released != 0
+            && self.chord.held() != 0
+            && self.chord.is_fresh()
+            && self.translator.wants_first_up(self.chord.pending()))
+        .then(|| self.chord.send_early())
+        .flatten()
     }
 
     /// Check the stuck-key timeout and pick up finished dictionary loads.
@@ -227,7 +315,43 @@ impl StenoEngine {
         if let Some(output) = self.poll_dictionary() {
             return Some(output);
         }
-        let stroke = self.chord.tick(now)?;
+        if let Some(stroke) = self.chord.tick(now) {
+            self.arming = None;
+            self.repeating = None;
+            self.last = Some((stroke, now));
+            return self.on_stroke(stroke);
+        }
+        self.repeat_tick(now)
+    }
+
+    /// Start a repeat once a double tap has been held long enough, and send the next repeat
+    /// when it is due.
+    fn repeat_tick(&mut self, now: Instant) -> Option<StenoOutput> {
+        if let Some((stroke, since)) = self.arming {
+            let held_long = now.saturating_duration_since(since) >= self.timing.repeat_delay;
+            if held_long && self.chord.is_fresh() && self.chord.pending() == stroke {
+                self.arming = None;
+                // A command (`{plover:...}`) is sent once, on release, as usual
+                if self.translator.is_command(stroke) {
+                    return None;
+                }
+                // Sent now, so letting go of the keys must not send it again
+                self.chord.mark_sent();
+                self.repeating = Some(Repeating {
+                    stroke,
+                    next: now + self.timing.repeat_rate,
+                });
+                self.last = Some((stroke, now));
+                return self.on_stroke(stroke);
+            }
+        }
+        let repeating = self.repeating.as_mut()?;
+        if now < repeating.next {
+            return None;
+        }
+        repeating.next = now + self.timing.repeat_rate;
+        let stroke = repeating.stroke;
+        self.last = Some((stroke, now));
         self.on_stroke(stroke)
     }
 
@@ -510,6 +634,10 @@ mod tests {
             keys: build_key_map(&preset("qwerty").unwrap(), overrides).unwrap(),
             held_keys: HashSet::new(),
             chord: ChordState::new(Duration::from_secs(1)),
+            timing: Timing::default(),
+            last: None,
+            arming: None,
+            repeating: None,
             translator: Translator::new(dict),
             updates: None,
             loading: false,
@@ -642,6 +770,11 @@ mod tests {
             spaces_after: false,
             start_attached: true,
             start_capitalized: false,
+            double_tap_window_ms: 300,
+            repeat_delay_ms: 300,
+            repeat_rate_ms: 40,
+            disable_repeat: false,
+            disable_first_up: false,
         };
         let err = StenoEngine::from_config(&config, true, Path::new("."), None).unwrap_err();
         assert!(err.to_string().contains("unknown steno layout preset"));
@@ -687,5 +820,175 @@ mod tests {
     fn stroke_names_render_for_the_tape() {
         use crate::steno::layout::render_stroke;
         assert_eq!(render_stroke(1 << 2 | 1 << 7 | 1 << 18), "KAT");
+    }
+
+    fn kat_keys(engine: &StenoEngine) -> [KeyCode; 3] {
+        [1 << 2, 1 << 7, 1 << 18].map(|bit| key_for(engine, bit))
+    }
+
+    fn typed(output: Option<StenoOutput>) -> String {
+        match output {
+            Some(StenoOutput::Type(text)) => text,
+            other => panic!("expected typed text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // a marker, not a format
+    fn a_marked_stroke_is_sent_when_its_first_key_comes_up_and_rearms_on_the_next_key() {
+        let mut engine = engine_with_dict(r#"{"KAT": "cat{:firstup}"}"#);
+        let [k, a, t] = kat_keys(&engine);
+        let now = Instant::now();
+        for key in [k, a, t] {
+            engine.press(key, now);
+        }
+        assert!(typed(engine.release(t)).contains("cat"));
+        // The keys still down alone send nothing
+        assert_eq!(engine.release(a), None);
+        // Another key with the one still held is a stroke of its own
+        engine.press(a, now);
+        engine.press(t, now);
+        assert!(typed(engine.release(t)).contains("cat"));
+        assert_eq!(engine.release(a), None);
+        assert_eq!(engine.release(k), None);
+    }
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // a marker, not a format
+    fn tapping_one_key_again_while_the_rest_are_held_repeats_the_stroke() {
+        let mut engine = engine_with_dict(r#"{"KAT": "cat{:firstup}"}"#);
+        let [k, a, t] = kat_keys(&engine);
+        let now = Instant::now();
+        for key in [k, a, t] {
+            engine.press(key, now);
+        }
+        assert!(typed(engine.release(t)).contains("cat"));
+        for _ in 0..3 {
+            engine.press(t, now);
+            assert!(typed(engine.release(t)).contains("cat"));
+        }
+        assert_eq!(engine.release(a), None);
+        assert_eq!(engine.release(k), None);
+    }
+
+    #[test]
+    fn an_unmarked_stroke_still_waits_for_its_last_key() {
+        let mut engine = engine_with_dict(r#"{"KAT": "cat"}"#);
+        let [k, a, t] = kat_keys(&engine);
+        let now = Instant::now();
+        for key in [k, a, t] {
+            engine.press(key, now);
+        }
+        assert_eq!(engine.release(t), None);
+        assert_eq!(engine.release(a), None);
+        assert!(typed(engine.release(k)).contains("cat"));
+    }
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // a marker, not a format
+    fn the_marker_can_be_turned_off() {
+        let mut engine = engine_with_dict(r#"{"KAT": "cat{:firstup}"}"#);
+        engine.timing.first_up = false;
+        let [k, a, t] = kat_keys(&engine);
+        let now = Instant::now();
+        for key in [k, a, t] {
+            engine.press(key, now);
+        }
+        assert_eq!(engine.release(t), None);
+        assert_eq!(engine.release(a), None);
+        assert!(typed(engine.release(k)).contains("cat"));
+    }
+
+    fn tap(engine: &mut StenoEngine, keys: [KeyCode; 3], down: Instant, up: Instant) -> Option<StenoOutput> {
+        for key in keys {
+            engine.press(key, down);
+        }
+        let mut out = None;
+        for key in keys {
+            out = engine.release_at(key, up).or(out);
+        }
+        out
+    }
+
+    #[test]
+    fn tap_then_press_and_hold_repeats_until_released() {
+        let mut engine = engine_with_dict(r#"{"KAT": "cat"}"#);
+        let keys = kat_keys(&engine);
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        assert!(typed(tap(&mut engine, keys, t0, t0 + ms(50))).contains("cat"));
+        // Pressed again soon after, and held
+        let second = t0 + ms(150);
+        for key in keys {
+            engine.press(key, second);
+        }
+        assert_eq!(engine.tick(second + ms(200)), None);
+        assert!(typed(engine.tick(second + ms(310))).contains("cat"));
+        assert_eq!(engine.tick(second + ms(330)), None);
+        assert!(typed(engine.tick(second + ms(360))).contains("cat"));
+        // No time limit: still going a minute later
+        assert!(typed(engine.tick(second + ms(60_000))).contains("cat"));
+        // Letting go sends nothing more, and ends it
+        for key in keys {
+            assert_eq!(engine.release_at(key, second + ms(60_010)), None);
+        }
+        assert_eq!(engine.tick(second + ms(60_100)), None);
+    }
+
+    #[test]
+    fn a_second_press_after_the_window_is_not_a_repeat() {
+        let mut engine = engine_with_dict(r#"{"KAT": "cat"}"#);
+        let keys = kat_keys(&engine);
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        tap(&mut engine, keys, t0, t0 + ms(50));
+        let late = t0 + ms(500);
+        for key in keys {
+            engine.press(key, late);
+        }
+        assert_eq!(engine.tick(late + ms(900)), None);
+    }
+
+    #[test]
+    fn a_second_press_of_another_stroke_is_not_a_repeat() {
+        let mut engine = engine_with_dict(r#"{"KAT": "cat", "KA": "ka"}"#);
+        let [k, a, t] = kat_keys(&engine);
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        tap(&mut engine, [k, a, t], t0, t0 + ms(50));
+        let second = t0 + ms(150);
+        engine.press(k, second);
+        engine.press(a, second);
+        assert_eq!(engine.tick(second + ms(800)), None);
+    }
+
+    #[test]
+    fn repeating_can_be_turned_off() {
+        let mut engine = engine_with_dict(r#"{"KAT": "cat"}"#);
+        engine.timing.repeat = false;
+        let keys = kat_keys(&engine);
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        tap(&mut engine, keys, t0, t0 + ms(50));
+        for key in keys {
+            engine.press(key, t0 + ms(150));
+        }
+        assert_eq!(engine.tick(t0 + ms(900)), None);
+    }
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // a command, not a format
+    fn a_command_stroke_never_repeats() {
+        let mut engine = engine_with_dict(r#"{"KAT": "{plover:lookup}"}"#);
+        let keys = kat_keys(&engine);
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        tap(&mut engine, keys, t0, t0 + ms(50));
+        for key in keys {
+            engine.press(key, t0 + ms(150));
+        }
+        assert_eq!(engine.tick(t0 + ms(600)), None);
+        assert!(engine.repeating.is_none() && engine.arming.is_none());
+        assert_eq!(engine.tick(t0 + ms(900)), None);
     }
 }
