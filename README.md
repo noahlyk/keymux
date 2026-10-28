@@ -666,16 +666,19 @@ opens a lookup. It is an ordinary dictionary entry, as in Plover: `{PLOVER:LOOKU
 already has it as `PHRUP` and `PHR*UP`, and you can add your own to any dictionary, for example
 `"HRAOUP": "{PLOVER:LOOKUP}"` in `00-user.json`.
 
-- You stay on the steno layer, but its keys go back to **QWERTY** for a moment. They type the
-  word you're after into a query, shown as `LOOKUP` on the [overlay](#on-screen-overlay).
-  Nothing you type reaches the application, so your document is untouched.
+- You stay on the steno layer, but its keys go through your **full base layer** for a moment:
+  remaps, mod-taps, held layers (a symbol layer, say) and Shift all work as everywhere else.
+  What comes out types the word you're after into a query, shown as `LOOKUP` on the
+  [overlay](#on-screen-overlay). Nothing you type reaches the application, so your document
+  is untouched. (Letters follow `typing_layout`, `us` by default.)
 - The overlay lists the strokes that type the word, fewest strokes first, with words that
   start with what you've typed after them. The first stroke of the best one is lit on the
   overlay's keyboard.
 - Backspace edits the query, Shift capitalizes (lookups are case-sensitive), and **Esc or
-  Enter** closes it. You're straight back in steno, mid-sentence.
-- Other keys your steno layer remaps (such as one that leaves steno) still work, and leave the
-  lookup behind.
+  Enter** closes it, including a key you remapped to either. You're straight back in steno,
+  mid-sentence.
+- A key that leaves the steno layer (such as one that goes back to base) leaves the lookup
+  behind. Tab and the arrow keys do nothing in it.
 
 Like any command, the stroke fires on its own, so it can't be the start of a longer outline.
 `keymux steno stroke HRAOUP` shows what a stroke types now, and "has no translation" means

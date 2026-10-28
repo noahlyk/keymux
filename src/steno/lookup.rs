@@ -1,15 +1,19 @@
 //! Live lookup: "I'm mid-sentence and forgot the stroke for a word."
 //!
 //! A dictionary entry for `{PLOVER:LOOKUP}` opens a lookup. The steno layer stays on, but its
-//! keys go back to plain QWERTY: they type into a query that is shown on the overlay and
-//! never reaches the application. The overlay lists the outlines that type the word, best
-//! first, and lights the first stroke of the best one on its keyboard. Esc or Enter closes it.
+//! keys go back to what the layers below it make of them: every key goes through the usual
+//! remaps, mod-taps and layers, and what comes out types into a query that is shown on the
+//! overlay instead of reaching the application. The overlay lists the outlines that type the
+//! word, best first, and lights the first stroke of the best one on its keyboard. Esc or Enter
+//! closes it.
 
 use super::commands::proper_outlines_in;
 use super::layout::render_stroke;
 use super::overlay::{LookupRow, LookupView};
 use super::translate::Translator;
+use super::typing::TypingLayout;
 use crate::keycode::KeyCode;
+use std::collections::HashSet;
 
 /// Rows the overlay is sent; it shows as many as fit.
 const MAX_ROWS: usize = 12;
@@ -30,61 +34,73 @@ pub enum LookupKey {
     Ignore,
 }
 
-/// The meaning of `key` in a lookup, on a US QWERTY layout (the keys are physical positions,
-/// so this is what the keycaps say). `shift` capitalizes letters: lookups are case-sensitive.
-#[must_use]
-pub fn classify(key: KeyCode, shift: bool) -> LookupKey {
-    use KeyCode::*;
-    let letter = |c: char| LookupKey::Char(if shift { c.to_ascii_uppercase() } else { c });
-    match key {
-        KC_ESC | KC_ENT => LookupKey::Close,
-        KC_BSPC => LookupKey::Backspace,
-        KC_SPC => LookupKey::Char(' '),
-        KC_A => letter('a'),
-        KC_B => letter('b'),
-        KC_C => letter('c'),
-        KC_D => letter('d'),
-        KC_E => letter('e'),
-        KC_F => letter('f'),
-        KC_G => letter('g'),
-        KC_H => letter('h'),
-        KC_I => letter('i'),
-        KC_J => letter('j'),
-        KC_K => letter('k'),
-        KC_L => letter('l'),
-        KC_M => letter('m'),
-        KC_N => letter('n'),
-        KC_O => letter('o'),
-        KC_P => letter('p'),
-        KC_Q => letter('q'),
-        KC_R => letter('r'),
-        KC_S => letter('s'),
-        KC_T => letter('t'),
-        KC_U => letter('u'),
-        KC_V => letter('v'),
-        KC_W => letter('w'),
-        KC_X => letter('x'),
-        KC_Y => letter('y'),
-        KC_Z => letter('z'),
-        KC_1 | KC_2 | KC_3 | KC_4 | KC_5 | KC_6 | KC_7 | KC_8 | KC_9 | KC_0 if !shift => {
-            LookupKey::Char(match key {
-                KC_1 => '1',
-                KC_2 => '2',
-                KC_3 => '3',
-                KC_4 => '4',
-                KC_5 => '5',
-                KC_6 => '6',
-                KC_7 => '7',
-                KC_8 => '8',
-                KC_9 => '9',
-                _ => '0',
-            })
+/// Turns the keys that come out of the layers into what a lookup does with them.
+///
+/// These are the keys the application would have got (after remaps, mod-taps and layers), so a
+/// symbol layer or a Shift on a thumb key work as they do everywhere else. Shift capitalizes:
+/// lookups are case-sensitive.
+#[derive(Debug, Clone, Default)]
+pub struct LookupInput {
+    layout: TypingLayout,
+    shift: HashSet<KeyCode>,
+    /// Ctrl, Alt or Super held: the next key is a shortcut, not text
+    shortcut: HashSet<KeyCode>,
+    caps: bool,
+}
+
+impl LookupInput {
+    #[must_use]
+    pub fn new(layout: TypingLayout) -> Self {
+        Self {
+            layout,
+            ..Self::default()
         }
-        KC_MINS if !shift => LookupKey::Char('-'),
-        KC_QUOT if !shift => LookupKey::Char('\''),
-        KC_DOT if !shift => LookupKey::Char('.'),
-        KC_COMM if !shift => LookupKey::Char(','),
-        _ => LookupKey::Ignore,
+    }
+
+    /// A key came out of the layers (`pressed` is false for its release). Returns what the
+    /// lookup should do about it, if anything.
+    pub fn key(&mut self, key: KeyCode, pressed: bool) -> Option<LookupKey> {
+        if key.is_modifier() {
+            let held = if matches!(key, KeyCode::KC_LSFT | KeyCode::KC_RSFT) {
+                &mut self.shift
+            } else {
+                &mut self.shortcut
+            };
+            if pressed {
+                held.insert(key);
+            } else {
+                held.remove(&key);
+            }
+            return None;
+        }
+        if !pressed {
+            return None;
+        }
+        match key {
+            KeyCode::KC_ESC | KeyCode::KC_ENT => Some(LookupKey::Close),
+            KeyCode::KC_BSPC => Some(LookupKey::Backspace),
+            KeyCode::KC_CAPS => {
+                self.caps = !self.caps;
+                None
+            }
+            _ if !self.shortcut.is_empty() => Some(LookupKey::Ignore),
+            _ => Some(
+                match self
+                    .layout
+                    .character(key, !self.shift.is_empty(), self.caps)
+                {
+                    Some('\t' | '\n') | None => LookupKey::Ignore,
+                    Some(c) => LookupKey::Char(c),
+                },
+            ),
+        }
+    }
+
+    /// Forget which modifiers are held, as a lookup opens.
+    pub fn reset(&mut self) {
+        self.shift.clear();
+        self.shortcut.clear();
+        self.caps = false;
     }
 }
 
@@ -238,26 +254,52 @@ mod tests {
         assert_eq!(rows[0].outline, "A");
     }
 
+    fn press(input: &mut LookupInput, key: KeyCode) -> Option<LookupKey> {
+        let result = input.key(key, true);
+        input.key(key, false);
+        result
+    }
+
     #[test]
     fn lookups_are_case_sensitive_and_shift_capitalizes() {
-        assert_eq!(classify(KeyCode::KC_C, false), LookupKey::Char('c'));
-        assert_eq!(classify(KeyCode::KC_C, true), LookupKey::Char('C'));
+        let mut input = LookupInput::default();
+        assert_eq!(press(&mut input, KeyCode::KC_C), Some(LookupKey::Char('c')));
+        input.key(KeyCode::KC_LSFT, true);
+        assert_eq!(press(&mut input, KeyCode::KC_C), Some(LookupKey::Char('C')));
+        input.key(KeyCode::KC_LSFT, false);
+        assert_eq!(press(&mut input, KeyCode::KC_C), Some(LookupKey::Char('c')));
         let view = typed("Can").view(&translator());
         assert!(view.rows.is_empty(), "the dictionary has `can`, not `Can`");
     }
 
     #[test]
-    fn keys_mean_what_their_keycaps_say() {
-        assert_eq!(classify(KeyCode::KC_SPC, false), LookupKey::Char(' '));
-        assert_eq!(classify(KeyCode::KC_5, false), LookupKey::Char('5'));
-        assert_eq!(classify(KeyCode::KC_MINS, false), LookupKey::Char('-'));
-        assert_eq!(classify(KeyCode::KC_QUOT, false), LookupKey::Char('\''));
-        // Shifted digits and punctuation aren't words, and F-keys and arrows do nothing
-        assert_eq!(classify(KeyCode::KC_5, true), LookupKey::Ignore);
-        assert_eq!(classify(KeyCode::KC_F1, false), LookupKey::Ignore);
-        assert_eq!(classify(KeyCode::KC_ESC, false), LookupKey::Close);
-        assert_eq!(classify(KeyCode::KC_ENT, false), LookupKey::Close);
-        assert_eq!(classify(KeyCode::KC_BSPC, false), LookupKey::Backspace);
+    fn keys_mean_what_the_layers_made_of_them() {
+        let mut input = LookupInput::default();
+        assert_eq!(press(&mut input, KeyCode::KC_SPC), Some(LookupKey::Char(' ')));
+        assert_eq!(press(&mut input, KeyCode::KC_5), Some(LookupKey::Char('5')));
+        assert_eq!(press(&mut input, KeyCode::KC_MINS), Some(LookupKey::Char('-')));
+        // Symbols come with Shift, as from a symbol layer, and so does Caps Lock for letters
+        input.key(KeyCode::KC_RSFT, true);
+        assert_eq!(press(&mut input, KeyCode::KC_5), Some(LookupKey::Char('%')));
+        assert_eq!(press(&mut input, KeyCode::KC_QUOT), Some(LookupKey::Char('"')));
+        input.key(KeyCode::KC_RSFT, false);
+        input.key(KeyCode::KC_CAPS, true);
+        assert_eq!(press(&mut input, KeyCode::KC_A), Some(LookupKey::Char('A')));
+        // F-keys, arrows and Tab do nothing; a shortcut isn't text; Esc and Enter close
+        assert_eq!(press(&mut input, KeyCode::KC_F1), Some(LookupKey::Ignore));
+        assert_eq!(press(&mut input, KeyCode::KC_TAB), Some(LookupKey::Ignore));
+        input.key(KeyCode::KC_LCTL, true);
+        assert_eq!(press(&mut input, KeyCode::KC_A), Some(LookupKey::Ignore));
+        input.key(KeyCode::KC_LCTL, false);
+        assert_eq!(press(&mut input, KeyCode::KC_ESC), Some(LookupKey::Close));
+        assert_eq!(press(&mut input, KeyCode::KC_ENT), Some(LookupKey::Close));
+        assert_eq!(press(&mut input, KeyCode::KC_BSPC), Some(LookupKey::Backspace));
+    }
+
+    #[test]
+    fn the_typing_layout_decides_the_letters() {
+        let mut input = LookupInput::new(TypingLayout::Dvorak);
+        assert_eq!(press(&mut input, KeyCode::KC_S), Some(LookupKey::Char('o')));
     }
 
     #[test]
