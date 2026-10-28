@@ -26,6 +26,9 @@ pub struct TapeEntry {
     pub text: String,
     /// The stroke matched nothing in the dictionaries
     pub unmatched: bool,
+    /// How many times it was repeated by holding it, on top of the once it was typed
+    #[serde(default)]
+    pub repeats: u32,
 }
 
 /// One result of a live lookup: a word, and the outline that types it.
@@ -127,11 +130,29 @@ impl OverlayHub {
                 stroke,
                 text,
                 unmatched,
+                repeats: 0,
             });
             state.chord = 0;
             state.held = 0;
             true
         });
+    }
+
+    /// A stroke was typed again by holding it. It counts on its line, if that is the newest one,
+    /// instead of adding a line for every repeat.
+    pub fn push_repeat(&self, stroke: u32, text: String, unmatched: bool) {
+        let counted = self.update(|state| {
+            let Some(last) = state.tape.back_mut().filter(|last| last.stroke == stroke) else {
+                return false;
+            };
+            last.repeats += 1;
+            state.chord = 0;
+            state.held = 0;
+            true
+        });
+        if !counted {
+            self.push_stroke(stroke, text, unmatched);
+        }
     }
 
     /// The current state, whatever its generation.
@@ -167,13 +188,16 @@ impl OverlayHub {
     }
 
     /// Apply `change`, and wake subscribers if it reports that something changed.
-    fn update(&self, change: impl FnOnce(&mut OverlaySnapshot) -> bool) {
+    /// Apply `change`, which says whether it changed anything, and wake the subscribers if so.
+    fn update(&self, change: impl FnOnce(&mut OverlaySnapshot) -> bool) -> bool {
         let mut state = lock(&self.state);
-        if change(&mut state) {
+        let changed = change(&mut state);
+        if changed {
             state.generation += 1;
             drop(state);
             self.changed.notify_all();
         }
+        changed
     }
 }
 
@@ -213,6 +237,23 @@ mod tests {
         let seqs: Vec<u64> = state.tape.iter().map(|entry| entry.seq).collect();
         assert_eq!(seqs, [1, 2]);
         assert!(state.tape[1].unmatched);
+    }
+
+    #[test]
+    fn a_repeated_stroke_counts_on_its_line_and_wakes_the_overlay() {
+        let hub = OverlayHub::default();
+        hub.push_stroke(0b1, "\"a\"".into(), false);
+        hub.push_stroke(0b10, "\"b\"".into(), false);
+        let before = hub.snapshot().generation;
+        hub.push_repeat(0b10, "\"b\"".into(), false);
+        hub.push_repeat(0b10, "\"b\"".into(), false);
+        let state = hub.snapshot();
+        assert_eq!(state.tape.len(), 2);
+        assert_eq!(state.tape[1].repeats, 2);
+        assert_eq!(state.generation, before + 2);
+        // A repeat of a stroke that is not the newest line has no line to count on
+        hub.push_repeat(0b1, "\"a\"".into(), false);
+        assert_eq!(hub.snapshot().tape.len(), 3);
     }
 
     #[test]

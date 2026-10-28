@@ -485,6 +485,12 @@ impl Renderer {
         } else {
             (display_text(&entry.text), self.theme.words)
         };
+        // A stroke held down repeats: one line with a count, not a line for each
+        let text = if entry.repeats > 0 {
+            Cow::Owned(format!("x{} {text}", entry.repeats + 1))
+        } else {
+            text
+        };
         draw_text_clipped(
             pixmap,
             &mut self.words,
@@ -729,6 +735,7 @@ mod tests {
             stroke: crate::steno::layout::parse_stroke(stroke).unwrap(),
             text: text.into(),
             unmatched: text.is_empty(),
+            repeats: 0,
         }
     }
 
