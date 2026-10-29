@@ -40,37 +40,65 @@ pub fn load_chain(config_dir: &Path) -> Chain {
     Chain::load_cached(&files, &cache)
 }
 
-/// Print the stroke(s) that type `word`.
-pub fn lookup(config_dir: &Path, word: &str) {
-    let dict = load_dictionary(config_dir);
-    let found = proper_outlines(&dict, word);
-    if found.is_empty() {
-        println!("No stroke for \"{word}\"");
-        return;
-    }
-    for strokes in found {
-        println!("{}", format_strokes(&strokes));
+/// The one lookup, forward or backward.
+///
+/// `KAT/-D` (no lowercase letter, valid notation) resolves forward through the full dictionary
+/// chain, plugin fallback included, same as `show_stroke` used to on its own; anything else is
+/// text to find the stroke(s) for, a single word or a whole phrase, falling back to
+/// fingerspelling (marked in quotes) for a word with no entry. See [`super::reverse`] for the
+/// engine both this and the live overlay lookup share.
+pub fn lookup(config_dir: &Path, query: &str) {
+    match super::reverse::classify(query) {
+        super::reverse::Query::Stroke(strokes) => print_forward(config_dir, &strokes),
+        super::reverse::Query::Text(phrase) => print_reverse(config_dir, &phrase),
     }
 }
 
-/// Print the text a stroke (or `KPA/TKAOEU`-style sequence) types.
-pub fn show_stroke(config_dir: &Path, text: &str) -> Result<()> {
-    let strokes = parse_strokes(text)?;
+fn print_forward(config_dir: &Path, strokes: &[u32]) {
     let dict = load_chain(config_dir);
-    if let Some(translation) = dict.lookup(&strokes) {
+    if let Some(translation) = dict.lookup(strokes) {
         println!(
-            "{:?}",
-            plain_text(&translation).unwrap_or_else(|| translation.clone())
+            "{}  ->  {:?}",
+            format_strokes(strokes),
+            plain_text(&translation).unwrap_or(translation)
         );
     } else if let Some(digits) = strokes
         .first()
         .filter(|_| strokes.len() == 1)
         .and_then(|&s| number_text(s))
     {
-        println!("{digits:?} (number stroke)");
+        println!("{}  ->  {digits:?} (number stroke)", format_strokes(strokes));
     } else {
-        println!("{} has no translation", format_strokes(&strokes));
+        println!("{} has no translation", format_strokes(strokes));
     }
+}
+
+fn print_reverse(config_dir: &Path, phrase: &str) {
+    if phrase.is_empty() {
+        println!("Nothing to look up");
+        return;
+    }
+    let dict = load_dictionary(config_dir);
+    let base = Translator::new(dict.clone());
+    let segments = super::reverse::reverse_phrase(&base, &dict, phrase);
+    if segments.iter().all(Option::is_none) {
+        println!("No stroke for \"{phrase}\"");
+        return;
+    }
+    let (words, strokes) = super::reverse::display(&segments);
+    println!("{words}  ->  {strokes}");
+    if segments.iter().any(|s| s.as_ref().is_some_and(|s| s.fingerspelled)) {
+        println!("(a quoted word has no dictionary entry — shown fingerspelled instead)");
+    }
+}
+
+/// Print the text a stroke (or `KPA/TKAOEU`-style sequence) types.
+///
+/// Kept as an explicit alias of what `lookup` does automatically for all-caps input, since
+/// `keymux steno stroke` is its own documented, scriptable command.
+pub fn show_stroke(config_dir: &Path, text: &str) -> Result<()> {
+    let strokes = parse_strokes(text)?;
+    print_forward(config_dir, &strokes);
     Ok(())
 }
 
@@ -430,7 +458,7 @@ fn keys_text(strokes: &[u32], keys_by_bit: &HashMap<u32, KeyCode>) -> String {
 /// Byte ranges of the words in `text`. Each whitespace-separated chunk is split so that
 /// punctuation on either end is its own word: `now,` is `now` then `,`. Punctuation
 /// inside a word stays with it, so `12:29am` is one word.
-fn word_spans(text: &str) -> Vec<(usize, usize)> {
+pub(crate) fn word_spans(text: &str) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     let mut chunk_start: Option<usize> = None;
     for (i, c) in text
@@ -496,7 +524,7 @@ pub fn proper_outlines_in(base: &Translator, word: &str) -> Vec<Vec<u32>> {
 /// Every stroke sequence that translates `word` on its own, fewest strokes first, then fewest keys.
 /// An entry that glues to the next word (`{be^}`, a prefix) is left out: it types `be`, but
 /// the next word would attach to it, so it doesn't type `be` as a word.
-fn ranked_strokes(dict: &Dictionary, word: &str) -> Vec<Vec<u32>> {
+pub(crate) fn ranked_strokes(dict: &Dictionary, word: &str) -> Vec<Vec<u32>> {
     let mut found = dict.strokes_for(word);
     found.retain(|strokes| !dict.lookup(strokes).is_some_and(leaves_attached));
     found.sort_by_key(|strokes| {
@@ -511,7 +539,7 @@ fn ranked_strokes(dict: &Dictionary, word: &str) -> Vec<Vec<u32>> {
 /// One stroke sequence per word that together type the text exactly, or `None`.
 /// `wants[i]` is the text that should be typed once word `i` is done.
 /// `base` is a fresh translator, so the run starts with no leading space.
-fn exact_strokes(
+pub(crate) fn exact_strokes(
     base: &Translator,
     wants: &[String],
     candidates: &[Vec<Vec<u32>>],

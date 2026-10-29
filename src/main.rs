@@ -150,8 +150,8 @@ fn main() -> Result<()> {
                         *fast,
                     )?;
                 }
-                cli::StenoAction::Lookup { word } => {
-                    keymux::steno::commands::lookup(config_dir, word);
+                cli::StenoAction::Lookup { query } => {
+                    keymux::steno::commands::lookup(config_dir, query);
                 }
                 cli::StenoAction::Stroke { stroke } => {
                     keymux::steno::commands::show_stroke(config_dir, stroke)?;
