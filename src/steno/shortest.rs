@@ -25,6 +25,23 @@ use std::collections::HashMap;
 /// dictionary word nor fingerspelling can type it. Ties go to the dictionary word.
 #[must_use]
 pub fn shortest_outline(dict: &Dictionary, word: &str) -> Option<Vec<u32>> {
+    shortest_outline_labeled(dict, word).map(|found| found.strokes)
+}
+
+/// [`shortest_outline`]'s answer, labeled with which of the two ways it came from.
+///
+/// A real dictionary word, or letters fingerspelled one at a time because no word did. The two
+/// read identically as plain strokes, but a caller showing the answer to someone (a reverse
+/// lookup, say) has reason to say which — fingerspelling is a materially worse answer than a
+/// real outline, not just a different-looking one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Spelled {
+    pub strokes: Vec<u32>,
+    pub fingerspelled: bool,
+}
+
+#[must_use]
+pub fn shortest_outline_labeled(dict: &Dictionary, word: &str) -> Option<Spelled> {
     let target: Vec<char> = word.chars().collect();
     if target.is_empty() {
         return None;
@@ -33,11 +50,25 @@ pub fn shortest_outline(dict: &Dictionary, word: &str) -> Option<Vec<u32>> {
     let spelled = spelled_outline(&letter_strokes(dict), &target);
     match (whole, spelled) {
         (Some(word_outline), Some(letters)) => Some(if letters.len() < word_outline.len() {
-            letters
+            Spelled {
+                strokes: letters,
+                fingerspelled: true,
+            }
         } else {
-            word_outline
+            Spelled {
+                strokes: word_outline,
+                fingerspelled: false,
+            }
         }),
-        (word_outline, letters) => word_outline.or(letters),
+        (Some(strokes), None) => Some(Spelled {
+            strokes,
+            fingerspelled: false,
+        }),
+        (None, Some(strokes)) => Some(Spelled {
+            strokes,
+            fingerspelled: true,
+        }),
+        (None, None) => None,
     }
 }
 

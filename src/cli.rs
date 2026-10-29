@@ -278,10 +278,14 @@ pub enum StenoAction {
         #[arg(long)]
         fast: bool,
     },
-    /// Show the stroke that types a word, e.g. `keymux steno lookup cat`
+    /// Look a word, phrase, or stroke up, whichever it is: `keymux steno lookup cat` finds the
+    /// stroke, `keymux steno lookup "tell me how"` finds the strokes for the whole phrase (one
+    /// per word unless a phrase entry covers more than one at once), and `keymux steno lookup
+    /// KAT/-D` (all caps, valid notation) finds what that stroke types instead. A word with no
+    /// dictionary entry is fingerspelled and shown in quotes, so you can tell the two apart.
     Lookup {
-        /// The word to look up (case-sensitive, as the dictionary spells it)
-        word: String,
+        /// The word, phrase, or stroke to look up
+        query: String,
     },
     /// Show what a stroke types, e.g. `KAT` or `KPA/TKAOEU`
     Stroke {

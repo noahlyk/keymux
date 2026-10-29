@@ -22,6 +22,7 @@ pub mod numbers;
 pub mod orthography;
 pub mod overlay;
 pub mod plugin;
+pub mod reverse;
 pub mod rtf;
 pub mod setup;
 pub mod shortest;

@@ -8,8 +8,10 @@
 //! closes it.
 
 use super::commands::proper_outlines_in;
-use super::layout::render_stroke;
+use super::layout::{parse_stroke, render_strokes};
 use super::overlay::{LookupRow, LookupView};
+use super::reverse::{self, Query};
+use super::shortest::shortest_outline_labeled;
 use super::translate::Translator;
 use super::typing::TypingLayout;
 use crate::keycode::KeyCode;
@@ -124,53 +126,120 @@ impl Lookup {
         true
     }
 
-    /// What the overlay shows for the query: the word's own outlines first, then words that
-    /// start with it, each with its best outline.
+    /// What the overlay shows for the query.
+    ///
+    /// All-caps text with no lowercase letter that parses as steno notation (`KAT/-D`) resolves
+    /// forward: one row, what it types. Anything else is a reverse lookup: a query with a space
+    /// in it is a whole phrase, shown as one row, word by word, falling back to fingerspelling
+    /// (marked in quotes) for a word with no entry — a single word keeps the fuller view this
+    /// always had, its own outlines first then words that start with it, but now also falls back
+    /// to fingerspelling when the dictionary has nothing at all, instead of showing nothing.
     ///
     /// `base` is a translator with nothing typed ([`Translator::fresh`]), over the dictionary
-    /// the engine is using.
+    /// the engine is using. See [`super::reverse`] for the engine this and the CLI's `keymux
+    /// steno lookup` share.
     #[must_use]
     pub fn view(&self, base: &Translator) -> LookupView {
         let query = self.query.trim();
-        let mut rows = Vec::new();
-        let mut hint = 0;
-        let mut add = |text: &str, outline: &[u32], rows: &mut Vec<LookupRow>| {
-            if rows.is_empty() {
-                hint = outline.first().copied().unwrap_or(0);
-            }
-            rows.push(LookupRow {
-                text: text.to_owned(),
-                outline: outline
-                    .iter()
-                    .map(|&bits| render_stroke(bits))
-                    .collect::<Vec<_>>()
-                    .join("/"),
-            });
-        };
-
-        if !query.is_empty() {
-            for outline in proper_outlines_in(base, query).iter().take(MAX_OUTLINES) {
-                add(query, outline, &mut rows);
-            }
-            if query.chars().count() >= MIN_PREFIX {
-                // Ask for extra: a word with no outline that types it properly is skipped
-                for word in base.dictionary().completions(query, MAX_ROWS * 2) {
-                    if rows.len() >= MAX_ROWS {
-                        break;
-                    }
-                    if let Some(outline) = proper_outlines_in(base, word).first() {
-                        add(word, outline, &mut rows);
-                    }
-                }
-            }
+        if query.is_empty() {
+            return LookupView {
+                query: self.query.clone(),
+                rows: Vec::new(),
+                hint: 0,
+            };
         }
-        rows.truncate(MAX_ROWS);
+        let rows = match reverse::classify(query) {
+            Query::Stroke(strokes) => vec![stroke_row(base, &strokes)],
+            Query::Text(text) if text.contains(char::is_whitespace) => {
+                vec![phrase_row(base, &text)]
+            }
+            Query::Text(text) => word_rows(base, &text),
+        };
+        let hint = rows.first().map_or(0, |row: &LookupRow| {
+            row.outline
+                .split('/')
+                .next()
+                .and_then(parse_stroke)
+                .unwrap_or(0)
+        });
         LookupView {
             query: self.query.clone(),
             rows,
             hint,
         }
     }
+}
+
+/// What a stroke sequence types, as a single row: outline is the notation itself, text is the
+/// result in quotes (or a note that nothing matched).
+fn stroke_row(base: &Translator, strokes: &[u32]) -> LookupRow {
+    let mut probe = base.clone();
+    for &bits in strokes {
+        probe.stroke(bits);
+    }
+    let text = probe.text();
+    LookupRow {
+        text: if text.is_empty() {
+            "(no translation)".to_string()
+        } else {
+            format!("\u{2192} {text:?}")
+        },
+        outline: render_strokes(strokes),
+    }
+}
+
+/// A whole phrase as a single row: the words (a fingerspelled one in quotes), and every stroke
+/// that types them in order.
+fn phrase_row(base: &Translator, phrase: &str) -> LookupRow {
+    let segments = reverse::reverse_phrase(base, base.dictionary(), phrase);
+    let (words, strokes) = reverse::display(&segments);
+    LookupRow {
+        text: words,
+        outline: strokes,
+    }
+}
+
+/// The existing single-word view: the word's own outlines first, then words that start with it,
+/// each with its best outline — falling back to fingerspelling, marked in quotes, when the exact
+/// query has no dictionary entry at all.
+fn word_rows(base: &Translator, query: &str) -> Vec<LookupRow> {
+    let mut rows = Vec::new();
+    let exact = proper_outlines_in(base, query);
+    if exact.is_empty() {
+        if let Some(found) = shortest_outline_labeled(base.dictionary(), query) {
+            rows.push(LookupRow {
+                text: if found.fingerspelled {
+                    format!("\"{query}\"")
+                } else {
+                    query.to_string()
+                },
+                outline: render_strokes(&found.strokes),
+            });
+        }
+    } else {
+        for outline in exact.iter().take(MAX_OUTLINES) {
+            rows.push(LookupRow {
+                text: query.to_string(),
+                outline: render_strokes(outline),
+            });
+        }
+    }
+    if query.chars().count() >= MIN_PREFIX {
+        // Ask for extra: a word with no outline that types it properly is skipped
+        for word in base.dictionary().completions(query, MAX_ROWS * 2) {
+            if rows.len() >= MAX_ROWS {
+                break;
+            }
+            if let Some(outline) = proper_outlines_in(base, word).first() {
+                rows.push(LookupRow {
+                    text: word.to_string(),
+                    outline: render_strokes(outline),
+                });
+            }
+        }
+    }
+    rows.truncate(MAX_ROWS);
+    rows
 }
 
 #[cfg(test)]
@@ -326,5 +395,36 @@ mod tests {
         }
         assert_eq!(lookup.view(&translator()).query, "");
         assert!(!lookup.apply(LookupKey::Close));
+    }
+
+    #[test]
+    fn an_all_caps_query_resolves_the_stroke_forward() {
+        let view = typed("KAPB").view(&translator());
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].text, "\u{2192} \"can\"");
+        assert_eq!(view.rows[0].outline, "KAPB");
+        assert_eq!(view.hint, parse_stroke("KAPB").unwrap());
+    }
+
+    #[test]
+    fn a_query_with_a_space_looks_up_the_whole_phrase_as_one_row() {
+        let mut dict = Dictionary::default();
+        dict.merge_json(r#"{"KAPB": "can", "-T": "the", "KAPBD": "candy"}"#)
+            .unwrap();
+        let view = typed("can the candy").view(&Translator::new(dict));
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].text, "can the candy");
+        assert_eq!(view.rows[0].outline, "KAPB / -T / KAPBD");
+    }
+
+    #[test]
+    fn a_word_with_no_dictionary_entry_falls_back_to_fingerspelling_in_quotes() {
+        let mut dict = Dictionary::default();
+        dict.merge_json(r#"{"TPH": "{&n}", "SR*": "{&v}", "SKW*": "{&i}", "PH*": "{&m}"}"#)
+            .unwrap();
+        let view = typed("nvim").view(&Translator::new(dict));
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].text, "\"nvim\"");
+        assert_eq!(view.rows[0].outline, "TPH/SR*/SKW*/PH*");
     }
 }
