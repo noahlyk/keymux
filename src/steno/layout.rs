@@ -264,11 +264,15 @@ pub fn render_raw_stroke(bits: u32) -> String {
     } else {
         ""
     };
-    format!(
-        "{extras}{number}{}-{star}{}",
-        letters(0..STAR_SLOT),
-        letters(STAR_SLOT + 1..NUMBER_SLOT)
-    )
+    let left = letters(0..STAR_SLOT);
+    let right = letters(STAR_SLOT + 1..NUMBER_SLOT);
+    // The hyphen marks where the left hand ends and the right begins; with nothing from either
+    // hand (an extra key or the number bar on its own), there are no two hands for it to mark.
+    if left.is_empty() && star.is_empty() && right.is_empty() {
+        format!("{extras}{number}")
+    } else {
+        format!("{extras}{number}{left}-{star}{right}")
+    }
 }
 
 /// The sound each stroke key stands for, in the same order as [`SLOTS`]. This is the
@@ -548,6 +552,8 @@ mod tests {
             ("STPHAO*EUFRPB", "STPHAO-*EUFRPB"),
             ("#T", "#T-"),
             ("#*", "#-*"),
+            // Nothing from either hand: no hyphen to mark a boundary between them
+            ("^", "^"),
         ] {
             let bits = parse_stroke(text).unwrap_or_else(|| panic!("{text} should parse"));
             assert_eq!(render_raw_stroke(bits), raw, "rendering {text}");

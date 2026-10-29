@@ -178,6 +178,14 @@ struct Macro {
     cmdline: String,
 }
 
+/// Whether `strokes` is a run the keyboard itself declared one word: more than one stroke,
+/// every one after the first carrying the join key. A dictionary's longest real key says
+/// nothing about how long this can run, since nothing here was an accidental match to begin
+/// with.
+fn is_join_continuation(strokes: &[u32]) -> bool {
+    matches!(strokes, [_, rest @ ..] if !rest.is_empty() && rest.iter().all(|s| s & JOIN_BIT != 0))
+}
+
 /// The macro a mapping stands for. Nothing mapped is the undo stroke's macro when the stroke is
 /// the undo stroke.
 fn mapping_to_macro(mapping: Option<&str>, stroke: u32) -> Option<Macro> {
@@ -876,7 +884,15 @@ impl Translator {
                 return None;
             }
         }
-        // How much of the history can be involved
+        // A stroke with the join key declares itself a continuation outright, so it is never
+        // tried on its own (`i == translations.len()`, no history involved): doing that would
+        // let it be mistaken for a fresh word the moment nothing glues onto it matches.
+        let joined = stroke & JOIN_BIT != 0;
+        // How much of the history can be involved. A dictionary's longest real key bounds an
+        // ordinary search for an accidental multi-stroke match, but a join-key run is not
+        // accidental: the keyboard already declared it one continuing word, so it keeps growing
+        // for as long as the keyboard says so, not just until it would be as long as the
+        // dictionary's longest brief.
         let mut num_strokes = 1;
         let mut count = 0;
         for t in self.hist.state.translations.iter().rev() {
@@ -886,17 +902,13 @@ impl Translator {
                 break;
             }
             num_strokes += t.strokes.len();
-            if num_strokes > max_len {
+            if !joined && num_strokes > max_len {
                 break;
             }
             count += 1;
         }
         let translations =
             &self.hist.state.translations[self.hist.state.translations.len() - count..];
-        // A stroke with the join key declares itself a continuation outright, so it is never
-        // tried on its own (`i == translations.len()`, no history involved): doing that would
-        // let it be mistaken for a fresh word the moment nothing glues onto it matches.
-        let joined = stroke & JOIN_BIT != 0;
         // The new stroke makes a new translation, or replaces earlier ones by matching a longer one
         for i in 0..=translations.len() {
             if joined && i == translations.len() {
@@ -987,7 +999,11 @@ impl Translator {
                 return Some(found);
             }
         }
-        if strokes.len() <= max_len {
+        // A dictionary's longest real key bounds an ordinary lookup, but it says nothing about
+        // how long a join-key run can be: the keyboard already declared the whole thing one
+        // word, so trying it is never pointless the way trying an arbitrarily long accidental
+        // window would be.
+        if strokes.len() <= max_len || is_join_continuation(strokes) {
             return self.lookup_with_suffix(strokes, suffixes);
         }
         None
@@ -1207,6 +1223,51 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
             t.text(),
             "",
             "an empty plugin answer must never shadow undo"
+        );
+    }
+
+    #[test]
+    fn holding_a_join_key_repeat_keeps_gluing_with_no_space_or_stray_schwa() {
+        // A dictionary's longest real key ("KPA/TKAOEU/-S/-D/-G/-Z", 6 strokes) is what the
+        // engine's ordinary search is bounded by; a held join-key repeat has to grow past it
+        // regardless, the same way a real word like "hahahahaha..." does on a real keyboard.
+        let dir = std::env::temp_dir().join(format!(
+            "keymux-translate-plugin-test-{}-held_join_key_repeat",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("orthographic-fallback.rs");
+        fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("docs")
+                .join("plugins")
+                .join("orthographic-fallback.rs"),
+            &source,
+        )
+        .unwrap();
+        let dict_path = dir.join("01-dict.json");
+        fs::write(&dict_path, r#"{"KPA/TKAOEU/-S/-D/-G/-Z": "dictionary"}"#).unwrap();
+        let chain = Chain::load_cached(&[dict_path, source], &dir.join("cache"));
+        assert_eq!(chain.as_dictionary().longest_key(), 6);
+        let mut t = Translator::with_shared(
+            Arc::new(chain),
+            Options {
+                start_attached: true,
+                ..Options::default()
+            },
+        );
+        t.stroke(stroke("HA"));
+        t.stroke(stroke("^HA"));
+        t.stroke(stroke("^HA"));
+        assert_eq!(t.text(), "hahaha");
+        for _ in 0..15 {
+            t.stroke(stroke("^HA"));
+        }
+        assert_eq!(
+            t.text(),
+            "ha".repeat(18),
+            "a held join-key repeat keeps gluing past the dictionary's longest real key, with \
+             no space and no stray \"uh\" from the engine's own word-start probe"
         );
     }
 
