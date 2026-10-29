@@ -77,7 +77,10 @@ const VOWELS: &[(&str, &str)] = &[
     ("E", "e"),
     ("U", "u"),
     ("*", ""),
-    ("", "uh"),
+    // No vowel key down is a bare consonant skeleton, valid on its own (the start of a word a
+    // join-key continuation finishes) or as all there really is: either way, not a cue to
+    // invent a specific vowel sound nobody asked for.
+    ("", ""),
 ];
 
 /// Greedily reads `letters` as a sequence of the given clusters, longest match first, until
