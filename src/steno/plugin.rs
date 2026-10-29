@@ -19,9 +19,14 @@
 //!
 //! # The fallback interface
 //!
-//! The one thing a plugin can be asked right now: a reading of a stroke outline that missed
-//! everything ahead of it, such as an orthographic guess from a theory's own phonetic rules.
-//! A plugin exports two functions:
+//! The one thing a plugin can be asked right now: a reading of one word that missed everything
+//! ahead of it, such as an orthographic guess from a theory's own phonetic rules — a single
+//! stroke, or several where every one after the first carries the join key, declaring itself a
+//! continuation of the word on purpose (a word that needed more keys than one stroke has). It
+//! is never asked about a run of otherwise-unrelated strokes — the engine's own search for the
+//! longest dictionary match tries windows of many strokes together regardless, and a plugin
+//! that answered those too would win every one of them, swallowing unrelated strokes into one
+//! guess instead of leaving them as separate words. A plugin exports two functions:
 //!
 //! ```ignore
 //! #[no_mangle]
@@ -32,15 +37,16 @@
 //! ```
 //!
 //! `alloc` is asked for `len` bytes of the plugin's own memory and returns where they start, or
-//! `0` for none to give. `fallback` is given the stroke outline exactly as Plover notation
-//! would render it (`KAT`, `KOPB/^TKEUGS`), written at the address `alloc` returned, and answers
-//! with its own reading of it, written into memory it also allocated, as a packed pointer and
-//! length (`ptr << 32 | len`, as an `i64`), or a negative number for no reading at all.
+//! `0` for none to give. `fallback` is given that word's outline exactly as Plover notation
+//! would render it (`KAT`, `KOPB`, `KAT/^-G`), written at the address `alloc` returned, and
+//! answers with its own reading of it, written into memory it also allocated, as a packed
+//! pointer and length
+//! (`ptr << 32 | len`, as an `i64`), or a negative number for no reading at all.
 //!
 //! See `docs/plugins/orthographic-fallback.rs` for a complete, working example.
 
 use super::dict::Dictionary;
-use super::layout::render_strokes;
+use super::layout::{render_strokes, JOIN_BIT};
 use super::source::is_plugin_file;
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -162,7 +168,7 @@ impl Plugin {
     }
 
     /// Ask this plugin for a reading of a stroke outline that missed every dictionary, in
-    /// Plover notation (`KAT`, `KOPB/^TKEUGS`). `None` for no reading, if the call itself
+    /// Plover notation (`KAT`, `KOPB`). `None` for no reading, if the call itself
     /// failed (a bad plugin answers nothing, it cannot bring the daemon down with it), or if
     /// the reading is empty: an empty string is never a useful translation, and treating it as
     /// one would mean this is "mapped" as far as the engine can tell, silently defeating
@@ -318,16 +324,22 @@ impl Chain {
     }
 
     /// The translation of an exact outline: the first step with an answer, trying each in the
-    /// priority order the files were given in.
+    /// priority order the files were given in. A plugin only ever answers for a single stroke,
+    /// or a run of strokes that is really one word the join key stitched together on purpose
+    /// (every stroke after the first carries it): the engine's own search for the longest
+    /// dictionary match also tries windows of many unrelated strokes at once, and a plugin that
+    /// answered those too would win every one of them (it never really has "no reading"),
+    /// swallowing whole runs of unrelated strokes into one guess instead of leaving them as
+    /// separate words. A real multi-stroke brief is the dictionary's job; the plugin is the last
+    /// resort for what nothing else recognizes, one word at a time.
     #[must_use]
     pub fn lookup(&self, strokes: &[u32]) -> Option<String> {
         for step in &self.steps {
             let found = match step {
                 Step::Dict(dict) => dict.lookup(strokes).map(str::to_owned),
-                Step::Plugin(plugin) => {
-                    let outline = render_strokes(strokes);
-                    lock(plugin).fallback(&outline)
-                }
+                Step::Plugin(plugin) => is_one_word(strokes)
+                    .then(|| lock(plugin).fallback(&render_strokes(strokes)))
+                    .flatten(),
             };
             if found.is_some() {
                 return found;
@@ -383,6 +395,18 @@ fn lock(mutex: &Mutex<Plugin>) -> std::sync::MutexGuard<'_, Plugin> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Whether `strokes` reads as one word to ask a plugin about: a single stroke, or several where
+/// every one after the first carries the join key, declaring itself a continuation on purpose.
+/// Anything else is a window the engine's own search built out of unrelated strokes to see if
+/// the dictionary recognizes them together, which a plugin must never be asked to settle.
+fn is_one_word(strokes: &[u32]) -> bool {
+    match strokes {
+        [] => false,
+        [_single] => true,
+        [_first, rest @ ..] => rest.iter().all(|s| s & JOIN_BIT != 0),
+    }
 }
 
 #[cfg(test)]
@@ -527,6 +551,52 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
             chain.lookup(&[parse_stroke("KAT").unwrap()]),
             Some("KKAATT".to_string()),
             "the broken plugin is skipped, the good one after it still answers"
+        );
+    }
+
+    #[test]
+    fn a_plugin_is_never_asked_about_unrelated_strokes_together() {
+        // A window of several unrelated strokes reaching the plugin step would let it answer
+        // for every one of them (it never really runs out of letters to double), swallowing
+        // whatever came before into one guess instead of leaving each stroke to be judged on
+        // its own.
+        let dir =
+            tmp_dir().join("a_plugin_is_never_asked_about_unrelated_strokes_together");
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("doubler.rs");
+        fs::write(&source, DOUBLER).unwrap();
+        let chain = Chain::load_cached(&[source], &dir.join("cache"));
+        let kat = parse_stroke("KAT").unwrap();
+        let top = parse_stroke("TOP").unwrap();
+        assert_eq!(
+            chain.lookup(&[kat]),
+            Some("KKAATT".to_string()),
+            "a single stroke still reaches the plugin"
+        );
+        assert_eq!(
+            chain.lookup(&[kat, top]),
+            None,
+            "two unrelated strokes together must not reach the plugin, however short"
+        );
+    }
+
+    #[test]
+    fn a_plugin_is_asked_about_a_run_the_join_key_declares_as_one_word() {
+        // The join key exists precisely so a word that needs more keys than one stroke has can
+        // be spelled across several strokes on purpose. That is still one word as far as a
+        // phonetic-fallback plugin is concerned, unlike an arbitrary window the engine's own
+        // search tried out of unrelated strokes.
+        let dir = tmp_dir().join("a_plugin_is_asked_about_a_run_the_join_key_declares_as_one_word");
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("doubler.rs");
+        fs::write(&source, DOUBLER).unwrap();
+        let chain = Chain::load_cached(&[source], &dir.join("cache"));
+        let kat = parse_stroke("KAT").unwrap();
+        let joined_top = parse_stroke("^TOP").unwrap();
+        assert_eq!(
+            chain.lookup(&[kat, joined_top]),
+            Some("KKAATT//^^TTOOPP".to_string()),
+            "a join-key continuation is one word, so the plugin is still asked about it whole"
         );
     }
 
