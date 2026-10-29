@@ -166,7 +166,7 @@ impl Keyboard {
                         let OverlayPlacement::SplitKey { half, .. } = placement(i) else {
                             unreachable!("resolved_slot only returns Some for SplitKey")
                         };
-                        half_of(keys[idx], *half)
+                        half_of(keys[idx], *half, gap)
                     },
                 )
             })
@@ -179,7 +179,7 @@ impl Keyboard {
                 let OverlayPlacement::SplitKey { half, .. } = placement(i) else {
                     unreachable!("resolved_slot only returns Some for SplitKey")
                 };
-                keys[idx] = half_of(keys[idx], half.opposite());
+                keys[idx] = half_of(keys[idx], half.opposite(), gap);
             }
         }
         let height = thumb + thumb_h - y;
@@ -232,13 +232,15 @@ const fn badge_rect(x: f32, y: f32, step: f32, unit: f32, extra_h: f32, badge_sl
     }
 }
 
-/// Half of `rect`, split along its height.
-fn half_of(rect: Rect, half: Half) -> Rect {
-    let h = rect.h / 2.0;
+/// Half of `rect`, split along its height, with `gap` left between the two halves — the same
+/// gap that already separates every other row, so a split key's halves don't touch where
+/// nothing else on the panel does.
+fn half_of(rect: Rect, half: Half, gap: f32) -> Rect {
+    let h = (rect.h - gap) / 2.0;
     Rect {
         y: match half {
             Half::Top => rect.y,
-            Half::Bottom => rect.y + h,
+            Half::Bottom => rect.y + h + gap,
         },
         h,
         ..rect
@@ -338,13 +340,19 @@ mod tests {
         // `*` is the other tall (2-row) key, untouched by the override, in this same keyboard
         // instance — the reference for what S-'s own full height would otherwise be.
         let star = keyboard.keys[9];
+        let unit = 250.0 / GAP.mul_add(COLUMNS - 1.0, COLUMNS);
+        let gap = unit * GAP;
+        let half_height = (star.h - gap) / 2.0;
         assert!((badge.x - s.x).abs() < 0.01, "same column as S-");
         assert!((badge.w - s.w).abs() < 0.01, "same width as S-");
         assert!((badge.y - star.y).abs() < 0.01, "top half starts where a tall key starts");
-        assert!((badge.h - star.h / 2.0).abs() < 0.01, "exactly half a tall key's height");
+        assert!((badge.h - half_height).abs() < 0.01, "half a tall key's height, minus the gap");
         // S- itself must have shrunk to the other half, not stayed full height underneath it.
-        assert!((s.h - star.h / 2.0).abs() < 0.01, "S- shrank to half a tall key's height: {s:?}");
-        assert!((s.y - badge.bottom()).abs() < 0.01, "S- starts right where the badge ends");
+        assert!((s.h - half_height).abs() < 0.01, "S- shrank the same way: {s:?}");
+        assert!(
+            (s.y - (badge.bottom() + gap)).abs() < 0.01,
+            "S- starts a full gap below the badge, same as any other row: {s:?} {badge:?}"
+        );
         assert!(!overlaps(&badge, &s), "badge and S- must stack, not overlap: {badge:?} {s:?}");
     }
 
@@ -368,7 +376,12 @@ mod tests {
         );
         let top_rect = Keyboard::new(0.0, 0.0, 250.0, &top).extra[0];
         let bottom_rect = Keyboard::new(0.0, 0.0, 250.0, &bottom).extra[0];
-        assert!((bottom_rect.y - top_rect.bottom()).abs() < 0.01);
+        let unit = 250.0 / GAP.mul_add(COLUMNS - 1.0, COLUMNS);
+        let gap = unit * GAP;
+        assert!(
+            (bottom_rect.y - (top_rect.bottom() + gap)).abs() < 0.01,
+            "a full gap between the halves, same as any other row: {top_rect:?} {bottom_rect:?}"
+        );
         assert!(!overlaps(&top_rect, &bottom_rect));
     }
 
