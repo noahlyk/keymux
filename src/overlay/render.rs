@@ -507,8 +507,20 @@ impl Renderer {
         let baseline_in_line =
             (self.line_height - self.words.line_height()) / 2.0 + self.words.ascent();
 
+        // A stroke still being pressed draws as its own newest line, ahead of the finished ones,
+        // so the keys appear on the tape as they go down instead of waiting for the stroke to
+        // complete. It has no text yet: what it types isn't known until it's released.
+        let live = (snapshot.chord != 0).then(|| TapeEntry {
+            seq: 0,
+            stroke: snapshot.chord,
+            text: String::new(),
+            unmatched: false,
+            repeats: 0,
+        });
+
         // Newest at the bottom, just above the keyboard
-        for (age, entry) in snapshot.tape.iter().rev().take(lines).enumerate() {
+        let entries = live.iter().chain(snapshot.tape.iter().rev()).take(lines);
+        for (age, entry) in entries.enumerate() {
             let row_top = ((age + 1) as f32).mul_add(-self.line_height, self.tape_bottom);
             let fade = line_fade(lines - 1 - age);
             self.draw_tape_line(pixmap, entry, row_top + baseline_in_line, fade);
@@ -1015,6 +1027,52 @@ mod tests {
             .filter_map(|(px, py)| pixmap.pixel(px, py))
             .any(|p| p.alpha() > 0);
         assert!(lit, "the extra key's letter should be drawn somewhere in its tape column");
+    }
+
+    #[test]
+    fn a_stroke_in_progress_draws_on_the_tape_before_it_is_released() {
+        let config = OverlayConfig::default();
+        let mut renderer = Renderer::new(&config, 1, 900).unwrap();
+        let (w, h) = renderer.size();
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        let t_bit = 1 << PAPER_ORDER[0];
+
+        // Geometry of the tape's newest (bottom-most) line, copied out so sampling doesn't
+        // need to borrow `renderer` across the mutable `draw` calls below.
+        let paper_left = renderer.paper_left;
+        let column = renderer.columns[0];
+        let pixel_size = renderer.strokes.pixel_size();
+        let baseline_in_line =
+            (renderer.line_height - renderer.words.line_height()) / 2.0 + renderer.words.ascent();
+        let baseline = (renderer.tape_bottom - renderer.line_height) + baseline_in_line;
+        let sample = |pixmap: &Pixmap| {
+            let x0 = (paper_left + column.x).max(0.0) as u32;
+            let x1 = ((paper_left + column.x + column.width).ceil() as u32).min(w);
+            let y0 = (baseline - pixel_size).max(0.0) as u32;
+            let y1 = (baseline as u32 + 2).min(h);
+            (y0..y1)
+                .flat_map(|py| (x0..x1).map(move |px| (px, py)))
+                .filter_map(|(px, py)| pixmap.pixel(px, py))
+                .any(|p| p.alpha() > 0)
+        };
+
+        // Nothing pressed, nothing on the tape yet: the newest line is blank
+        renderer.draw(&OverlaySnapshot::default(), &mut pixmap.as_mut());
+        assert!(!sample(&pixmap), "nothing held: the newest line should be blank");
+
+        // T- held, the stroke not released yet, so it has no dictionary match or text: its
+        // letter still appears on the newest line right away, without waiting for a release
+        let snapshot = OverlaySnapshot {
+            layer: Some("steno".into()),
+            held: t_bit,
+            chord: t_bit,
+            ..OverlaySnapshot::default()
+        };
+        renderer.draw(&snapshot, &mut pixmap.as_mut());
+        assert!(
+            sample(&pixmap),
+            "a key held mid-stroke should draw on the tape's newest line"
+        );
     }
 
     #[test]
