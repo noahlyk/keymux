@@ -400,12 +400,15 @@ fn lock(mutex: &Mutex<Plugin>) -> std::sync::MutexGuard<'_, Plugin> {
 /// Whether `strokes` reads as one word to ask a plugin about: a single stroke, or several where
 /// every one after the first carries the join key, declaring itself a continuation on purpose.
 /// Anything else is a window the engine's own search built out of unrelated strokes to see if
-/// the dictionary recognizes them together, which a plugin must never be asked to settle.
+/// the dictionary recognizes them together, which a plugin must never be asked to settle. A
+/// leading `0` is never a real stroke (the engine's own "could a word start here" probe uses it
+/// as a placeholder; a real stroke always has a key down, see `ChordState::take`), so a window
+/// starting with one is never one word either, however the rest of it looks.
 fn is_one_word(strokes: &[u32]) -> bool {
     match strokes {
         [] => false,
-        [_single] => true,
-        [_first, rest @ ..] => rest.iter().all(|s| s & JOIN_BIT != 0),
+        [single] => *single != 0,
+        [first, rest @ ..] => *first != 0 && rest.iter().all(|s| s & JOIN_BIT != 0),
     }
 }
 
