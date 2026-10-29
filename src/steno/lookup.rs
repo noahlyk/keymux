@@ -9,7 +9,7 @@
 
 use super::commands::proper_outlines_in;
 use super::layout::{parse_stroke, render_strokes};
-use super::overlay::{LookupRow, LookupView};
+use super::overlay::{LookupMode, LookupRow, LookupView};
 use super::reverse::{self, Query};
 use super::shortest::shortest_outline_labeled;
 use super::translate::Translator;
@@ -146,14 +146,15 @@ impl Lookup {
                 query: self.query.clone(),
                 rows: Vec::new(),
                 hint: 0,
+                mode: LookupMode::Word,
             };
         }
-        let rows = match reverse::classify(query) {
-            Query::Stroke(strokes) => vec![stroke_row(base, &strokes)],
+        let (rows, mode) = match reverse::classify(query) {
+            Query::Stroke(strokes) => (vec![stroke_row(base, &strokes)], LookupMode::Stroke),
             Query::Text(text) if text.contains(char::is_whitespace) => {
-                vec![phrase_row(base, &text)]
+                (vec![phrase_row(base, &text)], LookupMode::Phrase)
             }
-            Query::Text(text) => word_rows(base, &text),
+            Query::Text(text) => (word_rows(base, &text), LookupMode::Word),
         };
         let hint = rows.first().map_or(0, |row: &LookupRow| {
             row.outline
@@ -166,6 +167,7 @@ impl Lookup {
             query: self.query.clone(),
             rows,
             hint,
+            mode,
         }
     }
 }
@@ -404,6 +406,8 @@ mod tests {
         assert_eq!(view.rows[0].text, "\u{2192} \"can\"");
         assert_eq!(view.rows[0].outline, "KAPB");
         assert_eq!(view.hint, parse_stroke("KAPB").unwrap());
+        // Raw steno notation: the overlay labels this "Engine Resolver", not "Lookup"
+        assert_eq!(view.mode, LookupMode::Stroke);
     }
 
     #[test]
@@ -415,6 +419,14 @@ mod tests {
         assert_eq!(view.rows.len(), 1);
         assert_eq!(view.rows[0].text, "can the candy");
         assert_eq!(view.rows[0].outline, "KAPB / -T / KAPBD");
+        // A whole phrase: the overlay labels this "Translator", not "Lookup"
+        assert_eq!(view.mode, LookupMode::Phrase);
+    }
+
+    #[test]
+    fn a_single_word_query_and_an_empty_one_are_the_plain_lookup_mode() {
+        assert_eq!(typed("candy").view(&translator()).mode, LookupMode::Word);
+        assert_eq!(typed("").view(&translator()).mode, LookupMode::Word);
     }
 
     #[test]

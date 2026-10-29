@@ -39,6 +39,21 @@ pub struct LookupRow {
     pub outline: String,
 }
 
+/// What a query means, so the overlay can label the lookup for what it's doing.
+///
+/// Mirrors [`crate::steno::reverse::Query`] plus the phrase-vs-single-word split
+/// [`crate::steno::lookup::Lookup::view`] already makes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LookupMode {
+    /// A single word (or nothing yet): the ordinary reverse lookup
+    #[default]
+    Word,
+    /// All-caps steno notation, resolved forward: what would this type?
+    Stroke,
+    /// A whole phrase (a query with a space in it), reverse-looked-up word by word
+    Phrase,
+}
+
 /// The live lookup the overlay shows in place of the tape: what is being typed, and what it
 /// found. The daemon has already done the dictionary work, so the overlay only draws.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +63,7 @@ pub struct LookupView {
     pub rows: Vec<LookupRow>,
     /// Stroke bits to show on the keyboard: the first stroke of the best result
     pub hint: u32,
+    pub mode: LookupMode,
 }
 
 /// Everything the overlay draws. Sent whole on every change: it's a few hundred bytes.
