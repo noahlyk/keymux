@@ -61,8 +61,13 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 { /* ... */ }
 
 `alloc` is asked for `len` bytes of memory and returns where they start (as an address inside
 the plugin's own sandboxed memory, not a real pointer keymux can read directly), or `0` to
-decline. keymux writes the stroke outline there, in Plover notation (`KAT`, or `KOPB/TKEUGS` for
-several strokes), encoded as UTF-8.
+decline. keymux writes one word's outline there, in Plover notation (`KAT`, `KOPB`, `KAT/^-G`),
+encoded as UTF-8 — one stroke, or several where every one after the first carries the join key
+(see `src/steno/layout.rs`), declaring itself a continuation of the same word on purpose. It
+never writes a run of otherwise-unrelated strokes: the engine's own search for the longest
+dictionary match tries windows of many strokes together regardless, and a plugin that answered
+those too would win every one of them, swallowing unrelated strokes into one guess instead of
+leaving them as separate words. A real multi-stroke brief is the dictionary's job.
 
 `fallback` is given that address and length. It answers with its own reading of the outline,
 written into memory it allocates the same way, as a packed pointer and length
@@ -72,9 +77,9 @@ written into memory it allocates the same way, as a packed pointer and length
 plugin loader calls", is every line that interface needs; everything above it is the plugin's
 own logic and can be replaced freely.
 
-A stroke that carries the join key (see `src/steno/layout.rs`) is never given to a plugin on its
-own: it already declared itself a continuation of the word before it, so being asked to read it
-in isolation would be asking the wrong question.
+A join-key stroke with nothing before it to glue onto is never given to a plugin on its own: it
+already declared itself a continuation of the word before it, so being asked to read it in
+isolation would be asking the wrong question.
 
 ## Where things are cached
 

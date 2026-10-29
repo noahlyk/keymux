@@ -1210,6 +1210,39 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         );
     }
 
+    #[test]
+    fn a_plugin_does_not_swallow_unrelated_strokes_into_one_word() {
+        // The dictionary has a real multi-stroke brief ("KPA/TKAOEU"), so `longest_key()` is
+        // bigger than one stroke and the engine's own search really does try windows of
+        // several strokes, exactly like a real theory's dictionary does. Before the fix, the
+        // plugin answered those wide windows too and glommed every stroke since the last
+        // dictionary hit into one guess.
+        let mut t = with_shout_plugin(
+            r#"{"KPA/TKAOEU": "dictionary", "KAT": "cat"}"#,
+            "does_not_swallow_unrelated_strokes",
+        );
+        t.stroke(stroke("KAT"));
+        t.stroke(stroke("TOP"));
+        t.stroke(stroke("WORLD"));
+        assert_eq!(
+            t.text(),
+            "cat TOP WORLD",
+            "each stroke the dictionary misses is its own word, not one blob of every miss \
+             since the last hit"
+        );
+    }
+
+    #[test]
+    fn a_real_multi_stroke_brief_still_joins_normally_alongside_a_plugin() {
+        let mut t = with_shout_plugin(
+            r#"{"KPA/TKAOEU": "dictionary", "KAT": "cat"}"#,
+            "multi_stroke_brief_still_joins",
+        );
+        t.stroke(stroke("KPA"));
+        t.stroke(stroke("TKAOEU"));
+        assert_eq!(t.text(), "dictionary");
+    }
+
     const JOIN_DICT: &str = r#"{"KAT": "cat", "KAT/^-G": "catting", "-G": "ging"}"#;
 
     #[test]
