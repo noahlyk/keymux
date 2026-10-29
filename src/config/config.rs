@@ -728,6 +728,25 @@ pub struct Config {
     pub overlay: OverlayConfig,
 }
 
+/// Which half of a split key an extra key's badge takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Half {
+    Top,
+    Bottom,
+}
+
+/// Where an extra key (beyond the standard 23) is drawn on the overlay panel. Keyed by the
+/// extra key's own character (e.g. `"^"`) in [`OverlayConfig::overlay_overrides`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OverlayPlacement {
+    /// The default: its own badge in a row above the keyboard, since most layouts give an
+    /// extra key no fixed physical spot a diagram could assume.
+    Badge,
+    /// Drawn over half of an existing standard key's own spot instead — for a keyboard where
+    /// an extra key really does share a key with one half of it, such as a split S-.
+    SplitKey { slot: String, half: Half },
+}
+
 /// How `keymux overlay` looks. Every field has a default, so `overlay: ()` is enough.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -754,6 +773,10 @@ pub struct OverlayConfig {
     pub font: Option<String>,
     /// Steno layers that show the overlay. Empty means every steno layer.
     pub layers: Vec<Layer>,
+    /// Where an extra key (beyond the standard 23) is drawn, keyed by its own character, e.g.
+    /// `{ "^": SplitKey(slot: "S-", half: Top) }`. An extra key left out draws as the default
+    /// badge.
+    pub overlay_overrides: HashMap<String, OverlayPlacement>,
 }
 
 impl Default for OverlayConfig {
@@ -768,6 +791,7 @@ impl Default for OverlayConfig {
             keyboard: true,
             tape: true,
             tape_lines: None,
+            overlay_overrides: HashMap::new(),
             font: None,
             layers: Vec::new(),
         }

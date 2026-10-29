@@ -13,6 +13,7 @@ use super::shortest::shortest_outline;
 use super::source::expand;
 use super::tape;
 use super::translate::Translator;
+use crate::config::{KeyAction, LayerKind};
 use crate::keycode::KeyCode;
 use anyhow::{anyhow, Context, Result};
 use console::style;
@@ -73,10 +74,21 @@ pub fn show_stroke(config_dir: &Path, text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Print the keys that type `text` on the built-in QWERTY layout, one row per word.
-/// Without text, keeps asking for strings until an empty line or Ctrl-D.
-pub fn keys(config_dir: &Path, text: Option<&str>, show_keys: bool, fast: bool) -> Result<()> {
-    let keys_by_bit = qwerty_keys_by_bit()?;
+/// Print the keys that type `text` on a real config's own steno layout, if it has a steno
+/// layer, the built-in QWERTY preset otherwise.
+///
+/// One row per word; without text, keeps asking for strings until an empty line or Ctrl-D.
+pub fn keys(
+    config_path: &Path,
+    config_dir: &Path,
+    text: Option<&str>,
+    show_keys: bool,
+    fast: bool,
+) -> Result<()> {
+    let resolved = configured_layout(config_path);
+    let preset_name = resolved.as_ref().map_or("qwerty", |(name, _)| name.as_str());
+    let overrides = resolved.as_ref().map_or_else(HashMap::new, |(_, o)| o.clone());
+    let keys_by_bit = configured_keys_by_bit(preset_name, &overrides)?;
     let dict = load_dictionary(config_dir);
     match text {
         Some(text) => print_table(&chord_rows(dict, &keys_by_bit, text, fast), show_keys),
@@ -118,12 +130,17 @@ fn keys_session(
     Ok(())
 }
 
-/// Print the built-in QWERTY layout: each steno key, the physical key that presses it,
-/// and the sound it stands for. Extra keys for a steno key (a second key that presses
-/// it too) follow as repeated rows.
-pub fn layout() -> Result<()> {
-    let keys_by_bit = qwerty_keys_by_bit()?;
-    let extras: Vec<[String; 3]> = extra_keys(&preset("qwerty").map_err(|e| anyhow!(e))?)
+/// Print the steno layout a real config resolves to — its own preset and `layout_overrides`
+/// if it has a steno layer, the built-in QWERTY preset otherwise.
+///
+/// Each steno key, the physical key that presses it, and the sound it stands for. Extra keys
+/// for a steno key (a second key that presses it too) follow as repeated rows.
+pub fn layout(config_path: &Path) -> Result<()> {
+    let resolved = configured_layout(config_path);
+    let preset_name = resolved.as_ref().map_or("qwerty", |(name, _)| name.as_str());
+    let overrides = resolved.as_ref().map_or_else(HashMap::new, |(_, o)| o.clone());
+    let keys_by_bit = configured_keys_by_bit(preset_name, &overrides)?;
+    let extras: Vec<[String; 3]> = extra_keys(&preset(preset_name).map_err(|e| anyhow!(e))?)
         .into_iter()
         .map(|(slot, key)| {
             [
@@ -191,12 +208,38 @@ pub fn layout() -> Result<()> {
     Ok(())
 }
 
-/// The physical key for each stroke key on the built-in QWERTY layout, keyed by stroke bit.
-fn qwerty_keys_by_bit() -> Result<HashMap<u32, KeyCode>> {
+/// A real config's own layout and `layout_overrides`, if it has a steno layer: the one
+/// literally named `"steno"` if that's one, otherwise the alphabetically-first steno layer
+/// found. `None` with no config, or no steno layer in it — callers fall back to the built-in
+/// default instead of failing.
+fn configured_layout(config_path: &Path) -> Option<(String, HashMap<String, KeyAction>)> {
+    let config = crate::config::Config::load_or_hint(config_path).ok()?;
+    let mut steno_layers: Vec<(&crate::config::Layer, &crate::config::StenoConfig)> = config
+        .layers
+        .iter()
+        .filter_map(|(layer, cfg)| match &cfg.kind {
+            LayerKind::Steno(steno) => Some((layer, steno)),
+            LayerKind::Remap => None,
+        })
+        .collect();
+    steno_layers.sort_by(|(a, _), (b, _)| a.0.cmp(&b.0));
+    let (_, chosen) = steno_layers
+        .iter()
+        .find(|(layer, _)| layer.0 == "steno")
+        .or_else(|| steno_layers.first())?;
+    Some((chosen.layout.clone(), chosen.layout_overrides.clone()))
+}
+
+/// The physical key for each stroke key on `preset_name`, with `overrides` applied, keyed by
+/// stroke bit.
+fn configured_keys_by_bit(
+    preset_name: &str,
+    overrides: &HashMap<String, KeyAction>,
+) -> Result<HashMap<u32, KeyCode>> {
     // Main keys only, so each stroke key names one physical key
-    let preset = without_extra_keys(preset("qwerty").map_err(|e| anyhow!(e))?);
+    let preset = without_extra_keys(preset(preset_name).map_err(|e| anyhow!(e))?);
     let layout =
-        build_key_map(&preset, &HashMap::new()).map_err(|errs| anyhow!(errs.join("; ")))?;
+        build_key_map(&preset, overrides).map_err(|errs| anyhow!(errs.join("; ")))?;
     Ok(layout.into_iter().map(|(key, bit)| (bit, key)).collect())
 }
 
@@ -763,6 +806,87 @@ mod tests {
             .into_iter()
             .map(|(key, bit)| (bit, key))
             .collect()
+    }
+
+    fn config_file(name: &str, ron: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "keymux-commands-test-{}-{name}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.ron");
+        std::fs::write(&path, ron).unwrap();
+        path
+    }
+
+    #[test]
+    fn configured_layout_is_none_with_no_config_file() {
+        let path = std::env::temp_dir().join("keymux-commands-test-nonexistent-config.ron");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(configured_layout(&path), None);
+    }
+
+    #[test]
+    fn configured_layout_is_none_with_no_steno_layer() {
+        let path = config_file(
+            "no_steno_layer",
+            r#"(
+                layers: { "nav": (remaps: {}) },
+            )"#,
+        );
+        assert_eq!(configured_layout(&path), None);
+    }
+
+    #[test]
+    fn configured_layout_reads_the_layer_literally_named_steno() {
+        let path = config_file(
+            "named_steno",
+            r#"(
+                layers: {
+                    "other": (kind: Steno((layout: "dvorak"))),
+                    "steno": (kind: Steno((
+                        layout: "colemak",
+                        layout_overrides: { "^": Key(KC_Q) },
+                    ))),
+                },
+            )"#,
+        );
+        let (layout, overrides) = configured_layout(&path).unwrap();
+        assert_eq!(layout, "colemak");
+        assert_eq!(overrides.get("^"), Some(&KeyAction::Key(KeyCode::KC_Q)));
+    }
+
+    #[test]
+    fn configured_layout_falls_back_to_the_alphabetically_first_steno_layer_by_another_name() {
+        let path = config_file(
+            "no_layer_named_steno",
+            r#"(
+                layers: {
+                    "zzz": (kind: Steno((layout: "dvorak"))),
+                    "aaa": (kind: Steno((layout: "colemak"))),
+                },
+            )"#,
+        );
+        let (layout, _) = configured_layout(&path).unwrap();
+        assert_eq!(layout, "colemak");
+    }
+
+    #[test]
+    fn keymux_steno_layout_shows_a_real_overridden_key_not_the_built_in_default() {
+        let path = config_file(
+            "real_override",
+            r#"(
+                layers: {
+                    "steno": (kind: Steno((
+                        layout_overrides: { "T-": Key(KC_Z) },
+                    ))),
+                },
+            )"#,
+        );
+        let (layout_name, overrides) = configured_layout(&path).unwrap();
+        let keys_by_bit = configured_keys_by_bit(&layout_name, &overrides).unwrap();
+        // T- (bit 2) presses Z here, not the built-in preset's own key for it
+        assert_eq!(keys_by_bit.get(&(1 << 1)), Some(&KeyCode::KC_Z));
     }
 
     fn sample_dict() -> Dictionary {
