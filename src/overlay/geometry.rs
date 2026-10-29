@@ -130,7 +130,7 @@ impl Keyboard {
         let top = number_y + unit * NUMBER_BAR + gap;
         let bottom = top + key_h + gap;
         let thumb = bottom + key_h + gap + unit * THUMB_DROP;
-        let keys: [Rect; 23] = std::array::from_fn(|slot| {
+        let mut keys: [Rect; 23] = std::array::from_fn(|slot| {
             let (column, row, rows) = PLACES[slot];
             let (row_y, height) = match row {
                 Row::Number => {
@@ -171,6 +171,17 @@ impl Keyboard {
                 )
             })
             .collect();
+        // A `SplitKey` only halves the badge above: the named slot itself still drew full
+        // height underneath it, so the two overlapped instead of stacking. Shrink the slot to
+        // whichever half the badge didn't take, now that every badge has read its full rect.
+        for i in 0..EXTRA_KEYS.len() {
+            if let Some(idx) = resolved_slot(i) {
+                let OverlayPlacement::SplitKey { half, .. } = placement(i) else {
+                    unreachable!("resolved_slot only returns Some for SplitKey")
+                };
+                keys[idx] = half_of(keys[idx], half.opposite());
+            }
+        }
         let height = thumb + thumb_h - y;
         Self {
             keys,
@@ -312,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn split_key_puts_an_extra_key_on_half_of_the_named_slot() {
+    fn split_key_puts_an_extra_key_on_half_of_the_named_slot_and_shrinks_it_to_the_other_half() {
         let mut overrides = HashMap::new();
         overrides.insert(
             "^".to_string(),
@@ -324,10 +335,17 @@ mod tests {
         let keyboard = Keyboard::new(0.0, 0.0, 250.0, &overrides);
         let s = keyboard.keys[0];
         let badge = keyboard.extra[0];
+        // `*` is the other tall (2-row) key, untouched by the override, in this same keyboard
+        // instance — the reference for what S-'s own full height would otherwise be.
+        let star = keyboard.keys[9];
         assert!((badge.x - s.x).abs() < 0.01, "same column as S-");
         assert!((badge.w - s.w).abs() < 0.01, "same width as S-");
-        assert!((badge.y - s.y).abs() < 0.01, "top half starts where S- starts");
-        assert!((badge.h - s.h / 2.0).abs() < 0.01, "exactly half S-'s height");
+        assert!((badge.y - star.y).abs() < 0.01, "top half starts where a tall key starts");
+        assert!((badge.h - star.h / 2.0).abs() < 0.01, "exactly half a tall key's height");
+        // S- itself must have shrunk to the other half, not stayed full height underneath it.
+        assert!((s.h - star.h / 2.0).abs() < 0.01, "S- shrank to half a tall key's height: {s:?}");
+        assert!((s.y - badge.bottom()).abs() < 0.01, "S- starts right where the badge ends");
+        assert!(!overlaps(&badge, &s), "badge and S- must stack, not overlap: {badge:?} {s:?}");
     }
 
     #[test]

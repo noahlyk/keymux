@@ -735,6 +735,17 @@ pub enum Half {
     Bottom,
 }
 
+impl Half {
+    /// The other half, for shrinking a split slot to whichever half its badge didn't take.
+    #[must_use]
+    pub const fn opposite(self) -> Self {
+        match self {
+            Self::Top => Self::Bottom,
+            Self::Bottom => Self::Top,
+        }
+    }
+}
+
 /// Where an extra key (beyond the standard 23) is drawn on the overlay panel. Keyed by the
 /// extra key's own character (e.g. `"^"`) in [`OverlayConfig::overlay_overrides`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
