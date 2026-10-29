@@ -14,6 +14,7 @@
 use super::geometry::{KeyGroup, Keyboard, Rect};
 use super::glyphs::{self, GlyphCache};
 use crate::config::OverlayConfig;
+use crate::steno::layout::EXTRA_KEYS;
 use crate::steno::overlay::{LookupView, OverlaySnapshot, TapeEntry, TAPE_CAPACITY};
 use anyhow::Result;
 use std::borrow::Cow;
@@ -127,10 +128,16 @@ pub struct Renderer {
     keyboard: Option<Keyboard>,
     /// One pad per key, indexed by slot, built once
     key_shapes: Vec<Path>,
+    /// One pad per [`super::geometry::Keyboard::extra`] badge, same order
+    extra_shapes: Vec<Path>,
     /// Bottom of the tape area, line pitch and how many lines fit, physical px
     tape_bottom: f32,
     line_height: f32,
     tape_lines: usize,
+    /// One per [`EXTRA_KEYS`] entry, same order, drawn before the standard columns below —
+    /// a stroke's extra keys read first on the tape, the same way they get their own badge
+    /// row above the keyboard rather than a guessed spot among the 23 standard keys.
+    extra_columns: Vec<Column>,
     /// One per tape slot in [`PAPER_ORDER`] order
     columns: Vec<Column>,
     /// Left edge of the steno letters, and where the words start, physical px
@@ -157,24 +164,33 @@ impl Renderer {
         let text_scale = config.text_scale.clamp(0.5, 3.0);
 
         // The keyboard sits at the bottom. Laying it out once at the origin gives its height.
-        let keys_height = Keyboard::new(0.0, 0.0, inner).size.1;
-        let keyboard = config
-            .keyboard
-            .then(|| Keyboard::new(pad_x, height - pad_y - keys_height, inner));
-        let key_width = Keyboard::new(0.0, 0.0, inner).keys[1].w;
+        let keys_height = Keyboard::new(0.0, 0.0, inner, &config.overlay_overrides).size.1;
+        let keyboard = config.keyboard.then(|| {
+            Keyboard::new(
+                pad_x,
+                height - pad_y - keys_height,
+                inner,
+                &config.overlay_overrides,
+            )
+        });
+        let key_width = Keyboard::new(0.0, 0.0, inner, &config.overlay_overrides).keys[1].w;
         // Every size is nudged to where the letters' flat tops and bottoms land on whole pixel
         // rows (`crisp_size`); at an arbitrary size they smear over two rows and the text looks
         // soft. Capitals (key labels, steno letters) snap on `H`, lowercase words on `x`.
         let label_px = glyphs::crisp_size(&bold, key_width * LABEL_RATIO * text_scale, 'H');
         let labels = GlyphCache::new(bold.clone(), label_px);
 
-        // Size the steno letters so that all 23 columns, each as wide as its own letter plus
-        // `SLOT_GAP`, fill `PAPER_SHARE` of the width. Column widths scale linearly with the
-        // size, so measure once at a probe size.
+        // Size the steno letters so that every column — any extra keys first, then all 23
+        // standard slots — each as wide as its own letter plus `SLOT_GAP`, fill `PAPER_SHARE`
+        // of the width. Column widths scale linearly with the size, so measure once at a
+        // probe size.
         let mut probe = GlyphCache::new(bold.clone(), PROBE_PX);
-        let probe_total: f32 = PAPER_ORDER
+        let extra_labels: Vec<char> = (0..EXTRA_KEYS.len()).map(Keyboard::extra_label).collect();
+        let probe_total: f32 = extra_labels
             .iter()
-            .map(|&slot| probe.get(Keyboard::label(slot)).advance * (1.0 + SLOT_GAP))
+            .copied()
+            .chain(PAPER_ORDER.iter().map(|&slot| Keyboard::label(slot)))
+            .map(|ch| probe.get(ch).advance * (1.0 + SLOT_GAP))
             .sum();
         let stroke_px = glyphs::crisp_size(
             &bold,
@@ -185,8 +201,14 @@ impl Renderer {
         let words_px = glyphs::crisp_size(&bold, stroke_px * WORDS_RATIO, 'x');
         let words = GlyphCache::new(bold, words_px);
 
-        let mut columns = Vec::with_capacity(PAPER_ORDER.len());
         let mut x = 0.0;
+        let mut extra_columns = Vec::with_capacity(extra_labels.len());
+        for &ch in &extra_labels {
+            let width = strokes.get(ch).advance * (1.0 + SLOT_GAP);
+            extra_columns.push(Column { x, width });
+            x += width;
+        }
+        let mut columns = Vec::with_capacity(PAPER_ORDER.len());
         for &slot in &PAPER_ORDER {
             let width = strokes.get(Keyboard::label(slot)).advance * (1.0 + SLOT_GAP);
             columns.push(Column { x, width });
@@ -225,6 +247,12 @@ impl Renderer {
                 })
                 .collect()
         });
+        let extra_shapes = keyboard.as_ref().map_or_else(Vec::new, |k| {
+            k.extra
+                .iter()
+                .filter_map(|r| rounded_rect(*r, r.w * PAD_TOP_ROUND, r.w * PAD_TOP_ROUND))
+                .collect()
+        });
         let panel = (config.background > 0.0)
             .then(|| {
                 rounded_rect(
@@ -248,9 +276,11 @@ impl Renderer {
             panel,
             keyboard,
             key_shapes,
+            extra_shapes,
             tape_bottom,
             line_height,
             tape_lines,
+            extra_columns,
             columns,
             paper_left: pad_x,
             words_left,
@@ -437,6 +467,38 @@ impl Renderer {
                 self.scale,
             );
         }
+
+        // Keys beyond the standard 23 (currently just the join key): no physical slot of
+        // their own, so each gets its own badge, lit the same way a key is.
+        let accent = self.theme.accent(KeyGroup::Misc);
+        for (i, shape) in self.extra_shapes.iter().enumerate() {
+            let bit = Keyboard::extra_bit(i);
+            let label_color = if snapshot.held & bit != 0 {
+                fill(pixmap, shape, accent);
+                self.theme.label_lit
+            } else if (snapshot.chord | hint) & bit != 0 {
+                fill(pixmap, shape, with_alpha(accent, 150));
+                self.theme.label_lit
+            } else {
+                fill(pixmap, shape, self.theme.key);
+                stroke(pixmap, shape, self.theme.outline, &outline);
+                self.theme.label
+            };
+
+            let rect = keyboard.extra[i];
+            let label = Keyboard::extra_label(i);
+            let glyph_width = self.labels.get(label).advance;
+            let baseline = rect.y + self.labels.ascent().mul_add(0.72, rect.h) / 2.0;
+            draw_char(
+                pixmap,
+                &mut self.labels,
+                label,
+                rect.x + (rect.w - glyph_width) / 2.0,
+                baseline,
+                label_color,
+                self.scale,
+            );
+        }
     }
 
     fn draw_tape(&mut self, snapshot: &OverlaySnapshot, pixmap: &mut PixmapMut) {
@@ -461,7 +523,24 @@ impl Renderer {
         fade: f32,
     ) {
         // Every slot has its own column, as wide as its letter, so strokes line up from line
-        // to line and nothing overlaps
+        // to line and nothing overlaps. Extra keys (the join key among them) read first,
+        // ahead of the 23 standard slots.
+        for (index, column) in self.extra_columns.iter().enumerate() {
+            if entry.stroke & Keyboard::extra_bit(index) == 0 {
+                continue;
+            }
+            let letter = Keyboard::extra_label(index);
+            let advance = self.strokes.get(letter).advance;
+            draw_char(
+                pixmap,
+                &mut self.strokes,
+                letter,
+                self.paper_left + column.x + (column.width - advance) / 2.0,
+                baseline,
+                fade_color(self.theme.strokes, fade),
+                self.scale,
+            );
+        }
         for (index, &slot) in PAPER_ORDER.iter().enumerate() {
             if entry.stroke & (1 << slot) == 0 {
                 continue;
@@ -766,6 +845,45 @@ mod tests {
     }
 
     #[test]
+    fn a_key_beyond_the_standard_23_lights_up_in_its_own_badge() {
+        let config = OverlayConfig::default();
+        let mut renderer = Renderer::new(&config, 1, 900).unwrap();
+        let (w, h) = renderer.size();
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        let bit = Keyboard::extra_bit(0);
+        let snapshot = OverlaySnapshot {
+            layer: Some("steno".into()),
+            held: bit,
+            chord: bit,
+            ..OverlaySnapshot::default()
+        };
+        renderer.draw(&snapshot, &mut pixmap.as_mut());
+
+        let badge = renderer.keyboard.as_ref().unwrap().extra[0];
+        let pixel = pixmap
+            .pixel((badge.x + 2.0) as u32, (badge.y + badge.h / 2.0) as u32)
+            .unwrap()
+            .demultiply();
+        assert_ne!(
+            [pixel.red(), pixel.green(), pixel.blue()],
+            [0, 0, 0],
+            "the badge should be filled with its lit colour, not left empty"
+        );
+
+        // A standard key is untouched by the extra key's own bit
+        let s = renderer.keyboard.as_ref().unwrap().keys[0];
+        let unlit = pixmap
+            .pixel((s.x + 2.0) as u32, (s.y + 2.0) as u32)
+            .unwrap()
+            .demultiply();
+        assert_ne!(
+            [pixel.red(), pixel.green(), pixel.blue()],
+            [unlit.red(), unlit.green(), unlit.blue()],
+            "lighting the extra key must not also light an unrelated standard key"
+        );
+    }
+
+    #[test]
     fn there_is_no_background_unless_asked_for() {
         let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
         let (w, h) = renderer.size();
@@ -847,6 +965,56 @@ mod tests {
         let (t, w) = (Keyboard::label(1), Keyboard::label(4));
         assert_eq!((t, w), ('T', 'W'));
         assert!(renderer.columns[5].width > renderer.columns[2].width);
+    }
+
+    #[test]
+    fn an_extra_key_has_its_own_tape_column_ahead_of_the_standard_slots() {
+        let renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        assert_eq!(renderer.extra_columns.len(), EXTRA_KEYS.len());
+        let last_extra = renderer.extra_columns[renderer.extra_columns.len() - 1];
+        // Extra columns come first, so the standard slots start right where they end
+        assert!((last_extra.x + last_extra.width - renderer.columns[0].x).abs() < 0.01);
+        let mut strokes = GlyphCache::new(
+            glyphs::load_font(None, glyphs::BOLD).unwrap(),
+            renderer.strokes.pixel_size(),
+        );
+        for (i, column) in renderer.extra_columns.iter().enumerate() {
+            let letter = Keyboard::extra_label(i);
+            assert!(
+                strokes.get(letter).advance <= column.width,
+                "{letter:?} is wider than its column"
+            );
+        }
+    }
+
+    #[test]
+    fn an_extra_key_on_a_stroke_is_drawn_on_its_own_tape_column() {
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let (w, h) = renderer.size();
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        let kat = crate::steno::layout::parse_stroke("KAT").unwrap();
+        let entry = TapeEntry {
+            seq: 1,
+            stroke: Keyboard::extra_bit(0) | kat,
+            text: "\"cat\"".into(),
+            unmatched: false,
+            repeats: 0,
+        };
+        let baseline = 100.0;
+        renderer.draw_tape_line(&mut pixmap.as_mut(), &entry, baseline, 1.0);
+
+        // Scan the extra key's whole column for any ink at all: the exact glyph shape of `^`
+        // isn't worth pinning down pixel-by-pixel, but something must be drawn there.
+        let column = renderer.extra_columns[0];
+        let x0 = (renderer.paper_left + column.x).max(0.0) as u32;
+        let x1 = ((renderer.paper_left + column.x + column.width).ceil() as u32).min(w);
+        let y0 = (baseline - renderer.strokes.pixel_size()).max(0.0) as u32;
+        let y1 = (baseline as u32 + 2).min(h);
+        let lit = (y0..y1)
+            .flat_map(|py| (x0..x1).map(move |px| (px, py)))
+            .filter_map(|(px, py)| pixmap.pixel(px, py))
+            .any(|p| p.alpha() > 0);
+        assert!(lit, "the extra key's letter should be drawn somewhere in its tape column");
     }
 
     #[test]
