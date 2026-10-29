@@ -127,6 +127,8 @@ pub struct Renderer {
     keyboard: Option<Keyboard>,
     /// One pad per key, indexed by slot, built once
     key_shapes: Vec<Path>,
+    /// One pad per [`super::geometry::Keyboard::extra`] badge, same order
+    extra_shapes: Vec<Path>,
     /// Bottom of the tape area, line pitch and how many lines fit, physical px
     tape_bottom: f32,
     line_height: f32,
@@ -225,6 +227,12 @@ impl Renderer {
                 })
                 .collect()
         });
+        let extra_shapes = keyboard.as_ref().map_or_else(Vec::new, |k| {
+            k.extra
+                .iter()
+                .filter_map(|r| rounded_rect(*r, r.w * PAD_TOP_ROUND, r.w * PAD_TOP_ROUND))
+                .collect()
+        });
         let panel = (config.background > 0.0)
             .then(|| {
                 rounded_rect(
@@ -248,6 +256,7 @@ impl Renderer {
             panel,
             keyboard,
             key_shapes,
+            extra_shapes,
             tape_bottom,
             line_height,
             tape_lines,
@@ -425,6 +434,38 @@ impl Renderer {
 
             let rect = keyboard.keys[slot];
             let label = Keyboard::label(slot);
+            let glyph_width = self.labels.get(label).advance;
+            let baseline = rect.y + self.labels.ascent().mul_add(0.72, rect.h) / 2.0;
+            draw_char(
+                pixmap,
+                &mut self.labels,
+                label,
+                rect.x + (rect.w - glyph_width) / 2.0,
+                baseline,
+                label_color,
+                self.scale,
+            );
+        }
+
+        // Keys beyond the standard 23 (currently just the join key): no physical slot of
+        // their own, so each gets its own badge, lit the same way a key is.
+        let accent = self.theme.accent(KeyGroup::Misc);
+        for (i, shape) in self.extra_shapes.iter().enumerate() {
+            let bit = Keyboard::extra_bit(i);
+            let label_color = if snapshot.held & bit != 0 {
+                fill(pixmap, shape, accent);
+                self.theme.label_lit
+            } else if (snapshot.chord | hint) & bit != 0 {
+                fill(pixmap, shape, with_alpha(accent, 150));
+                self.theme.label_lit
+            } else {
+                fill(pixmap, shape, self.theme.key);
+                stroke(pixmap, shape, self.theme.outline, &outline);
+                self.theme.label
+            };
+
+            let rect = keyboard.extra[i];
+            let label = Keyboard::extra_label(i);
             let glyph_width = self.labels.get(label).advance;
             let baseline = rect.y + self.labels.ascent().mul_add(0.72, rect.h) / 2.0;
             draw_char(
@@ -763,6 +804,45 @@ mod tests {
             .unwrap()
             .demultiply();
         assert_eq!([pixel.red(), pixel.green(), pixel.blue()], [45, 212, 170]);
+    }
+
+    #[test]
+    fn a_key_beyond_the_standard_23_lights_up_in_its_own_badge() {
+        let config = OverlayConfig::default();
+        let mut renderer = Renderer::new(&config, 1, 900).unwrap();
+        let (w, h) = renderer.size();
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        let bit = Keyboard::extra_bit(0);
+        let snapshot = OverlaySnapshot {
+            layer: Some("steno".into()),
+            held: bit,
+            chord: bit,
+            ..OverlaySnapshot::default()
+        };
+        renderer.draw(&snapshot, &mut pixmap.as_mut());
+
+        let badge = renderer.keyboard.as_ref().unwrap().extra[0];
+        let pixel = pixmap
+            .pixel((badge.x + 2.0) as u32, (badge.y + badge.h / 2.0) as u32)
+            .unwrap()
+            .demultiply();
+        assert_ne!(
+            [pixel.red(), pixel.green(), pixel.blue()],
+            [0, 0, 0],
+            "the badge should be filled with its lit colour, not left empty"
+        );
+
+        // A standard key is untouched by the extra key's own bit
+        let s = renderer.keyboard.as_ref().unwrap().keys[0];
+        let unlit = pixmap
+            .pixel((s.x + 2.0) as u32, (s.y + 2.0) as u32)
+            .unwrap()
+            .demultiply();
+        assert_ne!(
+            [pixel.red(), pixel.green(), pixel.blue()],
+            [unlit.red(), unlit.green(), unlit.blue()],
+            "lighting the extra key must not also light an unrelated standard key"
+        );
     }
 
     #[test]

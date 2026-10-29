@@ -1,7 +1,7 @@
 //! Where each steno key sits on the panel. Computed once per panel size, then the drawing
 //! code just indexes it by slot: no layout work per frame.
 
-use crate::steno::layout::SLOTS;
+use crate::steno::layout::{EXTRA_KEYS, SLOTS};
 
 /// A rectangle in pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -68,12 +68,20 @@ const GAP: f32 = 0.16;
 const THUMB_ASPECT: f32 = 1.35;
 /// Extra space above the thumb row relative to a key's width
 const THUMB_DROP: f32 = 0.35;
+/// Height of the row for keys beyond the standard 23, relative to a key's width: the same
+/// scale as the `#` bar, since it is the same kind of marker row.
+const EXTRA_ROW: f32 = 0.5;
 
 /// The keyboard's key rectangles at one size.
 #[derive(Debug, Clone)]
 pub struct Keyboard {
     /// Indexed by stroke slot, the same bit order as strokes
     pub keys: [Rect; 23],
+    /// One pad per [`EXTRA_KEYS`] entry, in that order. A key here has no physical slot of its
+    /// own — a keyboard binds it to whatever key it has free (see `layout_overrides`) — so
+    /// each gets its own badge in a row above everything else, rather than the panel guessing
+    /// at a layout it has no way to know is right for a given keyboard.
+    pub extra: Vec<Rect>,
     /// Width and height of the whole keyboard
     pub size: (f32, f32),
 }
@@ -87,7 +95,13 @@ impl Keyboard {
         let step = unit + gap;
         let key_h = unit * KEY_ASPECT;
         let thumb_h = unit * THUMB_ASPECT;
-        let top = y + unit * NUMBER_BAR + gap;
+        let extra_h = unit * EXTRA_ROW;
+        let number_y = if EXTRA_KEYS.is_empty() {
+            y
+        } else {
+            y + extra_h + gap
+        };
+        let top = number_y + unit * NUMBER_BAR + gap;
         let bottom = top + key_h + gap;
         let thumb = bottom + key_h + gap + unit * THUMB_DROP;
         let keys = std::array::from_fn(|slot| {
@@ -96,7 +110,7 @@ impl Keyboard {
                 Row::Number => {
                     return Rect {
                         x,
-                        y,
+                        y: number_y,
                         w: width,
                         h: unit * NUMBER_BAR,
                     }
@@ -113,9 +127,18 @@ impl Keyboard {
                 h: height.mul_add(rows, gap * (rows - 1.0)),
             }
         });
+        let extra = (0..EXTRA_KEYS.len())
+            .map(|i| Rect {
+                x: (i as f32).mul_add(step, x),
+                y,
+                w: unit,
+                h: extra_h,
+            })
+            .collect();
         let height = thumb + thumb_h - y;
         Self {
             keys,
+            extra,
             size: (width, height),
         }
     }
@@ -124,6 +147,18 @@ impl Keyboard {
     #[must_use]
     pub const fn label(slot: usize) -> char {
         SLOTS[slot].0
+    }
+
+    /// The character printed on an [`EXTRA_KEYS`] badge.
+    #[must_use]
+    pub const fn extra_label(i: usize) -> char {
+        EXTRA_KEYS[i].0
+    }
+
+    /// The stroke bit an [`EXTRA_KEYS`] badge lights up for.
+    #[must_use]
+    pub const fn extra_bit(i: usize) -> u32 {
+        1 << (SLOTS.len() + i)
     }
 
     /// Which part of the keyboard a slot is on, which decides its colour.
