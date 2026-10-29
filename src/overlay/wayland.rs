@@ -9,7 +9,7 @@
 //!   most one frame callback is pending, so a burst of strokes draws once.
 
 use super::render::Renderer;
-use super::{client, Source};
+use super::{activity, client, Source};
 use crate::config::OverlayConfig;
 use crate::steno::overlay::OverlaySnapshot;
 use anyhow::{anyhow, Context, Result};
@@ -94,6 +94,20 @@ pub fn run(config: OverlayConfig, source: Source, always: bool) -> Result<()> {
         .map_err(|e| anyhow!("overlay config source: {e}"))?;
     client::watch_config(config_updates);
 
+    // A window switch or a click means you've stepped away from steno-typing: drop the
+    // overlay until real steno activity (a stroke, a layer change) proves otherwise.
+    let (interrupts, interrupt_source) = channel::channel::<()>();
+    event_loop
+        .handle()
+        .insert_source(interrupt_source, |event, (), overlay| {
+            if let channel::Event::Msg(()) = event {
+                overlay.on_activity_interrupted();
+            }
+        })
+        .map_err(|e| anyhow!("overlay activity source: {e}"))?;
+    activity::watch_window_focus(interrupts.clone());
+    activity::watch_mouse_clicks(&interrupts);
+
     let mut overlay = Overlay {
         registry: RegistryState::new(&globals),
         outputs: OutputState::new(&globals, &qh),
@@ -113,6 +127,7 @@ pub fn run(config: OverlayConfig, source: Source, always: bool) -> Result<()> {
         latest: OverlaySnapshot::default(),
         exit: false,
         always,
+        suppressed: false,
     };
     // With `--always` it shows right away, without waiting for the daemon's first frame
     if always {
@@ -150,6 +165,43 @@ struct Overlay {
     exit: bool,
     /// `--always`: show on every layer, not only steno ones
     always: bool,
+    /// A click or a window switch happened since the last real steno activity: stay hidden
+    /// even if the steno layer is still on, until a genuine change (a stroke, a layer
+    /// change) proves you're back to steno-typing. See [`Self::on_activity_interrupted`].
+    suppressed: bool,
+}
+
+/// What a snapshot should do to the surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    Show,
+    Hide,
+    Redraw,
+    Idle,
+}
+
+/// Work out what `on_snapshot` should do, and whether suppression should lift, as a pure
+/// function so it's testable without a live Wayland connection (see [`super::is_visible`] for
+/// the same idea applied to plain layer-based visibility).
+///
+/// `unchanged` says this snapshot carries nothing new on screen; `was_suppressed` is a click or
+/// window switch with no real steno activity since. A real change clears suppression (you're
+/// steno-typing again); a duplicate snapshot while suppressed leaves it hidden instead of
+/// popping back up on its own.
+const fn next_action(
+    visible: bool,
+    has_surface: bool,
+    unchanged: bool,
+    was_suppressed: bool,
+) -> (Action, bool) {
+    let suppressed = was_suppressed && unchanged;
+    let action = match (visible, has_surface) {
+        (true, false) if !suppressed => Action::Show,
+        (false, true) => Action::Hide,
+        (true, true) if !unchanged => Action::Redraw,
+        _ => Action::Idle,
+    };
+    (action, suppressed)
 }
 
 impl Overlay {
@@ -163,14 +215,27 @@ impl Overlay {
             && self.latest.tape.back().map(|e| (e.seq, e.repeats))
                 == snapshot.tape.back().map(|e| (e.seq, e.repeats));
         self.latest = snapshot;
-        match (visible, self.surface.is_some()) {
-            (true, false) => self.show(),
-            (false, true) => self.hide(),
-            (true, true) if !unchanged => {
+        let (action, suppressed) =
+            next_action(visible, self.surface.is_some(), unchanged, self.suppressed);
+        self.suppressed = suppressed;
+        match action {
+            Action::Show => self.show(),
+            Action::Hide => self.hide(),
+            Action::Redraw => {
                 self.dirty = true;
                 self.draw();
             }
-            _ => {}
+            Action::Idle => {}
+        }
+    }
+
+    /// A click or a window switch arrived from [`activity`]: you've stepped away from
+    /// steno-typing, so hide the overlay (if it's up) until real steno activity says
+    /// otherwise, even though the steno layer may still be on.
+    fn on_activity_interrupted(&mut self) {
+        self.suppressed = true;
+        if self.surface.is_some() {
+            self.hide();
         }
     }
 
@@ -420,3 +485,48 @@ delegate_output!(Overlay);
 delegate_shm!(Overlay);
 delegate_layer!(Overlay);
 delegate_registry!(Overlay);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_change_shows_a_hidden_overlay_and_clears_suppression() {
+        // Not suppressed: ordinary case, visible and nothing on screen yet
+        assert_eq!(
+            next_action(true, false, false, false),
+            (Action::Show, false)
+        );
+        // Was suppressed, but this is a real change (a stroke, a layer toggle): shows again
+        assert_eq!(
+            next_action(true, false, false, true),
+            (Action::Show, false)
+        );
+    }
+
+    #[test]
+    fn a_suppressed_duplicate_snapshot_stays_hidden() {
+        // Suppressed, and this snapshot carries nothing new: stays down, stays suppressed
+        assert_eq!(next_action(true, false, true, true), (Action::Idle, true));
+    }
+
+    #[test]
+    fn leaving_the_steno_layer_hides_regardless_of_suppression() {
+        assert_eq!(next_action(false, true, false, false), (Action::Hide, false));
+        assert_eq!(next_action(false, true, true, true), (Action::Hide, true));
+    }
+
+    #[test]
+    fn a_visible_change_redraws_an_already_showing_overlay() {
+        assert_eq!(
+            next_action(true, true, false, false),
+            (Action::Redraw, false)
+        );
+    }
+
+    #[test]
+    fn nothing_happens_when_nothing_changed_and_nothing_is_suppressed() {
+        assert_eq!(next_action(true, true, true, false), (Action::Idle, false));
+        assert_eq!(next_action(false, false, true, false), (Action::Idle, false));
+    }
+}

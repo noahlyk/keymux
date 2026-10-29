@@ -5,6 +5,7 @@
 //! and draws a layer-shell panel on the right edge of the screen while a steno layer is
 //! on. The panel takes no input and no focus. See `docs/overlay-plan.md`.
 
+mod activity;
 mod client;
 mod demo;
 pub mod geometry;
