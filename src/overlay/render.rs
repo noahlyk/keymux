@@ -395,34 +395,50 @@ impl Renderer {
             );
             return;
         }
-        for (index, row) in view.rows.iter().take(room_for).enumerate() {
-            let baseline = baseline_of(index + 1);
+        // How many lines each row's own text needs - the wider of its outline and its word,
+        // since both share the row - stopping once the panel's line budget is used up rather
+        // than ever truncating a long outline or a long phrase with an ellipsis. A row that
+        // would only partly fit is left off entirely, so the ones shown always get full text.
+        let mut used = 0usize;
+        let mut lines_before = 0.0f32;
+        for row in &view.rows {
+            let outline_lines = wrap_text(&mut self.strokes, &row.outline, paper_right - self.paper_left).len();
+            let text_lines = wrap_text(&mut self.words, &row.text, self.words_right - self.words_left).len();
+            let row_lines = outline_lines.max(text_lines).max(1);
+            if used + row_lines > room_for {
+                break;
+            }
+            let baseline = pitch.mul_add(-(1.0 + lines_before), bottom) + baseline_in_line;
             // The word as typed is full strength; words that merely start with it a bit less
             let strength = if row.text == view.query.trim() {
                 1.0
             } else {
                 0.8
             };
-            draw_text_clipped(
+            draw_text_wrapped(
                 pixmap,
                 &mut self.strokes,
                 &row.outline,
                 self.paper_left,
                 baseline,
                 paper_right,
+                pitch,
                 fade_color(self.theme.strokes, strength),
                 self.scale,
             );
-            draw_text_clipped(
+            draw_text_wrapped(
                 pixmap,
                 &mut self.words,
                 &row.text,
                 self.words_left,
                 baseline,
                 self.words_right,
+                pitch,
                 fade_color(self.theme.words, strength),
                 self.scale,
             );
+            used += row_lines;
+            lines_before += row_lines as f32;
         }
     }
 
@@ -502,7 +518,7 @@ impl Renderer {
     }
 
     fn draw_tape(&mut self, snapshot: &OverlaySnapshot, pixmap: &mut PixmapMut) {
-        let lines = self.tape_lines;
+        let budget = self.tape_lines;
         // Centre the smaller stroke letters and the words on one baseline within the line
         let baseline_in_line =
             (self.line_height - self.words.line_height()) / 2.0 + self.words.ascent();
@@ -518,12 +534,44 @@ impl Renderer {
             repeats: 0,
         });
 
-        // Newest at the bottom, just above the keyboard
-        let entries = live.iter().chain(snapshot.tape.iter().rev()).take(lines);
-        for (age, entry) in entries.enumerate() {
-            let row_top = ((age + 1) as f32).mul_add(-self.line_height, self.tape_bottom);
-            let fade = line_fade(lines - 1 - age);
+        let room = self.words_right - self.words_left;
+        // Newest first, bottom of the tape up: how many wrapped lines each entry's own text
+        // needs, stopping once the panel's line budget is used up rather than ever truncating
+        // a long entry's text with an ellipsis. An entry that would only partly fit is left off
+        // entirely, so the ones that are shown always get their full text.
+        let mut planned = Vec::new();
+        let mut used = 0usize;
+        for entry in live.iter().chain(snapshot.tape.iter().rev()) {
+            let text = Self::tape_entry_text(entry);
+            let text_lines = wrap_text(&mut self.words, &text, room).len().max(1);
+            if used + text_lines > budget {
+                break;
+            }
+            planned.push((entry, text_lines));
+            used += text_lines;
+        }
+
+        let mut row_top = (used as f32).mul_add(-self.line_height, self.tape_bottom);
+        for (age, (entry, text_lines)) in planned.iter().rev().enumerate() {
+            let fade = line_fade(planned.len() - 1 - age);
             self.draw_tape_line(pixmap, entry, row_top + baseline_in_line, fade);
+            row_top = (*text_lines as f32).mul_add(self.line_height, row_top);
+        }
+    }
+
+    /// The text a tape entry's own line shows, before any "held down x N" prefix: "?" for a
+    /// stroke that matched nothing, its translated text otherwise.
+    fn tape_entry_text(entry: &TapeEntry) -> Cow<'_, str> {
+        let text = if entry.unmatched {
+            Cow::Borrowed("?")
+        } else {
+            display_text(&entry.text)
+        };
+        // A stroke held down repeats: one line with a count, not a line for each
+        if entry.repeats > 0 {
+            Cow::Owned(format!("x{} {text}", entry.repeats + 1))
+        } else {
+            text
         }
     }
 
@@ -571,24 +619,20 @@ impl Renderer {
             );
         }
 
-        let (text, color) = if entry.unmatched {
-            (Cow::Borrowed("?"), self.theme.unmatched)
+        let color = if entry.unmatched {
+            self.theme.unmatched
         } else {
-            (display_text(&entry.text), self.theme.words)
+            self.theme.words
         };
-        // A stroke held down repeats: one line with a count, not a line for each
-        let text = if entry.repeats > 0 {
-            Cow::Owned(format!("x{} {text}", entry.repeats + 1))
-        } else {
-            text
-        };
-        draw_text_clipped(
+        let text = Self::tape_entry_text(entry);
+        draw_text_wrapped(
             pixmap,
             &mut self.words,
             &text,
             self.words_left,
             baseline,
             self.words_right,
+            self.line_height,
             fade_color(color, fade),
             self.scale,
         );
@@ -732,6 +776,85 @@ fn draw_text_clipped(
     }
 }
 
+/// Split `text` into lines that each fit within `max_width`: broken at a space or a `/` (a
+/// stroke outline's own separator) when one is available on the line so far, and mid-character
+/// otherwise, for a single word or outline longer than `max_width` on its own
+/// ("supercalifragilisticexpialidocious", a long multi-key stroke). Never truncates; the last
+/// line holds whatever is left over, however wide.
+fn wrap_text(glyphs: &mut GlyphCache, text: &str, max_width: f32) -> Vec<String> {
+    // Pieces end right after a break opportunity, so they can be packed onto a line without
+    // re-scanning for where it's safe to break.
+    let mut pieces = Vec::new();
+    let mut piece = String::new();
+    for c in text.chars() {
+        piece.push(c);
+        if c == ' ' || c == '/' {
+            pieces.push(std::mem::take(&mut piece));
+        }
+    }
+    if !piece.is_empty() {
+        pieces.push(piece);
+    }
+
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut width = 0.0f32;
+    for piece in pieces {
+        let piece_width = glyphs.measure(&piece);
+        if width > 0.0 && width + piece_width > max_width {
+            lines.push(std::mem::take(&mut line));
+            width = 0.0;
+        }
+        if piece_width > max_width {
+            // Doesn't fit on a line by itself either: the only break left is mid-character.
+            for c in piece.chars() {
+                let advance = glyphs.get(c).advance;
+                if width > 0.0 && width + advance > max_width {
+                    lines.push(std::mem::take(&mut line));
+                    width = 0.0;
+                }
+                line.push(c);
+                width += advance;
+            }
+            continue;
+        }
+        line.push_str(&piece);
+        width += piece_width;
+    }
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// Like [`draw_text_clipped`], but wraps instead of truncating: `text` starts at `baseline`,
+/// continuing on further lines (each `pitch` further down) as needed to fit within `right`
+/// rather than ever being cut short with an ellipsis. Returns how many lines it drew, so the
+/// caller can budget the vertical space whatever comes after it needs.
+#[allow(clippy::too_many_arguments)]
+fn draw_text_wrapped(
+    pixmap: &mut PixmapMut,
+    glyphs: &mut GlyphCache,
+    text: &str,
+    x: f32,
+    baseline: f32,
+    right: f32,
+    pitch: f32,
+    color: [u8; 4],
+    scale: f32,
+) -> usize {
+    let lines = wrap_text(glyphs, text, (right - x).max(0.0));
+    for (i, line) in lines.iter().enumerate() {
+        let mut cx = x.round();
+        let line_baseline = pitch.mul_add(i as f32, baseline);
+        for c in line.chars() {
+            draw_char(pixmap, glyphs, c, cx, line_baseline, color, scale);
+            cx += glyphs.get(c).advance.round();
+        }
+    }
+    lines.len()
+}
+
 /// Draw one character, with its pen at `x` (rounded to a whole pixel, so it is sharp), with a
 /// soft shadow on light text so it reads over any wallpaper.
 fn draw_char(
@@ -828,6 +951,77 @@ mod tests {
             unmatched: text.is_empty(),
             repeats: 0,
         }
+    }
+
+    #[test]
+    fn long_text_wraps_onto_further_lines_instead_of_an_ellipsis() {
+        let font = glyphs::load_font(None, glyphs::BOLD).unwrap();
+        let mut glyphs = GlyphCache::new(font, 16.0);
+        let width = glyphs.measure("supercalifragilistic");
+
+        // A single unbroken word longer than the width is split mid-word, never truncated: it
+        // all comes back out, across however many lines it takes, with no "…" anywhere.
+        let lines = wrap_text(&mut glyphs, "supercalifragilisticexpialidocious", width);
+        assert!(lines.len() > 1, "{lines:?}");
+        assert_eq!(lines.concat(), "supercalifragilisticexpialidocious");
+        assert!(lines.iter().all(|l| !l.contains('…')), "{lines:?}");
+
+        // A phrase breaks at its spaces when a break is available there
+        let lines = wrap_text(&mut glyphs, "tell me how to do this", width);
+        assert!(lines.len() > 1, "{lines:?}");
+        assert_eq!(lines.join(" ").split_whitespace().collect::<Vec<_>>().join(" "), "tell me how to do this");
+
+        // A stroke outline breaks at its own "/" separators the same way
+        let lines = wrap_text(&mut glyphs, "KAPBD/TKEU/HRAOEUT/SRAOEUT", width);
+        assert!(lines.len() > 1, "{lines:?}");
+        assert_eq!(lines.concat(), "KAPBD/TKEU/HRAOEUT/SRAOEUT");
+    }
+
+    #[test]
+    fn a_long_word_on_the_tape_wraps_instead_of_showing_an_ellipsis() {
+        let config = OverlayConfig::default();
+        let mut renderer = Renderer::new(&config, 1, 900).unwrap();
+        let (w, h) = renderer.size();
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+
+        let words_left = renderer.words_left;
+        let words_right = renderer.words_right;
+        let line_height = renderer.line_height;
+        let tape_bottom = renderer.tape_bottom;
+
+        let long_word = "supercalifragilisticexpialidocious";
+        let mut snapshot = OverlaySnapshot {
+            layer: Some("steno".into()),
+            ..OverlaySnapshot::default()
+        };
+        snapshot
+            .tape
+            .push_back(tape_entry(1, "KAT", long_word));
+        renderer.draw(&snapshot, &mut pixmap.as_mut());
+
+        // The newest (only) entry's text, were it a single clipped line, would draw somewhere
+        // on the bottom-most tape row and nowhere else; wrapped, it also lights pixels on the
+        // row above that one.
+        let lit_in_row = |pixmap: &Pixmap, row_top: f32| {
+            let y0 = (row_top).max(0.0) as u32;
+            let y1 = ((row_top + line_height).ceil() as u32).min(h);
+            let x0 = words_left.max(0.0) as u32;
+            let x1 = (words_right.ceil() as u32).min(w);
+            (y0..y1)
+                .flat_map(|py| (x0..x1).map(move |px| (px, py)))
+                .filter_map(|(px, py)| pixmap.pixel(px, py))
+                .any(|p| p.alpha() > 0)
+        };
+        let newest_row_top = tape_bottom - line_height;
+        let row_above_top = newest_row_top - line_height;
+        assert!(
+            lit_in_row(&pixmap, newest_row_top),
+            "the first line of the long word should draw on the newest tape row"
+        );
+        assert!(
+            lit_in_row(&pixmap, row_above_top),
+            "a word too long for one line should continue onto the row above, not be cut off"
+        );
     }
 
     #[test]
