@@ -162,8 +162,12 @@ impl Plugin {
     }
 
     /// Ask this plugin for a reading of a stroke outline that missed every dictionary, in
-    /// Plover notation (`KAT`, `KOPB/^TKEUGS`). `None` for no reading, or if the call itself
-    /// failed: a bad plugin answers nothing, it cannot bring the daemon down with it.
+    /// Plover notation (`KAT`, `KOPB/^TKEUGS`). `None` for no reading, if the call itself
+    /// failed (a bad plugin answers nothing, it cannot bring the daemon down with it), or if
+    /// the reading is empty: an empty string is never a useful translation, and treating it as
+    /// one would mean this is "mapped" as far as the engine can tell, silently defeating
+    /// anything that only acts when a stroke maps to nothing at all — Plover's own rule for the
+    /// bare `*` undo stroke among them.
     pub fn fallback(&mut self, outline: &str) -> Option<String> {
         let bytes = outline.as_bytes();
         let len = i32::try_from(bytes.len()).ok()?;
@@ -184,7 +188,7 @@ impl Plugin {
         let out_len = usize::try_from(packed & 0xFFFF_FFFF).ok()?;
         let mut buf = vec![0u8; out_len];
         self.memory.read(&self.store, out_ptr, &mut buf).ok()?;
-        String::from_utf8(buf).ok()
+        String::from_utf8(buf).ok().filter(|s| !s.is_empty())
     }
 }
 
@@ -443,6 +447,45 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         let again = compiled(&source, &cache).unwrap();
         assert_eq!(again, wasm);
         assert_eq!(fs::metadata(&wasm).unwrap().modified().unwrap(), modified);
+    }
+
+    /// Always answers with a reading, but an empty one for an outline with no letters in it —
+    /// exactly what a phonetic-spelling plugin does for a bare `*`, which has no onset, coda or
+    /// real vowel to read.
+    const BLANK_FOR_SYMBOLS: &str = r#"
+#[no_mangle]
+pub extern "C" fn alloc(len: i32) -> i32 {
+    let mut v: Vec<u8> = vec![0u8; len as usize];
+    let ptr = v.as_mut_ptr();
+    std::mem::forget(v);
+    ptr as i32
+}
+
+#[no_mangle]
+pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
+    let input = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let mut out: Vec<u8> = input.iter().copied().filter(u8::is_ascii_alphabetic).collect();
+    let out_len = out.len();
+    let out_ptr = out.as_mut_ptr();
+    std::mem::forget(out);
+    (i64::from(out_ptr as i32) << 32) | i64::from(out_len as i32)
+}
+"#;
+
+    #[test]
+    fn an_empty_reading_is_no_reading_at_all() {
+        let dir = tmp_dir().join("an_empty_reading_is_no_reading_at_all");
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("blank_for_symbols.rs");
+        fs::write(&source, BLANK_FOR_SYMBOLS).unwrap();
+        let wasm = compiled(&source, &dir.join("cache")).unwrap();
+        let mut plugin = Plugin::load("blank_for_symbols".to_string(), &wasm).unwrap();
+        assert_eq!(
+            plugin.fallback("*"),
+            None,
+            "an empty answer must not be mistaken for a found translation"
+        );
+        assert_eq!(plugin.fallback("KAT"), Some("KAT".to_string()));
     }
 
     #[test]
