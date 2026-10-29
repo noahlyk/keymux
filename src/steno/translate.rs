@@ -1159,6 +1159,57 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         assert_eq!(t.text(), "^-G");
     }
 
+    /// Keeps only the letters of what it is given: an empty answer for an outline with none,
+    /// such as the bare `*` undo stroke — exactly what a phonetic-spelling plugin does for it.
+    const BLANK_FOR_SYMBOLS_PLUGIN: &str = r#"
+#[no_mangle]
+pub extern "C" fn alloc(len: i32) -> i32 {
+    let mut v: Vec<u8> = vec![0u8; len as usize];
+    let ptr = v.as_mut_ptr();
+    std::mem::forget(v);
+    ptr as i32
+}
+
+#[no_mangle]
+pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
+    let input = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let mut out: Vec<u8> = input.iter().copied().filter(u8::is_ascii_alphabetic).collect();
+    let out_len = out.len();
+    let out_ptr = out.as_mut_ptr();
+    std::mem::forget(out);
+    (i64::from(out_ptr as i32) << 32) | i64::from(out_len as i32)
+}
+"#;
+
+    #[test]
+    fn undo_still_fires_when_a_plugin_would_otherwise_answer_the_bare_star_with_nothing_useful() {
+        let dir = std::env::temp_dir().join(format!(
+            "keymux-translate-plugin-test-{}-undo_survives_a_plugin",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let dict_path = dir.join("01-dict.json");
+        let plugin_path = dir.join("02-blank-for-symbols.rs");
+        fs::write(&dict_path, r#"{"KAT": "cat"}"#).unwrap();
+        fs::write(&plugin_path, BLANK_FOR_SYMBOLS_PLUGIN).unwrap();
+        let chain = Chain::load_cached(&[dict_path, plugin_path], &dir.join("cache"));
+        let mut t = Translator::with_shared(
+            Arc::new(chain),
+            Options {
+                start_attached: true,
+                ..Options::default()
+            },
+        );
+        t.stroke(stroke("KAT"));
+        assert_eq!(t.text(), "cat");
+        t.stroke(UNDO_STROKE);
+        assert_eq!(
+            t.text(),
+            "",
+            "an empty plugin answer must never shadow undo"
+        );
+    }
+
     const JOIN_DICT: &str = r#"{"KAT": "cat", "KAT/^-G": "catting", "-G": "ging"}"#;
 
     #[test]
