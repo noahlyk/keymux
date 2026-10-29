@@ -323,27 +323,29 @@ impl Renderer {
     }
 
     /// The live lookup, drawn where the tape is and bottom-up like it: the query being typed
-    /// sits just above the keyboard, and the results above it, best one nearest.
+    /// sits just above the keyboard, and the results above it, best one nearest. A short
+    /// result list doesn't just hug the query line and leave the rest of the tape's height
+    /// blank: it spreads out to use the whole area instead (see `row_pitch` below).
     fn draw_lookup(&mut self, view: &LookupView, pixmap: &mut PixmapMut) {
         let baseline_in_line =
             (self.line_height - self.words.line_height()) / 2.0 + self.words.ascent();
-        // Copies, so the closure doesn't hold `self` while text is being drawn with its fonts
-        let (bottom, pitch) = (self.tape_bottom, self.line_height);
-        let baseline_of =
-            move |age: usize| ((age + 1) as f32).mul_add(-pitch, bottom) + baseline_in_line;
+        let (bottom, line_height) = (self.tape_bottom, self.line_height);
+        // The query always sits snug against the keyboard, one ordinary line up - only the
+        // results above it get the extra spacing, so the query doesn't drift away from the
+        // keys it's drawn in front of.
+        let query_baseline = bottom - line_height + baseline_in_line;
         let paper_right = {
             let last = self.columns[self.columns.len() - 1];
             self.paper_left + last.x + last.width
         };
 
         // The query row: a label where the strokes go, the word with a caret where words go
-        let baseline = baseline_of(0);
         draw_text_clipped(
             pixmap,
             &mut self.strokes,
             "LOOKUP",
             self.paper_left,
-            baseline,
+            query_baseline,
             paper_right,
             self.theme.vowel,
             self.scale,
@@ -355,7 +357,7 @@ impl Renderer {
             &mut self.words,
             shown,
             self.words_left,
-            baseline,
+            query_baseline,
             self.words_right,
             self.theme.words,
             self.scale,
@@ -365,7 +367,7 @@ impl Renderer {
         if let Some(caret) = rounded_rect(
             Rect {
                 x: caret_x,
-                y: baseline - caret_height,
+                y: query_baseline - caret_height,
                 w: 2.0 * self.scale,
                 h: self.words.ascent().mul_add(0.2, caret_height),
             },
@@ -388,7 +390,7 @@ impl Renderer {
                 &mut self.strokes,
                 message,
                 self.paper_left,
-                baseline_of(1),
+                query_baseline - line_height,
                 self.words_right,
                 with_alpha(self.theme.strokes, 170),
                 self.scale,
@@ -399,8 +401,8 @@ impl Renderer {
         // since both share the row - stopping once the panel's line budget is used up rather
         // than ever truncating a long outline or a long phrase with an ellipsis. A row that
         // would only partly fit is left off entirely, so the ones shown always get full text.
+        let mut shown_rows = Vec::with_capacity(view.rows.len());
         let mut used = 0usize;
-        let mut lines_before = 0.0f32;
         for row in &view.rows {
             let outline_lines = wrap_text(&mut self.strokes, &row.outline, paper_right - self.paper_left).len();
             let text_lines = wrap_text(&mut self.words, &row.text, self.words_right - self.words_left).len();
@@ -408,7 +410,26 @@ impl Renderer {
             if used + row_lines > room_for {
                 break;
             }
-            let baseline = pitch.mul_add(-(1.0 + lines_before), bottom) + baseline_in_line;
+            shown_rows.push((row, row_lines));
+            used += row_lines;
+        }
+        // Spread the rows that fit across the whole budget instead of only the room their own
+        // text needs, so a handful of short results still fill the tape rather than leaving
+        // most of it blank. Capped, so one lone result doesn't drift off toward the top of the
+        // screen by itself - it's the gaps that grow, not an unbounded single jump.
+        const MAX_STRETCH: f32 = 1.6;
+        let row_pitch = if used == 0 {
+            line_height
+        } else {
+            line_height * (room_for as f32 / used as f32).min(MAX_STRETCH)
+        };
+
+        let mut lines_before = 0.0f32;
+        for (row, row_lines) in shown_rows {
+            // `draw_text_wrapped` lays a row's own lines out downward from the baseline it's
+            // given, so that baseline has to be the row's *topmost* line - the one furthest
+            // from the query - or a wrapped row's later lines land on the row below it.
+            let baseline = query_baseline - row_pitch * (lines_before + row_lines as f32);
             // The word as typed is full strength; words that merely start with it a bit less
             let strength = if row.text == view.query.trim() {
                 1.0
@@ -422,7 +443,7 @@ impl Renderer {
                 self.paper_left,
                 baseline,
                 paper_right,
-                pitch,
+                row_pitch,
                 fade_color(self.theme.strokes, strength),
                 self.scale,
             );
@@ -433,11 +454,10 @@ impl Renderer {
                 self.words_left,
                 baseline,
                 self.words_right,
-                pitch,
+                row_pitch,
                 fade_color(self.theme.words, strength),
                 self.scale,
             );
-            used += row_lines;
             lines_before += row_lines as f32;
         }
     }
@@ -1590,6 +1610,105 @@ mod tests {
         let mut after = Pixmap::new(w, h).unwrap();
         renderer.draw(&with_lookup, &mut after.as_mut());
         assert_eq!(tape_pixels.data(), after.data());
+    }
+
+    #[test]
+    fn a_result_does_not_draw_on_the_query_row() {
+        use crate::steno::overlay::LookupRow;
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let (w, h) = renderer.size();
+
+        // Same query, one with a result below it and one without: the query row itself (the
+        // "LOOKUP" label, the typed text and its caret) should look identical either way. If a
+        // result is drawn on top of that row instead of above it, this differs.
+        let no_rows = OverlaySnapshot {
+            lookup: Some(LookupView {
+                query: "cand".into(),
+                rows: vec![],
+                hint: 0,
+            }),
+            ..OverlaySnapshot::default()
+        };
+        let one_row = OverlaySnapshot {
+            lookup: Some(LookupView {
+                query: "cand".into(),
+                rows: vec![LookupRow {
+                    text: "candy".into(),
+                    outline: "KAPBD".into(),
+                }],
+                hint: 0,
+            }),
+            ..OverlaySnapshot::default()
+        };
+
+        let mut without = Pixmap::new(w, h).unwrap();
+        renderer.draw(&no_rows, &mut without.as_mut());
+        let mut with_one = Pixmap::new(w, h).unwrap();
+        renderer.draw(&one_row, &mut with_one.as_mut());
+
+        let query_row_top = (renderer.tape_bottom - renderer.line_height).max(0.0) as u32;
+        let query_row_bottom = (renderer.tape_bottom.ceil() as u32).min(h);
+        let row = |pixmap: &Pixmap| -> Vec<u8> {
+            (query_row_top..query_row_bottom)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .flat_map(|(x, y)| {
+                    let p = pixmap.pixel(x, y).unwrap();
+                    [p.red(), p.green(), p.blue(), p.alpha()]
+                })
+                .collect()
+        };
+        assert_eq!(
+            row(&without),
+            row(&with_one),
+            "the query row should be the same whether or not a result sits above it"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_result_extends_upward_not_onto_the_row_below() {
+        use crate::steno::overlay::LookupRow;
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let (w, h) = renderer.size();
+
+        // An outline too wide for one line, paired with a short word so only the strokes
+        // column wraps. The wrapped second line has to land above the first, inside this row's
+        // own budget - never downward onto the query row or the keyboard beneath it.
+        let snapshot = OverlaySnapshot {
+            lookup: Some(LookupView {
+                query: "cand".into(),
+                rows: vec![LookupRow {
+                    text: "candy".into(),
+                    outline: "KAPBD/TKEU/HRAOEUT/SRAOEUT/KAPBD/TKEU/HRAOEUT/SRAOEUT".into(),
+                }],
+                hint: 0,
+            }),
+            ..OverlaySnapshot::default()
+        };
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        renderer.draw(&snapshot, &mut pixmap.as_mut());
+
+        let lit_in_row = |row_top: f32| {
+            let y0 = row_top.max(0.0) as u32;
+            let y1 = ((row_top + renderer.line_height).ceil() as u32).min(h);
+            let x0 = renderer.paper_left.max(0.0) as u32;
+            let x1 = w;
+            (y0..y1)
+                .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+                .filter_map(|(x, y)| pixmap.pixel(x, y))
+                .any(|p| p.alpha() > 0)
+        };
+
+        let query_row_top = renderer.tape_bottom - renderer.line_height;
+        let result_row_top = query_row_top - renderer.line_height;
+        let wrap_row_top = result_row_top - renderer.line_height;
+        assert!(
+            lit_in_row(result_row_top),
+            "the wrapped outline's first line should draw directly above the query"
+        );
+        assert!(
+            lit_in_row(wrap_row_top),
+            "a wrapped outline should continue upward, not be dropped"
+        );
     }
 
     #[test]
