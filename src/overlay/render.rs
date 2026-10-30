@@ -15,7 +15,7 @@ use super::geometry::{KeyGroup, Keyboard, Rect};
 use super::glyphs::{self, GlyphCache};
 use crate::config::OverlayConfig;
 use crate::steno::layout::EXTRA_KEYS;
-use crate::steno::overlay::{LookupView, OverlaySnapshot, TapeEntry, TAPE_CAPACITY};
+use crate::steno::overlay::{LookupMode, LookupView, OverlaySnapshot, TapeEntry, TAPE_CAPACITY};
 use anyhow::Result;
 use std::borrow::Cow;
 use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, PixmapMut, Stroke, Transform};
@@ -339,15 +339,25 @@ impl Renderer {
             self.paper_left + last.x + last.width
         };
 
-        // The query row: a label where the strokes go, the word with a caret where words go
+        // The query row: a label where the strokes go, the word with a caret where words go.
+        // The label says what the query is actually doing instead of always the same generic
+        // word: raw steno notation resolving forward, a whole phrase translating into one
+        // outline, or (the default, a single word) the ordinary reverse lookup. Colours reuse
+        // the keyboard's own accents, so they read as "this is what that key's colour means"
+        // rather than new colours the keyboard doesn't otherwise use.
+        let (label, accent) = match view.mode {
+            LookupMode::Stroke => ("ENGINE RESOLVER", self.theme.right),
+            LookupMode::Phrase => ("TRANSLATOR", self.theme.misc),
+            LookupMode::Word => ("LOOKUP", self.theme.vowel),
+        };
         draw_text_clipped(
             pixmap,
             &mut self.strokes,
-            "LOOKUP",
+            label,
             self.paper_left,
             query_baseline,
             paper_right,
-            self.theme.vowel,
+            accent,
             self.scale,
         );
         let room = 4.0f32.mul_add(-self.scale, self.words_right - self.words_left);
@@ -374,7 +384,7 @@ impl Renderer {
             0.0,
             0.0,
         ) {
-            fill(pixmap, &caret, self.theme.vowel);
+            fill(pixmap, &caret, accent);
         }
 
         // Results, best nearest the query. A message when there is nothing to list.
@@ -410,26 +420,39 @@ impl Renderer {
             if used + row_lines > room_for {
                 break;
             }
-            shown_rows.push((row, row_lines));
+            shown_rows.push((row, outline_lines, text_lines, row_lines));
             used += row_lines;
         }
         // Spread the rows that fit across the whole budget instead of only the room their own
         // text needs, so a handful of short results still fill the tape rather than leaving
-        // most of it blank. Capped, so one lone result doesn't drift off toward the top of the
-        // screen by itself - it's the gaps that grow, not an unbounded single jump.
-        const MAX_STRETCH: f32 = 1.6;
-        let row_pitch = if used == 0 {
-            line_height
+        // most of it blank - but only as *extra gap between rows*. A row's own wrapped lines
+        // (its outline or its word breaking onto a further line) always stay at the normal,
+        // tight `line_height`: stretching those too made every wrapped line look like it had
+        // a spare blank line under it, which is wrong far more often than it's helpful, since
+        // a word usually wraps more than its outline does (English words are long; outlines
+        // are a handful of letters), making the two columns look unsynced inside one row.
+        const MAX_GAP_RATIO: f32 = 0.6;
+        let max_gap = MAX_GAP_RATIO * line_height;
+        let gaps = shown_rows.len() as f32;
+        let extra = (room_for as f32 - used as f32) * line_height;
+        let gap_each = if gaps > 0.0 {
+            (extra / gaps).clamp(0.0, max_gap)
         } else {
-            line_height * (room_for as f32 / used as f32).min(MAX_STRETCH)
+            0.0
         };
 
-        let mut lines_before = 0.0f32;
-        for (row, row_lines) in shown_rows {
-            // `draw_text_wrapped` lays a row's own lines out downward from the baseline it's
-            // given, so that baseline has to be the row's *topmost* line - the one furthest
-            // from the query - or a wrapped row's later lines land on the row below it.
-            let baseline = query_baseline - row_pitch * (lines_before + row_lines as f32);
+        let mut block_top = bottom - line_height; // the query's own block, already placed
+        for (row, outline_lines, text_lines, row_lines) in shown_rows {
+            let row_height = row_lines as f32 * line_height;
+            let row_bottom = block_top - gap_each;
+            let row_top = row_bottom - row_height;
+            block_top = row_top;
+            // A word usually needs more lines to wrap than its outline does, so the shorter
+            // column is centred within the row's full height rather than pinned to its top -
+            // otherwise it reads as orphaned above a tall gap instead of belonging to the row.
+            let center = |col_lines: usize| {
+                ((row_lines - col_lines) as f32 / 2.0).mul_add(line_height, row_top) + baseline_in_line
+            };
             // The word as typed is full strength; words that merely start with it a bit less
             let strength = if row.text == view.query.trim() {
                 1.0
@@ -441,9 +464,9 @@ impl Renderer {
                 &mut self.strokes,
                 &row.outline,
                 self.paper_left,
-                baseline,
+                center(outline_lines),
                 paper_right,
-                row_pitch,
+                line_height,
                 fade_color(self.theme.strokes, strength),
                 self.scale,
             );
@@ -452,13 +475,12 @@ impl Renderer {
                 &mut self.words,
                 &row.text,
                 self.words_left,
-                baseline,
+                center(text_lines),
                 self.words_right,
-                row_pitch,
+                line_height,
                 fade_color(self.theme.words, strength),
                 self.scale,
             );
-            lines_before += row_lines as f32;
         }
     }
 
@@ -1552,6 +1574,7 @@ mod tests {
                 },
             ],
             hint: crate::steno::layout::parse_stroke("T").unwrap(),
+            mode: LookupMode::Word,
         }
     }
 
@@ -1626,6 +1649,7 @@ mod tests {
                 query: "cand".into(),
                 rows: vec![],
                 hint: 0,
+                mode: LookupMode::Word,
             }),
             ..OverlaySnapshot::default()
         };
@@ -1637,6 +1661,7 @@ mod tests {
                     outline: "KAPBD".into(),
                 }],
                 hint: 0,
+                mode: LookupMode::Word,
             }),
             ..OverlaySnapshot::default()
         };
@@ -1681,6 +1706,7 @@ mod tests {
                     outline: "KAPBD/TKEU/HRAOEUT/SRAOEUT/KAPBD/TKEU/HRAOEUT/SRAOEUT".into(),
                 }],
                 hint: 0,
+                mode: LookupMode::Word,
             }),
             ..OverlaySnapshot::default()
         };
@@ -1748,6 +1774,88 @@ mod tests {
                     row("cane", "KAEUPB"),
                 ],
                 hint: crate::steno::layout::parse_stroke("KAPBD").unwrap(),
+                mode: LookupMode::Word,
+            }),
+            ..OverlaySnapshot::default()
+        };
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        renderer.draw(&snapshot, &mut pixmap.as_mut());
+        let mut out = format!("P6 {w} {h} 255\n").into_bytes();
+        for (i, px) in pixmap.data().as_chunks::<4>().0.iter().enumerate() {
+            let (row, col) = (i as u32 / w, i as u32 % w);
+            let backdrop = [70 + row * 50 / h, 60 + col * 40 / w, 100 + row * 60 / h];
+            for (c, back) in px[..3].iter().zip(backdrop) {
+                out.push(c + (back * (255 - u32::from(px[3])) / 255) as u8);
+            }
+        }
+        std::fs::write(path, out).unwrap();
+    }
+
+    /// Scratch preview with a long translation whose word side wraps far more than its
+    /// outline side, to eyeball the per-row gap and the tight within-row spacing by hand.
+    /// `OVERLAY_PREVIEW=/tmp/lookup3.ppm cargo test preview_lookup_long -- --ignored`
+    #[test]
+    #[ignore = "writes an image for eyeballing"]
+    fn preview_lookup_long() {
+        use crate::steno::overlay::LookupRow;
+        let path = std::env::var("OVERLAY_PREVIEW").expect("set OVERLAY_PREVIEW");
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 1080).unwrap();
+        let (w, h) = renderer.size();
+        let snapshot = OverlaySnapshot {
+            layer: Some("steno".into()),
+            lookup: Some(LookupView {
+                query: "cand".into(),
+                rows: vec![
+                    LookupRow {
+                        text: "candidate".into(),
+                        outline: "KAPBD/TKAEUT".into(),
+                    },
+                    LookupRow {
+                        text: "I hope you dont store this translation per key".into(),
+                        outline: "KAPBD".into(),
+                    },
+                    LookupRow {
+                        text: "candy".into(),
+                        outline: "KAPBD".into(),
+                    },
+                ],
+                hint: crate::steno::layout::parse_stroke("KAPBD").unwrap(),
+                mode: LookupMode::Phrase,
+            }),
+            ..OverlaySnapshot::default()
+        };
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        renderer.draw(&snapshot, &mut pixmap.as_mut());
+        let mut out = format!("P6 {w} {h} 255\n").into_bytes();
+        for (i, px) in pixmap.data().as_chunks::<4>().0.iter().enumerate() {
+            let (row, col) = (i as u32 / w, i as u32 % w);
+            let backdrop = [70 + row * 50 / h, 60 + col * 40 / w, 100 + row * 60 / h];
+            for (c, back) in px[..3].iter().zip(backdrop) {
+                out.push(c + (back * (255 - u32::from(px[3])) / 255) as u8);
+            }
+        }
+        std::fs::write(path, out).unwrap();
+    }
+
+    /// Scratch preview of the "ENGINE RESOLVER" label, the longest of the three, to check it
+    /// fits the strokes column. `OVERLAY_PREVIEW=/tmp/lookup6.ppm cargo test preview_lookup_stroke -- --ignored`
+    #[test]
+    #[ignore = "writes an image for eyeballing"]
+    fn preview_lookup_stroke() {
+        use crate::steno::overlay::LookupRow;
+        let path = std::env::var("OVERLAY_PREVIEW").expect("set OVERLAY_PREVIEW");
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 1080).unwrap();
+        let (w, h) = renderer.size();
+        let snapshot = OverlaySnapshot {
+            layer: Some("steno".into()),
+            lookup: Some(LookupView {
+                query: "KAPBD/TKEU".into(),
+                rows: vec![LookupRow {
+                    text: "\u{2192} \"candy\"".into(),
+                    outline: "KAPBD/TKEU".into(),
+                }],
+                hint: crate::steno::layout::parse_stroke("KAPBD").unwrap(),
+                mode: LookupMode::Stroke,
             }),
             ..OverlaySnapshot::default()
         };

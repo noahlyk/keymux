@@ -2,7 +2,9 @@
 //! checked without the daemon, a steno layer, or a keyboard.
 
 use crate::steno::layout::parse_stroke;
-use crate::steno::overlay::{LookupRow, LookupView, OverlaySnapshot, TapeEntry, TAPE_CAPACITY};
+use crate::steno::overlay::{
+    LookupMode, LookupRow, LookupView, OverlaySnapshot, TapeEntry, TAPE_CAPACITY,
+};
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
 use std::time::Duration;
 
@@ -117,6 +119,7 @@ fn lookup(frames: &Sender<OverlaySnapshot>, snapshot: &mut OverlaySnapshot) -> b
             query: query.into(),
             rows,
             hint,
+            mode: LookupMode::Word,
         };
         if !show(snapshot, Some(view)) {
             return false;
