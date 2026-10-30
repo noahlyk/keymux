@@ -14,7 +14,7 @@
 use super::geometry::{KeyGroup, Keyboard, Rect};
 use super::glyphs::{self, GlyphCache};
 use crate::config::OverlayConfig;
-use crate::steno::layout::EXTRA_KEYS;
+use crate::steno::layout::Layout;
 use crate::steno::overlay::{LookupMode, LookupView, OverlaySnapshot, TapeEntry, TAPE_CAPACITY};
 use anyhow::Result;
 use std::borrow::Cow;
@@ -31,8 +31,6 @@ const OUTLINE: f32 = 1.0;
 /// Radius of a pad's top corners relative to its width. The bottom is fully round, except on
 /// the top-row finger keys (see [`has_square_bottom`]), which are the same as the top.
 const PAD_TOP_ROUND: f32 = 0.2;
-/// Slot of the `#` number bar
-const NUMBER_SLOT: usize = 22;
 /// Share of the width inside the padding given to the steno letters; the words get the rest.
 /// The letters are sized to fill this, so a bigger share means bigger steno letters.
 const PAPER_SHARE: f32 = 0.68;
@@ -52,10 +50,6 @@ const PROBE_PX: f32 = 32.0;
 /// The oldest tape lines, at the top of the screen, fade out: this many of them, the topmost
 /// faintest. Every other line is at full strength.
 const FADE_LINES: usize = 3;
-/// Plover paper tape order: `#` first, then the slots in stroke order
-const PAPER_ORDER: [usize; 23] = [
-    22, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-];
 
 /// Colours. With no background, everything has to read over any wallpaper: text is bright with
 /// a dark halo, and unlit keys are a faint dark glass pad with a light outline.
@@ -119,6 +113,9 @@ struct Column {
 
 pub struct Renderer {
     config: OverlayConfig,
+    /// Which keys exist and what they're called. [`Layout::plover`] for now - threading a real
+    /// per-theory layout in from the daemon is separate follow-on work.
+    layout: Layout,
     theme: Theme,
     scale: f32,
     /// Buffer size in physical pixels
@@ -134,11 +131,11 @@ pub struct Renderer {
     tape_bottom: f32,
     line_height: f32,
     tape_lines: usize,
-    /// One per [`EXTRA_KEYS`] entry, same order, drawn before the standard columns below —
+    /// One per [`Layout::extra_keys`] entry, same order, drawn before the standard columns below —
     /// a stroke's extra keys read first on the tape, the same way they get their own badge
     /// row above the keyboard rather than a guessed spot among the 23 standard keys.
     extra_columns: Vec<Column>,
-    /// One per tape slot in [`PAPER_ORDER`] order
+    /// One per tape slot in [`Layout::paper_order`] order
     columns: Vec<Column>,
     /// Left edge of the steno letters, and where the words start, physical px
     paper_left: f32,
@@ -154,8 +151,16 @@ impl Renderer {
     /// Lay the overlay out for `config` on a surface `height` logical pixels tall, at an
     /// integer output `scale`. The tape takes all the height the keyboard leaves.
     pub fn new(config: &OverlayConfig, scale: u32, height: u32) -> Result<Self> {
+        Self::with_layout(config, scale, height, Layout::plover())
+    }
+
+    /// Like [`Self::new`], for a specific theory's own key layout instead of [`Layout::plover`].
+    pub fn with_layout(config: &OverlayConfig, scale: u32, height: u32, layout: Layout) -> Result<Self> {
         let scale = scale.max(1) as f32;
         let bold = glyphs::load_font(config.font.as_deref(), glyphs::BOLD)?;
+
+        let number_slot = layout.number_slot();
+        let paper_order = layout.paper_order();
 
         let width = (config.width as f32 * scale).ceil();
         let height = (height.max(1) as f32 * scale).ceil();
@@ -164,16 +169,17 @@ impl Renderer {
         let text_scale = config.text_scale.clamp(0.5, 3.0);
 
         // The keyboard sits at the bottom. Laying it out once at the origin gives its height.
-        let keys_height = Keyboard::new(0.0, 0.0, inner, &config.overlay_overrides).size.1;
+        let keys_height = Keyboard::new(0.0, 0.0, inner, &layout, &config.overlay_overrides).size.1;
         let keyboard = config.keyboard.then(|| {
             Keyboard::new(
                 pad_x,
                 height - pad_y - keys_height,
                 inner,
+                &layout,
                 &config.overlay_overrides,
             )
         });
-        let key_width = Keyboard::new(0.0, 0.0, inner, &config.overlay_overrides).keys[1].w;
+        let key_width = Keyboard::new(0.0, 0.0, inner, &layout, &config.overlay_overrides).keys[1].w;
         // Every size is nudged to where the letters' flat tops and bottoms land on whole pixel
         // rows (`crisp_size`); at an arbitrary size they smear over two rows and the text looks
         // soft. Capitals (key labels, steno letters) snap on `H`, lowercase words on `x`.
@@ -185,11 +191,13 @@ impl Renderer {
         // of the width. Column widths scale linearly with the size, so measure once at a
         // probe size.
         let mut probe = GlyphCache::new(bold.clone(), PROBE_PX);
-        let extra_labels: Vec<char> = (0..EXTRA_KEYS.len()).map(Keyboard::extra_label).collect();
+        let extra_labels: Vec<char> = (0..layout.extra_keys().len())
+            .map(|i| Keyboard::extra_label(&layout, i))
+            .collect();
         let probe_total: f32 = extra_labels
             .iter()
             .copied()
-            .chain(PAPER_ORDER.iter().map(|&slot| Keyboard::label(slot)))
+            .chain(paper_order.iter().map(|&slot| Keyboard::label(&layout, slot)))
             .map(|ch| probe.get(ch).advance * (1.0 + SLOT_GAP))
             .sum();
         let stroke_px = glyphs::crisp_size(
@@ -208,9 +216,9 @@ impl Renderer {
             extra_columns.push(Column { x, width });
             x += width;
         }
-        let mut columns = Vec::with_capacity(PAPER_ORDER.len());
-        for &slot in &PAPER_ORDER {
-            let width = strokes.get(Keyboard::label(slot)).advance * (1.0 + SLOT_GAP);
+        let mut columns = Vec::with_capacity(paper_order.len());
+        for &slot in &paper_order {
+            let width = strokes.get(Keyboard::label(&layout, slot)).advance * (1.0 + SLOT_GAP);
             columns.push(Column { x, width });
             x += width;
         }
@@ -219,7 +227,7 @@ impl Renderer {
 
         let line_height = (words.line_height() * LINE_SPACING).ceil();
         let tape_bottom = keyboard.as_ref().map_or(height - pad_y, |k| {
-            SECTION_GAP.mul_add(-scale, k.keys[NUMBER_SLOT].y)
+            SECTION_GAP.mul_add(-scale, k.keys[number_slot].y)
         });
         let fits = ((tape_bottom - pad_y) / line_height).floor().max(0.0) as usize;
         let tape_lines = if config.tape {
@@ -237,7 +245,7 @@ impl Renderer {
                 .iter()
                 .enumerate()
                 .filter_map(|(slot, r)| {
-                    if slot == NUMBER_SLOT {
+                    if slot == number_slot {
                         rounded_rect(*r, f32::MAX, f32::MAX)
                     } else if has_square_bottom(slot) {
                         rounded_rect(*r, r.w * PAD_TOP_ROUND, r.w * PAD_TOP_ROUND)
@@ -270,6 +278,7 @@ impl Renderer {
 
         Ok(Self {
             config: config.clone(),
+            layout,
             theme: Theme::default(),
             scale,
             size: (width as u32, height as u32),
@@ -562,7 +571,7 @@ impl Renderer {
             };
 
             let rect = keyboard.keys[slot];
-            let label = Keyboard::label(slot);
+            let label = Keyboard::label(&self.layout, slot);
             let glyph_width = self.labels.get(label).advance;
             let baseline = rect.y + self.labels.ascent().mul_add(0.72, rect.h) / 2.0;
             draw_char(
@@ -580,7 +589,7 @@ impl Renderer {
         // their own, so each gets its own badge, lit the same way a key is.
         let accent = self.theme.accent(KeyGroup::Misc);
         for (i, shape) in self.extra_shapes.iter().enumerate() {
-            let bit = Keyboard::extra_bit(i);
+            let bit = Keyboard::extra_bit(&self.layout, i);
             let label_color = if snapshot.held & bit != 0 {
                 fill(pixmap, shape, accent);
                 self.theme.label_lit
@@ -594,7 +603,7 @@ impl Renderer {
             };
 
             let rect = keyboard.extra[i];
-            let label = Keyboard::extra_label(i);
+            let label = Keyboard::extra_label(&self.layout, i);
             let glyph_width = self.labels.get(label).advance;
             let baseline = rect.y + self.labels.ascent().mul_add(0.72, rect.h) / 2.0;
             draw_char(
@@ -688,10 +697,10 @@ impl Renderer {
         // to line and nothing overlaps. Extra keys (the join key among them) read first,
         // ahead of the 23 standard slots.
         for (index, column) in self.extra_columns.iter().enumerate() {
-            if entry.stroke & Keyboard::extra_bit(index) == 0 {
+            if entry.stroke & Keyboard::extra_bit(&self.layout, index) == 0 {
                 continue;
             }
-            let letter = Keyboard::extra_label(index);
+            let letter = Keyboard::extra_label(&self.layout, index);
             let advance = self.strokes.get(letter).advance;
             draw_char(
                 pixmap,
@@ -703,11 +712,11 @@ impl Renderer {
                 self.scale,
             );
         }
-        for (index, &slot) in PAPER_ORDER.iter().enumerate() {
+        for (index, &slot) in self.layout.paper_order().iter().enumerate() {
             if entry.stroke & (1 << slot) == 0 {
                 continue;
             }
-            let letter = Keyboard::label(slot);
+            let letter = Keyboard::label(&self.layout, slot);
             let column = self.columns[index];
             let advance = self.strokes.get(letter).advance;
             draw_char(
@@ -1138,6 +1147,15 @@ mod tests {
     use super::*;
     use tiny_skia::Pixmap;
 
+    /// A layout exactly like Plover's, plus a `+` "join" extra key - the shape any theory that
+    /// wants one would build, not anything render.rs itself treats specially.
+    fn test_layout_with_join() -> Layout {
+        use crate::steno::layout::KeySpec;
+        Layout::plover()
+            .with_extra(KeySpec::new('+', "join"))
+            .unwrap()
+    }
+
     fn tape_entry(seq: u64, stroke: &str, text: &str) -> TapeEntry {
         TapeEntry {
             seq,
@@ -1306,10 +1324,11 @@ mod tests {
     #[test]
     fn a_key_beyond_the_standard_23_lights_up_in_its_own_badge() {
         let config = OverlayConfig::default();
-        let mut renderer = Renderer::new(&config, 1, 900).unwrap();
+        let layout = test_layout_with_join();
+        let mut renderer = Renderer::with_layout(&config, 1, 900, layout.clone()).unwrap();
         let (w, h) = renderer.size();
         let mut pixmap = Pixmap::new(w, h).unwrap();
-        let bit = Keyboard::extra_bit(0);
+        let bit = Keyboard::extra_bit(&layout, 0);
         let snapshot = OverlaySnapshot {
             layer: Some("steno".into()),
             held: bit,
@@ -1487,26 +1506,32 @@ mod tests {
             glyphs::load_font(None, glyphs::BOLD).unwrap(),
             renderer.strokes.pixel_size(),
         );
-        for (pair, columns) in PAPER_ORDER.windows(2).zip(renderer.columns.windows(2)) {
+        let paper_order = renderer.layout.paper_order();
+        for (pair, columns) in paper_order.windows(2).zip(renderer.columns.windows(2)) {
             // Each column starts where the previous one ends
             assert!((columns[0].x + columns[0].width - columns[1].x).abs() < 0.01);
             // And the letter fits inside its own column
-            let letter = Keyboard::label(pair[0]);
+            let letter = Keyboard::label(&renderer.layout, pair[0]);
             assert!(
                 strokes.get(letter).advance <= columns[0].width,
                 "{letter:?} is wider than its column"
             );
         }
         // W needs more room than T: the columns are not a uniform grid
-        let (t, w) = (Keyboard::label(1), Keyboard::label(4));
+        let (t, w) = (
+            Keyboard::label(&renderer.layout, 1),
+            Keyboard::label(&renderer.layout, 4),
+        );
         assert_eq!((t, w), ('T', 'W'));
         assert!(renderer.columns[5].width > renderer.columns[2].width);
     }
 
     #[test]
     fn an_extra_key_has_its_own_tape_column_ahead_of_the_standard_slots() {
-        let renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
-        assert_eq!(renderer.extra_columns.len(), EXTRA_KEYS.len());
+        let layout = test_layout_with_join();
+        let renderer =
+            Renderer::with_layout(&OverlayConfig::default(), 1, 900, layout.clone()).unwrap();
+        assert_eq!(renderer.extra_columns.len(), layout.extra_keys().len());
         let last_extra = renderer.extra_columns[renderer.extra_columns.len() - 1];
         // Extra columns come first, so the standard slots start right where they end
         assert!((last_extra.x + last_extra.width - renderer.columns[0].x).abs() < 0.01);
@@ -1515,7 +1540,7 @@ mod tests {
             renderer.strokes.pixel_size(),
         );
         for (i, column) in renderer.extra_columns.iter().enumerate() {
-            let letter = Keyboard::extra_label(i);
+            let letter = Keyboard::extra_label(&layout, i);
             assert!(
                 strokes.get(letter).advance <= column.width,
                 "{letter:?} is wider than its column"
@@ -1525,13 +1550,15 @@ mod tests {
 
     #[test]
     fn an_extra_key_on_a_stroke_is_drawn_on_its_own_tape_column() {
-        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let layout = test_layout_with_join();
+        let mut renderer =
+            Renderer::with_layout(&OverlayConfig::default(), 1, 900, layout.clone()).unwrap();
         let (w, h) = renderer.size();
         let mut pixmap = Pixmap::new(w, h).unwrap();
         let kat = crate::steno::layout::parse_stroke("KAT").unwrap();
         let entry = TapeEntry {
             seq: 1,
-            stroke: Keyboard::extra_bit(0) | kat,
+            stroke: Keyboard::extra_bit(&layout, 0) | kat,
             text: "\"cat\"".into(),
             unmatched: false,
             repeats: 0,
@@ -1559,7 +1586,7 @@ mod tests {
         let mut renderer = Renderer::new(&config, 1, 900).unwrap();
         let (w, h) = renderer.size();
         let mut pixmap = Pixmap::new(w, h).unwrap();
-        let t_bit = 1 << PAPER_ORDER[0];
+        let t_bit = 1 << renderer.layout.paper_order()[0];
 
         // Geometry of the tape's newest (bottom-most) line, copied out so sampling doesn't
         // need to borrow `renderer` across the mutable `draw` calls below.
@@ -1647,8 +1674,8 @@ mod tests {
             glyphs::load_font(None, glyphs::BOLD).unwrap(),
             renderer.strokes.pixel_size(),
         );
-        for (&slot, column) in PAPER_ORDER.iter().zip(&renderer.columns) {
-            let advance = strokes.get(Keyboard::label(slot)).advance;
+        for (&slot, column) in renderer.layout.paper_order().iter().zip(&renderer.columns) {
+            let advance = strokes.get(Keyboard::label(&renderer.layout, slot)).advance;
             let gap = column.width - advance;
             assert!(gap > 0.0, "{slot}: columns must not touch");
             assert!(gap < advance * 0.1, "{slot}: gap {gap} is not tight");

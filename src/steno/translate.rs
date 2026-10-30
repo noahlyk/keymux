@@ -11,7 +11,7 @@ use super::dict::Dictionary;
 use super::formatter::{Formatter, Op, Options};
 use super::journal::{self, History, MachineId, Origin, SharedHistory};
 use super::keycombo::key_events;
-use super::layout::{render_stroke, JOIN_BIT};
+use super::layout::render_stroke;
 use super::plugin::Chain;
 use crate::keycode::KeyCode;
 use std::sync::Arc;
@@ -178,13 +178,6 @@ struct Macro {
     cmdline: String,
 }
 
-/// Whether `strokes` is a run the keyboard itself declared one word: more than one stroke,
-/// every one after the first carrying the join key. A dictionary's longest real key says
-/// nothing about how long this can run, since nothing here was an accidental match to begin
-/// with.
-fn is_join_continuation(strokes: &[u32]) -> bool {
-    matches!(strokes, [_, rest @ ..] if !rest.is_empty() && rest.iter().all(|s| s & JOIN_BIT != 0))
-}
 
 /// The macro a mapping stands for. Nothing mapped is the undo stroke's macro when the stroke is
 /// the undo stroke.
@@ -494,9 +487,10 @@ impl Translator {
             return;
         }
         self.hist.redo.clear();
-        // A stroke with the join key is never a word by itself; it is only ever looked up
-        // glued onto some of what came before, in `find_longest_match` below.
-        let joined = stroke & JOIN_BIT != 0;
+        // A stroke a theory's own plugin treats as a continuation is never a word by itself;
+        // it is only ever looked up glued onto some of what came before, in
+        // `find_longest_match` below.
+        let joined = self.dict.joins(stroke);
         let translation = self
             // No prefix lookups (the stroke alone is already looked up)
             .find_longest_match(2, max_len, stroke, &[])
@@ -891,10 +885,11 @@ impl Translator {
                 return None;
             }
         }
-        // A stroke with the join key declares itself a continuation outright, so it is never
-        // tried on its own (`i == translations.len()`, no history involved): doing that would
-        // let it be mistaken for a fresh word the moment nothing glues onto it matches.
-        let joined = stroke & JOIN_BIT != 0;
+        // A stroke a theory's own plugin treats as a continuation declares itself one outright,
+        // so it is never tried on its own (`i == translations.len()`, no history involved):
+        // doing that would let it be mistaken for a fresh word the moment nothing glues onto it
+        // matches.
+        let joined = self.dict.joins(stroke);
         // How much of the history can be involved. A dictionary's longest real key bounds an
         // ordinary search for an accidental multi-stroke match, but a join-key run is not
         // accidental: the keyboard already declared it one continuing word, so it keeps growing
@@ -992,6 +987,14 @@ impl Translator {
 
     /// Look up `strokes`, first as the start of a word (with the empty stroke in front) if the
     /// word before is finished, then as they are.
+    /// Whether `strokes` is a run the keyboard itself declared one word: more than one stroke,
+    /// every one after the first answering `true` to the chain's [`super::plugin::Chain::joins`].
+    /// A dictionary's longest real key says nothing about how long this can run, since nothing
+    /// here was an accidental match to begin with.
+    fn is_join_continuation(&self, strokes: &[u32]) -> bool {
+        matches!(strokes, [_, rest @ ..] if !rest.is_empty() && rest.iter().all(|&s| self.dict.joins(s)))
+    }
+
     fn lookup_with_prefix(
         &self,
         max_len: usize,
@@ -1010,7 +1013,7 @@ impl Translator {
         // how long a join-key run can be: the keyboard already declared the whole thing one
         // word, so trying it is never pointless the way trying an arbitrarily long accidental
         // window would be.
-        if strokes.len() <= max_len || is_join_continuation(strokes) {
+        if strokes.len() <= max_len || self.is_join_continuation(strokes) {
             return self.lookup_with_suffix(strokes, suffixes);
         }
         None
@@ -1132,6 +1135,13 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
     std::mem::forget(out);
     (i64::from(out_ptr as i32) << 32) | i64::from(out_len as i32)
 }
+
+// Bit 23 (the first beyond keymux's own 23 standard keys) is this test file's own made-up
+// join key - keymux has no built-in notion of what any key means.
+#[no_mangle]
+pub extern "C" fn joins(bits: i64) -> i32 {
+    i32::from(bits & (1 << 23) != 0)
+}
 "#;
 
     /// A translator over a folder with one dictionary file and, after it (lower priority, a
@@ -1177,9 +1187,11 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
     #[test]
     fn a_join_key_stroke_with_nothing_to_glue_onto_is_not_given_to_a_plugin_either() {
         let mut t = with_shout_plugin(r#"{"KAT": "cat"}"#, "join_key_not_given");
-        // Nothing precedes it, so it is never a word by itself, plugin included
-        t.stroke(stroke("^-G"));
-        assert_eq!(t.text(), "^-G");
+        // Nothing precedes it, so it is never a word by itself, plugin included. Bit 23 is
+        // SHOUT_PLUGIN's own made-up join key (see its `joins` export above).
+        let joined_g = stroke("-G") | (1 << 23);
+        t.stroke(joined_g);
+        assert_eq!(t.text(), render_stroke(joined_g));
     }
 
     /// Keeps only the letters of what it is given: an empty answer for an outline with none,
@@ -1263,18 +1275,65 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
                 ..Options::default()
             },
         );
+        // Bit 23 is this plugin's own made-up join key (see its `joins` export).
+        let joined_ha = stroke("HA") | (1 << 23);
         t.stroke(stroke("HA"));
-        t.stroke(stroke("^HA"));
-        t.stroke(stroke("^HA"));
+        t.stroke(joined_ha);
+        t.stroke(joined_ha);
         assert_eq!(t.text(), "hahaha");
         for _ in 0..15 {
-            t.stroke(stroke("^HA"));
+            t.stroke(joined_ha);
         }
         assert_eq!(
             t.text(),
             "ha".repeat(18),
             "a held join-key repeat keeps gluing past the dictionary's longest real key, with \
              no space and no stray \"uh\" from the engine's own word-start probe"
+        );
+    }
+
+    /// Every call to `self.dict.joins()` can reach into a WASM plugin now, instead of a bare
+    /// bitmask check - a theory's own join key is no longer free. Measured in release: well
+    /// under 10µs per keystroke even with a real plugin loaded, so still imperceptible against
+    /// how fast anyone can actually stroke.
+    #[test]
+    fn joining_stays_fast_with_a_real_plugin_loaded() {
+        let dir = std::env::temp_dir().join(format!(
+            "keymux-translate-plugin-test-{}-bench_joins",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("orthographic-fallback.rs");
+        fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("docs")
+                .join("plugins")
+                .join("orthographic-fallback.rs"),
+            &source,
+        )
+        .unwrap();
+        let dict_path = dir.join("01-dict.json");
+        fs::write(&dict_path, r#"{"KAT": "cat"}"#).unwrap();
+        let chain = Chain::load_cached(&[dict_path, source], &dir.join("cache"));
+        let mut t = Translator::with_shared(
+            Arc::new(chain),
+            Options {
+                start_attached: true,
+                ..Options::default()
+            },
+        );
+        let kat = stroke("KAT");
+        let joined_ha = stroke("HA") | (1 << 23);
+        let start = std::time::Instant::now();
+        const N: u32 = 1000;
+        for _ in 0..N {
+            t.stroke(kat);
+            t.stroke(joined_ha);
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 2000,
+            "{N} keystroke pairs took {elapsed:?}, expected well under 2s even in a slow debug build"
         );
     }
 
@@ -1311,23 +1370,78 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         assert_eq!(t.text(), "dictionary");
     }
 
-    const JOIN_DICT: &str = r#"{"KAT": "cat", "KAT/^-G": "catting", "-G": "ging"}"#;
+    /// Exports only `joins`: bit 23 (this test file's own made-up join key) continues the word
+    /// before it; no fallback answer, ever (so a plain dictionary hit always wins).
+    const JOIN_ONLY_PLUGIN: &str = r#"
+#[no_mangle]
+pub extern "C" fn alloc(len: i32) -> i32 {
+    let mut v: Vec<u8> = vec![0u8; len as usize];
+    let ptr = v.as_mut_ptr();
+    std::mem::forget(v);
+    ptr as i32
+}
+
+#[no_mangle]
+pub extern "C" fn fallback(_ptr: i32, _len: i32) -> i64 {
+    -1
+}
+
+#[no_mangle]
+pub extern "C" fn joins(bits: i64) -> i32 {
+    i32::from(bits & (1 << 23) != 0)
+}
+"#;
+
+    /// A translator over a dictionary with `"KAT"`, `"-G"` and (a raw-bit entry a dictionary
+    /// *file* can't express, since bit 23 is this test's own made-up join key, not keymux's
+    /// own notation - see [`Dictionary::insert`]) a joined `"KAT/-G"` meaning "catting", plus
+    /// `JOIN_ONLY_PLUGIN` so that join bit is actually reachable through the chain.
+    fn join_dict_translator() -> Translator {
+        let mut dict = Dictionary::default();
+        dict.merge_json(r#"{"KAT": "cat", "-G": "ging"}"#).unwrap();
+        let kat = parse_stroke("KAT").unwrap();
+        let joined_g = parse_stroke("-G").unwrap() | (1 << 23);
+        dict.insert(vec![kat, joined_g], "catting");
+        let dir = std::env::temp_dir().join(format!(
+            "keymux-translate-plugin-test-{}-join_dict",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let plugin_path = dir.join("01-join-only.rs");
+        fs::write(&plugin_path, JOIN_ONLY_PLUGIN).unwrap();
+        let chain = Chain::test_with_plugin(dict, &plugin_path, &dir.join("cache"));
+        Translator::with_shared(
+            Arc::new(chain),
+            Options {
+                start_attached: true,
+                ..Options::default()
+            },
+        )
+    }
 
     #[test]
     fn a_join_key_stroke_only_matches_glued_onto_what_came_before() {
+        let joined_g = parse_stroke("-G").unwrap() | (1 << 23);
         // The plain stroke on its own still means what it always did
-        assert_eq!(type_strokes(JOIN_DICT, &["KAT", "-G"]), "cat ging");
+        let mut t = join_dict_translator();
+        t.stroke(stroke("KAT"));
+        t.stroke(stroke("-G"));
+        assert_eq!(t.text(), "cat ging");
         // With the join key down, the same keys glue onto "cat" instead
-        assert_eq!(type_strokes(JOIN_DICT, &["KAT", "^-G"]), "catting");
+        let mut t = join_dict_translator();
+        t.stroke(stroke("KAT"));
+        t.stroke(joined_g);
+        assert_eq!(t.text(), "catting");
     }
 
     #[test]
     fn a_join_key_stroke_is_never_a_word_by_itself() {
         // Nothing comes before it to glue onto, and "-G" alone (without the join key) is a
         // different stroke, so this matches nothing: raw keys, not "ging"
-        let mut t = translator(JOIN_DICT);
-        t.stroke(stroke("^-G"));
-        assert_eq!(t.text(), "^-G");
+        let joined_g = parse_stroke("-G").unwrap() | (1 << 23);
+        let mut t = join_dict_translator();
+        t.stroke(joined_g);
+        assert_eq!(t.text(), render_stroke(joined_g));
     }
 
     #[test]

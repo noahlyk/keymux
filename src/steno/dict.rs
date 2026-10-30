@@ -195,6 +195,16 @@ impl Dictionary {
         Ok(stats)
     }
 
+    /// Add one entry by its outline bits directly, bypassing stroke-notation parsing - for a
+    /// caller that already has `strokes`, such as one built with a theory-specific
+    /// [`super::layout::Layout`] a plain dictionary file's text can't express on its own
+    /// (`merge_json`/`merge_file` always parse against keymux's own default Plover layout).
+    /// Unlike `merge_json`, an existing entry for the same outline is replaced, not kept.
+    pub fn insert(&mut self, strokes: Vec<u32>, text: impl Into<String>) {
+        self.entries.remove(&strokes);
+        self.add(strokes, text.into());
+    }
+
     /// Add an entry unless an earlier dictionary already has one for the outline.
     fn add(&mut self, strokes: Vec<u32>, text: String) -> bool {
         let Entry::Vacant(slot) = self.entries.entry(strokes.clone()) else {

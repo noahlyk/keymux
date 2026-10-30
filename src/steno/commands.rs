@@ -3,8 +3,7 @@
 use super::dict::Dictionary;
 use super::formatter::{leaves_attached, plain_text};
 use super::layout::{
-    build_key_map, extra_keys, parse_stroke, preset, render_stroke, without_extra_keys, SLOTS,
-    SLOT_SOUNDS,
+    build_key_map, extra_keys, parse_stroke, preset, render_stroke, without_extra_keys, Layout,
 };
 use super::numbers::number_text;
 use super::plugin::Chain;
@@ -158,12 +157,21 @@ fn keys_session(
     Ok(())
 }
 
+/// The sound each of [`Layout::plover`]'s 23 keys stands for, in the same order: `KWEUBG` is
+/// K (k), W (w), E (e), U (u), B and G (ck). Purely descriptive, for the `layout` command - a
+/// theory's own keys have whatever sounds its own config says they do.
+const PLOVER_SLOT_SOUNDS: [&str; 23] = [
+    "s", "t", "k", "p", "w", "h", "r", "a", "o", "*", "e", "u", "f", "r", "p", "b", "l", "g", "t",
+    "s", "d", "z", "#",
+];
+
 /// Print the steno layout a real config resolves to — its own preset and `layout_overrides`
 /// if it has a steno layer, the built-in QWERTY preset otherwise.
 ///
 /// Each steno key, the physical key that presses it, and the sound it stands for. Extra keys
 /// for a steno key (a second key that presses it too) follow as repeated rows.
 pub fn layout(config_path: &Path) -> Result<()> {
+    let plover = Layout::plover();
     let resolved = configured_layout(config_path);
     let preset_name = resolved.as_ref().map_or("qwerty", |(name, _)| name.as_str());
     let overrides = resolved.as_ref().map_or_else(HashMap::new, |(_, o)| o.clone());
@@ -172,33 +180,31 @@ pub fn layout(config_path: &Path) -> Result<()> {
         .into_iter()
         .map(|(slot, key)| {
             [
-                SLOTS[slot].1.to_string(),
+                plover.key_at(slot).unwrap().name.clone(),
                 key_label(key),
-                SLOT_SOUNDS[slot].to_string(),
+                PLOVER_SLOT_SOUNDS[slot].to_string(),
             ]
         })
         .collect();
     // Sounds order: the number key (the last slot) first, then the rest in slot order
-    let number_slot = SLOTS.len() - 1;
+    let number_slot = plover.number_slot();
     let rows = std::iter::once(number_slot)
         .chain(0..number_slot)
         .map(|slot| {
-            let (_, name) = SLOTS[slot];
+            let name = &plover.key_at(slot).unwrap().name;
             let press = keys_by_bit
                 .get(&(1 << slot))
                 .map_or_else(String::new, |&key| key_label(key));
-            [name.to_string(), press, SLOT_SOUNDS[slot].to_string()]
+            [name.clone(), press, PLOVER_SLOT_SOUNDS[slot].to_string()]
         });
     // Combined keys press several stroke keys at once, so list them after the single ones
     let mut combined: Vec<[String; 3]> = keys_by_bit
         .iter()
         .filter(|(bits, _)| bits.count_ones() > 1)
         .map(|(&bits, &key)| {
-            let parts: Vec<(&str, &str)> = SLOTS
-                .iter()
-                .enumerate()
-                .filter(|(slot, _)| bits & (1 << slot) != 0)
-                .map(|(slot, &(_, name))| (name, SLOT_SOUNDS[slot]))
+            let parts: Vec<(&str, &str)> = (0..23)
+                .filter(|slot| bits & (1 << slot) != 0)
+                .map(|slot| (plover.key_at(slot).unwrap().name.as_str(), PLOVER_SLOT_SOUNDS[slot]))
                 .collect();
             [
                 parts
@@ -604,7 +610,7 @@ fn stroke_keys(bits: u32, keys_by_bit: &HashMap<u32, KeyCode>) -> Vec<String> {
             presses.push((mask, key));
         }
     }
-    for slot in 0..SLOTS.len() {
+    for slot in 0..23 {
         let bit = 1 << slot;
         if remaining & bit != 0 {
             if let Some(&key) = keys_by_bit.get(&bit) {
@@ -619,10 +625,10 @@ fn stroke_keys(bits: u32, keys_by_bit: &HashMap<u32, KeyCode>) -> Vec<String> {
     presses.into_iter().map(|(_, key)| key_label(key)).collect()
 }
 
-/// Where a press sits in the sounds order: the number key is the last slot in SLOTS but reads
+/// Where a press sits in the sounds order: the number key is the last slot in the standard 23 but reads
 /// first, so it ranks before every other key.
 const fn display_rank(mask: u32) -> u32 {
-    let number_bit = 1 << (SLOTS.len() - 1);
+    let number_bit = 1 << 22;
     if mask & number_bit != 0 {
         0
     } else {

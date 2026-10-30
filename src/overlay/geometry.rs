@@ -2,7 +2,7 @@
 //! code just indexes it by slot: no layout work per frame.
 
 use crate::config::{Half, OverlayPlacement};
-use crate::steno::layout::{slot_by_name, EXTRA_KEYS, SLOTS};
+use crate::steno::layout::Layout;
 use std::collections::HashMap;
 
 /// A rectangle in pixels.
@@ -75,14 +75,18 @@ const THUMB_DROP: f32 = 0.35;
 const EXTRA_ROW: f32 = 0.5;
 
 /// The keyboard's key rectangles at one size.
+///
+/// The grid itself (`PLACES`) still only knows Plover's own 23-key shape - see Phase 2 for
+/// giving a theory its own diagram, not just its own keys. `Keyboard::new` panics if `layout`
+/// has a different number of standard-grammar keys than that.
 #[derive(Debug, Clone)]
 pub struct Keyboard {
     /// Indexed by stroke slot, the same bit order as strokes
     pub keys: [Rect; 23],
-    /// One pad per [`EXTRA_KEYS`] entry, in that order. A key here has no physical slot of its
-    /// own — a keyboard binds it to whatever key it has free (see `layout_overrides`) — so
-    /// each gets its own badge in a row above everything else, rather than the panel guessing
-    /// at a layout it has no way to know is right for a given keyboard.
+    /// One pad per [`Layout::extra_keys`] entry, in that order. A key here has no physical slot
+    /// of its own — a keyboard binds it to whatever key it has free (see `layout_overrides`) —
+    /// so each gets its own badge in a row above everything else, rather than the panel
+    /// guessing at a layout it has no way to know is right for a given keyboard.
     pub extra: Vec<Rect>,
     /// Width and height of the whole keyboard
     pub size: (f32, f32),
@@ -97,12 +101,19 @@ impl Keyboard {
         x: f32,
         y: f32,
         width: f32,
+        layout: &Layout,
         overlay_overrides: &HashMap<String, OverlayPlacement>,
     ) -> Self {
+        assert_eq!(
+            layout.number_slot(),
+            PLACES.len() - 1,
+            "the diagram only knows Plover's own 23-key shape so far"
+        );
+        let extra_keys = layout.extra_keys();
         let placement = |i: usize| -> &OverlayPlacement {
-            EXTRA_KEYS
+            extra_keys
                 .get(i)
-                .and_then(|&(ch, _)| overlay_overrides.get(&ch.to_string()))
+                .and_then(|k| overlay_overrides.get(&k.char.to_string()))
                 .unwrap_or(&OverlayPlacement::Badge)
         };
         // The slot a `SplitKey` resolves to, or `None` for `Badge` and for a `SplitKey` naming
@@ -111,14 +122,14 @@ impl Keyboard {
         let resolved_slot = |i: usize| -> Option<usize> {
             match placement(i) {
                 OverlayPlacement::SplitKey { slot, .. } => {
-                    slot_by_name(slot).filter(|&idx| idx < SLOTS.len())
+                    layout.slot_by_name(slot).filter(|&idx| idx < 23)
                 }
                 OverlayPlacement::Badge => None,
             }
         };
         // The badge row is only there for an extra key that still wants it; one entirely
         // reassigned onto an existing key (`SplitKey`) needs no space of its own.
-        let needs_badge_row = (0..EXTRA_KEYS.len()).any(|i| resolved_slot(i).is_none());
+        let needs_badge_row = (0..extra_keys.len()).any(|i| resolved_slot(i).is_none());
 
         let unit = width / GAP.mul_add(COLUMNS - 1.0, COLUMNS);
         let gap = unit * GAP;
@@ -154,7 +165,7 @@ impl Keyboard {
             }
         });
         let mut badge_slots = 0usize;
-        let extra = (0..EXTRA_KEYS.len())
+        let extra = (0..extra_keys.len())
             .map(|i| {
                 resolved_slot(i).map_or_else(
                     || {
@@ -174,7 +185,7 @@ impl Keyboard {
         // A `SplitKey` only halves the badge above: the named slot itself still drew full
         // height underneath it, so the two overlapped instead of stacking. Shrink the slot to
         // whichever half the badge didn't take, now that every badge has read its full rect.
-        for i in 0..EXTRA_KEYS.len() {
+        for i in 0..extra_keys.len() {
             if let Some(idx) = resolved_slot(i) {
                 let OverlayPlacement::SplitKey { half, .. } = placement(i) else {
                     unreachable!("resolved_slot only returns Some for SplitKey")
@@ -192,20 +203,20 @@ impl Keyboard {
 
     /// The letter printed on a slot's key.
     #[must_use]
-    pub const fn label(slot: usize) -> char {
-        SLOTS[slot].0
+    pub fn label(layout: &Layout, slot: usize) -> char {
+        layout.key_at(slot).map_or('?', |k| k.char)
     }
 
-    /// The character printed on an [`EXTRA_KEYS`] badge.
+    /// The character printed on a [`Layout::extra_keys`] badge.
     #[must_use]
-    pub const fn extra_label(i: usize) -> char {
-        EXTRA_KEYS[i].0
+    pub fn extra_label(layout: &Layout, i: usize) -> char {
+        layout.extra_keys()[i].char
     }
 
-    /// The stroke bit an [`EXTRA_KEYS`] badge lights up for.
+    /// The stroke bit a [`Layout::extra_keys`] badge lights up for.
     #[must_use]
-    pub const fn extra_bit(i: usize) -> u32 {
-        1 << (SLOTS.len() + i)
+    pub const fn extra_bit(layout: &Layout, i: usize) -> u32 {
+        1 << (layout.extra_start() + i)
     }
 
     /// Which part of the keyboard a slot is on, which decides its colour.
@@ -263,7 +274,15 @@ mod tests {
     use super::*;
 
     fn kb(x: f32, y: f32, width: f32) -> Keyboard {
-        Keyboard::new(x, y, width, &HashMap::new())
+        Keyboard::new(x, y, width, &Layout::plover(), &HashMap::new())
+    }
+
+    /// A layout exactly like Plover's, plus a `+` "join" extra key - the shape any theory that
+    /// wants an extra key beyond the standard 23 would build, not anything geometry.rs itself
+    /// treats specially.
+    fn layout_with_join() -> Layout {
+        use crate::steno::layout::KeySpec;
+        Layout::plover().with_extra(KeySpec::new('+', "join")).unwrap()
     }
 
     fn overlaps(a: &Rect, b: &Rect) -> bool {
@@ -286,8 +305,10 @@ mod tests {
 
     #[test]
     fn every_key_is_in_the_group_its_name_says() {
-        for (slot, (_, name)) in SLOTS.iter().enumerate() {
-            let expected = match *name {
+        let layout = Layout::plover();
+        for slot in 0..23 {
+            let name = &layout.key_at(slot).unwrap().name;
+            let expected = match name.as_str() {
                 "A-" | "O-" | "-E" | "-U" => KeyGroup::Vowel,
                 "*" | "#" => KeyGroup::Misc,
                 name if name.ends_with('-') => KeyGroup::LeftHand,
@@ -318,7 +339,8 @@ mod tests {
 
     #[test]
     fn an_extra_key_with_no_override_draws_in_the_default_badge_row() {
-        let keyboard = kb(0.0, 0.0, 250.0);
+        let layout = layout_with_join();
+        let keyboard = Keyboard::new(0.0, 0.0, 250.0, &layout, &HashMap::new());
         let badge = keyboard.extra[0];
         // The badge row sits above the # bar and every other key
         assert!(badge.bottom() <= keyboard.keys[22].y + 0.01, "{badge:?}");
@@ -328,13 +350,14 @@ mod tests {
     fn split_key_puts_an_extra_key_on_half_of_the_named_slot_and_shrinks_it_to_the_other_half() {
         let mut overrides = HashMap::new();
         overrides.insert(
-            "^".to_string(),
+            "+".to_string(),
             OverlayPlacement::SplitKey {
                 slot: "S-".to_string(),
                 half: Half::Top,
             },
         );
-        let keyboard = Keyboard::new(0.0, 0.0, 250.0, &overrides);
+        let layout = layout_with_join();
+        let keyboard = Keyboard::new(0.0, 0.0, 250.0, &layout, &overrides);
         let s = keyboard.keys[0];
         let badge = keyboard.extra[0];
         // `*` is the other tall (2-row) key, untouched by the override, in this same keyboard
@@ -358,9 +381,10 @@ mod tests {
 
     #[test]
     fn split_key_bottom_half_sits_below_the_top_half() {
+        let layout = layout_with_join();
         let mut top = HashMap::new();
         top.insert(
-            "^".to_string(),
+            "+".to_string(),
             OverlayPlacement::SplitKey {
                 slot: "S-".to_string(),
                 half: Half::Top,
@@ -368,14 +392,14 @@ mod tests {
         );
         let mut bottom = HashMap::new();
         bottom.insert(
-            "^".to_string(),
+            "+".to_string(),
             OverlayPlacement::SplitKey {
                 slot: "S-".to_string(),
                 half: Half::Bottom,
             },
         );
-        let top_rect = Keyboard::new(0.0, 0.0, 250.0, &top).extra[0];
-        let bottom_rect = Keyboard::new(0.0, 0.0, 250.0, &bottom).extra[0];
+        let top_rect = Keyboard::new(0.0, 0.0, 250.0, &layout, &top).extra[0];
+        let bottom_rect = Keyboard::new(0.0, 0.0, 250.0, &layout, &bottom).extra[0];
         let unit = 250.0 / GAP.mul_add(COLUMNS - 1.0, COLUMNS);
         let gap = unit * GAP;
         assert!(
@@ -387,17 +411,18 @@ mod tests {
 
     #[test]
     fn every_extra_key_split_onto_a_slot_leaves_no_badge_row() {
+        let layout = layout_with_join();
         let mut overrides = HashMap::new();
         overrides.insert(
-            "^".to_string(),
+            "+".to_string(),
             OverlayPlacement::SplitKey {
                 slot: "S-".to_string(),
                 half: Half::Top,
             },
         );
         let y = 0.0;
-        let with_split = Keyboard::new(0.0, y, 250.0, &overrides);
-        let with_badge_row = kb(0.0, y, 250.0);
+        let with_split = Keyboard::new(0.0, y, 250.0, &layout, &overrides);
+        let with_badge_row = Keyboard::new(0.0, y, 250.0, &layout, &HashMap::new());
         // With every extra key reassigned onto an existing slot, the # bar starts right where
         // the panel itself does: no row reserved above it, unlike the default badge-row case.
         assert!((with_split.keys[22].y - y).abs() < 0.01, "{:?}", with_split.keys[22].y);
@@ -411,15 +436,16 @@ mod tests {
 
     #[test]
     fn an_unknown_split_key_slot_falls_back_to_the_badge_row() {
+        let layout = layout_with_join();
         let mut overrides = HashMap::new();
         overrides.insert(
-            "^".to_string(),
+            "+".to_string(),
             OverlayPlacement::SplitKey {
                 slot: "nonsense".to_string(),
                 half: Half::Top,
             },
         );
-        let keyboard = Keyboard::new(0.0, 0.0, 250.0, &overrides);
+        let keyboard = Keyboard::new(0.0, 0.0, 250.0, &layout, &overrides);
         let badge = keyboard.extra[0];
         assert!(badge.bottom() <= keyboard.keys[22].y + 0.01, "{badge:?}");
     }

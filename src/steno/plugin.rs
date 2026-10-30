@@ -19,14 +19,14 @@
 //!
 //! # The fallback interface
 //!
-//! The one thing a plugin can be asked right now: a reading of one word that missed everything
-//! ahead of it, such as an orthographic guess from a theory's own phonetic rules — a single
-//! stroke, or several where every one after the first carries the join key, declaring itself a
-//! continuation of the word on purpose (a word that needed more keys than one stroke has). It
-//! is never asked about a run of otherwise-unrelated strokes — the engine's own search for the
-//! longest dictionary match tries windows of many strokes together regardless, and a plugin
-//! that answered those too would win every one of them, swallowing unrelated strokes into one
-//! guess instead of leaving them as separate words. A plugin exports two functions:
+//! The one thing every plugin answers: a reading of one word that missed everything ahead of
+//! it, such as an orthographic guess from a theory's own phonetic rules — a single stroke, or
+//! several where every one after the first continues the word before it on purpose (see
+//! `joins` below; a word that needed more keys than one stroke has). It is never asked about a
+//! run of otherwise-unrelated strokes — the engine's own search for the longest dictionary
+//! match tries windows of many strokes together regardless, and a plugin that answered those
+//! too would win every one of them, swallowing unrelated strokes into one guess instead of
+//! leaving them as separate words. A plugin exports two required functions:
 //!
 //! ```ignore
 //! #[no_mangle]
@@ -38,15 +38,30 @@
 //!
 //! `alloc` is asked for `len` bytes of the plugin's own memory and returns where they start, or
 //! `0` for none to give. `fallback` is given that word's outline exactly as Plover notation
-//! would render it (`KAT`, `KOPB`, `KAT/^-G`), written at the address `alloc` returned, and
+//! would render it (`KAT`, `KOPB`, `KAT/+-G`), written at the address `alloc` returned, and
 //! answers with its own reading of it, written into memory it also allocated, as a packed
 //! pointer and length
 //! (`ptr << 32 | len`, as an `i64`), or a negative number for no reading at all.
 //!
-//! See `docs/plugins/orthographic-fallback.rs` for a complete, working example.
+//! # The join interface (optional)
+//!
+//! keymux itself has no notion of any key meaning "continue the previous word" - every stroke
+//! key, standard or a theory's own extra one, is just a bit to the engine. A theory that wants
+//! one of its keys to behave that way exports a third function:
+//!
+//! ```ignore
+//! #[no_mangle]
+//! pub extern "C" fn joins(bits: i64) -> i32;
+//! ```
+//!
+//! Called with one stroke's bits (the same ones a dictionary key or the tape would carry),
+//! answering non-zero if this stroke should glue onto whatever came before it rather than start
+//! a word of its own. A plugin that has no use for this leaves it out entirely; a stroke is
+//! then never treated as a continuation by anything in keymux. See
+//! `docs/plugins/orthographic-fallback.rs` for a complete, working example (including `joins`).
 
 use super::dict::Dictionary;
-use super::layout::{render_strokes, JOIN_BIT};
+use super::layout::render_strokes;
 use super::source::is_plugin_file;
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -126,6 +141,9 @@ pub struct Plugin {
     memory: Memory,
     alloc: TypedFunc<i32, i32>,
     fallback: TypedFunc<(i32, i32), i64>,
+    /// `joins(bits) -> bool`, if this plugin exports one - see the module doc's "join
+    /// interface". Not every plugin cares, so this is the one export that's optional.
+    joins: Option<TypedFunc<i64, i32>>,
 }
 
 impl fmt::Debug for Plugin {
@@ -153,12 +171,14 @@ impl Plugin {
             .map_err(|e| {
                 anyhow::anyhow!("plugin {name:?} has no fallback(ptr, len) -> packed: {e}")
             })?;
+        let joins = instance.get_typed_func::<i64, i32>(&mut store, "joins").ok();
         Ok(Self {
             name,
             store,
             memory,
             alloc,
             fallback,
+            joins,
         })
     }
 
@@ -195,6 +215,16 @@ impl Plugin {
         let mut buf = vec![0u8; out_len];
         self.memory.read(&self.store, out_ptr, &mut buf).ok()?;
         String::from_utf8(buf).ok().filter(|s| !s.is_empty())
+    }
+
+    /// Ask this plugin whether `bits` (one stroke) continues the word before it, rather than
+    /// starting a new one - a theory's own notion of a join key, if it gave one. `false` if
+    /// this plugin doesn't export `joins` at all, or if the call itself failed.
+    pub fn joins(&mut self, bits: u32) -> bool {
+        let Some(joins) = &self.joins else {
+            return false;
+        };
+        joins.call(&mut self.store, i64::from(bits)).unwrap_or(0) != 0
     }
 }
 
@@ -250,6 +280,25 @@ impl From<Dictionary> for Chain {
         Self {
             dict: dict.clone(),
             steps: vec![Step::Dict(dict)],
+        }
+    }
+}
+
+#[cfg(test)]
+impl Chain {
+    /// A chain over an already-built dictionary (see [`Dictionary::insert`], for an entry no
+    /// dictionary *file* could express) with one plugin, loaded the normal way. `pub(crate)`
+    /// since this exists for tests that need both at once, not as a general-purpose
+    /// constructor - `load_cached` is that, for the files a real steno folder actually has.
+    pub(crate) fn test_with_plugin(
+        dict: Dictionary,
+        plugin_file: &Path,
+        cache_dir: &Path,
+    ) -> Self {
+        let plugin = load_one(plugin_file, cache_dir).expect("test plugin should load");
+        Self {
+            dict: dict.clone(),
+            steps: vec![Step::Dict(dict), Step::Plugin(Mutex::new(plugin))],
         }
     }
 }
@@ -325,19 +374,20 @@ impl Chain {
 
     /// The translation of an exact outline: the first step with an answer, trying each in the
     /// priority order the files were given in. A plugin only ever answers for a single stroke,
-    /// or a run of strokes that is really one word the join key stitched together on purpose
-    /// (every stroke after the first carries it): the engine's own search for the longest
-    /// dictionary match also tries windows of many unrelated strokes at once, and a plugin that
-    /// answered those too would win every one of them (it never really has "no reading"),
-    /// swallowing whole runs of unrelated strokes into one guess instead of leaving them as
-    /// separate words. A real multi-stroke brief is the dictionary's job; the plugin is the last
-    /// resort for what nothing else recognizes, one word at a time.
+    /// or a run of strokes that is really one word a theory's own join key stitched together on
+    /// purpose (every stroke after the first answers `true` to [`Self::joins`]): the engine's
+    /// own search for the longest dictionary match also tries windows of many unrelated strokes
+    /// at once, and a plugin that answered those too would win every one of them (it never
+    /// really has "no reading"), swallowing whole runs of unrelated strokes into one guess
+    /// instead of leaving them as separate words. A real multi-stroke brief is the dictionary's
+    /// job; the plugin is the last resort for what nothing else recognizes, one word at a time.
     #[must_use]
     pub fn lookup(&self, strokes: &[u32]) -> Option<String> {
         for step in &self.steps {
             let found = match step {
                 Step::Dict(dict) => dict.lookup(strokes).map(str::to_owned),
-                Step::Plugin(plugin) => is_one_word(strokes)
+                Step::Plugin(plugin) => self
+                    .is_one_word(strokes)
                     .then(|| lock(plugin).fallback(&render_strokes(strokes)))
                     .flatten(),
             };
@@ -346,6 +396,34 @@ impl Chain {
             }
         }
         None
+    }
+
+    /// Whether `bits` (one stroke) continues the word before it, in any plugin's own judgement -
+    /// a theory's own notion of a join key, if it gave one through [`Plugin::joins`]. `false` if
+    /// no plugin in the chain says so, including when there are no plugins at all: nothing here
+    /// is a built-in notion of what any particular key means.
+    #[must_use]
+    pub fn joins(&self, bits: u32) -> bool {
+        self.steps.iter().any(|step| match step {
+            Step::Plugin(plugin) => lock(plugin).joins(bits),
+            Step::Dict(_) => false,
+        })
+    }
+
+    /// Whether `strokes` reads as one word to ask a plugin about: a single stroke, or several
+    /// where every one after the first continues the word before it (see [`Self::joins`]),
+    /// declaring itself a continuation on purpose. Anything else is a window the engine's own
+    /// search built out of unrelated strokes to see if the dictionary recognizes them together,
+    /// which a plugin must never be asked to settle. A leading `0` is never a real stroke (the
+    /// engine's own "could a word start here" probe uses it as a placeholder; a real stroke
+    /// always has a key down, see `ChordState::take`), so a window starting with one is never
+    /// one word either, however the rest of it looks.
+    fn is_one_word(&self, strokes: &[u32]) -> bool {
+        match strokes {
+            [] => false,
+            [single] => *single != 0,
+            [first, rest @ ..] => *first != 0 && rest.iter().all(|&s| self.joins(s)),
+        }
     }
 
     /// The merged view of every dictionary file in the chain, ignoring where any plugin fell:
@@ -397,21 +475,6 @@ fn lock(mutex: &Mutex<Plugin>) -> std::sync::MutexGuard<'_, Plugin> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Whether `strokes` reads as one word to ask a plugin about: a single stroke, or several where
-/// every one after the first carries the join key, declaring itself a continuation on purpose.
-/// Anything else is a window the engine's own search built out of unrelated strokes to see if
-/// the dictionary recognizes them together, which a plugin must never be asked to settle. A
-/// leading `0` is never a real stroke (the engine's own "could a word start here" probe uses it
-/// as a placeholder; a real stroke always has a key down, see `ChordState::take`), so a window
-/// starting with one is never one word either, however the rest of it looks.
-fn is_one_word(strokes: &[u32]) -> bool {
-    match strokes {
-        [] => false,
-        [single] => *single != 0,
-        [first, rest @ ..] => *first != 0 && rest.iter().all(|s| s & JOIN_BIT != 0),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::layout::parse_stroke;
@@ -443,6 +506,38 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
     let out_ptr = out.as_mut_ptr();
     std::mem::forget(out);
     (i64::from(out_ptr as i32) << 32) | i64::from(out_len as i32)
+}
+"#;
+
+    /// Like `DOUBLER`, with a `joins` export too: bit 23 (the first one beyond keymux's own
+    /// 23 standard keys) continues the previous word - a made-up theory's own join key, for
+    /// tests that need one without keymux having any built-in notion of what it is.
+    const DOUBLER_WITH_JOIN: &str = r#"
+#[no_mangle]
+pub extern "C" fn alloc(len: i32) -> i32 {
+    let mut v: Vec<u8> = vec![0u8; len as usize];
+    let ptr = v.as_mut_ptr();
+    std::mem::forget(v);
+    ptr as i32
+}
+
+#[no_mangle]
+pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
+    let input = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let mut out: Vec<u8> = Vec::with_capacity(input.len() * 2);
+    for &b in input {
+        out.push(b);
+        out.push(b);
+    }
+    let out_len = out.len();
+    let out_ptr = out.as_mut_ptr();
+    std::mem::forget(out);
+    (i64::from(out_ptr as i32) << 32) | i64::from(out_len as i32)
+}
+
+#[no_mangle]
+pub extern "C" fn joins(bits: i64) -> i32 {
+    i32::from(bits & (1 << 23) != 0)
 }
 "#;
 
@@ -585,20 +680,23 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
 
     #[test]
     fn a_plugin_is_asked_about_a_run_the_join_key_declares_as_one_word() {
-        // The join key exists precisely so a word that needs more keys than one stroke has can
-        // be spelled across several strokes on purpose. That is still one word as far as a
+        // A join key - a theory's own, declared through `joins` (see `DOUBLER_WITH_JOIN`) -
+        // exists precisely so a word that needs more keys than one stroke has can be spelled
+        // across several strokes on purpose. That is still one word as far as a
         // phonetic-fallback plugin is concerned, unlike an arbitrary window the engine's own
         // search tried out of unrelated strokes.
         let dir = tmp_dir().join("a_plugin_is_asked_about_a_run_the_join_key_declares_as_one_word");
         fs::create_dir_all(&dir).unwrap();
         let source = dir.join("doubler.rs");
-        fs::write(&source, DOUBLER).unwrap();
+        fs::write(&source, DOUBLER_WITH_JOIN).unwrap();
         let chain = Chain::load_cached(&[source], &dir.join("cache"));
         let kat = parse_stroke("KAT").unwrap();
-        let joined_top = parse_stroke("^TOP").unwrap();
+        // Bit 23 is this test's own made-up join key - keymux has no built-in notion of one.
+        let joined_top = parse_stroke("TOP").unwrap() | (1 << 23);
+        assert!(chain.joins(joined_top), "the plugin's own joins() must be reachable through the chain");
         assert_eq!(
             chain.lookup(&[kat, joined_top]),
-            Some("KKAATT//^^TTOOPP".to_string()),
+            Some("KKAATT//TTOOPP".to_string()),
             "a join-key continuation is one word, so the plugin is still asked about it whole"
         );
     }

@@ -116,7 +116,7 @@ fn parts(stroke: &str) -> (String, String, String) {
     let mut past_vowel = false;
     for c in stroke.chars() {
         match c {
-            '#' | '^' => {}
+            '#' | '+' => {}
             '-' => past_vowel = true,
             'A' | 'O' | '*' | 'E' | 'U' => {
                 vowel.push(c);
@@ -135,7 +135,7 @@ fn read(outline: &str) -> String {
     outline
         .split('/')
         .map(|stroke| {
-            let (left, vowel, right) = parts(stroke.trim_start_matches('^'));
+            let (left, vowel, right) = parts(stroke.trim_start_matches('+'));
             let vowel_sound = VOWELS
                 .iter()
                 .find(|(pattern, _)| *pattern == vowel)
@@ -167,4 +167,15 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
     let out_ptr = out.as_mut_ptr();
     std::mem::forget(out);
     (i64::from(out_ptr as i32) << 32) | i64::from(out_len as i32)
+}
+
+/// Optional: whether a stroke continues the word before it, rather than starting one of its
+/// own. keymux itself has no built-in notion of a "join key" - every stroke key, standard or a
+/// theory's own extra one, is just a bit to the engine - so a theory that wants one answers
+/// here. This example assumes its theory's own first extra key (bit 23, the one right after
+/// keymux's standard 23) is the join key; adjust the bit if your theory's isn't, or if it has
+/// more than one extra key and a different one is the one that means "continue".
+#[no_mangle]
+pub extern "C" fn joins(bits: i64) -> i32 {
+    i32::from(bits & (1 << 23) != 0)
 }
