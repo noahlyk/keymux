@@ -48,7 +48,7 @@ plugin's own build does.
 
 ## Writing one
 
-A plugin exports exactly two functions, in plain Rust with no attributes beyond `#[no_mangle]`
+A plugin exports two required functions, in plain Rust with no attributes beyond `#[no_mangle]`
 and `extern "C"`:
 
 ```rust
@@ -61,9 +61,9 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 { /* ... */ }
 
 `alloc` is asked for `len` bytes of memory and returns where they start (as an address inside
 the plugin's own sandboxed memory, not a real pointer keymux can read directly), or `0` to
-decline. keymux writes one word's outline there, in Plover notation (`KAT`, `KOPB`, `KAT/^-G`),
-encoded as UTF-8 — one stroke, or several where every one after the first carries the join key
-(see `src/steno/layout.rs`), declaring itself a continuation of the same word on purpose. It
+decline. keymux writes one word's outline there, in Plover notation (`KAT`, `KOPB`, `KAT/+-G`),
+encoded as UTF-8 — one stroke, or several where every one after the first continues the word
+before it on purpose (see `joins` below), declaring itself a continuation of the same word. It
 never writes a run of otherwise-unrelated strokes: the engine's own search for the longest
 dictionary match tries windows of many strokes together regardless, and a plugin that answered
 those too would win every one of them, swallowing unrelated strokes into one guess instead of
@@ -80,6 +80,23 @@ own logic and can be replaced freely.
 A join-key stroke with nothing before it to glue onto is never given to a plugin on its own: it
 already declared itself a continuation of the word before it, so being asked to read it in
 isolation would be asking the wrong question.
+
+### `joins` (optional)
+
+keymux itself has no notion of any key meaning "continue the previous word" - every stroke key,
+standard or a theory's own extra one, is just a bit to the engine. A theory that wants one of
+its keys to behave that way exports a third function:
+
+```rust
+#[no_mangle]
+pub extern "C" fn joins(bits: i64) -> i32 { /* ... */ }
+```
+
+Called with one stroke's bits (the same ones a dictionary key or the tape would carry),
+answering non-zero if this stroke should glue onto whatever came before it rather than start a
+word of its own. A plugin that has no use for this leaves it out entirely; a stroke is then
+never treated as a continuation by anything in keymux. `orthographic-fallback.rs` includes a
+working example - see its own comment for the bit it assumes.
 
 ## Where things are cached
 
