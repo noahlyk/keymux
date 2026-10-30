@@ -594,13 +594,20 @@ impl Renderer {
         }
 
         let mut row_top = (used as f32).mul_add(-self.line_height, self.tape_bottom);
-        // `planned` is newest first; reversed, this walks oldest (top of the tape) to newest
-        // (bottom), so `row_from_top` already is what `line_fade` wants - only the oldest few
-        // rows, at the top, should ever come out faint.
-        for (row_from_top, (entry, text_lines)) in planned.iter().rev().enumerate() {
-            let fade = line_fade(row_from_top);
+        // `planned` is newest first; reversed, this walks oldest (top of the drawn block) to
+        // newest (bottom). The fade is about nearness to the *panel's* top edge, not the top
+        // of whatever little is currently drawn - with only a line or two, the whole block
+        // sits well clear of the top with blank space above it, and none of it should fade
+        // just because it happens to be the first entry in a short list. `lines_above` is
+        // this entry's distance from the top of the drawn block; adding the blank space still
+        // above that block (`budget - used`) turns it into distance from the panel's actual
+        // top edge, which only shrinks toward `FADE_LINES` once the tape is nearly full.
+        let mut lines_above = 0usize;
+        for (entry, text_lines) in planned.iter().rev() {
+            let fade = line_fade(budget - used + lines_above);
             self.draw_tape_line(pixmap, entry, row_top + baseline_in_line, fade);
             row_top = (*text_lines as f32).mul_add(self.line_height, row_top);
+            lines_above += text_lines;
         }
     }
 
@@ -1195,18 +1202,35 @@ mod tests {
         }
     }
 
+    /// Brightest pixel in `row_top..row_top+line_height`, a few columns into the words
+    /// column - a stand-in for "how strong is whatever's drawn on this tape row".
+    fn row_alpha(pixmap: &Pixmap, renderer: &Renderer, h: u32, row_top: f32) -> u8 {
+        let words_x = renderer.words_left as u32;
+        let y0 = row_top.max(0.0) as u32;
+        let y1 = ((row_top + renderer.line_height).ceil() as u32).min(h);
+        (y0..y1)
+            .flat_map(|y| (words_x..(words_x + 20).min(pixmap.width())).map(move |x| (x, y)))
+            .filter_map(|(x, y)| pixmap.pixel(x, y))
+            .map(|p| p.alpha())
+            .max()
+            .unwrap_or(0)
+    }
+
     #[test]
     fn the_tape_actually_fades_the_oldest_lines_at_the_top_not_the_newest_at_the_bottom() {
         // `line_fade` alone (above) can't catch a caller passing it the wrong row index; this
         // draws real tape lines and checks which end of the screen actually comes out dim.
+        // Fills the tape right up to its own budget - the fade only applies once the tape is
+        // nearly full (see the test below for the opposite, mostly-empty case).
         let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
         let (w, h) = renderer.size();
+        let lines = renderer.tape_lines();
         let mut snapshot = OverlaySnapshot {
             layer: Some("steno".into()),
             ..OverlaySnapshot::default()
         };
-        // More than FADE_LINES, oldest (seq 1) first, newest (seq 5) last - a VecDeque's back
-        for seq in 1..=5 {
+        // Oldest (seq 1) first, newest (seq `lines`) last - a VecDeque's back is the newest
+        for seq in 1..=lines as u64 {
             snapshot
                 .tape
                 .push_back(tape_entry(seq, "KAT", &format!("\"w{seq}\"")));
@@ -1214,24 +1238,44 @@ mod tests {
         let mut pixmap = Pixmap::new(w, h).unwrap();
         renderer.draw(&snapshot, &mut pixmap.as_mut());
 
-        let words_x = renderer.words_left as u32;
-        let row_alpha = |row_top: f32| {
-            let y0 = row_top.max(0.0) as u32;
-            let y1 = ((row_top + renderer.line_height).ceil() as u32).min(h);
-            (y0..y1)
-                .flat_map(|y| (words_x..(words_x + 20).min(w)).map(move |x| (x, y)))
-                .filter_map(|(x, y)| pixmap.pixel(x, y))
-                .map(|p| p.alpha())
-                .max()
-                .unwrap_or(0)
-        };
-        let top_row = 5.0f32.mul_add(-renderer.line_height, renderer.tape_bottom); // oldest, seq 1
-        let bottom_row = renderer.tape_bottom - renderer.line_height; // newest, seq 5
+        let top_row = (lines as f32).mul_add(-renderer.line_height, renderer.tape_bottom);
+        let bottom_row = renderer.tape_bottom - renderer.line_height; // newest, last seq
+        let (top, bottom) = (
+            row_alpha(&pixmap, &renderer, h, top_row),
+            row_alpha(&pixmap, &renderer, h, bottom_row),
+        );
         assert!(
-            row_alpha(top_row) < row_alpha(bottom_row),
-            "the oldest line (top, alpha {}) should be dimmer than the newest (bottom, alpha {})",
-            row_alpha(top_row),
-            row_alpha(bottom_row)
+            top < bottom,
+            "a full tape's oldest line (top, alpha {top}) should be dimmer than its newest (bottom, alpha {bottom})"
+        );
+    }
+
+    #[test]
+    fn a_tape_nowhere_near_full_does_not_fade_its_one_line_just_for_being_first() {
+        // The bug this guards: fading used to be judged by position in the *drawn* list, so a
+        // single line - simultaneously the first and only entry - was always "row 0" and
+        // always faded, even though on screen it sits snug against the keyboard with most of
+        // the tape's height empty above it. Fading is for lines about to scroll off the top of
+        // a *full* tape, not for the first line or two of an otherwise-empty one.
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let (w, h) = renderer.size();
+        assert!(
+            renderer.tape_lines() > FADE_LINES * 4,
+            "test assumes a tall tape relative to FADE_LINES"
+        );
+        let mut snapshot = OverlaySnapshot {
+            layer: Some("steno".into()),
+            ..OverlaySnapshot::default()
+        };
+        snapshot.tape.push_back(tape_entry(1, "KAT", "\"cat\""));
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        renderer.draw(&snapshot, &mut pixmap.as_mut());
+
+        let only_row = renderer.tape_bottom - renderer.line_height;
+        assert_eq!(
+            row_alpha(&pixmap, &renderer, h, only_row),
+            255,
+            "the tape's one and only line should be at full strength, not faded"
         );
     }
 
