@@ -437,20 +437,16 @@ impl Renderer {
             shown_rows.push((row, row_lines));
             used += row_lines;
         }
-        // Spread the rows that fit across the whole budget instead of only the room their own
-        // text needs, so a handful of short results still fill the tape rather than leaving
-        // most of it blank - but only as *extra gap between rows*. A row's own wrapped lines
-        // (its outline or its word breaking onto a further line) always stay at the normal,
-        // tight `line_height`: stretching those too made every wrapped line look like it had
-        // a spare blank line under it, which is wrong far more often than it's helpful, since
-        // a word usually wraps more than its outline does (English words are long; outlines
-        // are a handful of letters), making the two columns look unsynced inside one row.
+        // A single short result is pushed up with some breathing room above the query instead
+        // of sitting squeezed right against it, so it still makes use of the tape's height - but
+        // only when there's just one row to place. With several results (plain word lookup's
+        // usual case, one candidate per row), spreading that same leftover room across every
+        // gap *between* them read as a wall of blank lines separating otherwise-related words;
+        // those always stack at the plain `line_height`, one right after another, like a list.
         const MAX_GAP_RATIO: f32 = 0.6;
         let max_gap = MAX_GAP_RATIO * line_height;
-        let gaps = shown_rows.len() as f32;
-        let extra = (room_for as f32 - used as f32) * line_height;
-        let gap_each = if gaps > 0.0 {
-            (extra / gaps).clamp(0.0, max_gap)
+        let gap_each = if shown_rows.len() == 1 {
+            ((room_for as f32 - used as f32) * line_height).clamp(0.0, max_gap)
         } else {
             0.0
         };
@@ -1925,6 +1921,67 @@ mod tests {
         let mut after = Pixmap::new(w, h).unwrap();
         renderer.draw(&with_lookup, &mut after.as_mut());
         assert_eq!(tape_pixels.data(), after.data());
+    }
+
+    #[test]
+    fn several_single_word_results_stack_without_a_gap_between_them() {
+        use crate::steno::overlay::LookupRow;
+        // Multiple one-line candidates - plain word lookup's usual shape - used to have the
+        // tape's leftover room spread out as extra gap *between every row*, reading as a wall
+        // of blank lines separating otherwise related words. They should stack tight, one row
+        // right after another, like a list; only a single result gets pushed up for breathing
+        // room (covered by the preview tests, since there's no "gap between rows" to check).
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 1080).unwrap();
+        let (w, h) = renderer.size();
+        let row = |text: &str, outline: &str| LookupRow {
+            text: text.into(),
+            outline: outline.into(),
+        };
+        let snapshot = OverlaySnapshot {
+            layer: Some("steno".into()),
+            lookup: Some(LookupView {
+                query: "cand".into(),
+                rows: vec![
+                    row("candy", "KAPBD"),
+                    row("candle", "KAPBL"),
+                    row("candid", "KAPBD/EUD"),
+                    row("candidate", "KAPBD/TKAEUT"),
+                    row("cane", "KAEUPB"),
+                ],
+                hint: 0,
+                mode: LookupMode::Word,
+            }),
+            ..OverlaySnapshot::default()
+        };
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        renderer.draw(&snapshot, &mut pixmap.as_mut());
+
+        let lit_in_row = |row_top: f32| {
+            let y0 = row_top.max(0.0) as u32;
+            let y1 = ((row_top + renderer.line_height).ceil() as u32).min(h);
+            let x0 = renderer.words_left.max(0.0) as u32;
+            let x1 = (renderer.words_right.ceil() as u32).min(w);
+            (y0..y1)
+                .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+                .filter_map(|(x, y)| pixmap.pixel(x, y))
+                .any(|p| p.alpha() > 0)
+        };
+
+        // Five one-line results, stacked tight: the whole block is exactly 5 lines tall, right
+        // above the query row. The row snug against the query is lit, as expected either way -
+        // the real test is that nothing spills into the *sixth* line's worth of space: with the
+        // old bug, gaps between the five rows push the block's top further up, lighting pixels
+        // a full extra line above where a tightly-packed block of 5 would ever reach.
+        let query_row_top = renderer.tape_bottom - renderer.line_height;
+        assert!(
+            lit_in_row(query_row_top - renderer.line_height),
+            "the result closest to the query should be lit"
+        );
+        assert!(
+            !lit_in_row(6.0f32.mul_add(-renderer.line_height, query_row_top)),
+            "5 one-line results stacked with no gap take up exactly 5 lines - anything lit a 6th \
+             line above the query means extra gap crept in between them"
+        );
     }
 
     #[test]
