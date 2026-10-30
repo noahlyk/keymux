@@ -2265,14 +2265,20 @@ mod tests {
         let path = std::env::var("OVERLAY_PREVIEW").expect("set OVERLAY_PREVIEW");
         let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 1080).unwrap();
         let (w, h) = renderer.size();
+        let row = |text: &str, outline: &str| LookupRow {
+            text: text.into(),
+            outline: outline.into(),
+        };
         let snapshot = OverlaySnapshot {
             layer: Some("steno".into()),
             lookup: Some(LookupView {
                 query: "KAPBD/TKEU".into(),
-                rows: vec![LookupRow {
-                    text: "\u{2192} \"candy\"".into(),
-                    outline: "KAPBD/TKEU".into(),
-                }],
+                rows: vec![
+                    row("\u{2192} \"candy\"", "KAPBD/TKEU"),
+                    row("\u{2192} \"candidate\"", "KAPBD/TKAEUT"),
+                    row("\u{2192} \"candle\"", "KAPBL/TKEU"),
+                    row("\u{2192} \"can\"", "KAPB/TKEU"),
+                ],
                 hint: crate::steno::layout::parse_stroke("KAPBD").unwrap(),
                 mode: LookupMode::Stroke,
             }),
