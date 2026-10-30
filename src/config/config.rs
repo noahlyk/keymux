@@ -317,31 +317,19 @@ pub enum LayerKind {
     Steno(StenoConfig),
 }
 
-/// One key beyond keymux's own standard 23, a theory adds for its own purpose.
-///
-/// A join key among them, but keymux has no built-in notion of what any of them mean (see
-/// `src/steno/plugin.rs`'s `joins` interface for giving one a meaning).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExtraKeyConfig {
-    /// The character this key is written as in stroke notation, e.g. `'+'`. Used as the key in
-    /// `overlay_overrides`.
-    pub char: char,
-    /// This key's name, e.g. `"join"`. Used as the key in `layout_overrides`, and anywhere
-    /// else a steno key is named.
-    pub name: String,
-}
-
 /// Settings for a steno layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StenoConfig {
     /// Built-in layout preset to start from.
     #[serde(default = "default_steno_layout")]
     pub layout: String,
-    /// Keys beyond keymux's own standard 23 this theory adds, such as a join key. Empty means
-    /// none: a stroke is then only ever built from the standard 23, exactly as keymux's own
-    /// `Layout::plover` has it.
+    /// Keys beyond keymux's own standard 23 this theory adds, such as a join key, by the
+    /// character each is written as in stroke notation, e.g. `['+']`. Used as the key in
+    /// `layout_overrides`, and anywhere else a steno key is named. Empty means none: a stroke
+    /// is then only ever built from the standard 23, exactly as keymux's own `Layout::plover`
+    /// has it.
     #[serde(default)]
-    pub extra_keys: Vec<ExtraKeyConfig>,
+    pub extra_keys: Vec<char>,
     /// Per-key changes to the preset, e.g. `{ "S-": Key(KC_Q) }`.
     #[serde(default)]
     pub layout_overrides: HashMap<String, KeyAction>,
@@ -807,7 +795,7 @@ pub struct OverlayConfig {
     /// says - the overlay process never reads a steno layer's config directly (it runs
     /// separately from the daemon), so it needs its own copy to know such a key exists at all,
     /// just as `overlay_overrides` already needs its own copy of where to draw it.
-    pub extra_keys: Vec<ExtraKeyConfig>,
+    pub extra_keys: Vec<char>,
     /// Where an extra key (beyond the standard 23) is drawn, keyed by its own character, e.g.
     /// `{ "+": SplitKey(slot: "S-", half: Top) }`. An extra key left out draws as the default
     /// badge.

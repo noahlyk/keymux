@@ -9,7 +9,7 @@
 //! beyond that shape entirely - says so in its own config; nothing here assumes Plover's
 //! specific letters or counts.
 
-use crate::config::{ExtraKeyConfig, KeyAction};
+use crate::config::KeyAction;
 use crate::keycode::KeyCode;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -124,11 +124,11 @@ impl Layout {
     ///
     /// # Errors
     /// One message per problem found, not just the first (see [`Self::with_extra`]).
-    pub fn plover_with(extra_keys: &[ExtraKeyConfig]) -> Result<Self, Vec<String>> {
+    pub fn plover_with(extra_keys: &[char]) -> Result<Self, Vec<String>> {
         let mut layout = Self::plover();
         let mut errors = Vec::new();
-        for key in extra_keys {
-            match layout.clone().with_extra(KeySpec::new(key.char, key.name.as_str())) {
+        for &ch in extra_keys {
+            match layout.clone().with_extra(KeySpec::new(ch, ch.to_string())) {
                 Ok(next) => layout = next,
                 Err(mut key_errors) => errors.append(&mut key_errors),
             }
@@ -584,10 +584,12 @@ impl Layout {
         let mut assigned: HashMap<String, KeyCode> = preset.clone();
 
         for (slot, action) in overrides {
-            if !slot
-                .split('+')
-                .all(|part| self.slot_by_name(part).is_some())
-            {
+            // A key's own name takes this literally, even one that is itself `+` (an extra
+            // key may be named after its own stroke character) - only once that fails is `+`
+            // read as joining several keys onto one physical key, e.g. "A-+O-" on V.
+            let resolves = self.slot_by_name(slot).is_some()
+                || slot.split('+').all(|part| self.slot_by_name(part).is_some());
+            if !resolves {
                 errors.push(format!("layout override for unknown steno key \"{slot}\""));
                 continue;
             }
@@ -637,11 +639,12 @@ impl Layout {
             keys.insert(key, 1 << (self.extra_start() + i));
         }
 
-        // A combined key presses several stroke keys at once, e.g. "A-+O-" on V.
-        // Its bits are the union of its parts.
+        // A combined key presses several stroke keys at once, e.g. "A-+O-" on V. Its bits are
+        // the union of its parts - but only once `name` fails as a key's own literal name, the
+        // same preference the override loop above already gives it.
         let mut combined: Vec<(&String, KeyCode)> = assigned
             .iter()
-            .filter(|(name, _)| name.contains('+'))
+            .filter(|(name, _)| name.contains('+') && self.slot_by_name(name).is_none())
             .map(|(name, &key)| (name, key))
             .collect();
         combined.sort_by(|a, b| a.0.cmp(b.0));
@@ -1068,6 +1071,33 @@ mod tests {
         let bit = |name: &str| 1 << layout.slot_by_name(name).unwrap();
         assert_eq!(map[&KeyCode::KC_X], bit("A-") | bit("O-"));
         assert_eq!(map[&KeyCode::KC_COMM], bit("-E") | bit("-U"));
+    }
+
+    #[test]
+    fn plover_with_builds_a_working_plus_join_key_end_to_end() {
+        // The exact shape `config.ron`'s `extra_keys: ['+']` plus `layout_overrides: { "+":
+        // Key(KC_Q) }` builds, start to finish.
+        let layout = Layout::plover_with(&['+']).unwrap();
+        let mut overrides = HashMap::new();
+        overrides.insert("+".to_string(), KeyAction::Key(KeyCode::KC_Q));
+        let map = layout
+            .build_key_map(&preset("qwerty").unwrap(), &overrides)
+            .unwrap();
+        assert_eq!(map.get(&KeyCode::KC_Q), Some(&(1 << layout.extra_start())));
+    }
+
+    #[test]
+    fn an_extra_key_literally_named_plus_overrides_as_itself_not_an_empty_combo() {
+        // `extra_keys: ['+']` gives the extra key the name "+" too (its name is always its own
+        // character) - a layout override for "+" must take that literally, not read it as
+        // joining the two empty names either side of a `+` split.
+        let layout = Layout::plover().with_extra(KeySpec::new('+', "+")).unwrap();
+        let mut overrides = HashMap::new();
+        overrides.insert("+".to_string(), KeyAction::Key(KeyCode::KC_Q));
+        let map = layout
+            .build_key_map(&preset("qwerty").unwrap(), &overrides)
+            .unwrap();
+        assert_eq!(map.get(&KeyCode::KC_Q), Some(&(1 << layout.extra_start())));
     }
 
     #[test]
