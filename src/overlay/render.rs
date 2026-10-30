@@ -414,13 +414,27 @@ impl Renderer {
         let mut shown_rows = Vec::with_capacity(view.rows.len());
         let mut used = 0usize;
         for row in &view.rows {
-            let outline_lines = wrap_text(&mut self.strokes, &row.outline, paper_right - self.paper_left).len();
-            let text_lines = wrap_text(&mut self.words, &row.text, self.words_right - self.words_left).len();
-            let row_lines = outline_lines.max(text_lines).max(1);
+            let row_lines = if let Some((words, strokes)) = word_groups(&row.text, &row.outline) {
+                wrap_paired(
+                    &mut self.strokes,
+                    &mut self.words,
+                    &strokes,
+                    &words,
+                    paper_right - self.paper_left,
+                    self.words_right - self.words_left,
+                )
+                .0
+                .len()
+            } else {
+                let outline_lines = wrap_text(&mut self.strokes, &row.outline, paper_right - self.paper_left).len();
+                let text_lines = wrap_text(&mut self.words, &row.text, self.words_right - self.words_left).len();
+                outline_lines.max(text_lines)
+            }
+            .max(1);
             if used + row_lines > room_for {
                 break;
             }
-            shown_rows.push((row, outline_lines, text_lines, row_lines));
+            shown_rows.push((row, row_lines));
             used += row_lines;
         }
         // Spread the rows that fit across the whole budget instead of only the room their own
@@ -442,22 +456,62 @@ impl Renderer {
         };
 
         let mut block_top = bottom - line_height; // the query's own block, already placed
-        for (row, outline_lines, text_lines, row_lines) in shown_rows {
+        for (row, row_lines) in shown_rows {
             let row_height = row_lines as f32 * line_height;
             let row_bottom = block_top - gap_each;
             let row_top = row_bottom - row_height;
             block_top = row_top;
-            // A word usually needs more lines to wrap than its outline does, so the shorter
-            // column is centred within the row's full height rather than pinned to its top -
-            // otherwise it reads as orphaned above a tall gap instead of belonging to the row.
-            let center = |col_lines: usize| {
-                ((row_lines - col_lines) as f32 / 2.0).mul_add(line_height, row_top) + baseline_in_line
-            };
             // The word as typed is full strength; words that merely start with it a bit less
             let strength = if row.text == view.query.trim() {
                 1.0
             } else {
                 0.8
+            };
+            let outline_color = fade_color(self.theme.strokes, strength);
+            let text_color = fade_color(self.theme.words, strength);
+            if let Some((words, strokes)) = word_groups(&row.text, &row.outline) {
+                // A phrase: wrap both columns together, word by word, so a line always shows
+                // the same words in both - see `wrap_paired`. The two always come out with the
+                // same number of lines, so neither needs centring against the other.
+                let (outline_lines, text_lines) = wrap_paired(
+                    &mut self.strokes,
+                    &mut self.words,
+                    &strokes,
+                    &words,
+                    paper_right - self.paper_left,
+                    self.words_right - self.words_left,
+                );
+                draw_lines(
+                    pixmap,
+                    &mut self.strokes,
+                    &outline_lines,
+                    self.paper_left,
+                    row_top + baseline_in_line,
+                    line_height,
+                    outline_color,
+                    self.scale,
+                );
+                draw_lines(
+                    pixmap,
+                    &mut self.words,
+                    &text_lines,
+                    self.words_left,
+                    row_top + baseline_in_line,
+                    line_height,
+                    text_color,
+                    self.scale,
+                );
+                continue;
+            }
+            // A single word (or a raw-steno row): the two columns wrap independently, since
+            // there's no word-for-word correspondence to keep in step. A word usually needs
+            // more lines to wrap than its outline does, so the shorter column is centred within
+            // the row's full height rather than pinned to its top - otherwise it reads as
+            // orphaned above a tall gap instead of belonging to the row.
+            let outline_lines = wrap_text(&mut self.strokes, &row.outline, paper_right - self.paper_left).len();
+            let text_lines = wrap_text(&mut self.words, &row.text, self.words_right - self.words_left).len();
+            let center = |col_lines: usize| {
+                ((row_lines - col_lines) as f32 / 2.0).mul_add(line_height, row_top) + baseline_in_line
             };
             draw_text_wrapped(
                 pixmap,
@@ -467,7 +521,7 @@ impl Renderer {
                 center(outline_lines),
                 paper_right,
                 line_height,
-                fade_color(self.theme.strokes, strength),
+                outline_color,
                 self.scale,
             );
             draw_text_wrapped(
@@ -478,7 +532,7 @@ impl Renderer {
                 center(text_lines),
                 self.words_right,
                 line_height,
-                fade_color(self.theme.words, strength),
+                text_color,
                 self.scale,
             );
         }
@@ -896,6 +950,26 @@ fn draw_text_wrapped(
     scale: f32,
 ) -> usize {
     let lines = wrap_text(glyphs, text, (right - x).max(0.0));
+    draw_lines(pixmap, glyphs, &lines, x, baseline, pitch, color, scale);
+    lines.len()
+}
+
+/// Draw already-wrapped `lines`, one below the other, `pitch` apart - the drawing half of
+/// [`draw_text_wrapped`], split out so lines wrapped some other way (such as
+/// [`wrap_paired`]'s, broken on the same word boundaries as a companion column rather than on
+/// this column's own width) can be drawn without wrapping the text over again, which would just
+/// undo that pairing.
+#[allow(clippy::too_many_arguments)]
+fn draw_lines(
+    pixmap: &mut PixmapMut,
+    glyphs: &mut GlyphCache,
+    lines: &[String],
+    x: f32,
+    baseline: f32,
+    pitch: f32,
+    color: [u8; 4],
+    scale: f32,
+) {
     for (i, line) in lines.iter().enumerate() {
         let mut cx = x.round();
         let line_baseline = pitch.mul_add(i as f32, baseline);
@@ -904,7 +978,80 @@ fn draw_text_wrapped(
             cx += glyphs.get(c).advance.round();
         }
     }
-    lines.len()
+}
+
+/// Recover a phrase row's per-word correspondence between its outline and its text, if there is
+/// one. [`crate::steno::reverse::display`] joins one stroke-group per word with `" / "`
+/// (spaced), while a multi-stroke word's own strokes join with a bare `"/"` (no spaces) - so
+/// splitting on `" / "` here can never land in the middle of one word's own outline, and lines
+/// back up with `text`'s words split on a single space. `None` when the two don't actually line
+/// up word for word: a single-word row (nothing to sync) or a raw-steno "what does this type"
+/// row, whose text is the resulting phrase, not one word per stroke group.
+fn word_groups<'a>(text: &'a str, outline: &'a str) -> Option<(Vec<&'a str>, Vec<&'a str>)> {
+    let words: Vec<&str> = text.split(' ').collect();
+    let strokes: Vec<&str> = outline.split(" / ").collect();
+    (words.len() > 1 && words.len() == strokes.len()).then_some((words, strokes))
+}
+
+/// Wrap a phrase's words and outline-groups onto shared lines, word by word: a word only moves
+/// to a new line together with its own outline when either column would otherwise overflow, so
+/// the two columns always show the same words on the same line. Wrapping each column on its own
+/// width (plain [`wrap_text`]) breaks each wherever THAT column's text runs out of room, with no
+/// regard for where the other broke - outlines are short, so a lot more of them fit on a line
+/// than the words they spell, and the two columns end up showing different words on "line 1".
+fn wrap_paired(
+    strokes_glyphs: &mut GlyphCache,
+    words_glyphs: &mut GlyphCache,
+    strokes: &[&str],
+    words: &[&str],
+    outline_max: f32,
+    words_max: f32,
+) -> (Vec<String>, Vec<String>) {
+    let sep_outline = strokes_glyphs.measure(" / ");
+    let sep_words = words_glyphs.measure(" ");
+    let mut outline_lines = Vec::new();
+    let mut text_lines = Vec::new();
+    let mut outline_line = String::new();
+    let mut text_line = String::new();
+    let (mut outline_width, mut text_width) = (0.0f32, 0.0f32);
+    for (&stroke, &word) in strokes.iter().zip(words) {
+        let stroke_width = strokes_glyphs.measure(stroke);
+        let word_width = words_glyphs.measure(word);
+        let next_outline_width = if outline_line.is_empty() {
+            stroke_width
+        } else {
+            outline_width + sep_outline + stroke_width
+        };
+        let next_text_width = if text_line.is_empty() {
+            word_width
+        } else {
+            text_width + sep_words + word_width
+        };
+        if !outline_line.is_empty()
+            && (next_outline_width > outline_max || next_text_width > words_max)
+        {
+            outline_lines.push(std::mem::take(&mut outline_line));
+            text_lines.push(std::mem::take(&mut text_line));
+            outline_line.push_str(stroke);
+            text_line.push_str(word);
+            outline_width = stroke_width;
+            text_width = word_width;
+            continue;
+        }
+        if !outline_line.is_empty() {
+            outline_line.push_str(" / ");
+            text_line.push(' ');
+        }
+        outline_line.push_str(stroke);
+        text_line.push_str(word);
+        outline_width = next_outline_width;
+        text_width = next_text_width;
+    }
+    if !outline_line.is_empty() || outline_lines.is_empty() {
+        outline_lines.push(outline_line);
+        text_lines.push(text_line);
+    }
+    (outline_lines, text_lines)
 }
 
 /// Draw one character, with its pen at `x` (rounded to a whole pixel, so it is sharp), with a
@@ -1027,6 +1174,64 @@ mod tests {
         let lines = wrap_text(&mut glyphs, "KAPBD/TKEU/HRAOEUT/SRAOEUT", width);
         assert!(lines.len() > 1, "{lines:?}");
         assert_eq!(lines.concat(), "KAPBD/TKEU/HRAOEUT/SRAOEUT");
+    }
+
+    #[test]
+    fn word_groups_pairs_up_a_phrase_but_not_a_single_word_or_raw_steno() {
+        // A phrase: one stroke-group per word, lining up 1:1.
+        assert_eq!(
+            word_groups("I want to go", "EU / WAUNT / TO / TKPWOE"),
+            Some((vec!["I", "want", "to", "go"], vec!["EU", "WAUNT", "TO", "TKPWOE"]))
+        );
+        // A single word has nothing to sync against another word, even with a multi-stroke
+        // outline (whose own strokes join with a bare "/", never " / ").
+        assert_eq!(word_groups("candy", "KAPBD/TKEU"), None);
+        // Raw steno resolving forward: the text is the resulting phrase, not one word per
+        // stroke, so splitting it on spaces doesn't mean the same thing as the outline's groups.
+        assert_eq!(word_groups("\u{2192} \"I want\"", "EU/WAUNT"), None);
+    }
+
+    #[test]
+    fn wrap_paired_breaks_both_columns_on_the_same_words() {
+        // The user's reported case: a phrase long enough to wrap, where the outline column
+        // (short stroke groups) could fit far more per line than the word column (real English
+        // words) - independently wrapping each on its own width put a different number of
+        // words on "line 1" of each column. Pairing them must always agree on the split.
+        let font = glyphs::load_font(None, glyphs::BOLD).unwrap();
+        let mut strokes_glyphs = GlyphCache::new(font.clone(), 16.0);
+        let mut words_glyphs = GlyphCache::new(font, 16.0);
+
+        let words = ["I", "want", "to", "go", "to", "the", "store", "and", "buy", "cookies"];
+        let strokes = ["EU", "WAUNT", "TO", "TKPWOE", "TO", "-T", "STOR", "APBD", "PWEU", "KAOBG/KEUS"];
+
+        // Wide enough for every outline on one line; only wide enough for about 4 words.
+        let outline_max = strokes_glyphs.measure(&strokes.join(" / "));
+        let words_max = 3.0f32.mul_add(words_glyphs.measure(" "), 4.0 * words_glyphs.measure("store"));
+
+        let (outline_lines, text_lines) = wrap_paired(
+            &mut strokes_glyphs,
+            &mut words_glyphs,
+            &strokes,
+            &words,
+            outline_max,
+            words_max,
+        );
+
+        assert_eq!(
+            outline_lines.len(),
+            text_lines.len(),
+            "paired columns must always break into the same number of lines: {outline_lines:?} vs {text_lines:?}"
+        );
+        for (outline_line, text_line) in outline_lines.iter().zip(&text_lines) {
+            assert_eq!(
+                outline_line.split(" / ").count(),
+                text_line.split(' ').count(),
+                "line {text_line:?} has a different number of words than its outline {outline_line:?}"
+            );
+        }
+        // Every word (and every outline) still shows up exactly once, in order.
+        assert_eq!(text_lines.join(" "), words.join(" "));
+        assert_eq!(outline_lines.join(" / "), strokes.join(" / "));
     }
 
     #[test]
@@ -1825,6 +2030,72 @@ mod tests {
     }
 
     #[test]
+    fn a_long_phrase_breaks_its_outline_and_words_on_the_same_lines() {
+        use crate::steno::overlay::LookupRow;
+        // The user's reported case: "I want to go to the store and buy cookies" wraps the word
+        // column onto several lines; the outline column, being much narrower per word, used to
+        // wrap independently and cram more words' worth of strokes onto its own "line 1" than
+        // the word column showed there - 6 outlines over 4 words, confusing to read. Every line
+        // in one column must show the same words as the matching line in the other.
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 1080).unwrap();
+        let (w, h) = renderer.size();
+        let snapshot = OverlaySnapshot {
+            layer: Some("steno".into()),
+            lookup: Some(LookupView {
+                query: "i want to go to the store and buy cookies".into(),
+                rows: vec![LookupRow {
+                    text: "I want to go to the store and buy cookies".into(),
+                    outline: "EU / WAUNT / TO / TKPWOE / TO / -T / STOR / APBD / PWEU / KAOBG/KEUS".into(),
+                }],
+                hint: 0,
+                mode: LookupMode::Phrase,
+            }),
+            ..OverlaySnapshot::default()
+        };
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        renderer.draw(&snapshot, &mut pixmap.as_mut());
+
+        let lit = |x0: u32, x1: u32, y0: f32, y1: f32| {
+            (y0.max(0.0) as u32..(y1.ceil() as u32).min(h))
+                .flat_map(|y| (x0..x1.min(w)).map(move |x| (x, y)))
+                .filter_map(|(x, y)| pixmap.pixel(x, y))
+                .any(|p| p.alpha() > 0)
+        };
+        let paper_left = renderer.paper_left as u32;
+        let paper_right = {
+            let last = renderer.columns[renderer.columns.len() - 1];
+            (renderer.paper_left + last.x + last.width) as u32
+        };
+        let words_left = renderer.words_left as u32;
+        let words_right = renderer.words_right as u32;
+        let line_height = renderer.line_height;
+
+        // Walk upward from the query row, one line at a time: as soon as both columns have gone
+        // blank, the phrase's block is done. Any line in between where one column still has
+        // something lit and the other doesn't is exactly the desync this guards against.
+        let mut row_top = 2.0f32.mul_add(-line_height, renderer.tape_bottom); // above the query row
+        let mut synced_lines = 0;
+        for _ in 0..8 {
+            let outline_lit = lit(paper_left, paper_right, row_top, row_top + line_height);
+            let text_lit = lit(words_left, words_right, row_top, row_top + line_height);
+            if !outline_lit && !text_lit {
+                break;
+            }
+            assert_eq!(
+                outline_lit, text_lit,
+                "row at y={row_top} has outline_lit={outline_lit} but text_lit={text_lit} - \
+                 the two columns disagree about which words are on this line"
+            );
+            synced_lines += 1;
+            row_top -= line_height;
+        }
+        assert!(
+            synced_lines > 1,
+            "expected the phrase to wrap onto more than one line"
+        );
+    }
+
+    #[test]
     fn a_long_query_keeps_its_end_visible() {
         let mut glyphs = GlyphCache::new(glyphs::load_font(None, glyphs::BOLD).unwrap(), 20.0);
         assert_eq!(tail_that_fits(&mut glyphs, "short", 500.0), "short");
@@ -1900,6 +2171,10 @@ mod tests {
                     LookupRow {
                         text: "I hope you dont store this translation per key".into(),
                         outline: "KAPBD".into(),
+                    },
+                    LookupRow {
+                        text: "I want to go to the store and buy cookies".into(),
+                        outline: "EU / WAUNT / TO / TKPWOE / TO / -T / STOR / APBD / PWEU / KAOBG/KEUS".into(),
                     },
                     LookupRow {
                         text: "candy".into(),
