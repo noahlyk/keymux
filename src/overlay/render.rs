@@ -594,8 +594,11 @@ impl Renderer {
         }
 
         let mut row_top = (used as f32).mul_add(-self.line_height, self.tape_bottom);
-        for (age, (entry, text_lines)) in planned.iter().rev().enumerate() {
-            let fade = line_fade(planned.len() - 1 - age);
+        // `planned` is newest first; reversed, this walks oldest (top of the tape) to newest
+        // (bottom), so `row_from_top` already is what `line_fade` wants - only the oldest few
+        // rows, at the top, should ever come out faint.
+        for (row_from_top, (entry, text_lines)) in planned.iter().rev().enumerate() {
+            let fade = line_fade(row_from_top);
             self.draw_tape_line(pixmap, entry, row_top + baseline_in_line, fade);
             row_top = (*text_lines as f32).mul_add(self.line_height, row_top);
         }
@@ -1190,6 +1193,46 @@ mod tests {
         for row in FADE_LINES..200 {
             assert_eq!(line_fade(row), 1.0, "row {row}");
         }
+    }
+
+    #[test]
+    fn the_tape_actually_fades_the_oldest_lines_at_the_top_not_the_newest_at_the_bottom() {
+        // `line_fade` alone (above) can't catch a caller passing it the wrong row index; this
+        // draws real tape lines and checks which end of the screen actually comes out dim.
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let (w, h) = renderer.size();
+        let mut snapshot = OverlaySnapshot {
+            layer: Some("steno".into()),
+            ..OverlaySnapshot::default()
+        };
+        // More than FADE_LINES, oldest (seq 1) first, newest (seq 5) last - a VecDeque's back
+        for seq in 1..=5 {
+            snapshot
+                .tape
+                .push_back(tape_entry(seq, "KAT", &format!("\"w{seq}\"")));
+        }
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        renderer.draw(&snapshot, &mut pixmap.as_mut());
+
+        let words_x = renderer.words_left as u32;
+        let row_alpha = |row_top: f32| {
+            let y0 = row_top.max(0.0) as u32;
+            let y1 = ((row_top + renderer.line_height).ceil() as u32).min(h);
+            (y0..y1)
+                .flat_map(|y| (words_x..(words_x + 20).min(w)).map(move |x| (x, y)))
+                .filter_map(|(x, y)| pixmap.pixel(x, y))
+                .map(|p| p.alpha())
+                .max()
+                .unwrap_or(0)
+        };
+        let top_row = 5.0f32.mul_add(-renderer.line_height, renderer.tape_bottom); // oldest, seq 1
+        let bottom_row = renderer.tape_bottom - renderer.line_height; // newest, seq 5
+        assert!(
+            row_alpha(top_row) < row_alpha(bottom_row),
+            "the oldest line (top, alpha {}) should be dimmer than the newest (bottom, alpha {})",
+            row_alpha(top_row),
+            row_alpha(bottom_row)
+        );
     }
 
     #[test]
