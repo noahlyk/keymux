@@ -479,11 +479,18 @@ impl Translator {
         let mapping =
             self.lookup_with_prefix(max_len, &self.hist.state.translations, &[stroke], &[]);
         if let Some(found) = mapping_to_macro(mapping.as_deref(), stroke) {
-            // Taking back and putting back keep the redo history; anything else is new input
-            if !matches!(found.name.as_str(), "undo" | "undo_word" | "redo") {
+            // Taking back and putting back keep the redo history; anything else is new input,
+            // but only once it actually changes something. Several macros here (the retro
+            // space commands, again, swap, repeat_last_stroke, the asterisk toggles) silently
+            // do nothing when their preconditions aren't met, and a no-op must not be allowed
+            // to wipe out what undo left behind to redo: `self.hist.to_do` is always 0 on entry
+            // (the previous flush reset it), so it being nonzero afterwards is exactly whether
+            // this macro appended anything new.
+            let keeps_redo = matches!(found.name.as_str(), "undo" | "undo_word" | "redo");
+            self.translate_macro(&found, ops);
+            if !keeps_redo && self.hist.to_do > 0 {
                 self.hist.redo.clear();
             }
-            self.translate_macro(&found, ops);
             return;
         }
         self.hist.redo.clear();
@@ -1569,6 +1576,96 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         let ops = t.stroke_ops(stroke("SP*"));
         assert_eq!(ops, vec![Op::Backspaces(3), Op::Text("hi".to_string())]);
         assert_eq!(t.text(), "hi hi hihi");
+    }
+
+    #[test]
+    fn retro_delete_space_after_undo_joins_the_words_left() {
+        // Type three words, undo the last one back, and retro-delete-space should join
+        // whatever two words are now actually last, not get confused by the one taken back.
+        let mut t = translator(SPACE_DICT);
+        for s in ["H*EU", "H*EU", "H*EU"] {
+            t.stroke(stroke(s));
+        }
+        assert_eq!(t.text(), "hi hi hi");
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "hi hi");
+        t.stroke(stroke("SP*"));
+        assert_eq!(t.text(), "hihi");
+    }
+
+    #[test]
+    fn retro_delete_space_can_be_redone_and_then_undone_and_redone_again() {
+        // Join, undo the join back into two words, redo the join, undo it again: the join
+        // and its two words round-trip cleanly however many times undo/redo alternate.
+        let mut t = translator(SPACE_DICT);
+        for s in ["H*EU", "H*EU"] {
+            t.stroke(stroke(s));
+        }
+        t.stroke(stroke("SP*"));
+        assert_eq!(t.text(), "hihi");
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "hi hi");
+        t.stroke(stroke("SP*"));
+        assert_eq!(t.text(), "hihi");
+    }
+
+    #[test]
+    fn a_retro_delete_space_that_does_nothing_does_not_clear_what_redo_would_restore() {
+        // Undo leaves one word. Retro-delete-space then has nothing to join (fewer than two
+        // words) and silently does nothing, as it should; that no-op must not also throw away
+        // the redo history undo left behind, or the next undo becomes unrecoverable.
+        let mut t = translator(SPACE_DICT);
+        for s in ["H*EU", "H*EU"] {
+            t.stroke(stroke(s));
+        }
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "hi");
+        t.stroke(stroke("SP*"));
+        assert_eq!(
+            t.text(),
+            "hi",
+            "a no-op retro must not type or delete anything"
+        );
+        t.stroke(stroke("R*E"));
+        assert_eq!(
+            t.text(),
+            "hi hi",
+            "redo must still restore the word undo took back, even after a no-op retro attempt"
+        );
+    }
+
+    #[test]
+    fn a_retro_delete_space_blocked_by_chaining_does_not_clear_the_redo_history_either() {
+        // Four words; retro-join the last two (3rd+4th), then type a 5th word, then undo just
+        // that 5th word back. The last two translations are now [word2, the join], and the
+        // join is itself a retrospective command, so retro-delete-space refuses to chain
+        // another join onto it (as Plover does too) and silently does nothing. That refusal
+        // must not clear the redo entry undoing word 5 left behind.
+        let mut t = translator(SPACE_DICT);
+        for s in ["H*EU", "H*EU", "H*EU"] {
+            t.stroke(stroke(s));
+        }
+        t.stroke(stroke("SP*")); // joins word2+word3
+        assert_eq!(t.text(), "hi hihi");
+        t.stroke(stroke("H*EU")); // a 4th word
+        assert_eq!(t.text(), "hi hihi hi");
+        t.stroke(stroke("*")); // undo just the 4th word
+        assert_eq!(t.text(), "hi hihi");
+        // Blocked: chaining a join onto the existing join is refused, so this is a no-op.
+        t.stroke(stroke("SP*"));
+        assert_eq!(
+            t.text(),
+            "hi hihi",
+            "chaining a retro join onto a join must stay blocked"
+        );
+        // Redo must still restore the 4th word that undo took back, since the blocked retro
+        // attempt just above did nothing and so must not have cleared the redo history.
+        t.stroke(stroke("R*E"));
+        assert_eq!(
+            t.text(),
+            "hi hihi hi",
+            "redo must still restore the undone word after a chaining-blocked retro attempt"
+        );
     }
 
     #[test]
