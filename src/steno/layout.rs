@@ -9,14 +9,14 @@
 //! beyond that shape entirely - says so in its own config; nothing here assumes Plover's
 //! specific letters or counts.
 
-use crate::config::KeyAction;
+use crate::config::{ExtraKeyConfig, KeyAction};
 use crate::keycode::KeyCode;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
 /// One stroke key: the character Plover-style notation writes it as, and the name a config
 /// file gives it (`layout_overrides`, `overlay_overrides`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KeySpec {
     pub char: char,
     pub name: String,
@@ -56,7 +56,7 @@ pub const fn reserved(ch: char) -> bool {
 /// nothing from the middle group marks the hand boundary itself. Everything past that shape -
 /// how many keys in each group, which letters, which (if any) double as digits, what else
 /// exists beyond the 23 - is theory data.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Layout {
     left: Vec<KeySpec>,
     pre_star: Vec<KeySpec>,
@@ -115,6 +115,28 @@ impl Layout {
                 (18, '9'),
             ],
             extra: Vec::new(),
+        }
+    }
+
+    /// [`Self::plover`], plus a steno layer's own `extra_keys` (`config.ron`'s `StenoConfig`/
+    /// `OverlayConfig` field of the same name) - the layout a real config actually builds,
+    /// empty `extra_keys` behaving exactly like `Self::plover` alone.
+    ///
+    /// # Errors
+    /// One message per problem found, not just the first (see [`Self::with_extra`]).
+    pub fn plover_with(extra_keys: &[ExtraKeyConfig]) -> Result<Self, Vec<String>> {
+        let mut layout = Self::plover();
+        let mut errors = Vec::new();
+        for key in extra_keys {
+            match layout.clone().with_extra(KeySpec::new(key.char, key.name.as_str())) {
+                Ok(next) => layout = next,
+                Err(mut key_errors) => errors.append(&mut key_errors),
+            }
+        }
+        if errors.is_empty() {
+            Ok(layout)
+        } else {
+            Err(errors)
         }
     }
 

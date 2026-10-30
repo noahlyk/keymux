@@ -23,20 +23,27 @@ use std::path::Path;
 use std::time::Duration;
 
 /// Every dictionary a layer would use with the default config.
+///
+/// Always [`Layout::plover`]: these CLI tools read a bare directory, not a real config, so a
+/// theory's own `extra_keys` (`config.ron`'s `StenoConfig`) aren't known here. A dictionary
+/// entry using one won't parse through this path - only the daemon, which does have the real
+/// config, resolves those.
 #[must_use]
 pub fn load_dictionary(config_dir: &Path) -> Dictionary {
     let cache = cache_dir(config_dir);
     let files = expand(&default_dictionaries(config_dir), &cache);
-    Dictionary::load_cached(&files, &cache)
+    Dictionary::load_cached(&files, &cache, &Layout::plover())
 }
 
 /// The same files as [`load_dictionary`], with any `.rs` plugin among them kept in the chain
 /// instead of skipped: for a forward lookup (stroke to text), where a plugin can answer.
+///
+/// [`Layout::plover`] only - see [`load_dictionary`].
 #[must_use]
 pub fn load_chain(config_dir: &Path) -> Chain {
     let cache = cache_dir(config_dir);
     let files = expand(&default_dictionaries(config_dir), &cache);
-    Chain::load_cached(&files, &cache)
+    Chain::load_cached(&files, &cache, &Layout::plover())
 }
 
 /// The one lookup, forward or backward.
@@ -928,6 +935,7 @@ mod tests {
         dict.merge_json(
             r#"{"-T": "the", "KWEUG": "quick", "SKWR*UPLD": "jumped",
                 "SKWRUPL/-PD": "jumped", "TKOG": "dog"}"#,
+            &Layout::plover(),
         )
         .unwrap();
         dict
@@ -950,7 +958,7 @@ mod tests {
     fn keys_pick_the_stroke_that_types_the_text_exactly() {
         // AOT attaches "out" to the next word, so "out with" needs the plain "A" instead
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"AOT": "{out^}", "A": "out", "W": "with"}"#)
+        dict.merge_json(r#"{"AOT": "{out^}", "A": "out", "W": "with"}"#, &Layout::plover())
             .unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "out with", true);
         assert_eq!(rows.len(), 2);
@@ -961,7 +969,7 @@ mod tests {
     #[test]
     fn unknown_word_does_not_stop_the_rest_from_matching() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"AOT": "{out^}", "A": "out", "W": "with"}"#)
+        dict.merge_json(r#"{"AOT": "{out^}", "A": "out", "W": "with"}"#, &Layout::plover())
             .unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "out zzyzx with", true);
         let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
@@ -979,7 +987,7 @@ mod tests {
     #[test]
     fn the_number_key_is_pressed_first_in_sounds_order() {
         // The number key is the last slot but reads first: #STKPWHRAO*EUFRPBLGTSDZ
-        let stroke = parse_stroke("#SK").unwrap();
+        let stroke = Layout::plover().parse_stroke("#SK").unwrap();
         assert_eq!(stroke_keys(stroke, &qwerty_keys_by_bit()), ["1", "A", "S"]);
     }
 
@@ -988,9 +996,9 @@ mod tests {
         let keys = qwerty_keys_by_bit();
         // K- and -T are single keys; A- and O- each press their own key too, since the
         // default preset has no combined keys
-        let stroke = parse_stroke("KAO-T").unwrap();
+        let stroke = Layout::plover().parse_stroke("KAO-T").unwrap();
         assert_eq!(stroke_keys(stroke, &keys), ["S", "C", "V", "P"]);
-        assert_eq!(stroke_keys(parse_stroke("KA").unwrap(), &keys), ["S", "C"]);
+        assert_eq!(stroke_keys(Layout::plover().parse_stroke("KA").unwrap(), &keys), ["S", "C"]);
     }
 
     #[test]
@@ -1003,7 +1011,7 @@ mod tests {
             .into_iter()
             .map(|(key, bit)| (bit, key))
             .collect();
-        let stroke = parse_stroke("KAO-T").unwrap();
+        let stroke = Layout::plover().parse_stroke("KAO-T").unwrap();
         assert_eq!(stroke_keys(stroke, &keys), ["S", "X", "P"]);
     }
 
@@ -1014,7 +1022,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].outline,
-            render_stroke(parse_stroke("SKWR*UPLD").unwrap())
+            render_stroke(Layout::plover().parse_stroke("SKWR*UPLD").unwrap())
         );
     }
 
@@ -1025,7 +1033,7 @@ mod tests {
         assert_eq!(
             outlines,
             [
-                render_stroke(parse_stroke("SKWR*UPLD").unwrap()),
+                render_stroke(Layout::plover().parse_stroke("SKWR*UPLD").unwrap()),
                 "SKWRUPL/-PD".to_string()
             ]
         );
@@ -1038,7 +1046,7 @@ mod tests {
     fn a_prefix_that_glues_to_the_next_word_is_not_listed_as_the_word() {
         // `{be^}` types "be" but attaches the word after it, so only the plain "be" is an outline
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"-T": "the", "-B": "be", "PWE": "{be^}"}"#)
+        dict.merge_json(r#"{"-T": "the", "-B": "be", "PWE": "{be^}"}"#, &Layout::plover())
             .unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "be", false);
         let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
@@ -1049,7 +1057,7 @@ mod tests {
     fn an_outline_that_attaches_to_the_word_before_is_not_listed() {
         // `{^under}` glues onto "the", so "the under" would type "theunder"
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"-T": "the", "UPBD": "under", "TPH-PB": "{^under}"}"#)
+        dict.merge_json(r#"{"-T": "the", "UPBD": "under", "TPH-PB": "{^under}"}"#, &Layout::plover())
             .unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "under", false);
         let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
@@ -1063,6 +1071,7 @@ mod tests {
         dict.merge_json(
             r#"{"-T": "the", "UPBD": "under", "TPH-PB": "under", "*URPBD": "under",
                 "UPB/TK*ER": "under", "UPB/TKER": "{under^}", "KWHUR": "your", "SKEUPB": "skin"}"#,
+            &Layout::plover(),
         )
         .unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "under your skin", false);
@@ -1076,11 +1085,11 @@ mod tests {
     #[test]
     fn lookup_leaves_out_glued_outlines_too() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"-T": "the", "UPBD": "under", "UPB/TKER": "{under^}"}"#)
+        dict.merge_json(r#"{"-T": "the", "UPBD": "under", "UPB/TKER": "{under^}"}"#, &Layout::plover())
             .unwrap();
         assert_eq!(
             proper_outlines(&dict, "under"),
-            vec![vec![parse_stroke("UPBD").unwrap()]]
+            vec![vec![Layout::plover().parse_stroke("UPBD").unwrap()]]
         );
     }
 
@@ -1094,7 +1103,7 @@ mod tests {
     #[test]
     fn unknown_word_is_fingerspelled_one_letter_per_stroke() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"-T": "the", "TPH": "{&n}", "SRA": "{&v}", "EU": "{&i}", "PL": "{&m}", "SREUPL": "vim"}"#)
+        dict.merge_json(r#"{"-T": "the", "TPH": "{&n}", "SRA": "{&v}", "EU": "{&i}", "PL": "{&m}", "SREUPL": "vim"}"#, &Layout::plover())
             .unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "nvim vim", false);
         assert_eq!(rows[0].word, "nvim");
@@ -1105,7 +1114,7 @@ mod tests {
     #[test]
     fn a_word_with_no_letter_stroke_still_gets_no_stroke() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"TPH": "{&n}"}"#).unwrap();
+        dict.merge_json(r#"{"TPH": "{&n}"}"#, &Layout::plover()).unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "n1", false);
         assert_eq!(rows[0].outline, "no stroke");
     }
@@ -1113,17 +1122,17 @@ mod tests {
     #[test]
     fn trailing_punctuation_is_its_own_word() {
         let mut dict = sample_dict();
-        dict.merge_json(r#"{"TPHOU": "now", "KW-B": ","}"#).unwrap();
+        dict.merge_json(r#"{"TPHOU": "now", "KW-B": ","}"#, &Layout::plover()).unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "now, the", false);
         let words: Vec<&str> = rows.iter().map(|row| row.word.as_str()).collect();
         assert_eq!(words, ["now", ",", "the"]);
         assert_eq!(
             rows[0].outline,
-            render_stroke(parse_stroke("TPHOU").unwrap())
+            render_stroke(Layout::plover().parse_stroke("TPHOU").unwrap())
         );
         assert_eq!(
             rows[1].outline,
-            render_stroke(parse_stroke("KW-B").unwrap())
+            render_stroke(Layout::plover().parse_stroke("KW-B").unwrap())
         );
     }
 
@@ -1182,12 +1191,12 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
 
         let chain = load_chain(&config_dir);
         assert_eq!(
-            chain.lookup(&[parse_stroke("KAT").unwrap()]),
+            chain.lookup(&[Layout::plover().parse_stroke("KAT").unwrap()]),
             Some("cat".to_string()),
             "a dictionary hit is never overridden by the plugin after it"
         );
         assert_eq!(
-            chain.lookup(&[parse_stroke("TKOG").unwrap()]),
+            chain.lookup(&[Layout::plover().parse_stroke("TKOG").unwrap()]),
             Some("TTKKOOGG".to_string()),
             "a stroke no dictionary covers reaches the plugin"
         );

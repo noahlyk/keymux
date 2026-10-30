@@ -177,7 +177,7 @@ pub fn display(segments: &[Option<Segment>]) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::steno::layout::parse_stroke;
+    use crate::steno::layout::Layout;
 
     fn translator_and_dict() -> (Translator, Dictionary) {
         let mut dict = Dictionary::default();
@@ -191,6 +191,7 @@ mod tests {
                 "AEU": "I",
                 "APL": "am"
             }"#,
+            &Layout::plover(),
         )
         .unwrap();
         (Translator::new(dict.clone()), dict)
@@ -200,7 +201,7 @@ mod tests {
     fn an_all_caps_stroke_classifies_as_a_stroke() {
         assert_eq!(
             classify("KAT/-D"),
-            Query::Stroke(vec![parse_stroke("KAT").unwrap(), parse_stroke("-D").unwrap()])
+            Query::Stroke(vec![Layout::plover().parse_stroke("KAT").unwrap(), Layout::plover().parse_stroke("-D").unwrap()])
         );
     }
 
@@ -218,7 +219,7 @@ mod tests {
             segments,
             [Some(Segment {
                 text: "cat".to_string(),
-                strokes: vec![parse_stroke("KAT").unwrap()],
+                strokes: vec![Layout::plover().parse_stroke("KAT").unwrap()],
                 fingerspelled: false,
             })]
         );
@@ -270,9 +271,10 @@ mod tests {
                 "KPAT": "kpat",
                 "-T": "the"
             }"#,
+            &Layout::plover(),
         )
         .unwrap();
-        let kat = parse_stroke("KAT").unwrap();
+        let kat = Layout::plover().parse_stroke("KAT").unwrap();
         let nearby = nearby_strokes(&dict, &[kat], 10);
         // "-T" has a different stroke length in nobody's eyes here - it's 1 stroke, same as the
         // rest, so it's a candidate too, just a farther one. The query itself is never included.
@@ -292,9 +294,9 @@ mod tests {
     #[test]
     fn nearby_strokes_only_compares_outlines_of_the_same_length() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KAT": "cat", "KAT/-D": "catted"}"#)
+        dict.merge_json(r#"{"KAT": "cat", "KAT/-D": "catted"}"#, &Layout::plover())
             .unwrap();
-        let kat = parse_stroke("KAT").unwrap();
+        let kat = Layout::plover().parse_stroke("KAT").unwrap();
         // "KAT/-D" is two strokes; a one-stroke query has nothing of the same shape to compare
         // it against here, so the search turns up nothing rather than a meaningless answer.
         assert_eq!(nearby_strokes(&dict, &[kat], 10), Vec::<Vec<u32>>::new());
@@ -303,9 +305,9 @@ mod tests {
     #[test]
     fn nearby_strokes_respects_its_limit() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KAT": "cat", "KA": "ca", "TKAT": "dat", "GAT": "gat"}"#)
+        dict.merge_json(r#"{"KAT": "cat", "KA": "ca", "TKAT": "dat", "GAT": "gat"}"#, &Layout::plover())
             .unwrap();
-        let kat = parse_stroke("KAT").unwrap();
+        let kat = Layout::plover().parse_stroke("KAT").unwrap();
         assert_eq!(nearby_strokes(&dict, &[kat], 2).len(), 2);
         assert_eq!(nearby_strokes(&dict, &[kat], 0).len(), 0);
     }
@@ -337,7 +339,7 @@ mod tests {
         }
         json.push('}');
         let mut dict = Dictionary::default();
-        dict.merge_json(&json).unwrap();
+        dict.merge_json(&json, &Layout::plover()).unwrap();
 
         let query = [0x0041_2345u32 & 0x007F_FFFF];
         let start = std::time::Instant::now();

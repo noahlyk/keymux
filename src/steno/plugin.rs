@@ -61,7 +61,7 @@
 //! `docs/plugins/orthographic-fallback.rs` for a complete, working example (including `joins`).
 
 use super::dict::Dictionary;
-use super::layout::render_strokes;
+use super::layout::{render_strokes, Layout};
 use super::source::is_plugin_file;
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -308,15 +308,19 @@ impl Chain {
     /// merged dictionary and each compiled plugin under `cache_dir`, with no error even if
     /// every file fails: a working but empty chain, exactly as an all-missing dictionary is.
     #[must_use]
-    pub fn load_cached(files: &[PathBuf], cache_dir: &Path) -> Self {
-        Self::load_cached_reporting(files, cache_dir).0
+    pub fn load_cached(files: &[PathBuf], cache_dir: &Path, layout: &Layout) -> Self {
+        Self::load_cached_reporting(files, cache_dir, layout).0
     }
 
     /// Like [`Self::load_cached`], and also returns what went wrong with any dictionary file
     /// that was skipped (a plugin that fails is only ever logged, never reported: unlike a
     /// malformed dictionary, there is no older, still-good copy of it to protect).
     #[must_use]
-    pub fn load_cached_reporting(files: &[PathBuf], cache_dir: &Path) -> (Self, Vec<String>) {
+    pub fn load_cached_reporting(
+        files: &[PathBuf],
+        cache_dir: &Path,
+        layout: &Layout,
+    ) -> (Self, Vec<String>) {
         let dict_only: Vec<PathBuf> = files
             .iter()
             .filter(|p| !is_plugin_file(p))
@@ -328,6 +332,7 @@ impl Chain {
             &super::dict::fingerprint(&dict_only),
             cache_dir,
             &super::dict::cache_name(&names),
+            layout,
         );
         if !problems.is_empty() {
             return (
@@ -355,7 +360,7 @@ impl Chain {
         for path in files {
             if is_plugin_file(path) {
                 if !pending.is_empty() {
-                    steps.push(Step::Dict(Dictionary::load_cached(&pending, cache_dir)));
+                    steps.push(Step::Dict(Dictionary::load_cached(&pending, cache_dir, layout)));
                     pending.clear();
                 }
                 match load_one(path, &plugin_cache) {
@@ -367,7 +372,7 @@ impl Chain {
             }
         }
         if !pending.is_empty() {
-            steps.push(Step::Dict(Dictionary::load_cached(&pending, cache_dir)));
+            steps.push(Step::Dict(Dictionary::load_cached(&pending, cache_dir, layout)));
         }
         (Self { dict, steps }, Vec::new())
     }
@@ -477,7 +482,6 @@ fn lock(mutex: &Mutex<Plugin>) -> std::sync::MutexGuard<'_, Plugin> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::layout::parse_stroke;
     use super::*;
     use std::sync::OnceLock;
 
@@ -620,17 +624,17 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
             .join("orthographic-fallback.rs");
         let cache =
             tmp_dir().join("the_documented_example_plugin_compiles_and_gives_a_plausible_reading");
-        let chain = Chain::load_cached(&[source], &cache);
+        let chain = Chain::load_cached(&[source], &cache, &Layout::plover());
         assert_eq!(
-            chain.lookup(&[parse_stroke("KAT").unwrap()]),
+            chain.lookup(&[Layout::plover().parse_stroke("KAT").unwrap()]),
             Some("kat".to_string())
         );
         assert_eq!(
-            chain.lookup(&[parse_stroke("STOP").unwrap()]),
+            chain.lookup(&[Layout::plover().parse_stroke("STOP").unwrap()]),
             Some("stop".to_string())
         );
         assert_eq!(
-            chain.lookup(&[parse_stroke("TKPWEUPB").unwrap()]),
+            chain.lookup(&[Layout::plover().parse_stroke("TKPWEUPB").unwrap()]),
             Some("gin".to_string())
         );
     }
@@ -644,9 +648,9 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         let good = dir.join("02-good.rs");
         fs::write(&broken, "this is not rust").unwrap();
         fs::write(&good, DOUBLER).unwrap();
-        let chain = Chain::load_cached(&[broken, good], &dir.join("cache"));
+        let chain = Chain::load_cached(&[broken, good], &dir.join("cache"), &Layout::plover());
         assert_eq!(
-            chain.lookup(&[parse_stroke("KAT").unwrap()]),
+            chain.lookup(&[Layout::plover().parse_stroke("KAT").unwrap()]),
             Some("KKAATT".to_string()),
             "the broken plugin is skipped, the good one after it still answers"
         );
@@ -663,9 +667,9 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         fs::create_dir_all(&dir).unwrap();
         let source = dir.join("doubler.rs");
         fs::write(&source, DOUBLER).unwrap();
-        let chain = Chain::load_cached(&[source], &dir.join("cache"));
-        let kat = parse_stroke("KAT").unwrap();
-        let top = parse_stroke("TOP").unwrap();
+        let chain = Chain::load_cached(&[source], &dir.join("cache"), &Layout::plover());
+        let kat = Layout::plover().parse_stroke("KAT").unwrap();
+        let top = Layout::plover().parse_stroke("TOP").unwrap();
         assert_eq!(
             chain.lookup(&[kat]),
             Some("KKAATT".to_string()),
@@ -689,10 +693,10 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         fs::create_dir_all(&dir).unwrap();
         let source = dir.join("doubler.rs");
         fs::write(&source, DOUBLER_WITH_JOIN).unwrap();
-        let chain = Chain::load_cached(&[source], &dir.join("cache"));
-        let kat = parse_stroke("KAT").unwrap();
+        let chain = Chain::load_cached(&[source], &dir.join("cache"), &Layout::plover());
+        let kat = Layout::plover().parse_stroke("KAT").unwrap();
         // Bit 23 is this test's own made-up join key - keymux has no built-in notion of one.
-        let joined_top = parse_stroke("TOP").unwrap() | (1 << 23);
+        let joined_top = Layout::plover().parse_stroke("TOP").unwrap() | (1 << 23);
         assert!(chain.joins(joined_top), "the plugin's own joins() must be reachable through the chain");
         assert_eq!(
             chain.lookup(&[kat, joined_top]),

@@ -259,7 +259,7 @@ fn word_rows(base: &Translator, query: &str) -> Vec<LookupRow> {
 mod tests {
     use super::*;
     use crate::steno::dict::Dictionary;
-    use crate::steno::layout::parse_stroke;
+    use crate::steno::layout::Layout;
 
     fn translator() -> Translator {
         let mut dict = Dictionary::default();
@@ -274,6 +274,7 @@ mod tests {
                 "KA": "ca",
                 "SPH-PL": "{^ing}"
             }"#,
+            &Layout::plover(),
         )
         .unwrap();
         Translator::new(dict)
@@ -295,7 +296,7 @@ mod tests {
         assert_eq!(outlines, ["KAPBD", "KAPB/TKEU"]);
         assert!(view.rows.iter().all(|row| row.text == "candy"));
         // The keyboard lights the first stroke of the best outline
-        assert_eq!(view.hint, parse_stroke("KAPBD").unwrap());
+        assert_eq!(view.hint, Layout::plover().parse_stroke("KAPBD").unwrap());
     }
 
     #[test]
@@ -329,7 +330,7 @@ mod tests {
     #[test]
     fn one_letter_gives_no_suggestions_but_an_exact_word_still_does() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"-T": "the", "A": "a", "AB": "about"}"#)
+        dict.merge_json(r#"{"-T": "the", "A": "a", "AB": "about"}"#, &Layout::plover())
             .unwrap();
         let base = Translator::new(dict);
         let rows = typed("a").view(&base).rows;
@@ -416,7 +417,7 @@ mod tests {
         // The exact resolution always leads
         assert_eq!(view.rows[0].text, "\u{2192} \"can\"");
         assert_eq!(view.rows[0].outline, "KAPB");
-        assert_eq!(view.hint, parse_stroke("KAPB").unwrap());
+        assert_eq!(view.hint, Layout::plover().parse_stroke("KAPB").unwrap());
         // Raw steno notation: the overlay labels this "Engine Resolver", not "Lookup"
         assert_eq!(view.mode, LookupMode::Stroke);
         // Every single-stroke entry in `translator()`'s dictionary besides "KAPB" itself and the
@@ -432,7 +433,7 @@ mod tests {
     #[test]
     fn a_query_with_a_space_looks_up_the_whole_phrase_as_one_row() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KAPB": "can", "-T": "the", "KAPBD": "candy"}"#)
+        dict.merge_json(r#"{"KAPB": "can", "-T": "the", "KAPBD": "candy"}"#, &Layout::plover())
             .unwrap();
         let view = typed("can the candy").view(&Translator::new(dict));
         assert_eq!(view.rows.len(), 1);
@@ -451,7 +452,7 @@ mod tests {
     #[test]
     fn a_word_with_no_dictionary_entry_falls_back_to_fingerspelling_in_quotes() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"TPH": "{&n}", "SR*": "{&v}", "SKW*": "{&i}", "PH*": "{&m}"}"#)
+        dict.merge_json(r#"{"TPH": "{&n}", "SR*": "{&v}", "SKW*": "{&i}", "PH*": "{&m}"}"#, &Layout::plover())
             .unwrap();
         let view = typed("nvim").view(&Translator::new(dict));
         assert_eq!(view.rows.len(), 1);

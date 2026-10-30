@@ -4,7 +4,7 @@
 use super::chord::ChordState;
 use super::dict::Dictionary;
 use super::journal::{MachineId, SharedHistory};
-use super::layout::{build_key_map, preset};
+use super::layout::{preset, Layout};
 use super::live;
 use super::lookup::{Lookup, LookupKey};
 use super::overlay::OverlayHub;
@@ -111,10 +111,13 @@ impl StenoEngine {
         history: &SharedHistory,
         label: &str,
     ) -> Result<Self> {
+        let layout = Layout::plover_with(&config.extra_keys)
+            .map_err(|errors| anyhow!(errors.join("; ")))?;
         let preset = preset(&config.layout).map_err(|e| anyhow!(e))?;
         let overrides: HashMap<String, KeyAction> = config.layout_overrides.clone();
-        let keys =
-            build_key_map(&preset, &overrides).map_err(|errors| anyhow!(errors.join("; ")))?;
+        let keys = layout
+            .build_key_map(&preset, &overrides)
+            .map_err(|errors| anyhow!(errors.join("; ")))?;
 
         // Without an explicit list, read the whole steno folder. Each entry is a file or a folder.
         let roots: Vec<PathBuf> = if config.dictionaries.is_empty() {
@@ -127,7 +130,7 @@ impl StenoEngine {
                 .collect()
         };
         let machine = machine_id(&roots);
-        let updates = live::subscribe(roots, super::setup::cache_dir(config_dir));
+        let updates = live::subscribe(roots, super::setup::cache_dir(config_dir), layout);
 
         // Every layer and keyboard writes to the one history; this layer's dictionaries are its machine
         let mut translator =
@@ -612,6 +615,7 @@ pub fn resolve_dictionary_path(raw: &str, config_dir: &Path, home: Option<&Path>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::layout::build_key_map;
 
     fn engine_with_dict(json: &str) -> StenoEngine {
         engine_with_dict_and_overrides(json, &HashMap::new())
@@ -622,7 +626,7 @@ mod tests {
         overrides: &HashMap<String, crate::config::KeyAction>,
     ) -> StenoEngine {
         let mut dict = Dictionary::default();
-        dict.merge_json(json).unwrap();
+        dict.merge_json(json, &Layout::plover()).unwrap();
         StenoEngine {
             keys: build_key_map(&preset("qwerty").unwrap(), overrides).unwrap(),
             held_keys: HashSet::new(),
@@ -720,7 +724,7 @@ mod tests {
         }
 
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KAT": "cat"}"#).unwrap();
+        dict.merge_json(r#"{"KAT": "cat"}"#, &Layout::plover()).unwrap();
         sender.send(Arc::new(Chain::from(dict))).unwrap();
         assert_eq!(engine.tick(now), Some(StenoOutput::Type("cat".to_string())));
     }
@@ -755,6 +759,7 @@ mod tests {
     fn from_config_rejects_unknown_preset() {
         let config = StenoConfig {
             layout: "dvorak".to_string(),
+            extra_keys: Vec::new(),
             layout_overrides: HashMap::new(),
             dictionaries: Vec::new(),
             stroke_timeout_ms: 5000,

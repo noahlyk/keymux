@@ -76,9 +76,10 @@ const EXTRA_ROW: f32 = 0.5;
 
 /// The keyboard's key rectangles at one size.
 ///
-/// The grid itself (`PLACES`) still only knows Plover's own 23-key shape - see Phase 2 for
-/// giving a theory its own diagram, not just its own keys. `Keyboard::new` panics if `layout`
-/// has a different number of standard-grammar keys than that.
+/// The grid itself (`PLACES`) only knows Plover's own 23-key shape. `Keyboard::new` panics if
+/// `layout` has a different number of standard-grammar keys than that - which no real config
+/// can trigger today: `config.ron`'s `extra_keys` only ever appends keys past the standard 23,
+/// never resizes the standard groups themselves.
 #[derive(Debug, Clone)]
 pub struct Keyboard {
     /// Indexed by stroke slot, the same bit order as strokes

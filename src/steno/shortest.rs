@@ -141,11 +141,11 @@ fn letter_strokes(dict: &Dictionary) -> HashMap<char, u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::steno::layout::parse_stroke;
+    use crate::steno::layout::Layout;
 
     fn dict(json: &str) -> Dictionary {
         let mut dict = Dictionary::default();
-        dict.merge_json(json).unwrap();
+        dict.merge_json(json, &Layout::plover()).unwrap();
         dict
     }
 
@@ -155,7 +155,7 @@ mod tests {
         let outline = shortest_outline(&dict, "nvim").unwrap();
         let expected: Vec<u32> = ["TPH", "SR*", "SKW*", "PH*"]
             .iter()
-            .map(|s| parse_stroke(s).unwrap())
+            .map(|s| Layout::plover().parse_stroke(s).unwrap())
             .collect();
         assert_eq!(outline, expected);
     }
@@ -165,7 +165,7 @@ mod tests {
         let dict = dict(r#"{"KAT": "cat", "TPH": "{&n}", "SRA": "{&v}"}"#);
         assert_eq!(
             shortest_outline(&dict, "cat"),
-            Some(vec![parse_stroke("KAT").unwrap()])
+            Some(vec![Layout::plover().parse_stroke("KAT").unwrap()])
         );
     }
 

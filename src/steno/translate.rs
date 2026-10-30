@@ -1058,19 +1058,19 @@ impl Translator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::steno::layout::parse_stroke;
+    use crate::steno::layout::Layout;
     use std::fs;
 
     fn stroke(text: &str) -> u32 {
         if text == "*" {
             return UNDO_STROKE;
         }
-        parse_stroke(text).unwrap_or_else(|| panic!("{text} is not a stroke"))
+        Layout::plover().parse_stroke(text).unwrap_or_else(|| panic!("{text} is not a stroke"))
     }
 
     fn translator(json: &str) -> Translator {
         let mut dict = Dictionary::default();
-        dict.merge_json(json).unwrap();
+        dict.merge_json(json, &Layout::plover()).unwrap();
         Translator::new(dict)
     }
 
@@ -1156,7 +1156,7 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         let plugin_path = dir.join("02-shout.rs");
         fs::write(&dict_path, dict).unwrap();
         fs::write(&plugin_path, SHOUT_PLUGIN).unwrap();
-        let chain = Chain::load_cached(&[dict_path, plugin_path], &dir.join("cache"));
+        let chain = Chain::load_cached(&[dict_path, plugin_path], &dir.join("cache"), &Layout::plover());
         Translator::with_shared(
             Arc::new(chain),
             Options {
@@ -1227,7 +1227,7 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         let plugin_path = dir.join("02-blank-for-symbols.rs");
         fs::write(&dict_path, r#"{"KAT": "cat"}"#).unwrap();
         fs::write(&plugin_path, BLANK_FOR_SYMBOLS_PLUGIN).unwrap();
-        let chain = Chain::load_cached(&[dict_path, plugin_path], &dir.join("cache"));
+        let chain = Chain::load_cached(&[dict_path, plugin_path], &dir.join("cache"), &Layout::plover());
         let mut t = Translator::with_shared(
             Arc::new(chain),
             Options {
@@ -1266,7 +1266,7 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         .unwrap();
         let dict_path = dir.join("01-dict.json");
         fs::write(&dict_path, r#"{"KPA/TKAOEU/-S/-D/-G/-Z": "dictionary"}"#).unwrap();
-        let chain = Chain::load_cached(&[dict_path, source], &dir.join("cache"));
+        let chain = Chain::load_cached(&[dict_path, source], &dir.join("cache"), &Layout::plover());
         assert_eq!(chain.as_dictionary().longest_key(), 6);
         let mut t = Translator::with_shared(
             Arc::new(chain),
@@ -1314,7 +1314,7 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         .unwrap();
         let dict_path = dir.join("01-dict.json");
         fs::write(&dict_path, r#"{"KAT": "cat"}"#).unwrap();
-        let chain = Chain::load_cached(&[dict_path, source], &dir.join("cache"));
+        let chain = Chain::load_cached(&[dict_path, source], &dir.join("cache"), &Layout::plover());
         let mut t = Translator::with_shared(
             Arc::new(chain),
             Options {
@@ -1398,9 +1398,9 @@ pub extern "C" fn joins(bits: i64) -> i32 {
     /// `JOIN_ONLY_PLUGIN` so that join bit is actually reachable through the chain.
     fn join_dict_translator() -> Translator {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KAT": "cat", "-G": "ging"}"#).unwrap();
-        let kat = parse_stroke("KAT").unwrap();
-        let joined_g = parse_stroke("-G").unwrap() | (1 << 23);
+        dict.merge_json(r#"{"KAT": "cat", "-G": "ging"}"#, &Layout::plover()).unwrap();
+        let kat = Layout::plover().parse_stroke("KAT").unwrap();
+        let joined_g = Layout::plover().parse_stroke("-G").unwrap() | (1 << 23);
         dict.insert(vec![kat, joined_g], "catting");
         let dir = std::env::temp_dir().join(format!(
             "keymux-translate-plugin-test-{}-join_dict",
@@ -1421,7 +1421,7 @@ pub extern "C" fn joins(bits: i64) -> i32 {
 
     #[test]
     fn a_join_key_stroke_only_matches_glued_onto_what_came_before() {
-        let joined_g = parse_stroke("-G").unwrap() | (1 << 23);
+        let joined_g = Layout::plover().parse_stroke("-G").unwrap() | (1 << 23);
         // The plain stroke on its own still means what it always did
         let mut t = join_dict_translator();
         t.stroke(stroke("KAT"));
@@ -1438,7 +1438,7 @@ pub extern "C" fn joins(bits: i64) -> i32 {
     fn a_join_key_stroke_is_never_a_word_by_itself() {
         // Nothing comes before it to glue onto, and "-G" alone (without the join key) is a
         // different stroke, so this matches nothing: raw keys, not "ging"
-        let joined_g = parse_stroke("-G").unwrap() | (1 << 23);
+        let joined_g = Layout::plover().parse_stroke("-G").unwrap() | (1 << 23);
         let mut t = join_dict_translator();
         t.stroke(joined_g);
         assert_eq!(t.text(), render_stroke(joined_g));
@@ -1616,7 +1616,7 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         }));
         let make = |json: &str, machine| {
             let mut dict = Dictionary::default();
-            dict.merge_json(json).unwrap();
+            dict.merge_json(json, &Layout::plover()).unwrap();
             Translator::with_history(Arc::new(Chain::from(dict)), Arc::clone(&shared), machine)
         };
         (

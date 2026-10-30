@@ -317,12 +317,31 @@ pub enum LayerKind {
     Steno(StenoConfig),
 }
 
+/// One key beyond keymux's own standard 23, a theory adds for its own purpose.
+///
+/// A join key among them, but keymux has no built-in notion of what any of them mean (see
+/// `src/steno/plugin.rs`'s `joins` interface for giving one a meaning).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtraKeyConfig {
+    /// The character this key is written as in stroke notation, e.g. `'+'`. Used as the key in
+    /// `overlay_overrides`.
+    pub char: char,
+    /// This key's name, e.g. `"join"`. Used as the key in `layout_overrides`, and anywhere
+    /// else a steno key is named.
+    pub name: String,
+}
+
 /// Settings for a steno layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StenoConfig {
     /// Built-in layout preset to start from.
     #[serde(default = "default_steno_layout")]
     pub layout: String,
+    /// Keys beyond keymux's own standard 23 this theory adds, such as a join key. Empty means
+    /// none: a stroke is then only ever built from the standard 23, exactly as keymux's own
+    /// `Layout::plover` has it.
+    #[serde(default)]
+    pub extra_keys: Vec<ExtraKeyConfig>,
     /// Per-key changes to the preset, e.g. `{ "S-": Key(KC_Q) }`.
     #[serde(default)]
     pub layout_overrides: HashMap<String, KeyAction>,
@@ -784,8 +803,13 @@ pub struct OverlayConfig {
     pub font: Option<String>,
     /// Steno layers that show the overlay. Empty means every steno layer.
     pub layers: Vec<Layer>,
+    /// Keys beyond keymux's own standard 23, exactly as the steno layer's own `extra_keys`
+    /// says - the overlay process never reads a steno layer's config directly (it runs
+    /// separately from the daemon), so it needs its own copy to know such a key exists at all,
+    /// just as `overlay_overrides` already needs its own copy of where to draw it.
+    pub extra_keys: Vec<ExtraKeyConfig>,
     /// Where an extra key (beyond the standard 23) is drawn, keyed by its own character, e.g.
-    /// `{ "^": SplitKey(slot: "S-", half: Top) }`. An extra key left out draws as the default
+    /// `{ "+": SplitKey(slot: "S-", half: Top) }`. An extra key left out draws as the default
     /// badge.
     pub overlay_overrides: HashMap<String, OverlayPlacement>,
 }
@@ -802,6 +826,7 @@ impl Default for OverlayConfig {
             keyboard: true,
             tape: true,
             tape_lines: None,
+            extra_keys: Vec::new(),
             overlay_overrides: HashMap::new(),
             font: None,
             layers: Vec::new(),
@@ -1460,16 +1485,30 @@ impl Config {
         // Validation 4: Steno layers have a valid layout
         for (layer, layer_config) in &self.layers {
             if let LayerKind::Steno(steno) = &layer_config.kind {
-                if let Err(layout_errors) = crate::steno::layout::preset(&steno.layout)
-                    .map_err(|e| vec![e])
-                    .and_then(|preset| {
-                        crate::steno::layout::build_key_map(&preset, &steno.layout_overrides)
-                    })
+                if let Err(layout_errors) =
+                    crate::steno::layout::Layout::plover_with(&steno.extra_keys)
+                        .and_then(|layout| {
+                            crate::steno::layout::preset(&steno.layout)
+                                .map_err(|e| vec![e])
+                                .map(|preset| (layout, preset))
+                        })
+                        .and_then(|(layout, preset)| {
+                            layout.build_key_map(&preset, &steno.layout_overrides)
+                        })
                 {
                     for layout_error in layout_errors {
                         errors.push(format!("steno layer \"{}\": {}", layer.0, layout_error));
                     }
                 }
+            }
+        }
+
+        // Validation 5: the overlay's own extra_keys (a separate copy of a steno layer's,
+        // since the overlay process never reads a layer's own config - see OverlayConfig's
+        // doc comment) are themselves a valid layout.
+        if let Err(layout_errors) = crate::steno::layout::Layout::plover_with(&self.overlay.extra_keys) {
+            for layout_error in layout_errors {
+                errors.push(format!("overlay: {layout_error}"));
             }
         }
 

@@ -6,7 +6,7 @@
 //! first), the same files a Lapwing layer uses in production.
 
 use super::dict::Dictionary;
-use super::layout::parse_stroke;
+use super::layout::Layout;
 use super::numbers::NUMBER_BIT;
 use super::setup::LAPWING_FILES;
 use super::translate::{OutputOp, StenoOutput, Translator, UNDO_STROKE};
@@ -29,13 +29,13 @@ fn vectors() -> Vec<(&'static str, &'static str)> {
 
 /// Translate one stroke on a fresh translator, as the first word of a sentence.
 fn first_word(dict: Dictionary, stroke: &str) -> Option<StenoOutput> {
-    Translator::new(dict).stroke(parse_stroke(stroke).unwrap())
+    Translator::new(dict).stroke(Layout::plover().parse_stroke(stroke).unwrap())
 }
 
 #[test]
 fn every_book_vector_is_a_valid_stroke() {
     for (stroke, _) in vectors() {
-        assert!(parse_stroke(stroke).is_some(), "{stroke} should parse");
+        assert!(Layout::plover().parse_stroke(stroke).is_some(), "{stroke} should parse");
     }
 }
 
@@ -51,7 +51,7 @@ fn every_book_vector_types_its_word() {
             .join(", ")
     );
     let mut dict = Dictionary::default();
-    dict.merge_json(&json).unwrap();
+    dict.merge_json(&json, &Layout::plover()).unwrap();
     for (stroke, text) in vectors() {
         assert_eq!(
             first_word(dict.clone(), stroke),
@@ -66,7 +66,7 @@ fn lapwing_dictionary() -> Dictionary {
     let home = std::env::var("HOME").unwrap();
     let dir = PathBuf::from(home).join(".config/keymux/steno/lapwing");
     let paths: Vec<PathBuf> = LAPWING_FILES.iter().map(|file| dir.join(file)).collect();
-    Dictionary::load(&paths)
+    Dictionary::load(&paths, &Layout::plover())
 }
 
 #[test]
@@ -89,7 +89,7 @@ fn real_lapwing_dictionaries_have_no_invalid_strokes() {
     let dir = PathBuf::from(home).join(".config/keymux/steno/lapwing");
     for file in LAPWING_FILES {
         let json = std::fs::read_to_string(dir.join(file)).unwrap();
-        let stats = Dictionary::default().merge_json(&json).unwrap();
+        let stats = Dictionary::default().merge_json(&json, &Layout::plover()).unwrap();
         assert_eq!(stats.invalid, 0, "{file} has strokes keymux cannot parse");
     }
 }
@@ -106,7 +106,7 @@ const CH20: &str = r#"{
 /// Type `strokes` in order on a fresh translator, returning the text on screen.
 fn type_strokes(json: &str, strokes: &[&str]) -> String {
     let mut dict = Dictionary::default();
-    dict.merge_json(json).unwrap();
+    dict.merge_json(json, &Layout::plover()).unwrap();
     type_with(dict, strokes)
 }
 
@@ -115,7 +115,7 @@ fn type_with(dict: Dictionary, strokes: &[&str]) -> String {
     let mut translator = Translator::new(dict);
     let mut typed = String::new();
     for stroke in strokes {
-        apply_output(&mut typed, translator.stroke(parse_stroke(stroke).unwrap()));
+        apply_output(&mut typed, translator.stroke(Layout::plover().parse_stroke(stroke).unwrap()));
     }
     typed
 }
@@ -213,9 +213,9 @@ fn random_sessions_keep_the_screen_and_the_translator_in_step() {
     let mut pool: Vec<u32> = EXAMPLES
         .lines()
         .flat_map(|line| line.split('\t').next().unwrap().split('/'))
-        .map(|s| parse_stroke(s).unwrap())
+        .map(|s| Layout::plover().parse_stroke(s).unwrap())
         .collect();
-    pool.extend(vectors().iter().map(|(s, _)| parse_stroke(s).unwrap()));
+    pool.extend(vectors().iter().map(|(s, _)| Layout::plover().parse_stroke(s).unwrap()));
     pool.push(UNDO_STROKE);
     pool.push(NUMBER_BIT);
 
@@ -272,12 +272,12 @@ const CH26: &str = r##"{
 /// The key events strokes make, from the translator's output: `(key, true)` is a press.
 fn key_presses(json: &str, strokes: &[&str]) -> Vec<(KeyCode, bool)> {
     let mut dict = Dictionary::default();
-    dict.merge_json(json).unwrap();
+    dict.merge_json(json, &Layout::plover()).unwrap();
     let mut translator = Translator::new(dict);
     let mut events = Vec::new();
     for stroke in strokes {
         for op in translator
-            .stroke(parse_stroke(stroke).unwrap())
+            .stroke(Layout::plover().parse_stroke(stroke).unwrap())
             .map(StenoOutput::into_ops)
             .unwrap_or_default()
         {
@@ -332,10 +332,10 @@ fn ch26_number_key_repeats_the_last_movement() {
 #[test]
 fn ch26_undo_after_movement_goes_on_to_the_word_before_it() {
     let mut dict = Dictionary::default();
-    dict.merge_json(CH26).unwrap();
+    dict.merge_json(CH26, &Layout::plover()).unwrap();
     let mut translator = Translator::new(dict);
-    translator.stroke(parse_stroke("KAT").unwrap());
-    translator.stroke(parse_stroke("#TPH-R").unwrap());
+    translator.stroke(Layout::plover().parse_stroke("KAT").unwrap());
+    translator.stroke(Layout::plover().parse_stroke("#TPH-R").unwrap());
     // As in Plover, undo skips a translation that typed nothing, and takes back the one before
     // it in the same stroke
     assert!(matches!(
@@ -361,7 +361,7 @@ fn real_lapwing_movement_table_presses_its_keys() {
     ];
     for (stroke, key) in table {
         let mut translator = Translator::new(dict.clone());
-        let output = translator.stroke(parse_stroke(stroke).unwrap());
+        let output = translator.stroke(Layout::plover().parse_stroke(stroke).unwrap());
         let Some(OutputOp::Keys(events)) = output.clone().and_then(|o| {
             o.into_ops()
                 .into_iter()
@@ -384,7 +384,7 @@ fn every_lapwing_entry_loads_and_formats() {
     for file in LAPWING_FILES {
         let json = std::fs::read_to_string(dir.join(file)).unwrap();
         let mut dict = Dictionary::default();
-        let stats = dict.merge_json(&json).unwrap();
+        let stats = dict.merge_json(&json, &Layout::plover()).unwrap();
         assert_eq!(stats.invalid, 0, "{file}");
         entries += stats.loaded;
         for (_, translation) in dict.iter() {
@@ -400,6 +400,6 @@ fn every_lapwing_entry_loads_and_formats() {
 fn real_lapwing_dictionaries_support_chapter_20_case_commands() {
     // KPA is "capitalize next" (`{:case:cap_first_word}`), not a skipped plugin command
     let dict = lapwing_dictionary();
-    assert!(dict.lookup(&[parse_stroke("KPA").unwrap()]).is_some());
-    assert!(dict.lookup(&[parse_stroke("KA*PD").unwrap()]).is_some());
+    assert!(dict.lookup(&[Layout::plover().parse_stroke("KPA").unwrap()]).is_some());
+    assert!(dict.lookup(&[Layout::plover().parse_stroke("KA*PD").unwrap()]).is_some());
 }
