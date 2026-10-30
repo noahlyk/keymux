@@ -150,7 +150,7 @@ impl Lookup {
             };
         }
         let (rows, mode) = match reverse::classify(query) {
-            Query::Stroke(strokes) => (vec![stroke_row(base, &strokes)], LookupMode::Stroke),
+            Query::Stroke(strokes) => (stroke_rows(base, &strokes), LookupMode::Stroke),
             Query::Text(text) if text.contains(char::is_whitespace) => {
                 (vec![phrase_row(base, &text)], LookupMode::Phrase)
             }
@@ -188,6 +188,17 @@ fn stroke_row(base: &Translator, strokes: &[u32]) -> LookupRow {
         },
         outline: render_strokes(strokes),
     }
+}
+
+/// Every row the raw-steno view shows: what the typed chord actually resolves to, first, then
+/// the dictionary's other entries nearest to it - a chord a key or two off from a real entry
+/// still shows what it was probably reaching for, instead of leaving it at "(no translation)".
+fn stroke_rows(base: &Translator, strokes: &[u32]) -> Vec<LookupRow> {
+    let mut rows = vec![stroke_row(base, strokes)];
+    for outline in reverse::nearby_strokes(base.dictionary(), strokes, MAX_ROWS - 1) {
+        rows.push(stroke_row(base, &outline));
+    }
+    rows
 }
 
 /// A whole phrase as a single row: the words (a fingerspelled one in quotes), and every stroke
@@ -402,12 +413,20 @@ mod tests {
     #[test]
     fn an_all_caps_query_resolves_the_stroke_forward() {
         let view = typed("KAPB").view(&translator());
-        assert_eq!(view.rows.len(), 1);
+        // The exact resolution always leads
         assert_eq!(view.rows[0].text, "\u{2192} \"can\"");
         assert_eq!(view.rows[0].outline, "KAPB");
         assert_eq!(view.hint, parse_stroke("KAPB").unwrap());
         // Raw steno notation: the overlay labels this "Engine Resolver", not "Lookup"
         assert_eq!(view.mode, LookupMode::Stroke);
+        // Every single-stroke entry in `translator()`'s dictionary besides "KAPB" itself and the
+        // two-stroke "KAPB/TKEU" is close enough (they're all a handful of keys apart) to show
+        // up as a "did you mean" row after it.
+        let outlines: Vec<&str> = view.rows.iter().map(|r| r.outline.as_str()).collect();
+        assert_eq!(outlines.len(), 7, "{outlines:?}");
+        for expected in ["-T", "KAPBD", "KAPBL", "KAPBT", "KA", "SPH-PL"] {
+            assert!(outlines.contains(&expected), "expected {expected} in {outlines:?}");
+        }
     }
 
     #[test]
