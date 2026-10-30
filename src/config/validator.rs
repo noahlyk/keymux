@@ -1,7 +1,7 @@
 use crate::config::{Config, KeyAction, Layer, LayerKind, StenoConfig};
 use crate::keycode::KeyCode;
 use crate::steno::engine::resolve_dictionary_path;
-use crate::steno::layout::{build_key_map, preset};
+use crate::steno::layout::{preset, Layout};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 
@@ -188,9 +188,11 @@ pub fn validate_config(config_path: Option<&std::path::Path>) -> Result<()> {
         .unwrap_or_else(|| std::path::Path::new("."));
     let mut steno_errors = Vec::new();
     for (layer, steno) in &steno_layers {
-        let layout = preset(&steno.layout)
-            .map_err(|e| vec![e])
-            .and_then(|preset| build_key_map(&preset, &steno.layout_overrides));
+        let layout = Layout::plover_with(&steno.extra_keys).and_then(|layout| {
+            preset(&steno.layout)
+                .map_err(|e| vec![e])
+                .and_then(|preset| layout.build_key_map(&preset, &steno.layout_overrides))
+        });
         if let Err(layout_errors) = layout {
             for layout_error in layout_errors {
                 steno_errors.push(format!("steno layer \"{}\": {}", layer.0, layout_error));
