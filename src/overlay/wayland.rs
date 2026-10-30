@@ -11,6 +11,7 @@
 use super::render::Renderer;
 use super::{activity, client, Source};
 use crate::config::OverlayConfig;
+use crate::steno::layout::Layout;
 use crate::steno::overlay::OverlaySnapshot;
 use anyhow::{anyhow, Context, Result};
 use smithay_client_toolkit::{
@@ -47,6 +48,21 @@ const NAMESPACE: &str = "keymux-steno";
 /// output is.
 const FALLBACK_HEIGHT: u32 = 1080;
 
+/// The steno [`Layout`] `config.extra_keys` describes - the overlay process never sees a
+/// steno layer's own config (it runs separately from the daemon; see `StenoConfig`'s
+/// `extra_keys` and `OverlayConfig`'s own copy of the same field), so this is its only source
+/// for which extra keys exist at all. A bad entry is dropped with a warning and the rest kept,
+/// the same way a broken config elsewhere here falls back rather than refusing to draw anything.
+fn layout_for(config: &OverlayConfig) -> Layout {
+    Layout::plover_with(&config.extra_keys).unwrap_or_else(|errors| {
+        tracing::warn!(
+            "overlay extra_keys ignored, using the standard 23 only: {}",
+            errors.join("; ")
+        );
+        Layout::plover()
+    })
+}
+
 pub fn run(config: OverlayConfig, source: Source, always: bool) -> Result<()> {
     let conn = Connection::connect_to_env().context("no Wayland session to draw on")?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
@@ -58,7 +74,7 @@ pub fn run(config: OverlayConfig, source: Source, always: bool) -> Result<()> {
     let shm = Shm::bind(&globals, &qh).context("wl_shm missing")?;
 
     // The real height arrives with the first configure; this is only until then
-    let renderer = Renderer::new(&config, 1, FALLBACK_HEIGHT)?;
+    let renderer = Renderer::with_layout(&config, 1, FALLBACK_HEIGHT, layout_for(&config))?;
     let (width, height) = renderer.size();
     // Room for two buffers: one the compositor holds, one being drawn
     let pool = SlotPool::new((width * height * 4 * 2) as usize, &shm)?;
@@ -245,7 +261,7 @@ impl Overlay {
         if config == self.config {
             return;
         }
-        match Renderer::new(&config, self.scale as u32, self.height) {
+        match Renderer::with_layout(&config, self.scale as u32, self.height, layout_for(&config)) {
             Ok(renderer) => self.renderer = renderer,
             Err(e) => {
                 tracing::warn!("keeping the old overlay settings: {e:#}");
@@ -381,7 +397,12 @@ impl CompositorHandler for Overlay {
             return;
         }
         self.scale = new_factor;
-        match Renderer::new(&self.config, new_factor as u32, self.height) {
+        match Renderer::with_layout(
+            &self.config,
+            new_factor as u32,
+            self.height,
+            layout_for(&self.config),
+        ) {
             Ok(renderer) => self.renderer = renderer,
             Err(e) => return tracing::warn!("overlay scale {new_factor}: {e:#}"),
         }
@@ -444,7 +465,7 @@ impl LayerShellHandler for Overlay {
         // The compositor picks the height (the output's); lay the tape out to fill it
         let height = configure.new_size.1;
         if height > 0 && height != self.height {
-            match Renderer::new(&self.config, self.scale as u32, height) {
+            match Renderer::with_layout(&self.config, self.scale as u32, height, layout_for(&self.config)) {
                 Ok(renderer) => {
                     self.renderer = renderer;
                     self.height = height;

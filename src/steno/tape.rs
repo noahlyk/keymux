@@ -214,6 +214,7 @@ fn clock() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::steno::layout::Layout;
 
     #[test]
     fn describes_each_kind_of_output() {
@@ -265,7 +266,7 @@ mod tests {
     #[test]
     fn a_word_typed_by_hand_shows_the_stroke_that_would_have_typed_it() {
         let mut dict = crate::steno::dict::Dictionary::default();
-        dict.merge_json(r#"{"KAT": "cat"}"#).unwrap();
+        dict.merge_json(r#"{"KAT": "cat"}"#, &Layout::plover()).unwrap();
         assert_eq!(describe_typed(&dict, "cat "), "\"cat \"  could be KAT");
         // No dictionary entry, and too long to fingerspell: nothing to suggest
         assert_eq!(describe_typed(&dict, "elephant"), "\"elephant\"");

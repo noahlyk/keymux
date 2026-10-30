@@ -15,6 +15,7 @@
 //! dictionary already in use and tries again on the next change.
 
 use super::dict::{fingerprint, Source};
+use super::layout::Layout;
 use super::plugin::Chain;
 use super::source::expand;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -31,12 +32,15 @@ const QUIET: Duration = Duration::from_millis(300);
 /// Niceness of the worker thread: loading a big dictionary mustn't compete with typing
 const WORKER_NICE: libc::c_int = 10;
 
-/// What a layer's dictionaries are made of: files and folders in priority order, and the
-/// folder holding cached copies of the parsed result.
+/// What a layer's dictionaries are made of: files and folders in priority order, the folder
+/// holding cached copies of the parsed result, and the steno [`Layout`] to parse them against -
+/// two layers with the same files but different theories (different `extra_keys`) must never
+/// share a parsed copy, since the same text can parse to different outlines under each.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Key {
     roots: Vec<PathBuf>,
     cache_dir: PathBuf,
+    layout: Layout,
 }
 
 #[derive(Default)]
@@ -72,8 +76,9 @@ struct State {
 }
 
 enum Job {
-    /// Bring this set up to date now: a layer has just subscribed to it
-    Check(Key),
+    /// Bring this set up to date now: a layer has just subscribed to it. Boxed: a `Key` now
+    /// carries a whole steno [`Layout`], making it much bigger than `Changed`'s no data at all.
+    Check(Box<Key>),
     /// Something under a watched path changed: wait for quiet, then check every set
     Changed,
 }
@@ -110,9 +115,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// now if it is loaded, otherwise as soon as it is, and again whenever any of its files change.
 /// Layers with the same `roots` share one copy.
 #[must_use]
-pub fn subscribe(roots: Vec<PathBuf>, cache_dir: PathBuf) -> Receiver<Arc<Chain>> {
+pub fn subscribe(roots: Vec<PathBuf>, cache_dir: PathBuf, layout: Layout) -> Receiver<Arc<Chain>> {
     let hub = hub();
-    let key = Key { roots, cache_dir };
+    let key = Key { roots, cache_dir, layout };
     let (sender, receiver) = mpsc::channel();
     {
         let mut interest = lock(&hub.interest);
@@ -135,7 +140,7 @@ pub fn subscribe(roots: Vec<PathBuf>, cache_dir: PathBuf) -> Receiver<Arc<Chain>
         drop(state);
     }
     // Even a set that is loaded is checked, so a layer starting up never has stale entries
-    let _ = hub.jobs.send(Job::Check(key));
+    let _ = hub.jobs.send(Job::Check(Box::new(key)));
     receiver
 }
 
@@ -192,7 +197,7 @@ fn refresh(key: &Key) {
     };
 
     // Parsing a large dictionary takes a moment, so it happens with nothing locked
-    let (dict, problems) = Chain::load_cached_reporting(&files, &key.cache_dir);
+    let (dict, problems) = Chain::load_cached_reporting(&files, &key.cache_dir, &key.layout);
     if !problems.is_empty() && !first_time {
         warn!(
             "steno dictionaries not reloaded, keeping the ones in use: {}",
@@ -314,7 +319,7 @@ mod tests {
     fn a_layer_gets_its_dictionary_and_then_every_change_to_the_files() {
         let dir = folder("changes");
         fs::write(dir.join("a.json"), r#"{"KAT": "cat"}"#).unwrap();
-        let updates = subscribe(vec![dir.clone()], dir.join("cache"));
+        let updates = subscribe(vec![dir.clone()], dir.join("cache"), Layout::plover());
         assert!(says(&until(&updates, |d| says(d, "cat")), "cat"));
 
         // Edited in place
@@ -339,8 +344,8 @@ mod tests {
     fn layers_with_the_same_files_share_one_dictionary() {
         let dir = folder("shared");
         fs::write(dir.join("a.json"), r#"{"KAT": "cat"}"#).unwrap();
-        let first = subscribe(vec![dir.clone()], dir.join("cache"));
-        let second = subscribe(vec![dir.clone()], dir.join("cache"));
+        let first = subscribe(vec![dir.clone()], dir.join("cache"), Layout::plover());
+        let second = subscribe(vec![dir.clone()], dir.join("cache"), Layout::plover());
         let one = until(&first, |d| says(d, "cat"));
         let two = until(&second, |d| says(d, "cat"));
         assert!(Arc::ptr_eq(&one, &two), "one copy in memory, not one each");
@@ -351,7 +356,7 @@ mod tests {
     fn a_file_saved_half_finished_leaves_the_working_dictionary_in_place() {
         let dir = folder("broken");
         fs::write(dir.join("a.json"), r#"{"KAT": "cat"}"#).unwrap();
-        let updates = subscribe(vec![dir.clone()], dir.join("cache"));
+        let updates = subscribe(vec![dir.clone()], dir.join("cache"), Layout::plover());
         until(&updates, |d| says(d, "cat"));
 
         fs::write(dir.join("a.json"), r#"{"KAT": "ca"#).unwrap();
@@ -368,7 +373,7 @@ mod tests {
     fn writing_the_cache_does_not_trigger_a_reload() {
         let dir = folder("cache");
         fs::write(dir.join("a.json"), r#"{"KAT": "cat"}"#).unwrap();
-        let updates = subscribe(vec![dir.clone()], dir.join("cache"));
+        let updates = subscribe(vec![dir.clone()], dir.join("cache"), Layout::plover());
         until(&updates, |d| says(d, "cat"));
         // The first load wrote a cache file inside the watched folder. Nothing more comes.
         assert!(updates.recv_timeout(Duration::from_secs(2)).is_err());
@@ -402,7 +407,7 @@ mod tests {
     fn watching_an_idle_dictionary_folder_uses_no_cpu() {
         let dir = folder("idle");
         fs::write(dir.join("a.json"), r#"{"KAT": "cat"}"#).unwrap();
-        let updates = subscribe(vec![dir.clone()], dir.join("cache"));
+        let updates = subscribe(vec![dir.clone()], dir.join("cache"), Layout::plover());
         until(&updates, |d| says(d, "cat"));
         // Let the load and the cache write finish, then count what five idle seconds cost
         std::thread::sleep(Duration::from_secs(1));

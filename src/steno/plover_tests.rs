@@ -8,7 +8,7 @@
 
 use super::dict::Dictionary;
 use super::formatter::{Op, Options};
-use super::layout::parse_stroke;
+use super::layout::Layout;
 use super::orthography::Orthography;
 use super::plugin::Chain;
 use super::translate::{Translator, UNDO_STROKE};
@@ -19,14 +19,14 @@ fn stroke(text: &str) -> u32 {
     if text == "*" {
         return UNDO_STROKE;
     }
-    parse_stroke(text).unwrap_or_else(|| panic!("{text} is not a stroke"))
+    Layout::plover().parse_stroke(text).unwrap_or_else(|| panic!("{text} is not a stroke"))
 }
 
 /// The dictionaries of a set, highest priority first.
 fn dictionary(tables: &Value) -> Dictionary {
     let mut dict = Dictionary::default();
     for table in tables.as_array().unwrap() {
-        dict.merge_json(&table.to_string()).unwrap();
+        dict.merge_json(&table.to_string(), &Layout::plover()).unwrap();
     }
     dict.set_orthography(Orthography::from_wordlist(include_str!(
         "testdata/plover_golden_words.txt"
@@ -118,7 +118,7 @@ fn plovers_own_dictionaries_type_what_plover_types() {
     let assets = std::path::Path::new(&assets);
     let mut dict = Dictionary::default();
     for file in ["commands.json", "main.json", "american_english_words.txt"] {
-        dict.merge_file(&assets.join(file)).unwrap();
+        dict.merge_file(&assets.join(file), &Layout::plover()).unwrap();
     }
     let dict = Arc::new(Chain::from(dict));
     let data: Value = serde_json::from_str(&std::fs::read_to_string(golden).unwrap()).unwrap();

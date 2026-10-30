@@ -10,7 +10,7 @@
 //! word list that orthography needs (`american_english_words.txt`) is read from the same place.
 
 use super::formatter::plain_text;
-use super::layout::parse_strokes;
+use super::layout::Layout;
 use super::orthography::{Orthography, WORDLIST_FILE};
 use anyhow::{Context, Result};
 use rustc_hash::FxHashMap;
@@ -79,9 +79,18 @@ struct CacheOut<'a> {
     dict: &'a Dictionary,
 }
 
-/// Changes whenever the cache layout or the parser does, so a stale cache is never trusted.
-fn cache_version() -> String {
-    format!("{CACHE_LAYOUT}-{}", env!("CARGO_PKG_VERSION"))
+/// Changes whenever the cache layout, the parser, or the steno [`Layout`] the files are parsed
+/// against does, so a stale cache - or one from a theory with different extra keys - is never
+/// trusted.
+fn cache_version(layout: &Layout) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    layout.hash(&mut hasher);
+    format!(
+        "{CACHE_LAYOUT}-{}-{:x}",
+        env!("CARGO_PKG_VERSION"),
+        hasher.finish()
+    )
 }
 
 /// How many entries a dictionary file had that we couldn't use.
@@ -107,18 +116,18 @@ impl Dictionary {
     /// Load dictionaries in priority order. Earlier files win on conflicts.
     /// A file that can't be read is logged and skipped rather than failing the layer.
     #[must_use]
-    pub fn load(paths: &[impl AsRef<Path>]) -> Self {
-        Self::load_reporting(paths).0
+    pub fn load(paths: &[impl AsRef<Path>], layout: &Layout) -> Self {
+        Self::load_reporting(paths, layout).0
     }
 
     /// Like `load`, and also returns what went wrong with each file that was skipped.
     #[must_use]
-    pub fn load_reporting(paths: &[impl AsRef<Path>]) -> (Self, Vec<String>) {
+    pub fn load_reporting(paths: &[impl AsRef<Path>], layout: &Layout) -> (Self, Vec<String>) {
         let mut dict = Self::default();
         let mut problems = Vec::new();
         for path in paths {
             let path = path.as_ref();
-            match dict.merge_file(path) {
+            match dict.merge_file(path, layout) {
                 Ok(stats) => info!(
                     "steno dictionary {}: {} entries ({} invalid skipped)",
                     path.display(),
@@ -135,7 +144,7 @@ impl Dictionary {
     }
 
     /// Merge one file: a JSON or RTF/CRE dictionary, or the orthography word list.
-    pub fn merge_file(&mut self, path: &Path) -> Result<MergeStats> {
+    pub fn merge_file(&mut self, path: &Path, layout: &Layout) -> Result<MergeStats> {
         let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let name = path.file_name().and_then(|n| n.to_str());
         if name == Some(WORDLIST_FILE) {
@@ -147,20 +156,20 @@ impl Dictionary {
             return Ok(MergeStats::default());
         }
         if has_extension(path, "rtf") {
-            return self.merge_rtf(&bytes);
+            return self.merge_rtf(&bytes, layout);
         }
-        self.merge_json(&decode_text(&bytes))
+        self.merge_json(&decode_text(&bytes), layout)
     }
 
     /// Merge one Plover JSON dictionary. Entries already present are kept.
-    pub fn merge_json(&mut self, json: &str) -> Result<MergeStats> {
+    pub fn merge_json(&mut self, json: &str, layout: &Layout) -> Result<MergeStats> {
         let raw: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(json).context("dictionary is not a JSON object")?;
         let mut stats = MergeStats::default();
         // Within one file the last of two spellings of the same outline wins, as in Plover
         let mut entries: FxHashMap<Vec<u32>, String> = FxHashMap::default();
         for (key, value) in raw {
-            match (parse_strokes(&key), value.as_str()) {
+            match (layout.parse_strokes(&key), value.as_str()) {
                 (Some(strokes), Some(text)) => {
                     entries.insert(strokes, text.to_string());
                 }
@@ -176,11 +185,11 @@ impl Dictionary {
     }
 
     /// Merge the entries of one RTF/CRE dictionary.
-    pub fn merge_rtf(&mut self, bytes: &[u8]) -> Result<MergeStats> {
+    pub fn merge_rtf(&mut self, bytes: &[u8], layout: &Layout) -> Result<MergeStats> {
         let mut stats = MergeStats::default();
         let mut entries: FxHashMap<Vec<u32>, String> = FxHashMap::default();
         for (outline, translation) in super::rtf::parse_rtf(bytes)? {
-            match parse_strokes(&outline) {
+            match layout.parse_strokes(&outline) {
                 Some(strokes) => {
                     entries.insert(strokes, translation);
                 }
@@ -283,12 +292,19 @@ impl Dictionary {
     /// Like `load`, but restores a binary copy from `cache_dir` when every file still has the
     /// contents it had when the copy was made. Otherwise the JSON is parsed and a new copy saved.
     #[must_use]
-    pub fn load_cached(paths: &[impl AsRef<Path>], cache_dir: &Path) -> Self {
+    pub fn load_cached(paths: &[impl AsRef<Path>], cache_dir: &Path, layout: &Layout) -> Self {
         let names: Vec<String> = paths
             .iter()
             .map(|path| path.as_ref().display().to_string())
             .collect();
-        Self::load_cached_reporting(paths, &fingerprint(paths), cache_dir, &cache_name(&names)).0
+        Self::load_cached_reporting(
+            paths,
+            &fingerprint(paths),
+            cache_dir,
+            &cache_name(&names),
+            layout,
+        )
+        .0
     }
 
     /// Like `load_cached`, for files whose `fingerprint` is already known, kept under `name`
@@ -301,15 +317,16 @@ impl Dictionary {
         sources: &[Source],
         cache_dir: &Path,
         name: &str,
+        layout: &Layout,
     ) -> (Self, Vec<String>) {
         let file = cache_dir.join(format!("{name}.bin"));
-        if let Some(dict) = read_cache(&file, sources) {
+        if let Some(dict) = read_cache(&file, sources, layout) {
             info!("steno dictionaries restored from {}", file.display());
             return (dict, Vec::new());
         }
-        let (dict, problems) = Self::load_reporting(paths);
+        let (dict, problems) = Self::load_reporting(paths, layout);
         if problems.is_empty() {
-            write_cache(&file, sources, &dict);
+            write_cache(&file, sources, &dict, layout);
         }
         (dict, problems)
     }
@@ -354,16 +371,16 @@ pub fn cache_name(sources: &[String]) -> String {
 }
 
 /// The cached dictionary, if it was built from files with these exact contents.
-fn read_cache(file: &Path, sources: &[Source]) -> Option<Dictionary> {
+fn read_cache(file: &Path, sources: &[Source], layout: &Layout) -> Option<Dictionary> {
     let bytes = fs::read(file).ok()?;
     let cache: CacheIn = bincode::deserialize(&bytes).ok()?;
-    (cache.version == cache_version() && cache.sources == sources).then_some(cache.dict)
+    (cache.version == cache_version(layout) && cache.sources == sources).then_some(cache.dict)
 }
 
 /// Save the dictionary for these files. A cache that can't be written only costs time next
 /// start, so failures are logged and not returned.
-fn write_cache(file: &Path, sources: &[Source], dict: &Dictionary) {
-    let version = cache_version();
+fn write_cache(file: &Path, sources: &[Source], dict: &Dictionary, layout: &Layout) {
+    let version = cache_version(layout);
     let bytes = match bincode::serialize(&CacheOut {
         version: &version,
         sources,
@@ -433,11 +450,11 @@ mod tests {
             "TK": 5
         }"#;
         let mut dict = Dictionary::default();
-        let stats = dict.merge_json(json).unwrap();
+        let stats = dict.merge_json(json, &Layout::plover()).unwrap();
         assert_eq!(dict.lookup(&[KAT]), Some("cat"));
         assert_eq!(dict.lookup(&[KPA, TKAOEU]), Some("example"));
         // Commands are entries like any other: they are run when the stroke is typed
-        assert!(dict.lookup(&[parse_strokes("-PB").unwrap()[0]]).is_some());
+        assert!(dict.lookup(&[Layout::plover().parse_strokes("-PB").unwrap()[0]]).is_some());
         assert_eq!(
             stats,
             MergeStats {
@@ -450,9 +467,9 @@ mod tests {
     #[test]
     fn a_deleted_entry_hides_the_same_outline_in_later_dictionaries() {
         let mut dict = Dictionary::default();
-        dict.merge_json(&format!(r#"{{"KAT": "{DELETED}"}}"#))
+        dict.merge_json(&format!(r#"{{"KAT": "{DELETED}"}}"#), &Layout::plover())
             .unwrap();
-        dict.merge_json(r#"{"KAT": "cat", "TKOG": "dog"}"#).unwrap();
+        dict.merge_json(r#"{"KAT": "cat", "TKOG": "dog"}"#, &Layout::plover()).unwrap();
         assert_eq!(dict.lookup(&[KAT]), None);
         assert!(
             dict.strokes_for("cat").is_empty(),
@@ -462,7 +479,7 @@ mod tests {
         // In any letter case
         let mut upper = Dictionary::default();
         upper
-            .merge_json(&format!(r#"{{"KAT": "{}"}}"#, DELETED.to_uppercase()))
+            .merge_json(&format!(r#"{{"KAT": "{}"}}"#, DELETED.to_uppercase()), &Layout::plover())
             .unwrap();
         assert_eq!(upper.lookup(&[KAT]), None);
     }
@@ -470,11 +487,11 @@ mod tests {
     #[test]
     fn number_keys_and_the_word_boundary_stroke_are_read_in_keys() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"1": "one", "1-9": "x", "/S": "{prefix^}"}"#)
+        dict.merge_json(r#"{"1": "one", "1-9": "x", "/S": "{prefix^}"}"#, &Layout::plover())
             .unwrap();
-        assert_eq!(dict.lookup(&[parse_strokes("1").unwrap()[0]]), Some("one"));
+        assert_eq!(dict.lookup(&[Layout::plover().parse_strokes("1").unwrap()[0]]), Some("one"));
         assert_eq!(
-            dict.lookup(&[0, parse_strokes("S").unwrap()[0]]),
+            dict.lookup(&[0, Layout::plover().parse_strokes("S").unwrap()[0]]),
             Some("{prefix^}")
         );
         assert_eq!(dict.longest_key(), 2);
@@ -483,7 +500,7 @@ mod tests {
     #[test]
     fn within_one_file_the_later_of_two_spellings_of_an_outline_wins() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KAT": "first", "KA-T": "second"}"#)
+        dict.merge_json(r#"{"KAT": "first", "KA-T": "second"}"#, &Layout::plover())
             .unwrap();
         assert_eq!(dict.lookup(&[KAT]), Some("second"));
     }
@@ -497,14 +514,14 @@ mod tests {
     #[test]
     fn longest_entry_length_is_tracked() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KPA/TKAOEU": "example"}"#).unwrap();
+        dict.merge_json(r#"{"KPA/TKAOEU": "example"}"#, &Layout::plover()).unwrap();
         assert_eq!(dict.max_len(), 2);
     }
 
     #[test]
     fn strokes_for_finds_every_stroke_sequence_for_a_word() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KAT": "cat", "KPA/TKAOEU": "example"}"#)
+        dict.merge_json(r#"{"KAT": "cat", "KPA/TKAOEU": "example"}"#, &Layout::plover())
             .unwrap();
         assert_eq!(dict.strokes_for("cat"), vec![vec![KAT]]);
         assert_eq!(dict.strokes_for("example"), vec![vec![KPA, TKAOEU]]);
@@ -528,12 +545,12 @@ mod tests {
     #[test]
     fn a_cached_dictionary_is_restored_until_its_file_changes() {
         let (dir, file, cache) = cache_fixture("restore", r#"{"KAT": "cat"}"#);
-        let first = Dictionary::load_cached(&[&file], &cache);
+        let first = Dictionary::load_cached(&[&file], &cache, &Layout::plover());
         assert_eq!(first.strokes_for("cat"), vec![vec![KAT]]);
         assert_eq!(cache_files(&cache), 1, "the first load saves a cache");
 
         // Unchanged file: the cache is used, so the same answer comes back
-        let restored = Dictionary::load_cached(&[&file], &cache);
+        let restored = Dictionary::load_cached(&[&file], &cache, &Layout::plover());
         assert_eq!(restored.strokes_for("cat"), vec![vec![KAT]]);
         assert_eq!(
             cache_files(&cache),
@@ -543,7 +560,7 @@ mod tests {
 
         // Changed file: the fingerprint no longer matches, so the JSON is read again
         fs::write(&file, r#"{"KAT": "dog"}"#).unwrap();
-        let changed = Dictionary::load_cached(&[&file], &cache);
+        let changed = Dictionary::load_cached(&[&file], &cache, &Layout::plover());
         assert_eq!(changed.strokes_for("dog"), vec![vec![KAT]]);
         assert!(changed.strokes_for("cat").is_empty());
         assert_eq!(
@@ -561,7 +578,7 @@ mod tests {
         fs::write(&extra, r#"{"TKOG": "dog"}"#).unwrap();
         let asked = cache_name(&[dir.display().to_string()]);
         let load = |files: &[&Path]| {
-            Dictionary::load_cached_reporting(files, &fingerprint(files), &cache, &asked).0
+            Dictionary::load_cached_reporting(files, &fingerprint(files), &cache, &asked, &Layout::plover()).0
         };
         // The same folder, as its files come and go: always the one cache file
         let _ = load(&[&file]);
@@ -579,11 +596,11 @@ mod tests {
     #[test]
     fn a_corrupt_cache_is_replaced_by_parsing_the_json() {
         let (dir, file, cache) = cache_fixture("corrupt", r#"{"KAT": "cat"}"#);
-        let _ = Dictionary::load_cached(&[&file], &cache);
+        let _ = Dictionary::load_cached(&[&file], &cache, &Layout::plover());
         for entry in fs::read_dir(&cache).unwrap() {
             fs::write(entry.unwrap().path(), b"not a dictionary").unwrap();
         }
-        let dict = Dictionary::load_cached(&[&file], &cache);
+        let dict = Dictionary::load_cached(&[&file], &cache, &Layout::plover());
         assert_eq!(dict.strokes_for("cat"), vec![vec![KAT]]);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -591,7 +608,7 @@ mod tests {
     #[test]
     fn strokes_for_finds_every_outline_through_the_word_index() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KAT": "cat", "KAT/-PB": "cat", "KWRAT": "{^}cat"}"#)
+        dict.merge_json(r#"{"KAT": "cat", "KAT/-PB": "cat", "KWRAT": "{^}cat"}"#, &Layout::plover())
             .unwrap();
         // The leading space that spacing adds is ignored, and the index covers every entry
         assert_eq!(dict.strokes_for("cat").len(), 3);
@@ -600,8 +617,8 @@ mod tests {
     #[test]
     fn earlier_merges_win() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KAT": "kitty"}"#).unwrap();
-        dict.merge_json(r#"{"KAT": "cat"}"#).unwrap();
+        dict.merge_json(r#"{"KAT": "kitty"}"#, &Layout::plover()).unwrap();
+        dict.merge_json(r#"{"KAT": "cat"}"#, &Layout::plover()).unwrap();
         assert_eq!(dict.lookup(&[KAT]), Some("kitty"));
     }
 
@@ -622,20 +639,20 @@ mod tests {
         fs::write(&words, "cats 5\ncarries 9\n").unwrap();
 
         // The first dictionary wins, whichever format it is
-        let dict = Dictionary::load(&[json.as_path(), rtf.as_path(), words.as_path()]);
+        let dict = Dictionary::load(&[json.as_path(), rtf.as_path(), words.as_path()], &Layout::plover());
         assert_eq!(dict.lookup(&[KAT]), Some("kitty"));
         assert_eq!(
-            dict.lookup(&[parse_strokes("-S").unwrap()[0]]),
+            dict.lookup(&[Layout::plover().parse_strokes("-S").unwrap()[0]]),
             Some("{^s}")
         );
         assert_eq!(
-            dict.lookup(&[parse_strokes("TKOG").unwrap()[0]]),
+            dict.lookup(&[Layout::plover().parse_strokes("TKOG").unwrap()[0]]),
             Some("dog")
         );
         assert!(dict.orthography().has_words());
         assert_eq!(dict.orthography().add_suffix("cat", "s"), "cats");
 
-        let other_way = Dictionary::load(&[rtf.as_path(), json.as_path()]);
+        let other_way = Dictionary::load(&[rtf.as_path(), json.as_path()], &Layout::plover());
         assert_eq!(other_way.lookup(&[KAT]), Some("cat"));
         assert!(!other_way.orthography().has_words());
         let _ = fs::remove_dir_all(&dir);
@@ -643,7 +660,7 @@ mod tests {
 
     #[test]
     fn missing_file_is_skipped() {
-        let dict = Dictionary::load(&[Path::new("/nonexistent/steno/main.json")]);
+        let dict = Dictionary::load(&[Path::new("/nonexistent/steno/main.json")], &Layout::plover());
         assert!(dict.is_empty());
     }
 }
