@@ -13,6 +13,7 @@ use tracing::{debug, error, info, warn};
 
 pub mod actions;
 pub mod adaptive;
+mod debounce;
 pub mod keymap;
 pub mod layer_stack;
 #[cfg(test)]
@@ -92,6 +93,7 @@ fn run_event_processor(
 
     // Track last save time for periodic stats saving
     let mut alt_f12 = AltF12::default();
+    let mut debounce = debounce::Debounce::default();
     let mut last_stats_save = std::time::Instant::now();
     const STATS_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -196,6 +198,12 @@ fn run_event_processor(
 
                             // Ignore repeat events
                             if repeat {
+                                continue;
+                            }
+
+                            // Drop switch-bounce chatter (and its matching half of the pair)
+                            // before it ever reaches the keymap - see debounce.rs.
+                            if debounce.is_chatter(ev.code(), pressed, std::time::Instant::now()) {
                                 continue;
                             }
 
