@@ -436,7 +436,16 @@ impl StenoEngine {
     /// Translate a stroke. A repeat counts on the stroke's tape line instead of adding lines.
     fn translate(&mut self, stroke: u32, repeated: bool) -> Option<StenoOutput> {
         let output = self.translator.stroke(stroke);
+        // A stroke that only runs an engine command (opening the lookup, ...) typed nothing, so it
+        // has no place on the tape: the tape shows what was written, and a line for it would
+        // only be one more thing to undo past. Plover's undo already skips such a stroke.
+        let command_only = is_command_only(output.as_ref());
         let output = self.run_commands(output);
+        if command_only {
+            tracing::debug!("steno command stroke {stroke:#x} kept off the tape");
+            self.hub.clear_keys();
+            return output;
+        }
         let unmatched = self.translator.was_unmatched();
         let description = tape::describe(output.as_ref(), unmatched);
         if let Some(tape) = &mut self.tape {
@@ -524,6 +533,16 @@ impl StenoEngine {
             }
             self.loading = false;
         }
+    }
+}
+
+/// Whether an output is nothing but engine commands: no text, no keys, no backspaces.
+fn is_command_only(output: Option<&StenoOutput>) -> bool {
+    match output {
+        Some(StenoOutput::Ops(ops)) => {
+            !ops.is_empty() && ops.iter().all(|op| matches!(op, OutputOp::Command(_)))
+        }
+        _ => false,
     }
 }
 
@@ -1039,5 +1058,18 @@ mod tests {
         assert_eq!(engine.tick(t0 + ms(600)), None);
         assert!(engine.repeating.is_none() && engine.arming.is_none());
         assert_eq!(engine.tick(t0 + ms(900)), None);
+    }
+
+    #[test]
+    fn only_a_stroke_that_is_nothing_but_commands_stays_off_the_tape() {
+        let command = || OutputOp::Command("LOOKUP".to_owned());
+        assert!(is_command_only(Some(&StenoOutput::Ops(vec![command()]))));
+        assert!(is_command_only(Some(&StenoOutput::Ops(vec![command(), command()]))));
+        let with_text = StenoOutput::Ops(vec![command(), OutputOp::Text("a".to_owned())]);
+        assert!(!is_command_only(Some(&with_text)));
+        let with_backspace = StenoOutput::Ops(vec![OutputOp::Backspaces(1), command()]);
+        assert!(!is_command_only(Some(&with_backspace)));
+        assert!(!is_command_only(Some(&StenoOutput::Type("a".to_owned()))));
+        assert!(!is_command_only(None));
     }
 }

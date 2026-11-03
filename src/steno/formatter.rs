@@ -476,6 +476,7 @@ impl Formatter {
                     translation.formatting = vec![action];
                     continue;
                 }
+                let first_action = ctx.translated.len();
                 translation.formatting = match translation.english.as_deref() {
                     Some(english) if !english.is_empty() => {
                         translation_to_actions(english, &mut ctx)
@@ -485,6 +486,21 @@ impl Formatter {
                         raw_to_actions(&render_stroke(stroke), &render_raw_stroke(stroke), &mut ctx)
                     }
                 };
+                // A command runs once per translation: the first time it is formatted. Redoing
+                // it, or putting it back after a longer entry that replaced it is undone, is
+                // not the user striking it again.
+                let has_command = |a: &Action| a.command.as_ref().is_some_and(|c| !c.is_empty());
+                if translation.command_ran {
+                    for action in translation
+                        .formatting
+                        .iter_mut()
+                        .chain(ctx.translated[first_action..].iter_mut())
+                    {
+                        action.command = None;
+                    }
+                } else if translation.formatting.iter().any(has_command) {
+                    translation.command_ran = true;
+                }
             }
             ctx.translated
         };

@@ -133,6 +133,17 @@ impl OverlayHub {
         });
     }
 
+    /// A stroke finished that belongs on no tape (an engine command): clear the lit keys without
+    /// adding a line.
+    pub fn clear_keys(&self) {
+        self.update(|state| {
+            let changed = state.chord != 0 || state.held != 0;
+            state.chord = 0;
+            state.held = 0;
+            changed
+        });
+    }
+
     /// A stroke finished and was translated. Clears the lit keys.
     pub fn push_stroke(&self, stroke: u32, text: String, unmatched: bool) {
         self.update(|state| {

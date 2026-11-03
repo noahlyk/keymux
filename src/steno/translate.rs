@@ -45,6 +45,11 @@ pub struct Translation {
     /// What the formatter made of it
     pub formatting: Vec<Action>,
     pub is_retrospective_command: bool,
+    /// Its engine command (`{plover:lookup}`, ...) already ran. A command runs once, when the
+    /// stroke that wrote it is struck, and never again: not when the translation is put back by
+    /// redo, nor when undoing a longer entry puts back the translations it replaced. The
+    /// formatter sets this the first time it sends the command and drops the command afterwards.
+    pub command_ran: bool,
     /// Which set of dictionaries made it
     pub machine: MachineId,
     /// Strokes, or text that was typed or erased by hand
@@ -60,6 +65,7 @@ impl Translation {
             replaced: Vec::new(),
             formatting: Vec::new(),
             is_retrospective_command: false,
+            command_ran: false,
             machine: 0,
             origin: Origin::Stroke,
         }
@@ -1875,5 +1881,57 @@ pub extern "C" fn joins(bits: i64) -> i32 {
     fn a_deleted_entry_is_untranslated() {
         let json = format!(r#"{{"KAT": "{}"}}"#, super::super::dict::DELETED);
         assert_eq!(type_strokes(&json, &["KAT"]), "KA-T");
+    }
+
+    /// The commands a stroke made, as written (`LOOKUP` for `{PLOVER:LOOKUP}`).
+    fn commands_of(t: &mut Translator, stroke_text: &str) -> Vec<String> {
+        t.stroke(stroke(stroke_text))
+            .map(StenoOutput::into_ops)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|op| match op {
+                OutputOp::Command(command) => Some(command),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const COMMAND_JSON: &str =
+        r#"{"KAT": "cat", "TKOG": "dog", "PHR*UP": "{PLOVER:LOOKUP}", "PHR*UP/TKOG": "lookdog"}"#;
+
+    #[test]
+    fn a_command_stroke_runs_when_struck() {
+        let mut t = translator(COMMAND_JSON);
+        assert_eq!(commands_of(&mut t, "PHR*UP"), ["LOOKUP"]);
+    }
+
+    #[test]
+    fn striking_a_command_stroke_again_runs_it_again() {
+        let mut t = translator(COMMAND_JSON);
+        assert_eq!(commands_of(&mut t, "PHR*UP"), ["LOOKUP"]);
+        assert_eq!(commands_of(&mut t, "PHR*UP"), ["LOOKUP"]);
+    }
+
+    #[test]
+    fn undoing_a_longer_entry_never_puts_back_the_commands_it_replaced() {
+        // PHR*UP then TKOG becomes the one entry "lookdog", replacing the command's translation;
+        // undoing "lookdog" puts that translation back, which must not run the command again
+        for strokes in [vec!["PHR*UP", "TKOG", "*"], vec!["KAT", "PHR*UP", "TKOG", "*"]] {
+            let mut t = translator(COMMAND_JSON);
+            let mut last = Vec::new();
+            for s in &strokes {
+                last = commands_of(&mut t, s);
+            }
+            assert!(last.is_empty(), "{strokes:?}: undo ran {last:?}");
+        }
+    }
+
+    #[test]
+    fn undo_after_a_command_takes_back_the_word_before_it_and_runs_nothing() {
+        let mut t = translator(COMMAND_JSON);
+        commands_of(&mut t, "KAT");
+        commands_of(&mut t, "PHR*UP");
+        assert!(commands_of(&mut t, "*").is_empty());
+        assert_eq!(t.text(), "");
     }
 }
