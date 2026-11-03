@@ -101,6 +101,12 @@ impl ChordState {
         }
     }
 
+    /// When the stroke in progress times out, while one is in progress.
+    #[must_use]
+    pub fn deadline(&self) -> Option<Instant> {
+        self.started.map(|start| start + self.timeout)
+    }
+
     /// Finish the stroke if its timeout has passed, even with keys still held.
     pub fn tick(&mut self, now: Instant) -> Option<u32> {
         match self.started {

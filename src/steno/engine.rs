@@ -336,6 +336,20 @@ impl StenoEngine {
         .flatten()
     }
 
+    /// When [`Self::tick`] next has something to do without a key event: a stuck stroke to
+    /// flush, a held double tap to start repeating, or the next repeat to send.
+    #[must_use]
+    pub fn next_deadline(&self) -> Option<Instant> {
+        let stuck = self.chord.deadline();
+        // Armed the same way `repeat_tick` fires, so a deadline is never one it won't act on
+        let repeat_starts = self
+            .arming
+            .filter(|&(stroke, _)| self.chord.is_fresh() && self.chord.pending() == stroke)
+            .map(|(_, since)| since + self.timing.repeat_delay);
+        let next_repeat = self.repeating.map(|repeating| repeating.next);
+        [stuck, repeat_starts, next_repeat].into_iter().flatten().min()
+    }
+
     /// Check the stuck-key timeout and pick up finished dictionary loads.
     /// Returns output if a stuck stroke was flushed, or if strokes queued during
     /// loading were just translated.

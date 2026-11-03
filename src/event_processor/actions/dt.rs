@@ -14,7 +14,7 @@ use crate::config::{Config, KeyAction};
 use crate::event_processor::actions::{EmitResult, HeldAction, ProcessResult};
 use crate::keycode::KeyCode;
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TdState {
@@ -250,6 +250,22 @@ impl DtProcessor {
         self.tracked_keys
             .get(&keycode)
             .and_then(|td| td.last_emitted_action.clone())
+    }
+
+    /// When the earliest tracked key next needs its timeouts checked, if any is waiting on one.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.tracked_keys
+            .values()
+            .filter_map(|td_key| {
+                let term_ms = match td_key.state {
+                    TdState::Undecided => u64::from(self.config.tapping_term_ms),
+                    TdState::Tapped | TdState::TappingSecond => self.config.double_tap_window_ms,
+                    TdState::HoldingFirst | TdState::HoldingSecond => return None,
+                };
+                // The checks count whole milliseconds and fire once the term is exceeded
+                Some(td_key.first_press_at + Duration::from_millis(term_ms + 1))
+            })
+            .min()
     }
 
     pub fn check_timeouts(&mut self) -> Vec<(KeyCode, ProcessResult)> {

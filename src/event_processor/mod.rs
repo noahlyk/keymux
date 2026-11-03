@@ -1,14 +1,14 @@
 use crate::keyboard_id::KeyboardId;
 use crate::keycode::KeyCode;
 use crate::steno::translate::OutputOp;
-use actions::ProcessResult as ProcResult;
 pub use actions::ProcessResult;
 use anyhow::{Context, Result};
 use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
 use evdev::{AttributeSet, Device, EventType, InputEvent, Key};
 pub use keymap::KeymapProcessor;
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 pub mod actions;
@@ -94,8 +94,8 @@ fn run_event_processor(
     // Track last save time for periodic stats saving
     let mut alt_f12 = AltF12::default();
     let mut debounce = debounce::Debounce::default();
-    let mut last_stats_save = std::time::Instant::now();
-    const STATS_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+    let mut last_stats_save = Instant::now();
+    const STATS_SAVE_INTERVAL: Duration = Duration::from_secs(30);
 
     // Event processing loop. Each pass locks the keyboard's shared keymap, so the
     // device threads for one keyboard take turns and see one chord and layer state.
@@ -165,7 +165,7 @@ fn run_event_processor(
         // Periodically save adaptive timing stats
         if last_stats_save.elapsed() >= STATS_SAVE_INTERVAL {
             let _ = keymap.save_adaptive_stats(user_id);
-            last_stats_save = std::time::Instant::now();
+            last_stats_save = Instant::now();
         }
 
         // Read events from physical keyboard (non-blocking)
@@ -175,7 +175,7 @@ fn run_event_processor(
                 // The kernel stamps each event when it happened. A batch that waited while
                 // this thread was busy or asleep is replayed at those moments, so the wait
                 // never looks like a key held for longer than it was.
-                let anchor = (std::time::Instant::now(), std::time::SystemTime::now());
+                let anchor = (Instant::now(), std::time::SystemTime::now());
                 for ev in events {
                     // Alt+F12 releases this keyboard from keymux. It's checked on the raw key,
                     // before the keymap, so no layer or remap can swallow it.
@@ -218,60 +218,8 @@ fn run_event_processor(
                                 continue;
                             }
 
-                            // Process key through keymap (QMK-inspired)
                             let result = keymap.process_key_at(input_key, pressed, at);
-
-                            match result {
-                                ProcessResult::EmitKey(output_key, output_pressed) => {
-                                    // Convert back to evdev and emit
-                                    let output_evdev = Key::new(output_key.code());
-                                    let output_event = InputEvent::new_now(
-                                        ev.event_type(),
-                                        output_evdev.code(),
-                                        i32::from(output_pressed),
-                                    );
-                                    virtual_device.emit(&[output_event])?;
-                                }
-                                ProcessResult::Retype { backspaces, text } => {
-                                    retype(&mut virtual_device, &mut pacer, backspaces, &text)?;
-                                }
-                                ProcessResult::Ops(ops) => {
-                                    emit_ops(&mut virtual_device, &mut pacer, &ops)?;
-                                }
-                                ProcessResult::TypeString(text, add_enter) => {
-                                    // Type out the string character by character
-                                    type_string(&mut virtual_device, &mut pacer, &text, add_enter)?;
-                                }
-                                ProcessResult::TapKeyPressRelease(tap_key) => {
-                                    // Emit tap key press and release
-                                    let key_evdev = Key::new(tap_key.code());
-                                    let press_event =
-                                        InputEvent::new_now(ev.event_type(), key_evdev.code(), 1);
-                                    virtual_device.emit(&[press_event])?;
-
-                                    std::thread::sleep(std::time::Duration::from_millis(5));
-
-                                    let release_event =
-                                        InputEvent::new_now(ev.event_type(), key_evdev.code(), 0);
-                                    virtual_device.emit(&[release_event])?;
-                                }
-                                ProcessResult::MultipleEvents(events) => {
-                                    // Emit multiple events in sequence
-                                    for (key, pressed) in events {
-                                        let key_evdev = Key::new(key.code());
-                                        let event = InputEvent::new_now(
-                                            ev.event_type(),
-                                            key_evdev.code(),
-                                            i32::from(pressed),
-                                        );
-                                        virtual_device.emit(&[event])?;
-                                        std::thread::sleep(std::time::Duration::from_millis(2));
-                                    }
-                                }
-                                ProcessResult::None => {
-                                    // Don't emit anything (consumed by layer switch, etc.)
-                                }
-                            }
+                            emit_result(&mut virtual_device, &mut pacer, result)?;
                         } else {
                             // Unsupported key, pass through unchanged
                             virtual_device.emit(&[ev])?;
@@ -283,46 +231,16 @@ fn run_event_processor(
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No events available - check for DT timeouts
-                // This allows hold detection to work even when no keys are being pressed
-                let timeout_result = keymap.check_dt_timeouts();
-                match timeout_result {
-                    ProcResult::MultipleEvents(events) => {
-                        // Emit timeout events (hold first action, single-tap, etc.)
-                        for (key, pressed) in events {
-                            let key_evdev = Key::new(key.code());
-                            let event = InputEvent::new_now(
-                                EventType::KEY,
-                                key_evdev.code(),
-                                i32::from(pressed),
-                            );
-                            virtual_device.emit(&[event])?;
-                        }
-                    }
-                    _ => {
-                        // No timeouts to process
-                    }
-                }
-
-                // A stroke held past its timeout, or a held prefix gone idle, is typed now
-                match keymap.check_steno_timeouts() {
-                    ProcResult::TypeString(text, add_enter) => {
-                        type_string(&mut virtual_device, &mut pacer, &text, add_enter)?;
-                    }
-                    ProcResult::Retype { backspaces, text } => {
-                        retype(&mut virtual_device, &mut pacer, backspaces, &text)?;
-                    }
-                    ProcResult::Ops(ops) => {
-                        emit_ops(&mut virtual_device, &mut pacer, &ops)?;
-                    }
-                    _ => {}
-                }
-
+                // With no key to prompt them, timeouts resolve by themselves: a tap-dance
+                // held past its term, a stuck stroke, a held stroke repeating
+                let tap_dance = keymap.check_dt_timeouts();
+                emit_result(&mut virtual_device, &mut pacer, tap_dance)?;
+                let steno = keymap.check_steno_timeouts();
+                emit_result(&mut virtual_device, &mut pacer, steno)?;
+                let deadline = keymap.next_deadline();
                 // Let the keyboard's other device threads in before waiting
                 drop(keymap);
-                // The next key wakes the loop the moment it arrives; with none, the timeouts
-                // are checked again in a millisecond
-                wait_for_input(fd, 1);
+                wait_for_input(fd, deadline);
             }
             Err(e) => return Err(e.into()),
         }
@@ -487,35 +405,21 @@ fn release_all_keys_on_startup(virtual_device: &mut VirtualDevice) {
         let event = InputEvent::new_now(EventType::KEY, key.code(), 0);
         let _ = virtual_device.emit(&[event]);
     }
-
-    // Send final SYN_REPORT
-    let syn_event = InputEvent::new_now(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT);
-    let _ = virtual_device.emit(&[syn_event]);
+    let _ = virtual_device.emit(&[syn_report()]);
 }
 
 /// Release all potentially held keys before shutdown
 fn release_all_keys(virtual_device: &mut VirtualDevice, keymap: &KeymapProcessor) {
-    use evdev::InputEvent;
-
-    // Get all keys that the keymap thinks are held
     let held_keys = keymap.get_held_keys();
-
     if !held_keys.is_empty() {
         info!(
             "Gracefully releasing {} held key(s) before shutdown",
             held_keys.len()
         );
-
-        // Release all held keys
         for keycode in held_keys {
-            let evdev_key = Key::new(keycode.code());
-            let event = InputEvent::new_now(EventType::KEY, evdev_key.code(), 0);
-            let _ = virtual_device.emit(&[event]);
+            let _ = virtual_device.emit(&[key_event(keycode, false)]);
         }
-
-        // Send SYN_REPORT
-        let syn_event = InputEvent::new_now(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT);
-        let _ = virtual_device.emit(&[syn_event]);
+        let _ = virtual_device.emit(&[syn_report()]);
     }
 
     // Also release common modifiers as a safety measure
@@ -534,21 +438,72 @@ fn release_all_keys(virtual_device: &mut VirtualDevice, keymap: &KeymapProcessor
         let event = InputEvent::new_now(EventType::KEY, key.code(), 0);
         let _ = virtual_device.emit(&[event]);
     }
-
-    // Send final SYN_REPORT
-    let syn_event = InputEvent::new_now(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT);
-    let _ = virtual_device.emit(&[syn_event]);
+    let _ = virtual_device.emit(&[syn_report()]);
 }
 
-/// Wait until the keyboard has an event to read, or `timeout_ms` passes.
-fn wait_for_input(fd: std::os::unix::io::RawFd, timeout_ms: i32) {
+/// How long the loop waits with no key and no timeout due before it looks at its channels
+/// (shutdown, game mode, stats) again.
+const IDLE_WAIT: Duration = Duration::from_millis(25);
+
+/// Wait until the keyboard has an event to read, `deadline` comes, or `IDLE_WAIT` passes,
+/// whichever is first. A key always wakes it at once.
+fn wait_for_input(fd: RawFd, deadline: Option<Instant>) {
+    let now = Instant::now();
+    let wait = deadline.map_or(IDLE_WAIT, |at| {
+        at.saturating_duration_since(now).min(IDLE_WAIT)
+    });
+    // poll counts whole milliseconds; round up so a deadline is never woken for early
+    let millis = i32::try_from(wait.as_nanos().div_ceil(1_000_000)).unwrap_or(i32::MAX);
     let mut pollfd = libc::pollfd {
         fd,
         events: libc::POLLIN,
         revents: 0,
     };
     // SAFETY: `pollfd` is one valid, initialized entry, and 1 says so
-    unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+    unsafe { libc::poll(&mut pollfd, 1, millis) };
+}
+
+/// Send what the keymap decided to the virtual keyboard.
+fn emit_result(
+    virtual_device: &mut VirtualDevice,
+    pacer: &mut Pacer,
+    result: ProcessResult,
+) -> Result<()> {
+    match result {
+        // One event of an ordinary key: straight out, nothing to pace
+        ProcessResult::EmitKey(key, pressed) => Ok(virtual_device.emit(&[key_event(key, pressed)])?),
+        ProcessResult::TapKeyPressRelease(key) => {
+            emit_keystrokes(virtual_device, pacer, &[keystroke(Key::new(key.code()), false)])
+        }
+        ProcessResult::MultipleEvents(events) => emit_key_events(virtual_device, pacer, &events),
+        ProcessResult::TypeString(text, _) => retype(virtual_device, pacer, 0, &text),
+        ProcessResult::Retype { backspaces, text } => {
+            retype(virtual_device, pacer, backspaces, &text)
+        }
+        ProcessResult::Ops(ops) => emit_ops(virtual_device, pacer, &ops),
+        ProcessResult::None => Ok(()),
+    }
+}
+
+fn key_event(key: KeyCode, pressed: bool) -> InputEvent {
+    InputEvent::new_now(EventType::KEY, Key::new(key.code()).code(), i32::from(pressed))
+}
+
+fn syn_report() -> InputEvent {
+    InputEvent::new_now(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT)
+}
+
+/// Press and release keys one event at a time, in order, as the pacer allows.
+fn emit_key_events(
+    virtual_device: &mut VirtualDevice,
+    pacer: &mut Pacer,
+    events: &[(KeyCode, bool)],
+) -> Result<()> {
+    let groups: Vec<Vec<InputEvent>> = events
+        .iter()
+        .map(|&(key, pressed)| vec![key_event(key, pressed), syn_report()])
+        .collect();
+    emit_keystrokes(virtual_device, pacer, &groups)
 }
 
 /// The most input events allowed unread at once. The kernel keeps 63 per reader of a
@@ -560,7 +515,7 @@ const SAFE_EVENTS: usize = 48;
 /// How long an event counts as possibly unread. An app or compositor busy for longer than
 /// this can still lose events, but nothing sent at once ever can: up to `SAFE_EVENTS` go out
 /// together, whatever the delay.
-const UNREAD_WINDOW: std::time::Duration = std::time::Duration::from_millis(15);
+const UNREAD_WINDOW: Duration = Duration::from_millis(15);
 
 /// Keeps what is sent to one virtual keyboard from outrunning whoever reads it. Output that fits
 /// goes out at once. Only what doesn't fit waits, just until earlier events are old enough
@@ -568,7 +523,7 @@ const UNREAD_WINDOW: std::time::Duration = std::time::Duration::from_millis(15);
 #[derive(Default)]
 struct Pacer {
     /// When events were sent, and how many, for the last `UNREAD_WINDOW`
-    sent: std::collections::VecDeque<(std::time::Instant, usize)>,
+    sent: std::collections::VecDeque<(Instant, usize)>,
 }
 
 impl Pacer {
@@ -577,9 +532,9 @@ impl Pacer {
     /// across two parts, so shift is never left held between them.
     fn schedule(
         &mut self,
-        now: std::time::Instant,
+        now: Instant,
         sizes: &[usize],
-    ) -> Vec<(std::time::Instant, std::ops::Range<usize>)> {
+    ) -> Vec<(Instant, std::ops::Range<usize>)> {
         let mut parts = Vec::new();
         // Never before something already planned, so output stays in order
         let mut at = self.sent.back().map_or(now, |&(time, _)| time.max(now));
@@ -617,27 +572,20 @@ impl Pacer {
 
 /// One key press and release, each followed by a SYN_REPORT, with shift held around it if needed
 fn keystroke(key: Key, shift: bool) -> Vec<InputEvent> {
-    let syn = || InputEvent::new_now(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT);
+    let tap = |key: Key, pressed: bool| {
+        [
+            InputEvent::new_now(EventType::KEY, key.code(), i32::from(pressed)),
+            syn_report(),
+        ]
+    };
     let mut events = Vec::with_capacity(8);
     if shift {
-        events.push(InputEvent::new_now(
-            EventType::KEY,
-            Key::KEY_LEFTSHIFT.code(),
-            1,
-        ));
-        events.push(syn());
+        events.extend(tap(Key::KEY_LEFTSHIFT, true));
     }
-    events.push(InputEvent::new_now(EventType::KEY, key.code(), 1));
-    events.push(syn());
-    events.push(InputEvent::new_now(EventType::KEY, key.code(), 0));
-    events.push(syn());
+    events.extend(tap(key, true));
+    events.extend(tap(key, false));
     if shift {
-        events.push(InputEvent::new_now(
-            EventType::KEY,
-            Key::KEY_LEFTSHIFT.code(),
-            0,
-        ));
-        events.push(syn());
+        events.extend(tap(Key::KEY_LEFTSHIFT, false));
     }
     events
 }
@@ -649,8 +597,8 @@ fn emit_keystrokes(
     keystrokes: &[Vec<InputEvent>],
 ) -> Result<()> {
     let sizes: Vec<usize> = keystrokes.iter().map(Vec::len).collect();
-    for (at, range) in pacer.schedule(std::time::Instant::now(), &sizes) {
-        if let Some(wait) = at.checked_duration_since(std::time::Instant::now()) {
+    for (at, range) in pacer.schedule(Instant::now(), &sizes) {
+        if let Some(wait) = at.checked_duration_since(Instant::now()) {
             std::thread::sleep(wait);
         }
         virtual_device.emit(&keystrokes[range].concat())?;
@@ -692,39 +640,14 @@ fn emit_ops(virtual_device: &mut VirtualDevice, pacer: &mut Pacer, ops: &[Output
                     retype(virtual_device, pacer, *count, "")?;
                 }
             }
-            OutputOp::Text(text) => type_string(virtual_device, pacer, text, false)?,
-            OutputOp::Keys(events) => {
-                let groups: Vec<Vec<InputEvent>> = events
-                    .iter()
-                    .map(|(key, pressed)| {
-                        vec![
-                            InputEvent::new_now(
-                                EventType::KEY,
-                                Key::new(key.code()).code(),
-                                i32::from(*pressed),
-                            ),
-                            InputEvent::new_now(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT),
-                        ]
-                    })
-                    .collect();
-                emit_keystrokes(virtual_device, pacer, &groups)?;
-            }
+            OutputOp::Text(text) => retype(virtual_device, pacer, 0, text)?,
+            OutputOp::Keys(events) => emit_key_events(virtual_device, pacer, events)?,
             // Commands were run by the steno engine
             OutputOp::Command(_) => {}
         }
         i += 1;
     }
     Ok(())
-}
-
-/// Type a string by emitting key events for each character
-fn type_string(
-    virtual_device: &mut VirtualDevice,
-    pacer: &mut Pacer,
-    text: &str,
-    _add_enter: bool,
-) -> Result<()> {
-    retype(virtual_device, pacer, 0, text)
 }
 
 /// Convert a character to an evdev Key and whether shift is needed

@@ -4,6 +4,7 @@
 //! Each tape file has a thread of its own that does the writing, so a stroke never waits on
 //! the disk: the typing path hands the line over and carries on.
 
+use super::dict::Dictionary;
 use super::layout::render_stroke;
 use super::translate::{OutputOp, StenoOutput};
 use std::collections::HashMap;
@@ -11,7 +12,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
@@ -289,6 +290,36 @@ impl Writer {
     }
 }
 
+/// Put a word typed by hand on the tape, with the outline that would have typed it.
+///
+/// Looking that up in `dict` takes a moment, so one thread does it for every word, in order,
+/// and the key that finished the word never waits.
+pub fn note_typed(path: &Path, dict: Option<Arc<Dictionary>>, word: String) {
+    type Note = (PathBuf, Option<Arc<Dictionary>>, String);
+    static NOTES: OnceLock<Sender<Note>> = OnceLock::new();
+    let notes = NOTES.get_or_init(|| {
+        let (sender, notes) = mpsc::channel::<Note>();
+        let spawned = std::thread::Builder::new()
+            .name("steno-tape-notes".into())
+            .spawn(move || {
+                for (path, dict, word) in notes {
+                    let line = dict.map_or_else(
+                        || format!("{word:?}"),
+                        |dict| describe_typed(&dict, &word),
+                    );
+                    append_note(&path, "typed", &line);
+                }
+            });
+        if let Err(e) = spawned {
+            warn!("steno tape: no thread to note typed words: {e}");
+        }
+        sender
+    });
+    if notes.send((path.to_path_buf(), dict, word)).is_err() {
+        warn!("steno tape {}: nothing is noting typed words", path.display());
+    }
+}
+
 /// The longest outline worth suggesting for a word typed by hand.
 const MAX_SUGGESTED_STROKES: usize = 3;
 
@@ -297,7 +328,7 @@ const MAX_SUGGESTED_STROKES: usize = 3;
 /// The word, and the strokes that would have typed it if the dictionary has them. Looking through
 /// a big dictionary takes a moment, so callers do this off the typing path.
 #[must_use]
-pub fn describe_typed(dict: &super::dict::Dictionary, word: &str) -> String {
+pub fn describe_typed(dict: &Dictionary, word: &str) -> String {
     let shown = format!("{word:?}");
     let bare = word.trim();
     if !bare.chars().any(char::is_alphanumeric) {

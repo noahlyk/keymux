@@ -116,7 +116,7 @@ pub fn run(config: OverlayConfig, source: Source, always: bool) -> Result<()> {
     event_loop
         .handle()
         .insert_source(interrupt_source, |event, (), overlay| {
-            if let channel::Event::Msg(()) = event {
+            if matches!(event, channel::Event::Msg(())) {
                 overlay.on_activity_interrupted();
             }
         })

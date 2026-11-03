@@ -217,6 +217,21 @@ impl KeymapProcessor {
         }
     }
 
+    /// When a timeout next needs checking with no key to prompt it: a tap-dance or a steno
+    /// stroke that resolves by itself. `None` while nothing is waiting on one.
+    #[must_use]
+    pub fn next_deadline(&self) -> Option<Instant> {
+        let steno = self
+            .steno_engines
+            .values()
+            .filter_map(|engine| engine.next_deadline());
+        self.dt_processor
+            .next_deadline()
+            .into_iter()
+            .chain(steno)
+            .min()
+    }
+
     /// Finish any steno stroke that has been held past its timeout, or translate
     /// held strokes that have gone idle. Returns what to type, if anything.
     pub fn check_steno_timeouts(&mut self) -> ProcessResult {
@@ -312,23 +327,14 @@ impl KeymapProcessor {
         let Some(path) = self.tape.clone() else {
             return;
         };
-        // The first layer's dictionary, by name, once it has loaded. Looking a word up in it takes
-        // a moment, so that happens on a thread of its own and never holds up a key.
+        // The first layer's dictionary, by name, once it has loaded
         let dict = self
             .steno_engines
             .iter()
             .min_by(|a, b| a.0 .0.cmp(&b.0 .0))
             .and_then(|(_, engine)| engine.dictionary_handle());
         for word in words {
-            let path = path.clone();
-            let dict = dict.clone();
-            std::thread::spawn(move || {
-                let line = dict.map_or_else(
-                    || format!("{word:?}"),
-                    |dict| steno::tape::describe_typed(&dict, &word),
-                );
-                steno::tape::append_note(&path, "typed", &line);
-            });
+            steno::tape::note_typed(&path, dict.clone(), word);
         }
     }
 
