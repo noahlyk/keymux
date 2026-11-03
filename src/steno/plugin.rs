@@ -62,6 +62,7 @@
 
 use super::dict::Dictionary;
 use super::layout::Layout;
+use super::parts::Parts;
 use super::source::is_plugin_file;
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -69,7 +70,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use wasmtime::{Engine, Instance, Memory, Module, Store, TypedFunc};
 
 /// Bumped whenever the interface above changes, so a plugin compiled against an older one is
@@ -241,8 +242,8 @@ fn load_one(source: &Path, cache_dir: &Path) -> Result<Plugin> {
 
 /// One step of a lookup: a run of dictionary files merged together, or one plugin.
 enum Step {
-    Dict(Dictionary),
-    Plugin(Mutex<Plugin>),
+    Dict(Arc<Dictionary>),
+    Plugin(Box<Mutex<Plugin>>),
 }
 
 /// A dictionary lookup pipeline built from one priority-ordered file list.
@@ -254,7 +255,7 @@ pub struct Chain {
     /// Every dictionary file in the list merged into one, ignoring where any plugins fell: for
     /// everything a plain [`Dictionary`] already does that a plugin cannot meaningfully join in
     /// on anyway (reverse lookup, completions, listing).
-    dict: Dictionary,
+    dict: Arc<Dictionary>,
     steps: Vec<Step>,
     /// The layout strokes are rendered with before a plugin ever sees them: must be the same
     /// layout the keyboard itself parses strokes with, extra keys (a theory's own join key,
@@ -283,9 +284,10 @@ impl Default for Chain {
 /// step ever runs here, so which layout is recorded makes no difference.
 impl From<Dictionary> for Chain {
     fn from(dict: Dictionary) -> Self {
+        let dict = Arc::new(dict);
         Self {
-            dict: dict.clone(),
-            steps: vec![Step::Dict(dict)],
+            steps: vec![Step::Dict(Arc::clone(&dict))],
+            dict,
             layout: Layout::plover(),
         }
     }
@@ -303,18 +305,20 @@ impl Chain {
         cache_dir: &Path,
     ) -> Self {
         let plugin = load_one(plugin_file, cache_dir).expect("test plugin should load");
+        let dict = Arc::new(dict);
         Self {
-            dict: dict.clone(),
-            steps: vec![Step::Dict(dict), Step::Plugin(Mutex::new(plugin))],
+            steps: vec![Step::Dict(Arc::clone(&dict)), Step::Plugin(Box::new(Mutex::new(plugin)))],
+            dict,
             layout: Layout::plover(),
         }
     }
 }
 
 impl Chain {
-    /// Load `files` (already expanded, highest priority first) into a chain, caching both the
-    /// merged dictionary and each compiled plugin under `cache_dir`, with no error even if
-    /// every file fails: a working but empty chain, exactly as an all-missing dictionary is.
+    /// Load `files` (already expanded, highest priority first) into a chain, each dictionary
+    /// file restored from its own cache copy or parsed (see [`Parts`]) and each plugin compiled
+    /// once, with no error even if every file fails: a working but empty chain, exactly as an
+    /// all-missing dictionary is.
     #[must_use]
     pub fn load_cached(files: &[PathBuf], cache_dir: &Path, layout: &Layout) -> Self {
         Self::load_cached_reporting(files, cache_dir, layout).0
@@ -329,40 +333,30 @@ impl Chain {
         cache_dir: &Path,
         layout: &Layout,
     ) -> (Self, Vec<String>) {
+        let mut parts = Parts::default();
+        let refresh = parts.refresh(files, cache_dir, layout);
+        (Self::from_parts(files, &parts, cache_dir, layout), refresh.problems)
+    }
+
+    /// The chain `files` make, out of `parts` already brought up to date with them: layered
+    /// dictionaries in the order given, with a plugin at its own place among them. Nothing is
+    /// read or parsed here, only merged, so it is what a reload costs when a file changed.
+    #[must_use]
+    pub fn from_parts(files: &[PathBuf], parts: &Parts, cache_dir: &Path, layout: &Layout) -> Self {
         let dict_only: Vec<PathBuf> = files
             .iter()
             .filter(|p| !is_plugin_file(p))
             .cloned()
             .collect();
-        let names: Vec<String> = dict_only.iter().map(|p| p.display().to_string()).collect();
-        let (dict, problems) = Dictionary::load_cached_reporting(
-            &dict_only,
-            &super::dict::fingerprint(&dict_only),
-            cache_dir,
-            &super::dict::cache_name(&names),
-            layout,
-        );
-        if !problems.is_empty() {
-            return (
-                Self {
-                    dict,
-                    steps: Vec::new(),
-                    layout: layout.clone(),
-                },
-                problems,
-            );
-        }
+        let dict = Arc::new(parts.layered(&dict_only));
         // No plugin at all: the common case, and the one every keymux without one already
         // has, needs nothing further, the merged dictionary standing as the only step.
         if dict_only.len() == files.len() {
-            return (
-                Self {
-                    dict: dict.clone(),
-                    steps: vec![Step::Dict(dict)],
-                    layout: layout.clone(),
-                },
-                Vec::new(),
-            );
+            return Self {
+                steps: vec![Step::Dict(Arc::clone(&dict))],
+                dict,
+                layout: layout.clone(),
+            };
         }
         let plugin_cache = cache_dir.join("plugins");
         let mut steps = Vec::new();
@@ -370,11 +364,11 @@ impl Chain {
         for path in files {
             if is_plugin_file(path) {
                 if !pending.is_empty() {
-                    steps.push(Step::Dict(Dictionary::load_cached(&pending, cache_dir, layout)));
+                    steps.push(Step::Dict(Arc::new(parts.layered(&pending))));
                     pending.clear();
                 }
                 match load_one(path, &plugin_cache) {
-                    Ok(plugin) => steps.push(Step::Plugin(Mutex::new(plugin))),
+                    Ok(plugin) => steps.push(Step::Plugin(Box::new(Mutex::new(plugin)))),
                     Err(e) => tracing::warn!("plugin {} not loaded: {e:#}", path.display()),
                 }
             } else {
@@ -382,16 +376,13 @@ impl Chain {
             }
         }
         if !pending.is_empty() {
-            steps.push(Step::Dict(Dictionary::load_cached(&pending, cache_dir, layout)));
+            steps.push(Step::Dict(Arc::new(parts.layered(&pending))));
         }
-        (
-            Self {
-                dict,
-                steps,
-                layout: layout.clone(),
-            },
-            Vec::new(),
-        )
+        Self {
+            dict,
+            steps,
+            layout: layout.clone(),
+        }
     }
 
     /// The translation of an exact outline: the first step with an answer, trying each in the
@@ -452,17 +443,17 @@ impl Chain {
     /// for a caller that wants a plain `Dictionary` specifically (reverse lookup, completions),
     /// since there is nothing a plugin could meaningfully add to either.
     #[must_use]
-    pub const fn as_dictionary(&self) -> &Dictionary {
+    pub fn as_dictionary(&self) -> &Dictionary {
         &self.dict
     }
 
     #[must_use]
-    pub const fn orthography(&self) -> &super::orthography::Orthography {
+    pub fn orthography(&self) -> &super::orthography::Orthography {
         self.dict.orthography()
     }
 
     #[must_use]
-    pub const fn longest_key(&self) -> usize {
+    pub fn longest_key(&self) -> usize {
         self.dict.longest_key()
     }
 

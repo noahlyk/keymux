@@ -14,8 +14,8 @@
 //! A reload that finds a file it can't read, such as one saved half-finished, keeps the
 //! dictionary already in use and tries again on the next change.
 
-use super::dict::{fingerprint, Source};
 use super::layout::Layout;
+use super::parts::Parts;
 use super::plugin::Chain;
 use super::source::expand;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 /// How long the files must stay unchanged before they are read again
@@ -45,9 +45,11 @@ struct Key {
 
 #[derive(Default)]
 struct Entry {
-    /// The dictionary built from the files fingerprinted in `built_from`
+    /// The dictionary built from `parts` as they were at generation `built_from`
     latest: Option<Arc<Chain>>,
-    built_from: Vec<Source>,
+    built_from: u64,
+    /// Every file parsed on its own, kept between reloads: only a changed file is read again
+    parts: Parts,
     subscribers: Vec<Sender<Arc<Chain>>>,
 }
 
@@ -177,47 +179,65 @@ fn lower_priority() {
 }
 
 /// Read `key`'s files again if they changed, and send the result to everyone subscribed.
+///
+/// Only the files that changed are read and parsed: a `stat` per file says which (see
+/// [`Parts`]), the others keep the parse they already have, and the new dictionary is those
+/// parts layered again.
 fn refresh(key: &Key) {
+    let started = Instant::now();
     let files = expand(&key.roots, &key.cache_dir);
-    let sources = fingerprint(&files);
     let hub = hub();
-    let first_time = {
+    let (mut parts, built_from, first_time) = {
         let mut state = lock(&hub.state);
-        let Some(entry) = state.entries.get(key) else {
-            return;
-        };
-        let current = entry.latest.is_some() && entry.built_from == sources;
-        let first_time = entry.latest.is_none();
-        watch_roots(&mut state, key, &hub.jobs, &hub.interest);
-        drop(state);
-        if current {
+        if !state.entries.contains_key(key) {
             return;
         }
-        first_time
+        watch_roots(&mut state, key, &hub.jobs, &hub.interest);
+        let Some(entry) = state.entries.get_mut(key) else {
+            return;
+        };
+        let first_time = entry.latest.is_none();
+        if !first_time && entry.parts.is_current(&files) && entry.built_from == entry.parts.generation()
+        {
+            return;
+        }
+        let taken = (std::mem::take(&mut entry.parts), entry.built_from, first_time);
+        drop(state);
+        taken
     };
 
-    // Parsing a large dictionary takes a moment, so it happens with nothing locked
-    let (dict, problems) = Chain::load_cached_reporting(&files, &key.cache_dir, &key.layout);
-    if !problems.is_empty() && !first_time {
+    // Parsing a changed dictionary file takes a moment, so it happens with nothing locked
+    let report = parts.refresh(&files, &key.cache_dir, &key.layout);
+    let up_to_date = !first_time && built_from == parts.generation();
+    let keep_old = !first_time && !report.problems.is_empty();
+    if keep_old {
         warn!(
             "steno dictionaries not reloaded, keeping the ones in use: {}",
-            problems.join("; ")
+            report.problems.join("; ")
         );
-        return;
     }
-    info!(
-        "steno dictionaries {}: {} entries from {} files",
-        if first_time { "loaded" } else { "reloaded" },
-        dict.len(),
-        files.len()
-    );
-    let dict = Arc::new(dict);
+    let dict = (!up_to_date && !keep_old)
+        .then(|| Arc::new(Chain::from_parts(&files, &parts, &key.cache_dir, &key.layout)));
+    if let Some(dict) = &dict {
+        info!(
+            "steno dictionaries {}: {} entries from {} files in {:?}",
+            if first_time { "loaded" } else { "reloaded" },
+            dict.len(),
+            files.len(),
+            started.elapsed()
+        );
+    }
+    let generation = parts.generation();
     let mut state = lock(&hub.state);
     let Some(entry) = state.entries.get_mut(key) else {
         return;
     };
+    entry.parts = parts;
+    let Some(dict) = dict else {
+        return;
+    };
     entry.latest = Some(Arc::clone(&dict));
-    entry.built_from = sources;
+    entry.built_from = generation;
     entry
         .subscribers
         .retain(|subscriber| subscriber.send(Arc::clone(&dict)).is_ok());

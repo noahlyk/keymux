@@ -542,8 +542,9 @@ To add your own, drop a file in; to switch one off, start its name with `disable
 ├── disabled_plover/        switched off: anything starting with `disabled` is skipped
 ```
 
-The parsed copies keymux keeps for fast startup live in `~/.cache/keymux/steno/`, one file per
-set of dictionaries, written over in place. They are safe to delete; they are made again.
+The parsed copies keymux keeps for fast startup live in `~/.cache/keymux/steno/parts/`, one per
+dictionary file, written over in place when that file changes. They are safe to delete; they are
+made again.
 
 **Priority.** When two entries have the same stroke, the one from the earlier file wins. A folder
 is one unit: it ranks among its neighbours by its own name, everything inside it stays together
@@ -582,6 +583,14 @@ changes (saved, added, renamed, removed), it rebuilds the dictionary on a backgr
 swaps it in between two strokes, without leaving steno mode. Watching costs no CPU while
 nothing changes. If a file is saved half-finished and doesn't parse, the dictionary in use
 stays until the next save fixes it.
+
+**Per file.** Each file is parsed on its own and kept, so a reload parses only the files that
+changed and layers them again with the ones that did not. Whether a file changed is its size and
+modification time, with nothing read; a file saved again with the same contents is read and
+hashed but rebuilds nothing. A big theory can therefore be split into several smaller files (lyk
+writes `02-lyk-primary.json`, `02-lyk-extras.json`, ...) and an edit to one of them reloads
+that one. The first start, or a start after a restart, restores each file from its own cached
+copy when its contents are unchanged.
 
 `keymux steno theory <name>` downloads a theory into its own folder the first time, and after
 that only renames folders, so switching is instant and never deletes anything. If you are on an

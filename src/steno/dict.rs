@@ -12,17 +12,18 @@
 use super::formatter::plain_text;
 use super::layout::Layout;
 use super::orthography::{Orthography, WORDLIST_FILE};
+use super::parts::Parts;
 use anyhow::{Context, Result};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::hash_map::Entry;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use tracing::{info, warn};
 
 /// Bumped when the cached layout changes, so older cache files are ignored.
-const CACHE_LAYOUT: u32 = 3;
+const CACHE_LAYOUT: u32 = 4;
 
 /// The value that deletes an entry of a dictionary after this one.
 pub const DELETED: &str = "{plover:deleted}";
@@ -33,8 +34,9 @@ pub const fn is_deleted(translation: &str) -> bool {
     translation.eq_ignore_ascii_case(DELETED)
 }
 
+/// What one file holds, parsed: the unit that is cached and shared.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct Dictionary {
+struct Table {
     /// Each outline and its translation as written, deletions included
     entries: FxHashMap<Vec<u32>, String>,
     /// Stroke sequences grouped by the text they type, for reverse lookup
@@ -44,39 +46,41 @@ pub struct Dictionary {
     orthography: Orthography,
 }
 
+/// Dictionary entries, as one or more layers of parsed tables, highest priority first.
+///
+/// One file parsed on its own is one table. A dictionary made of many files
+/// ([`Self::layered`]) is those tables side by side, shared and not copied, so putting a changed
+/// file's new table in place of its old one costs nothing in proportion to the other files. An
+/// outline means what the first table that has it says, a deletion included.
+#[derive(Debug, Clone)]
+pub struct Dictionary {
+    tables: Vec<Arc<Table>>,
+}
+
+impl Default for Dictionary {
+    fn default() -> Self {
+        Self {
+            tables: vec![Arc::new(Table::default())],
+        }
+    }
+}
+
 /// The file a cache was built from: its path, and the sha256 of its contents when it was read.
 pub type Source = (String, String);
-
-/// The path and content hash of each file, which says whether a dictionary built from them
-/// is still current. A file that can't be read counts as `missing`.
-#[must_use]
-pub fn fingerprint(paths: &[impl AsRef<Path>]) -> Vec<Source> {
-    paths
-        .iter()
-        .map(|path| {
-            let path = path.as_ref();
-            let digest = fs::read(path).map_or_else(
-                |_| "missing".to_string(),
-                |bytes| format!("{:x}", Sha256::digest(&bytes)),
-            );
-            (path.display().to_string(), digest)
-        })
-        .collect()
-}
 
 /// What a cache file holds. Written borrowed, read owned.
 #[derive(Deserialize)]
 struct CacheIn {
     version: String,
     sources: Vec<Source>,
-    dict: Dictionary,
+    dict: Table,
 }
 
 #[derive(Serialize)]
 struct CacheOut<'a> {
     version: &'a str,
     sources: &'a [Source],
-    dict: &'a Dictionary,
+    dict: &'a Table,
 }
 
 /// Changes whenever the cache layout, the parser, or the steno [`Layout`] the files are parsed
@@ -146,19 +150,25 @@ impl Dictionary {
     /// Merge one file: a JSON or RTF/CRE dictionary, or the orthography word list.
     pub fn merge_file(&mut self, path: &Path, layout: &Layout) -> Result<MergeStats> {
         let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        self.merge_bytes(path, &bytes, layout)
+    }
+
+    /// Like [`Self::merge_file`], for the contents of `path` already read.
+    pub fn merge_bytes(&mut self, path: &Path, bytes: &[u8], layout: &Layout) -> Result<MergeStats> {
         let name = path.file_name().and_then(|n| n.to_str());
         if name == Some(WORDLIST_FILE) {
-            let words = Orthography::from_wordlist(&decode_text(&bytes));
+            let words = Orthography::from_wordlist(&decode_text(bytes));
             // The first word list found is the one used
-            if !self.orthography.has_words() {
-                self.orthography = words;
+            if !self.orthography().has_words() {
+                self.own().orthography = words;
             }
             return Ok(MergeStats::default());
         }
         if has_extension(path, "rtf") {
-            return self.merge_rtf(&bytes, layout);
+            return self.merge_rtf(bytes, layout);
         }
-        self.merge_json(&decode_text(&bytes), layout)
+        self.merge_json(&decode_text(bytes), layout)
+            .with_context(|| path.display().to_string())
     }
 
     /// Merge one Plover JSON dictionary. Entries already present are kept.
@@ -204,28 +214,58 @@ impl Dictionary {
         Ok(stats)
     }
 
+    /// One dictionary out of several already-parsed ones, highest priority first: an outline
+    /// means what the first of them that has it says (a deletion included), and the first word
+    /// list found sets the orthography. Nothing is copied: the result shares the others' tables,
+    /// so a folder reloaded after one file changed costs that file, not all of them.
+    #[must_use]
+    pub fn layered<'a>(parts: impl IntoIterator<Item = &'a Self>) -> Self {
+        Self {
+            tables: parts
+                .into_iter()
+                .flat_map(|part| part.tables.iter().cloned())
+                .collect(),
+        }
+    }
+
+    /// The table new entries go into: the last, which is the only one a dictionary built entry
+    /// by entry has.
+    fn own(&mut self) -> &mut Table {
+        if self.tables.is_empty() {
+            self.tables.push(Arc::new(Table::default()));
+        }
+        let last = self.tables.len() - 1;
+        Arc::make_mut(&mut self.tables[last])
+    }
+
+    /// Whether any table has an entry (a deletion counts) for the outline.
+    fn has_entry(&self, strokes: &[u32]) -> bool {
+        self.tables.iter().any(|table| table.entries.contains_key(strokes))
+    }
+
     /// Add one entry by its outline bits directly, bypassing stroke-notation parsing - for a
     /// caller that already has `strokes`, such as one built with a theory-specific
     /// [`super::layout::Layout`] a plain dictionary file's text can't express on its own
     /// (`merge_json`/`merge_file` always parse against keymux's own default Plover layout).
     /// Unlike `merge_json`, an existing entry for the same outline is replaced, not kept.
     pub fn insert(&mut self, strokes: Vec<u32>, text: impl Into<String>) {
-        self.entries.remove(&strokes);
+        self.own().entries.remove(&strokes);
         self.add(strokes, text.into());
     }
 
     /// Add an entry unless an earlier dictionary already has one for the outline.
     fn add(&mut self, strokes: Vec<u32>, text: String) -> bool {
-        let Entry::Vacant(slot) = self.entries.entry(strokes.clone()) else {
+        if self.has_entry(&strokes) {
             return false;
-        };
-        self.max_len = self.max_len.max(strokes.len());
+        }
+        let own = self.own();
+        own.max_len = own.max_len.max(strokes.len());
         if !is_deleted(&text) {
             if let Some(typed) = plain_text(&text) {
-                self.by_text.entry(typed).or_default().push(strokes);
+                own.by_text.entry(typed).or_default().push(strokes.clone());
             }
         }
-        slot.insert(text);
+        own.entries.insert(strokes, text);
         true
     }
 
@@ -233,34 +273,53 @@ impl Dictionary {
     /// outline was deleted.
     #[must_use]
     pub fn lookup(&self, strokes: &[u32]) -> Option<&str> {
-        self.entries
-            .get(strokes)
+        self.tables
+            .iter()
+            .find_map(|table| table.entries.get(strokes))
             .map(String::as_str)
             .filter(|translation| !is_deleted(translation))
     }
 
     /// Use this orthography, as if its word list had been read.
     pub fn set_orthography(&mut self, orthography: Orthography) {
-        self.orthography = orthography;
+        self.own().orthography = orthography;
     }
 
-    /// How suffixes are spelled.
+    /// How suffixes are spelled: the first word list among the tables, else the first table's
+    /// plain rules.
     #[must_use]
-    pub const fn orthography(&self) -> &Orthography {
-        &self.orthography
+    pub fn orthography(&self) -> &Orthography {
+        static NONE: OnceLock<Orthography> = OnceLock::new();
+        self.tables
+            .iter()
+            .map(|table| &table.orthography)
+            .find(|orthography| orthography.has_words())
+            .or_else(|| self.tables.first().map(|table| &table.orthography))
+            .unwrap_or_else(|| NONE.get_or_init(Orthography::default))
     }
 
     /// The length in strokes of the longest outline.
     #[must_use]
-    pub const fn longest_key(&self) -> usize {
-        self.max_len
+    pub fn longest_key(&self) -> usize {
+        self.max_len()
     }
 
     /// Every stroke sequence whose translation is exactly `text`, ignoring the
     /// leading space that spacing adds. Case matters.
     #[must_use]
     pub fn strokes_for(&self, text: &str) -> Vec<Vec<u32>> {
-        let mut found = self.by_text.get(text).cloned().unwrap_or_default();
+        let mut found = Vec::new();
+        for (i, table) in self.tables.iter().enumerate() {
+            for strokes in table.by_text.get(text).into_iter().flatten() {
+                // An earlier table's entry for the outline, even a deletion, hides this one
+                let hidden = self.tables[..i]
+                    .iter()
+                    .any(|earlier| earlier.entries.contains_key(strokes));
+                if !hidden {
+                    found.push(strokes.clone());
+                }
+            }
+        }
         found.sort();
         found
     }
@@ -272,9 +331,10 @@ impl Dictionary {
     /// Scans every distinct translation, so keep `prefix` to a couple of characters or more.
     #[must_use]
     pub fn completions(&self, prefix: &str, limit: usize) -> Vec<&str> {
-        let mut found: Vec<&str> = self
-            .by_text
-            .keys()
+        let candidates: FxHashSet<&str> = self
+            .tables
+            .iter()
+            .flat_map(|table| table.by_text.keys())
             .map(String::as_str)
             .filter(|text| {
                 text.len() > prefix.len()
@@ -284,107 +344,103 @@ impl Dictionary {
                         .all(|c| c.is_alphanumeric() || c == '\'' || c == '-')
             })
             .collect();
+        let mut found: Vec<&str> = candidates.into_iter().collect();
         found.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+        // A word whose every outline was deleted or replaced by a later dictionary is not a word
+        found.retain(|text| !self.strokes_for(text).is_empty());
         found.truncate(limit);
         found
     }
 
-    /// Like `load`, but restores a binary copy from `cache_dir` when every file still has the
-    /// contents it had when the copy was made. Otherwise the JSON is parsed and a new copy saved.
+    /// Like `load`, but each file is restored from its own binary copy in `cache_dir` while its
+    /// contents are what they were when the copy was made, and parsed (and the copy renewed)
+    /// only otherwise: see [`Parts`].
     #[must_use]
     pub fn load_cached(paths: &[impl AsRef<Path>], cache_dir: &Path, layout: &Layout) -> Self {
-        let names: Vec<String> = paths
-            .iter()
-            .map(|path| path.as_ref().display().to_string())
-            .collect();
-        Self::load_cached_reporting(
-            paths,
-            &fingerprint(paths),
-            cache_dir,
-            &cache_name(&names),
-            layout,
-        )
-        .0
-    }
-
-    /// Like `load_cached`, for files whose `fingerprint` is already known, kept under `name`
-    /// (see [`cache_name`]). Also returns what went wrong with each file that couldn't be
-    /// read. Nothing is cached then, so a file caught mid-save is never remembered as the
-    /// real thing.
-    #[must_use]
-    pub fn load_cached_reporting(
-        paths: &[impl AsRef<Path>],
-        sources: &[Source],
-        cache_dir: &Path,
-        name: &str,
-        layout: &Layout,
-    ) -> (Self, Vec<String>) {
-        let file = cache_dir.join(format!("{name}.bin"));
-        if let Some(dict) = read_cache(&file, sources, layout) {
-            info!("steno dictionaries restored from {}", file.display());
-            return (dict, Vec::new());
-        }
-        let (dict, problems) = Self::load_reporting(paths, layout);
-        if problems.is_empty() {
-            write_cache(&file, sources, &dict, layout);
-        }
-        (dict, problems)
+        let files: Vec<PathBuf> = paths.iter().map(|path| path.as_ref().to_path_buf()).collect();
+        let mut parts = Parts::default();
+        parts.refresh(&files, cache_dir, layout);
+        parts.layered(&files)
     }
 
     /// Every entry that is in force, for listing and search.
     pub fn iter(&self) -> impl Iterator<Item = (&Vec<u32>, &String)> {
-        self.entries
-            .iter()
-            .filter(|(_, translation)| !is_deleted(translation))
+        self.tables.iter().enumerate().flat_map(move |(i, table)| {
+            table.entries.iter().filter(move |(strokes, translation)| {
+                !is_deleted(translation)
+                    && !self.tables[..i]
+                        .iter()
+                        .any(|earlier| earlier.entries.contains_key(*strokes))
+            })
+        })
     }
 
     /// Length in strokes of the longest entry.
     #[must_use]
-    pub const fn max_len(&self) -> usize {
-        self.max_len
+    pub fn max_len(&self) -> usize {
+        self.tables.iter().map(|table| table.max_len).max().unwrap_or(0)
     }
 
+    /// How many outlines have an entry (deletions included).
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.len()
+        match self.tables.as_slice() {
+            [] => 0,
+            [only] => only.entries.len(),
+            tables => tables
+                .iter()
+                .enumerate()
+                .map(|(i, table)| {
+                    table
+                        .entries
+                        .keys()
+                        .filter(|strokes| {
+                            !tables[..i].iter().any(|earlier| earlier.entries.contains_key(*strokes))
+                        })
+                        .count()
+                })
+                .sum(),
+        }
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.tables.iter().all(|table| table.entries.is_empty())
     }
 }
 
-/// The name of the cache file for a dictionary made from `sources`.
+/// The name of the cache file for the dictionary file at `path`.
 ///
-/// That is the folders and files it was asked for, not the files found inside them. Adding,
-/// removing or editing a dictionary then writes over the one cache file instead of leaving a
-/// copy of every version behind.
+/// One copy per file, named for the place it was read from, so editing a file writes over its own
+/// copy instead of leaving one of every version behind.
 #[must_use]
-pub fn cache_name(sources: &[String]) -> String {
+pub fn cache_name(path: &Path) -> String {
     let mut hasher = Sha256::new();
-    for source in sources {
-        hasher.update(source.as_bytes());
-        hasher.update(b"\n");
-    }
+    hasher.update(path.display().to_string().as_bytes());
     format!("{:x}", hasher.finalize())[..16].to_string()
 }
 
 /// The cached dictionary, if it was built from files with these exact contents.
-fn read_cache(file: &Path, sources: &[Source], layout: &Layout) -> Option<Dictionary> {
+pub(super) fn read_cache(file: &Path, sources: &[Source], layout: &Layout) -> Option<Dictionary> {
     let bytes = fs::read(file).ok()?;
     let cache: CacheIn = bincode::deserialize(&bytes).ok()?;
-    (cache.version == cache_version(layout) && cache.sources == sources).then_some(cache.dict)
+    (cache.version == cache_version(layout) && cache.sources == sources).then(|| Dictionary {
+        tables: vec![Arc::new(cache.dict)],
+    })
 }
 
 /// Save the dictionary for these files. A cache that can't be written only costs time next
 /// start, so failures are logged and not returned.
-fn write_cache(file: &Path, sources: &[Source], dict: &Dictionary, layout: &Layout) {
+pub(super) fn write_cache(file: &Path, sources: &[Source], dict: &Dictionary, layout: &Layout) {
+    // Only a dictionary read from one file is ever cached, and that is one table
+    let [table] = dict.tables.as_slice() else {
+        return;
+    };
     let version = cache_version(layout);
     let bytes = match bincode::serialize(&CacheOut {
         version: &version,
         sources,
-        dict,
+        dict: table,
     }) {
         Ok(bytes) => bytes,
         Err(e) => return warn!("steno cache not saved: {e}"),
@@ -402,16 +458,23 @@ fn write_cache(file: &Path, sources: &[Source], dict: &Dictionary, layout: &Layo
     if let Some(dir) = file.parent() {
         super::setup::hand_to_owner_of_parent(dir);
         super::setup::hand_to_owner_of_parent(file);
-        prune_cache(dir, file);
     }
 }
 
-/// Copies kept in a cache folder, newest first. Each set of dictionary files has its own copy,
-/// so a few cover every layer; beyond that, they are copies of sets no longer in use.
-const CACHE_KEPT: usize = 6;
+/// Copies kept in a cache folder, newest first. Each dictionary file has its own copy; beyond
+/// this many, they are copies of files no longer in use.
+const CACHE_KEPT: usize = 512;
 
-/// Delete all but the newest `CACHE_KEPT` copies, never the one just written (`keep`).
-fn prune_cache(dir: &Path, keep: &Path) {
+/// Delete the oldest copies in `dir` beyond `CACHE_KEPT`, never one named in `keep`, and any
+/// whole-set copy (`*.bin` directly in `legacy`) an older keymux left, which nothing reads now.
+pub(super) fn prune_cache(dir: &Path, keep: &[PathBuf], legacy: &Path) {
+    if let Ok(entries) = fs::read_dir(legacy) {
+        for entry in entries.flatten() {
+            if entry.path().extension().is_some_and(|ext| ext == "bin") {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -422,7 +485,7 @@ fn prune_cache(dir: &Path, keep: &Path) {
         .collect();
     copies.sort_by_key(|copy| std::cmp::Reverse(copy.0));
     for (_, path) in copies.into_iter().skip(CACHE_KEPT) {
-        if path != keep {
+        if !keep.contains(&path) {
             let _ = fs::remove_file(path);
         }
     }
@@ -538,8 +601,9 @@ mod tests {
         (dir.clone(), file, dir.join("cache"))
     }
 
+    /// Copies in the cache: one per dictionary file.
     fn cache_files(cache: &Path) -> usize {
-        fs::read_dir(cache).map_or(0, |dir| dir.count())
+        fs::read_dir(cache.join("parts")).map_or(0, |dir| dir.count())
     }
 
     #[test]
@@ -558,7 +622,7 @@ mod tests {
             "the cache is reused, not duplicated"
         );
 
-        // Changed file: the fingerprint no longer matches, so the JSON is read again
+        // Changed file: its contents no longer match, so the JSON is read again
         fs::write(&file, r#"{"KAT": "dog"}"#).unwrap();
         let changed = Dictionary::load_cached(&[&file], &cache, &Layout::plover());
         assert_eq!(changed.strokes_for("dog"), vec![vec![KAT]]);
@@ -572,15 +636,11 @@ mod tests {
     }
 
     #[test]
-    fn adding_and_removing_dictionaries_rewrites_one_cache_file_instead_of_piling_up() {
+    fn each_file_has_one_cache_copy_however_the_set_of_files_changes() {
         let (dir, file, cache) = cache_fixture("one-file", r#"{"KAT": "cat"}"#);
         let extra = dir.join("extra.json");
         fs::write(&extra, r#"{"TKOG": "dog"}"#).unwrap();
-        let asked = cache_name(&[dir.display().to_string()]);
-        let load = |files: &[&Path]| {
-            Dictionary::load_cached_reporting(files, &fingerprint(files), &cache, &asked, &Layout::plover()).0
-        };
-        // The same folder, as its files come and go: always the one cache file
+        let load = |files: &[&Path]| Dictionary::load_cached(files, &cache, &Layout::plover());
         let _ = load(&[&file]);
         let both = load(&[&file, &extra]);
         assert_eq!(
@@ -589,7 +649,7 @@ mod tests {
         );
         let _ = load(&[&extra]);
         let _ = load(&[&file, &extra]);
-        assert_eq!(cache_files(&cache), 1);
+        assert_eq!(cache_files(&cache), 2, "a copy per file, not per combination");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -597,7 +657,7 @@ mod tests {
     fn a_corrupt_cache_is_replaced_by_parsing_the_json() {
         let (dir, file, cache) = cache_fixture("corrupt", r#"{"KAT": "cat"}"#);
         let _ = Dictionary::load_cached(&[&file], &cache, &Layout::plover());
-        for entry in fs::read_dir(&cache).unwrap() {
+        for entry in fs::read_dir(cache.join("parts")).unwrap() {
             fs::write(entry.unwrap().path(), b"not a dictionary").unwrap();
         }
         let dict = Dictionary::load_cached(&[&file], &cache, &Layout::plover());

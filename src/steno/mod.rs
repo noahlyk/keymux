@@ -21,6 +21,7 @@ pub mod meta;
 pub mod numbers;
 pub mod orthography;
 pub mod overlay;
+pub mod parts;
 pub mod plugin;
 pub mod reverse;
 pub mod rtf;
