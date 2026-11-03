@@ -546,6 +546,43 @@ fn is_command_only(output: Option<&StenoOutput>) -> bool {
     }
 }
 
+#[cfg(test)]
+impl StenoEngine {
+    /// An engine over `dict`, keys from the qwerty preset with `overrides`, writing no tape:
+    /// for a test to drive key by key.
+    pub(crate) fn for_tests(
+        dict: Dictionary,
+        overrides: &HashMap<String, crate::config::KeyAction>,
+    ) -> Self {
+        use super::layout::build_key_map;
+        Self {
+            keys: build_key_map(&preset("qwerty").unwrap(), overrides).unwrap(),
+            held_keys: HashSet::new(),
+            chord: ChordState::new(Duration::from_secs(1)),
+            timing: Timing::default(),
+            last: None,
+            arming: None,
+            repeating: None,
+            translator: Translator::new(dict),
+            updates: None,
+            loading: false,
+            backlog: Vec::new(),
+            tape: None,
+            disabled_in_game_mode: true,
+            hub: OverlayHub::global(),
+            lookup: None,
+            leave_requested: false,
+            fresh_on_enter: false,
+            label: String::new(),
+        }
+    }
+
+    /// The stroke bits each physical key presses.
+    pub(crate) fn key_map(&self) -> &HashMap<KeyCode, u32> {
+        &self.keys
+    }
+}
+
 /// Several outputs combined into one, so a backlog replays as a single edit. Typing that a later
 /// output deletes again is never sent.
 #[derive(Default)]
@@ -634,7 +671,6 @@ pub fn resolve_dictionary_path(raw: &str, config_dir: &Path, home: Option<&Path>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::layout::build_key_map;
 
     fn engine_with_dict(json: &str) -> StenoEngine {
         engine_with_dict_and_overrides(json, &HashMap::new())
@@ -646,26 +682,7 @@ mod tests {
     ) -> StenoEngine {
         let mut dict = Dictionary::default();
         dict.merge_json(json, &Layout::plover()).unwrap();
-        StenoEngine {
-            keys: build_key_map(&preset("qwerty").unwrap(), overrides).unwrap(),
-            held_keys: HashSet::new(),
-            chord: ChordState::new(Duration::from_secs(1)),
-            timing: Timing::default(),
-            last: None,
-            arming: None,
-            repeating: None,
-            translator: Translator::new(dict),
-            updates: None,
-            loading: false,
-            backlog: Vec::new(),
-            tape: None,
-            disabled_in_game_mode: true,
-            hub: OverlayHub::global(),
-            lookup: None,
-            leave_requested: false,
-            fresh_on_enter: false,
-            label: String::new(),
-        }
+        StenoEngine::for_tests(dict, overrides)
     }
 
     fn key_for(engine: &StenoEngine, bit: u32) -> KeyCode {

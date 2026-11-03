@@ -36,5 +36,7 @@ pub mod typing;
 mod lapwing_tests;
 #[cfg(test)]
 mod plover_tests;
+#[cfg(test)]
+mod soak_tests;
 
 pub use engine::StenoEngine;
