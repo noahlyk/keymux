@@ -15,7 +15,7 @@ fn is_word(c: char) -> bool {
 
 /// Parse a combo into key events, `(key, true)` to press and `(key, false)` to release, with
 /// `key_of` turning a lowercase name into a key. Plover's parser, with its errors as text.
-pub fn parse_key_combo<K: PartialEq + Clone>(
+fn parse_key_combo<K: PartialEq + Clone>(
     combo: &str,
     key_of: impl Fn(&str) -> Option<K>,
 ) -> Result<Vec<(K, bool)>, String> {
@@ -73,7 +73,7 @@ pub fn parse_key_combo<K: PartialEq + Clone>(
 
 /// The key a name stands for on a US keyboard, if keymux can press it.
 #[must_use]
-pub fn key_for_name(name: &str) -> Option<KeyCode> {
+fn key_for_name(name: &str) -> Option<KeyCode> {
     use KeyCode as K;
     let letters = [
         K::KC_A,

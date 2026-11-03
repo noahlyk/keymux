@@ -26,7 +26,7 @@ fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> 
 /// Which meta `meta` (the text between the braces) is, and its argument. `None` when it is
 /// nothing Plover knows, which does nothing.
 #[must_use]
-pub fn parse_meta(meta: &str) -> Option<Meta<'_>> {
+fn parse_meta(meta: &str) -> Option<Meta<'_>> {
     let found = |name: &str, param: &'static str| {
         Some(Meta {
             name: name.to_string(),

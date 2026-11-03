@@ -312,11 +312,6 @@ impl Translator {
         Arc::clone(&self.shared)
     }
 
-    /// Which set of dictionaries this translator stands for.
-    pub const fn set_machine(&mut self, machine: MachineId) {
-        self.machine = machine;
-    }
-
     /// A translator over the same dictionary with nothing typed, and a history of its own. Cheap:
     /// the dictionary is shared.
     #[must_use]
@@ -327,11 +322,6 @@ impl Translator {
     /// Forget what was typed, as when the layer is entered: the next word starts a sentence.
     pub fn start_fresh(&mut self) {
         journal::lock(&self.shared).fence();
-    }
-
-    /// Swap in the dictionary. What was typed stays undoable.
-    pub fn set_dictionary(&mut self, dict: Dictionary) {
-        self.set_shared(Arc::new(Chain::from(dict)));
     }
 
     /// Swap in a dictionary chain that other translators share. What is already typed is
@@ -357,12 +347,6 @@ impl Translator {
     #[must_use]
     pub fn dictionary(&self) -> &Dictionary {
         self.dict.as_dictionary()
-    }
-
-    /// Whether any dictionary entries loaded.
-    #[must_use]
-    pub fn has_dictionary(&self) -> bool {
-        !self.dict.is_empty()
     }
 
     /// The dictionary, to look things up on another thread. `None` when nothing loaded.
@@ -515,21 +499,29 @@ impl Translator {
         }
         self.hist.redo.clear();
         // A stroke a theory's own plugin treats as a continuation is never a word by itself;
-        // it is only ever looked up glued onto some of what came before, in
-        // `find_longest_match` below.
+        // it is only ever looked up glued onto some of what came before.
         let joined = self.dict.joins(stroke);
+        let window = self.history_window(max_len, joined);
+        let outlines = Self::outlines(window, stroke, joined);
         let translation = self
-            // No prefix lookups (the stroke alone is already looked up)
-            .find_longest_match(2, max_len, stroke, &[])
+            // The longest outline ending in this stroke, two strokes or more (the stroke alone
+            // is already looked up)
+            .longest_match(window, &outlines, 2, &[])
             // The stroke alone, if it is mapped
             .or_else(|| {
                 (!joined)
                     .then(|| mapping.map(|m| Translation::new(vec![stroke], Some(m))))
                     .flatten()
             })
-            // No direct match: try with suffixes (a plugin at its own place in the chain
-            // already had its chance, in `mapping` above and in each attempt here)
-            .or_else(|| self.find_longest_match(1, max_len, stroke, &SUFFIX_KEYS))
+            // No direct match: the same outlines with a suffix key folded off the stroke, as
+            // Plover tries them only after every plain outline failed (a plugin at its own
+            // place in the chain already had its chance, in `mapping` and in each attempt)
+            .or_else(|| {
+                let suffixes = self.involved_suffixes(stroke, &SUFFIX_KEYS);
+                (!suffixes.is_empty())
+                    .then(|| self.longest_match(window, &outlines, 1, &suffixes))
+                    .flatten()
+            })
             // Nothing: the stroke as its keys
             .unwrap_or_else(|| Translation::new(vec![stroke], None));
         if translation.english.is_none() {
@@ -865,8 +857,7 @@ impl Translator {
         if translation.origin.is_stroke() {
             translation.machine = self.machine;
         }
-        let replaced = translation.replaced.clone();
-        self.undo_all(&replaced);
+        self.undo_all(&translation.replaced);
         self.do_all(vec![translation]);
     }
 
@@ -895,36 +886,16 @@ impl Translator {
         self.hist.state.translations.extend(translations);
     }
 
-    /// Find the translation with the longest outline that ends in `stroke`: the strokes of the
-    /// last translations, as many as fit, plus this one. The new translation replaces the ones it
-    /// covers. With `suffix_keys`, the stroke is looked up without one of them folded in.
-    fn find_longest_match(
-        &self,
-        min_len: usize,
-        max_len: usize,
-        stroke: u32,
-        suffix_keys: &[u32],
-    ) -> Option<Translation> {
-        let mut suffixes = Vec::new();
-        if !suffix_keys.is_empty() {
-            suffixes = self.involved_suffixes(stroke, suffix_keys);
-            if suffixes.is_empty() {
-                return None;
-            }
-        }
-        // A stroke a theory's own plugin treats as a continuation declares itself one outright,
-        // so it is never tried on its own (`i == translations.len()`, no history involved):
-        // doing that would let it be mistaken for a fresh word the moment nothing glues onto it
-        // matches.
-        let joined = self.dict.joins(stroke);
-        // How much of the history can be involved. A dictionary's longest real key bounds an
-        // ordinary search for an accidental multi-stroke match, but a join-key run is not
-        // accidental: the keyboard already declared it one continuing word, so it keeps growing
-        // for as long as the keyboard says so, not just until it would be as long as the
-        // dictionary's longest brief.
+    /// The last translations a new stroke may make a longer outline with, oldest first. A
+    /// dictionary's longest real key bounds an ordinary search for an accidental multi-stroke
+    /// match, but a join-key run is not accidental: the keyboard already declared it one
+    /// continuing word, so it keeps growing for as long as the keyboard says so, not just until
+    /// it would be as long as the dictionary's longest brief.
+    fn history_window(&self, max_len: usize, joined: bool) -> &[Translation] {
+        let translations = &self.hist.state.translations;
         let mut num_strokes = 1;
         let mut count = 0;
-        for t in self.hist.state.translations.iter().rev() {
+        for t in translations.iter().rev() {
             // Outlines are written for one set of dictionaries: strokes made by another, or text
             // typed by hand, end the run
             if !t.origin.is_stroke() || t.machine != self.machine {
@@ -936,31 +907,48 @@ impl Translator {
             }
             count += 1;
         }
-        let translations =
-            &self.hist.state.translations[self.hist.state.translations.len() - count..];
-        // The new stroke makes a new translation, or replaces earlier ones by matching a longer one
-        for i in 0..=translations.len() {
-            if joined && i == translations.len() {
-                continue;
-            }
-            let replaced = &translations[i..];
-            let mut strokes: Strokes = replaced
-                .iter()
-                .flat_map(|t| t.strokes.iter().copied())
-                .collect();
-            strokes.push(stroke);
-            if strokes.len() < min_len {
-                continue;
-            }
-            if let Some(mapping) =
-                self.lookup_with_prefix(max_len, &translations[..i], &strokes, &suffixes)
-            {
-                let mut translation = Translation::new(strokes.into_vec(), Some(mapping));
-                translation.replaced = replaced.to_vec();
-                return Some(translation);
-            }
-        }
-        None
+        &translations[translations.len() - count..]
+    }
+
+    /// Every outline ending in `stroke` that the window allows, longest first: the strokes of
+    /// the window from each translation on, plus this one, with the index it starts at. A
+    /// stroke a theory's own plugin treats as a continuation declares itself one outright, so
+    /// it is never tried on its own: doing that would let it be mistaken for a fresh word the
+    /// moment nothing glues onto it matches.
+    fn outlines(window: &[Translation], stroke: u32, joined: bool) -> Vec<(usize, Strokes)> {
+        let end = window.len() + usize::from(!joined);
+        (0..end)
+            .map(|i| {
+                let mut strokes: Strokes = window[i..]
+                    .iter()
+                    .flat_map(|t| t.strokes.iter().copied())
+                    .collect();
+                strokes.push(stroke);
+                (i, strokes)
+            })
+            .collect()
+    }
+
+    /// The translation of the first of `outlines` that is in the dictionary, at least `min_len`
+    /// strokes long. It replaces the translations of the window it covers. With `suffixes`, each
+    /// outline is looked up with one of them folded off its last stroke.
+    fn longest_match(
+        &self,
+        window: &[Translation],
+        outlines: &[(usize, Strokes)],
+        min_len: usize,
+        suffixes: &[(u32, String)],
+    ) -> Option<Translation> {
+        let max_len = self.dict.longest_key();
+        outlines
+            .iter()
+            .filter(|(_, strokes)| strokes.len() >= min_len)
+            .find_map(|(i, strokes)| {
+                let mapping = self.lookup_with_prefix(max_len, &window[..*i], strokes, suffixes)?;
+                let mut translation = Translation::new(strokes.to_vec(), Some(mapping));
+                translation.replaced = window[*i..].to_vec();
+                Some(translation)
+            })
     }
 
     fn lookup_strokes(&self, strokes: &[u32]) -> Option<String> {
@@ -1012,16 +1000,14 @@ impl Translator {
             .is_none_or(|action| action.effective().word_is_finished)
     }
 
-    /// Look up `strokes`, first as the start of a word (with the empty stroke in front) if the
-    /// word before is finished, then as they are.
     /// Whether `strokes` is a run the keyboard itself declared one word: more than one stroke,
     /// every one after the first answering `true` to the chain's [`super::plugin::Chain::joins`].
-    /// A dictionary's longest real key says nothing about how long this can run, since nothing
-    /// here was an accidental match to begin with.
     fn is_join_continuation(&self, strokes: &[u32]) -> bool {
         matches!(strokes, [_, rest @ ..] if !rest.is_empty() && rest.iter().all(|&s| self.dict.joins(s)))
     }
 
+    /// Look up `strokes`, first as the start of a word (with the empty stroke in front) if the
+    /// word before is finished, then as they are.
     fn lookup_with_prefix(
         &self,
         max_len: usize,

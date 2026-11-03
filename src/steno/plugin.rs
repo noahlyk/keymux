@@ -330,21 +330,9 @@ impl Chain {
     /// all-missing dictionary is.
     #[must_use]
     pub fn load_cached(files: &[PathBuf], cache_dir: &Path, layout: &Layout) -> Self {
-        Self::load_cached_reporting(files, cache_dir, layout).0
-    }
-
-    /// Like [`Self::load_cached`], and also returns what went wrong with any dictionary file
-    /// that was skipped (a plugin that fails is only ever logged, never reported: unlike a
-    /// malformed dictionary, there is no older, still-good copy of it to protect).
-    #[must_use]
-    pub fn load_cached_reporting(
-        files: &[PathBuf],
-        cache_dir: &Path,
-        layout: &Layout,
-    ) -> (Self, Vec<String>) {
         let mut parts = Parts::default();
-        let refresh = parts.refresh(files, cache_dir, layout);
-        (Self::from_parts(files, &parts, cache_dir, layout), refresh.problems)
+        parts.refresh(files, cache_dir, layout);
+        Self::from_parts(files, &parts, cache_dir, layout)
     }
 
     /// The chain `files` make, out of `parts` already brought up to date with them: layered
@@ -469,15 +457,6 @@ impl Chain {
     #[must_use]
     pub fn strokes_for(&self, text: &str) -> Vec<Vec<u32>> {
         self.dict.strokes_for(text)
-    }
-
-    #[must_use]
-    pub fn completions(&self, prefix: &str, limit: usize) -> Vec<&str> {
-        self.dict.completions(prefix, limit)
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&Vec<u32>, &String)> {
-        self.dict.iter()
     }
 
     #[must_use]

@@ -147,7 +147,7 @@ fn get_meta(atom: &str) -> Option<&str> {
 
 /// The actions for a translation: a word, or `{...}` operators, or a mix.
 #[must_use]
-pub fn translation_to_actions(translation: &str, ctx: &mut Context) -> Vec<Action> {
+fn translation_to_actions(translation: &str, ctx: &mut Context) -> Vec<Action> {
     // A translation of nothing but digits is glued to the digits next to it
     let atoms: Vec<String> = if is_digits(translation) {
         vec![format!("{{&{translation}}}")]
@@ -175,7 +175,7 @@ pub fn translation_to_actions(translation: &str, ctx: &mut Context) -> Vec<Actio
 /// The actions for a stroke that has no translation. `rtfcre` is the stroke as Plover writes it
 /// and `shown` how it is typed. A stroke of only digits is a number, glued to its neighbours.
 #[must_use]
-pub fn raw_to_actions(rtfcre: &str, shown: &str, ctx: &mut Context) -> Vec<Action> {
+fn raw_to_actions(rtfcre: &str, shown: &str, ctx: &mut Context) -> Vec<Action> {
     let no_dash = rtfcre.replacen('-', "", 1);
     if is_digits(&no_dash) {
         return translation_to_actions(&no_dash, ctx);

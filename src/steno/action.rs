@@ -282,7 +282,7 @@ pub fn is_digits(s: &str) -> bool {
 
 /// Capitalize the first letter of `s`: `foo bar` is `Foo bar` and `STUFF` stays as it is.
 #[must_use]
-pub fn capitalize_first_word(s: &str) -> String {
+fn capitalize_first_word(s: &str) -> String {
     let mut chars = s.chars();
     chars.next().map_or_else(String::new, |first| {
         let mut out: String = first.to_uppercase().collect();
@@ -293,7 +293,7 @@ pub fn capitalize_first_word(s: &str) -> String {
 
 /// Lowercase the first letter of `s`.
 #[must_use]
-pub fn lower_first_character(s: &str) -> String {
+fn lower_first_character(s: &str) -> String {
     let mut chars = s.chars();
     chars.next().map_or_else(String::new, |first| {
         let mut out: String = first.to_lowercase().collect();
@@ -314,7 +314,7 @@ pub fn upper_first_word(s: &str) -> String {
 /// Capitalize each word of `s`, lowercasing the rest of it: `O'Something STUFF` is
 /// `O'something Stuff`. Python's `string.capwords(s, " ")`.
 #[must_use]
-pub fn capitalize_all_words(s: &str) -> String {
+fn capitalize_all_words(s: &str) -> String {
     s.split(' ')
         .map(|word| {
             let mut chars = word.chars();
@@ -388,7 +388,7 @@ pub fn apply_mode(
 /// The last text fragments, last first, of the text the actions (last first) produced. A
 /// fragment is a run of non-whitespace followed by the whitespace after it.
 #[must_use]
-pub fn last_fragments(actions: &[&Action]) -> Vec<String> {
+fn last_fragments(actions: &[&Action]) -> Vec<String> {
     let mut found = Vec::new();
     let mut replace = 0usize;
     let mut next: Option<&Action> = None;

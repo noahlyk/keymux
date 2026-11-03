@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use tracing::{info, warn};
+use tracing::warn;
 
 /// Bumped when the cached layout changes, so older cache files are ignored.
 const CACHE_LAYOUT: u32 = 4;
@@ -29,8 +29,7 @@ const CACHE_LAYOUT: u32 = 4;
 pub const DELETED: &str = "{plover:deleted}";
 
 /// Whether a translation is the deletion marker, in any letter case.
-#[must_use]
-pub const fn is_deleted(translation: &str) -> bool {
+const fn is_deleted(translation: &str) -> bool {
     translation.eq_ignore_ascii_case(DELETED)
 }
 
@@ -105,8 +104,7 @@ pub struct MergeStats {
 }
 
 /// Read bytes as text the way Plover reads a dictionary: UTF-8, or failing that Latin-1.
-#[must_use]
-pub fn decode_text(bytes: &[u8]) -> String {
+fn decode_text(bytes: &[u8]) -> String {
     String::from_utf8(bytes.to_vec())
         .unwrap_or_else(|_| bytes.iter().map(|&b| char::from(b)).collect())
 }
@@ -117,34 +115,17 @@ fn has_extension(path: &Path, extension: &str) -> bool {
 }
 
 impl Dictionary {
-    /// Load dictionaries in priority order. Earlier files win on conflicts.
-    /// A file that can't be read is logged and skipped rather than failing the layer.
-    #[must_use]
-    pub fn load(paths: &[impl AsRef<Path>], layout: &Layout) -> Self {
-        Self::load_reporting(paths, layout).0
-    }
-
-    /// Like `load`, and also returns what went wrong with each file that was skipped.
-    #[must_use]
-    pub fn load_reporting(paths: &[impl AsRef<Path>], layout: &Layout) -> (Self, Vec<String>) {
+    /// Load files in priority order, earlier ones winning, skipping any that can't be read: for
+    /// tests over files written on the spot. The daemon loads through [`Parts`].
+    #[cfg(test)]
+    pub(crate) fn load(paths: &[impl AsRef<Path>], layout: &Layout) -> Self {
         let mut dict = Self::default();
-        let mut problems = Vec::new();
         for path in paths {
-            let path = path.as_ref();
-            match dict.merge_file(path, layout) {
-                Ok(stats) => info!(
-                    "steno dictionary {}: {} entries ({} invalid skipped)",
-                    path.display(),
-                    stats.loaded,
-                    stats.invalid
-                ),
-                Err(e) => {
-                    warn!("steno dictionary skipped: {e:#}");
-                    problems.push(format!("{e:#}"));
-                }
+            if let Err(e) = dict.merge_file(path.as_ref(), layout) {
+                warn!("steno dictionary skipped: {e:#}");
             }
         }
-        (dict, problems)
+        dict
     }
 
     /// Merge one file: a JSON or RTF/CRE dictionary, or the orthography word list.
@@ -301,7 +282,7 @@ impl Dictionary {
     /// The length in strokes of the longest outline.
     #[must_use]
     pub fn longest_key(&self) -> usize {
-        self.max_len()
+        self.tables.iter().map(|table| table.max_len).max().unwrap_or(0)
     }
 
     /// Every stroke sequence whose translation is exactly `text`, ignoring the
@@ -373,12 +354,6 @@ impl Dictionary {
                         .any(|earlier| earlier.entries.contains_key(*strokes))
             })
         })
-    }
-
-    /// Length in strokes of the longest entry.
-    #[must_use]
-    pub fn max_len(&self) -> usize {
-        self.tables.iter().map(|table| table.max_len).max().unwrap_or(0)
     }
 
     /// How many outlines have an entry (deletions included).
@@ -578,7 +553,7 @@ mod tests {
     fn longest_entry_length_is_tracked() {
         let mut dict = Dictionary::default();
         dict.merge_json(r#"{"KPA/TKAOEU": "example"}"#, &Layout::plover()).unwrap();
-        assert_eq!(dict.max_len(), 2);
+        assert_eq!(dict.longest_key(), 2);
     }
 
     #[test]
