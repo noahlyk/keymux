@@ -1,7 +1,8 @@
 use crate::keycode::KeyCode;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 /// Enable or Disable action for a keyboard entry
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1361,153 +1362,325 @@ impl Config {
         }
     }
 
-    /// Validate config without printing - returns errors as a Vec<String>
+    /// Check the config, rule by rule: everything the daemon's reload and `keymux validate`
+    /// agree on. `dictionaries` says where a steno layer's relative and `~/` dictionary paths
+    /// resolve from, so missing files can be warned about; without it that warning is skipped,
+    /// which is all the daemon needs since its reload only ever acts on errors.
+    #[must_use]
+    pub fn validate(&self, dictionaries: Option<DictionaryRoots<'_>>) -> Report {
+        Report {
+            checks: vec![
+                self.check_socd(),
+                self.check_timing(),
+                self.check_layer_references(),
+                self.check_steno_layers(dictionaries),
+                self.check_overlay(),
+            ],
+        }
+    }
+
+    /// The errors alone, as one `Err` naming them all: for the daemon's reload.
     pub fn validate_silent(&self) -> Result<()> {
-        use std::collections::{HashMap, HashSet};
+        self.validate(None).into_result()
+    }
 
-        let mut errors: Vec<String> = Vec::new();
+    /// Every remap table a key can be found in: the global ones, then each keyboard's own.
+    fn remap_tables(&self) -> impl Iterator<Item = &HashMap<KeyCode, KeyAction>> {
+        let global = std::iter::once(&self.remaps)
+            .chain(self.layers.values().map(|layer| &layer.remaps))
+            .chain(std::iter::once(&self.game_mode.remaps));
+        let per_keyboard = self.per_keyboard_overrides.values().flat_map(|keyboard| {
+            keyboard
+                .remaps
+                .iter()
+                .chain(keyboard.layers.iter().flat_map(|layers| layers.values().map(|layer| &layer.remaps)))
+                .chain(keyboard.game_mode.iter().map(|game| &game.remaps))
+        });
+        global.chain(per_keyboard)
+    }
 
-        // Validation 1: Check SOCD pairs are symmetric
-        let mut socd_map: HashMap<KeyCode, KeyCode> = HashMap::new();
-
-        let mut extract_socd = |remaps: &HashMap<KeyCode, KeyAction>| {
-            let mut pairs = Vec::new();
+    fn check_socd(&self) -> Check {
+        let mut check = Check::new("SOCD pairs");
+        let mut pairs: HashMap<KeyCode, KeyCode> = HashMap::new();
+        for remaps in self.remap_tables() {
             for (key, action) in remaps {
-                if let KeyAction::SOCD(this_action, opposing_actions) = action {
-                    // Extract KeyCode from Action (only validate Key actions)
-                    if let KeyAction::Key(this_key) = this_action.as_ref() {
-                        if key != this_key {
-                            errors.push(format!(
-                                "SOCD key mismatch: {:?} maps to SOCD({:?}, ...)",
-                                key, this_key
-                            ));
-                        }
-                        for opposing_action in opposing_actions {
-                            if let KeyAction::Key(opposing_key) = opposing_action.as_ref() {
-                                pairs.push((*this_key, *opposing_key));
-                            }
-                        }
+                let KeyAction::SOCD(this, opposing) = action else {
+                    continue;
+                };
+                let KeyAction::Key(this_key) = this.as_ref() else {
+                    continue;
+                };
+                if key != this_key {
+                    check.warnings.push(format!(
+                        "SOCD key mismatch: {key:?} maps to SOCD({this_key:?}, ...)"
+                    ));
+                }
+                for other in opposing {
+                    if let KeyAction::Key(other_key) = other.as_ref() {
+                        pairs.insert(*this_key, *other_key);
                     }
                 }
             }
-            pairs
-        };
-
-        for (key1, key2) in extract_socd(&self.remaps) {
-            socd_map.insert(key1, key2);
         }
-        for layer_config in self.layers.values() {
-            for (key1, key2) in extract_socd(&layer_config.remaps) {
-                socd_map.insert(key1, key2);
-            }
-        }
-        for (key1, key2) in extract_socd(&self.game_mode.remaps) {
-            socd_map.insert(key1, key2);
-        }
-
-        // Check symmetry
-        let mut socd_checked = HashSet::new();
-        for (key1, key2) in &socd_map {
-            if socd_checked.contains(key1) {
+        let mut sorted: Vec<(KeyCode, KeyCode)> = pairs.iter().map(|(&a, &b)| (a, b)).collect();
+        sorted.sort_by_key(|&(key, _)| key.code());
+        let mut checked = HashSet::new();
+        for (key, other) in sorted {
+            if checked.contains(&key) {
                 continue;
             }
-            if let Some(reverse) = socd_map.get(key2) {
-                if reverse != key1 {
-                    errors.push(format!(
-                        "SOCD pair asymmetric: {:?} → {:?}, but {:?} → {:?}",
-                        key1, key2, key2, reverse
-                    ));
+            match pairs.get(&other) {
+                Some(&back) => {
+                    if back != key {
+                        check.errors.push(format!(
+                            "SOCD pair asymmetric: {key:?} → {other:?}, but {other:?} → {back:?}"
+                        ));
+                    }
+                    checked.insert(key);
+                    checked.insert(other);
                 }
-                socd_checked.insert(*key1);
-                socd_checked.insert(*key2);
-            } else {
-                errors.push(format!(
-                    "SOCD missing reverse pair: {:?} → {:?}, but {:?} not defined",
-                    key1, key2, key2
+                None => check.errors.push(format!(
+                    "SOCD missing reverse pair: {key:?} → {other:?}, but {other:?} not defined"
+                )),
+            }
+        }
+        check.summary = format!("{} pairs", pairs.len() / 2);
+        check
+    }
+
+    fn check_timing(&self) -> Check {
+        let mut check = Check::new("timing settings");
+        let mut settings: Vec<(String, u64)> = vec![
+            ("tapping_term_ms".to_string(), self.tapping_term_ms.into()),
+            (
+                "mt_config.double_tap_window_ms".to_string(),
+                self.mt_config.double_tap_window_ms.into(),
+            ),
+        ];
+        for (id, keyboard) in &self.per_keyboard_overrides {
+            if let Some(term) = keyboard.tapping_term_ms {
+                settings.push((format!("keyboard \"{id}\": tapping_term_ms"), term.into()));
+            }
+            if let Some(mt) = &keyboard.mt_config {
+                settings.push((
+                    format!("keyboard \"{id}\": mt_config.double_tap_window_ms"),
+                    mt.double_tap_window_ms.into(),
                 ));
             }
         }
-
-        // Validation 2: Check timing values are reasonable
-        if self.tapping_term_ms == 0 || self.tapping_term_ms > 1000 {
-            errors.push(format!(
-                "tapping_term_ms out of reasonable range (0-1000): {}",
-                self.tapping_term_ms
-            ));
-        }
-
-        // Validate MT config timing
-        if self.mt_config.double_tap_window_ms == 0 || self.mt_config.double_tap_window_ms > 1000 {
-            errors.push(format!(
-                "mt_config.double_tap_window_ms out of reasonable range (0-1000): {}",
-                self.mt_config.double_tap_window_ms
-            ));
-        }
-
-        // Validation 3: Check layer references
-        let mut referenced_layers = HashSet::new();
-
-        let extract_layer_refs = |remaps: &HashMap<KeyCode, KeyAction>| {
-            let mut refs = Vec::new();
-            for action in remaps.values() {
-                action.layer_refs(&mut refs);
+        for (name, value) in settings {
+            if value == 0 || value > 1000 {
+                check.errors.push(format!(
+                    "{name} out of reasonable range (0-1000): {value}"
+                ));
             }
-            refs
+        }
+        check
+    }
+
+    fn check_layer_references(&self) -> Check {
+        let mut check = Check::new("layer references");
+        let referenced = |remaps: &[&HashMap<KeyCode, KeyAction>], default: Option<&Layer>| {
+            let mut names = Vec::new();
+            for table in remaps {
+                for action in table.values() {
+                    action.layer_refs(&mut names);
+                }
+            }
+            names.extend(default.map(|layer| layer.0.clone()));
+            names.sort();
+            names.dedup();
+            names
         };
-
-        for layer_name in extract_layer_refs(&self.remaps) {
-            referenced_layers.insert(layer_name);
-        }
-        for layer_config in self.layers.values() {
-            for layer_name in extract_layer_refs(&layer_config.remaps) {
-                referenced_layers.insert(layer_name);
+        let defined = |name: &str, own: Option<&HashMap<Layer, LayerConfig>>| {
+            name == "base"
+                || self.layers.contains_key(&Layer(name.to_string()))
+                || own.is_some_and(|layers| layers.contains_key(&Layer(name.to_string())))
+        };
+        let global: Vec<&HashMap<KeyCode, KeyAction>> = std::iter::once(&self.remaps)
+            .chain(self.layers.values().map(|layer| &layer.remaps))
+            .collect();
+        for name in referenced(&global, self.default_layer.as_ref()) {
+            if !defined(&name, None) {
+                check
+                    .errors
+                    .push(format!("Referenced layer not defined: \"{name}\""));
             }
         }
-
-        for layer_name in &referenced_layers {
-            if layer_name != "base" && !self.layers.contains_key(&Layer(layer_name.clone())) {
-                errors.push(format!("Referenced layer not defined: \"{}\"", layer_name));
+        for (id, keyboard) in &self.per_keyboard_overrides {
+            let own: Vec<&HashMap<KeyCode, KeyAction>> = keyboard
+                .remaps
+                .iter()
+                .chain(keyboard.layers.iter().flat_map(|layers| layers.values().map(|layer| &layer.remaps)))
+                .collect();
+            for name in referenced(&own, keyboard.default_layer.as_ref()) {
+                if !defined(&name, keyboard.layers.as_ref()) {
+                    check.errors.push(format!(
+                        "keyboard \"{id}\": referenced layer not defined: \"{name}\""
+                    ));
+                }
             }
         }
+        check.summary = format!("{} layers", self.layers.len());
+        check
+    }
 
-        // Validation 4: Steno layers have a valid layout
-        for (layer, layer_config) in &self.layers {
-            if let LayerKind::Steno(steno) = &layer_config.kind {
-                if let Err(layout_errors) =
-                    crate::steno::layout::Layout::plover_with(&steno.extra_keys)
-                        .and_then(|layout| {
-                            crate::steno::layout::preset(&steno.layout)
-                                .map_err(|e| vec![e])
-                                .map(|preset| (layout, preset))
-                        })
-                        .and_then(|(layout, preset)| {
-                            layout.build_key_map(&preset, &steno.layout_overrides)
-                        })
-                {
-                    for layout_error in layout_errors {
-                        errors.push(format!("steno layer \"{}\": {}", layer.0, layout_error));
+    fn check_steno_layers(&self, dictionaries: Option<DictionaryRoots<'_>>) -> Check {
+        use crate::steno::layout::{preset, Layout};
+        let mut check = Check::new("steno layers");
+        let mut count = 0;
+        let own_layers = self.per_keyboard_overrides.iter().filter_map(|(id, keyboard)| {
+            keyboard.layers.as_ref().map(|layers| (Some(id.as_str()), layers))
+        });
+        for (keyboard, layers) in std::iter::once((None, &self.layers)).chain(own_layers) {
+            for (layer, config) in layers {
+                let LayerKind::Steno(steno) = &config.kind else {
+                    continue;
+                };
+                count += 1;
+                let name = keyboard.map_or_else(
+                    || format!("steno layer \"{}\"", layer.0),
+                    |id| format!("steno layer \"{}\" (keyboard \"{id}\")", layer.0),
+                );
+                let key_map = Layout::plover_with(&steno.extra_keys).and_then(|layout| {
+                    preset(&steno.layout)
+                        .map_err(|e| vec![e])
+                        .and_then(|preset| layout.build_key_map(&preset, &steno.layout_overrides))
+                });
+                if let Err(problems) = key_map {
+                    check
+                        .errors
+                        .extend(problems.into_iter().map(|problem| format!("{name}: {problem}")));
+                }
+                if steno.translation_timeout_ms.is_some() {
+                    check.warnings.push(format!(
+                        "{name}: translation_timeout_ms is no longer used and can be removed"
+                    ));
+                }
+                let Some(roots) = dictionaries else {
+                    continue;
+                };
+                for raw in &steno.dictionaries {
+                    let path = crate::steno::engine::resolve_dictionary_path(
+                        raw,
+                        roots.config_dir,
+                        roots.home,
+                    );
+                    if !path.exists() {
+                        // Not fatal: the layer loads without this dictionary
+                        check.warnings.push(format!(
+                            "{name}: dictionary not found: {}",
+                            path.display()
+                        ));
                     }
                 }
             }
         }
+        check.summary = format!("{count} steno layers");
+        check
+    }
 
-        // Validation 5: the overlay's own extra_keys (a separate copy of a steno layer's,
-        // since the overlay process never reads a layer's own config - see OverlayConfig's
-        // doc comment) are themselves a valid layout.
-        if let Err(layout_errors) = crate::steno::layout::Layout::plover_with(&self.overlay.extra_keys) {
-            for layout_error in layout_errors {
-                errors.push(format!("overlay: {layout_error}"));
+    /// The overlay's own copy of the extra keys is itself a valid layout, and each placement
+    /// in `overlay_overrides` names an extra key and a standard key to draw it over.
+    fn check_overlay(&self) -> Check {
+        let mut check = Check::new("overlay");
+        let overlay = &self.overlay;
+        match crate::steno::layout::Layout::plover_with(&overlay.extra_keys) {
+            Err(problems) => check
+                .errors
+                .extend(problems.into_iter().map(|problem| format!("overlay: {problem}"))),
+            Ok(layout) => {
+                for (key, placement) in &overlay.overlay_overrides {
+                    let mut chars = key.chars();
+                    let extra = matches!((chars.next(), chars.next()), (Some(ch), None) if overlay.extra_keys.contains(&ch));
+                    if !extra {
+                        check.warnings.push(format!(
+                            "overlay: override for \"{key}\" names no extra key, so it does nothing"
+                        ));
+                    }
+                    let OverlayPlacement::SplitKey { slot, .. } = placement else {
+                        continue;
+                    };
+                    let standard = layout.slot_by_name(slot).is_some()
+                        && !overlay.extra_keys.iter().any(|ch| ch.to_string() == *slot);
+                    if !standard {
+                        check.warnings.push(format!(
+                            "overlay: \"{key}\" is placed on \"{slot}\", which is no standard key, so it draws as a badge"
+                        ));
+                    }
+                }
             }
         }
+        check.summary = format!("{} extra keys", overlay.extra_keys.len());
+        check
+    }
+}
 
-        if !errors.is_empty() {
-            Err(anyhow::anyhow!(
-                "Config validation failed: {}",
-                errors.join("; ")
-            ))
-        } else {
-            Ok(())
+/// Where a steno layer's dictionary paths resolve from, so [`Config::validate`] can look for
+/// the files: the config's own directory, and the user's home for `~/`.
+#[derive(Debug, Clone, Copy)]
+pub struct DictionaryRoots<'a> {
+    pub config_dir: &'a Path,
+    pub home: Option<&'a Path>,
+}
+
+/// What validating a config found, check by check. `keymux validate` shows every check; the
+/// daemon's reload only asks whether there were errors.
+#[derive(Debug)]
+pub struct Report {
+    pub checks: Vec<Check>,
+}
+
+/// One rule checked. It passed if it found no errors, whatever it warns about.
+#[derive(Debug)]
+pub struct Check {
+    /// What was checked, as `keymux validate` lists it
+    pub name: &'static str,
+    /// What was looked at, shown when the check passed: "3 pairs"
+    pub summary: String,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+impl Check {
+    const fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            summary: String::new(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
         }
+    }
+}
+
+impl Report {
+    pub fn errors(&self) -> impl Iterator<Item = &str> {
+        self.checks
+            .iter()
+            .flat_map(|check| check.errors.iter().map(String::as_str))
+    }
+
+    pub fn warnings(&self) -> impl Iterator<Item = &str> {
+        self.checks
+            .iter()
+            .flat_map(|check| check.warnings.iter().map(String::as_str))
+    }
+
+    #[must_use]
+    pub fn is_ok(&self) -> bool {
+        self.checks.iter().all(|check| check.errors.is_empty())
+    }
+
+    /// `Err` naming every error, for a caller that only needs to know the config can't be used.
+    pub fn into_result(self) -> Result<()> {
+        if self.is_ok() {
+            return Ok(());
+        }
+        let errors: Vec<&str> = self.errors().collect();
+        Err(anyhow::anyhow!(
+            "Config validation failed: {}",
+            errors.join("; ")
+        ))
     }
 }
 
@@ -1517,6 +1690,54 @@ mod tests {
 
     fn parse(text: &str) -> Config {
         ron::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn a_bad_override_on_a_keyboards_own_steno_layer_is_reported_by_both_paths() {
+        let config = parse(
+            r#"(
+            per_keyboard_overrides: {
+                "16c0:27db": (layers: Some({
+                    "steno": (kind: Steno((layout_overrides: { "Q-": Key(KC_Q) }))),
+                })),
+            },
+        )"#,
+        );
+        let report = config.validate(None);
+        let steno = report
+            .checks
+            .iter()
+            .find(|check| check.name == "steno layers")
+            .unwrap();
+        assert_eq!(steno.errors.len(), 1, "{:?}", steno.errors);
+        let error = &steno.errors[0];
+        assert!(
+            error.starts_with("steno layer \"steno\" (keyboard \"16c0:27db\"): "),
+            "{error}"
+        );
+        assert!(error.contains("unknown steno key \"Q-\""), "{error}");
+        // The daemon's reload sees the same thing the CLI shows
+        let silent = config.validate_silent().unwrap_err().to_string();
+        assert!(silent.contains(error.as_str()), "{silent}");
+    }
+
+    #[test]
+    fn an_overlay_placement_on_a_key_that_is_not_there_is_a_warning_not_an_error() {
+        let config = parse(
+            r#"(overlay: (
+                extra_keys: ['+'],
+                overlay_overrides: {
+                    "+": SplitKey(slot: "Q-", half: Top),
+                    "^": Badge,
+                },
+            ))"#,
+        );
+        let report = config.validate(None);
+        assert!(report.is_ok(), "{:?}", report.errors().collect::<Vec<_>>());
+        let warnings: Vec<&str> = report.warnings().collect();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("\"Q-\"")), "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("\"^\"")), "{warnings:?}");
     }
 
     #[test]
