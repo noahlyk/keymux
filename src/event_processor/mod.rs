@@ -172,6 +172,10 @@ fn run_event_processor(
         let mut escaped = false;
         match device.fetch_events() {
             Ok(events) => {
+                // The kernel stamps each event when it happened. A batch that waited while
+                // this thread was busy or asleep is replayed at those moments, so the wait
+                // never looks like a key held for longer than it was.
+                let anchor = (std::time::Instant::now(), std::time::SystemTime::now());
                 for ev in events {
                     // Alt+F12 releases this keyboard from keymux. It's checked on the raw key,
                     // before the keymap, so no layer or remap can swallow it.
@@ -201,14 +205,21 @@ fn run_event_processor(
                                 continue;
                             }
 
+                            let age = anchor
+                                .1
+                                .duration_since(ev.timestamp())
+                                .unwrap_or_default();
+                            let at = anchor.0.checked_sub(age).unwrap_or(anchor.0);
+
                             // Drop switch-bounce chatter (and its matching half of the pair)
-                            // before it ever reaches the keymap - see debounce.rs.
-                            if debounce.is_chatter(ev.code(), pressed, std::time::Instant::now()) {
+                            // before it ever reaches the keymap - see debounce.rs. Judged by
+                            // when the key really bounced, not by when the batch was read.
+                            if debounce.is_chatter(ev.code(), pressed, at) {
                                 continue;
                             }
 
                             // Process key through keymap (QMK-inspired)
-                            let result = keymap.process_key(input_key, pressed);
+                            let result = keymap.process_key_at(input_key, pressed, at);
 
                             match result {
                                 ProcessResult::EmitKey(output_key, output_pressed) => {
@@ -307,11 +318,11 @@ fn run_event_processor(
                     _ => {}
                 }
 
-                // Let the keyboard's other device threads in before sleeping
+                // Let the keyboard's other device threads in before waiting
                 drop(keymap);
-                // Sleep briefly to avoid CPU spinning
-                // 1ms sleep provides excellent responsiveness while preventing busy-wait
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                // The next key wakes the loop the moment it arrives; with none, the timeouts
+                // are checked again in a millisecond
+                wait_for_input(fd, 1);
             }
             Err(e) => return Err(e.into()),
         }
@@ -527,6 +538,17 @@ fn release_all_keys(virtual_device: &mut VirtualDevice, keymap: &KeymapProcessor
     // Send final SYN_REPORT
     let syn_event = InputEvent::new_now(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT);
     let _ = virtual_device.emit(&[syn_event]);
+}
+
+/// Wait until the keyboard has an event to read, or `timeout_ms` passes.
+fn wait_for_input(fd: std::os::unix::io::RawFd, timeout_ms: i32) {
+    let mut pollfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `pollfd` is one valid, initialized entry, and 1 says so
+    unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
 }
 
 /// The most input events allowed unread at once. The kernel keeps 63 per reader of a

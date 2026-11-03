@@ -251,11 +251,17 @@ impl KeymapProcessor {
     }
 
     pub fn process_key(&mut self, keycode: KeyCode, pressed: bool) -> ProcessResult {
+        self.process_key_at(keycode, pressed, Instant::now())
+    }
+
+    /// [`Self::process_key`] for an event that happened at `at`: when the keyboard reported
+    /// it, which is earlier than now for events that waited to be read.
+    pub fn process_key_at(&mut self, keycode: KeyCode, pressed: bool, at: Instant) -> ProcessResult {
         if let Some(result) = self.lookup_capture(keycode, pressed) {
             self.publish_overlay_layer();
             return result;
         }
-        let result = self.steno_capture(keycode, pressed).unwrap_or_else(|| {
+        let result = self.steno_capture(keycode, pressed, at).unwrap_or_else(|| {
             let result = if pressed {
                 self.process_key_press(keycode)
             } else {
@@ -490,14 +496,19 @@ impl KeymapProcessor {
     ///
     /// On a steno layer, stroke keys are captured. Other keys use the layer's remaps
     /// if it has one, and are swallowed otherwise so they don't leak to layers below.
-    fn steno_capture(&mut self, keycode: KeyCode, pressed: bool) -> Option<ProcessResult> {
+    fn steno_capture(
+        &mut self,
+        keycode: KeyCode,
+        pressed: bool,
+        at: Instant,
+    ) -> Option<ProcessResult> {
         if !pressed {
             // Releases belong to whoever pressed the key, even if its layer is gone now
             match self.held_keys.get(&keycode)?.first()? {
                 HeldAction::StenoManaged(layer) => {
                     let layer = layer.clone();
                     self.held_keys.remove(&keycode);
-                    let output = self.steno_engines.get_mut(&layer)?.release(keycode);
+                    let output = self.steno_engines.get_mut(&layer)?.release_at(keycode, at);
                     self.leave_if_asked(&layer);
                     return Some(steno_result(output));
                 }
@@ -525,7 +536,7 @@ impl KeymapProcessor {
         }
 
         if engine.owns(keycode) {
-            engine.press(keycode, Instant::now());
+            engine.press(keycode, at);
             self.held_keys
                 .insert(keycode, vec![HeldAction::StenoManaged(top)]);
             return Some(ProcessResult::None);
