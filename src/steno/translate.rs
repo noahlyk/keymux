@@ -14,8 +14,13 @@ use super::keycombo::key_events;
 use super::layout::render_stroke;
 use super::plugin::Chain;
 use crate::keycode::KeyCode;
+use smallvec::SmallVec;
 use std::sync::Arc;
 use tracing::{info, warn};
+
+/// An outline being tried against the dictionary. The search tries many per stroke typed, and
+/// nearly all are short, so they live on the stack.
+type Strokes = SmallVec<[u32; 8]>;
 
 /// The stroke that undoes the last translation: the star on its own.
 pub const UNDO_STROKE: u32 = 1 << 9;
@@ -389,7 +394,10 @@ impl Translator {
     #[must_use]
     #[allow(clippy::literal_string_with_formatting_args)] // a translation marker, not a format
     pub fn wants_first_up(&self, stroke: u32) -> bool {
+        // The dictionary files alone: a plugin's reading is a guess at a word, never a marker,
+        // and this is asked on every key that comes up mid-stroke
         self.dict
+            .as_dictionary()
             .lookup(&[stroke])
             .is_some_and(|text| text.contains("{:firstup}"))
     }
@@ -398,8 +406,13 @@ impl Translator {
     #[must_use]
     pub fn is_command(&self, stroke: u32) -> bool {
         self.dict
+            .as_dictionary()
             .lookup(&[stroke])
-            .is_some_and(|text| text.to_ascii_lowercase().contains("{plover:"))
+            .is_some_and(|text| {
+                text.as_bytes()
+                    .windows(8)
+                    .any(|window| window.eq_ignore_ascii_case(b"{plover:"))
+            })
     }
 
     /// Translate a finished stroke and say what to do with the keyboard.
@@ -455,8 +468,16 @@ impl Translator {
         for op in ops {
             match op {
                 Op::Backspaces(count) => {
-                    let keep = self.hist.screen.chars().count().saturating_sub(count);
-                    self.hist.screen = self.hist.screen.chars().take(keep).collect();
+                    if count > 0 {
+                        // Where the last `count` characters start, or 0 if there are fewer
+                        let cut = self
+                            .hist
+                            .screen
+                            .char_indices()
+                            .nth_back(count - 1)
+                            .map_or(0, |(at, _)| at);
+                        self.hist.screen.truncate(cut);
+                    }
                     out.push(OutputOp::Backspaces(count));
                 }
                 Op::Text(text) => {
@@ -923,7 +944,7 @@ impl Translator {
                 continue;
             }
             let replaced = &translations[i..];
-            let mut strokes: Vec<u32> = replaced
+            let mut strokes: Strokes = replaced
                 .iter()
                 .flat_map(|t| t.strokes.iter().copied())
                 .collect();
@@ -934,7 +955,7 @@ impl Translator {
             if let Some(mapping) =
                 self.lookup_with_prefix(max_len, &translations[..i], &strokes, &suffixes)
             {
-                let mut translation = Translation::new(strokes, Some(mapping));
+                let mut translation = Translation::new(strokes.into_vec(), Some(mapping));
                 translation.replaced = replaced.to_vec();
                 return Some(translation);
             }
@@ -954,7 +975,7 @@ impl Translator {
         }
         let (last, rest) = strokes.split_last()?;
         for (suffix_stroke, suffix_mapping) in suffixes {
-            let mut without = rest.to_vec();
+            let mut without = Strokes::from_slice(rest);
             without.push(last & !suffix_stroke);
             if let Some(main) = self.lookup_strokes(&without) {
                 return Some(format!("{main} {suffix_mapping}"));
@@ -1009,7 +1030,7 @@ impl Translator {
         suffixes: &[(u32, String)],
     ) -> Option<String> {
         if strokes.len() < max_len && Self::previous_word_is_finished(last_translations) {
-            let mut prefixed = vec![0];
+            let mut prefixed: Strokes = smallvec::smallvec![0];
             prefixed.extend_from_slice(strokes);
             if let Some(found) = self.lookup_with_suffix(&prefixed, suffixes) {
                 return Some(found);

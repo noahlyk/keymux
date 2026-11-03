@@ -145,6 +145,9 @@ pub struct Plugin {
     /// `joins(bits) -> bool`, if this plugin exports one - see the module doc's "join
     /// interface". Not every plugin cares, so this is the one export that's optional.
     joins: Option<TypedFunc<i64, i32>>,
+    /// What `joins` answered for each stroke asked so far. A pure function of the stroke, and
+    /// the longest-match search asks about the same few strokes many times per stroke typed.
+    joins_known: rustc_hash::FxHashMap<u32, bool>,
 }
 
 impl fmt::Debug for Plugin {
@@ -180,6 +183,7 @@ impl Plugin {
             alloc,
             fallback,
             joins,
+            joins_known: rustc_hash::FxHashMap::default(),
         })
     }
 
@@ -225,7 +229,12 @@ impl Plugin {
         let Some(joins) = &self.joins else {
             return false;
         };
-        joins.call(&mut self.store, i64::from(bits)).unwrap_or(0) != 0
+        if let Some(&known) = self.joins_known.get(&bits) {
+            return known;
+        }
+        let answer = joins.call(&mut self.store, i64::from(bits)).unwrap_or(0) != 0;
+        self.joins_known.insert(bits, answer);
+        answer
     }
 }
 
