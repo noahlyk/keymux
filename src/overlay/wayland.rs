@@ -204,6 +204,8 @@ enum Action {
 /// window switch with no real steno activity since. A real change clears suppression (you're
 /// steno-typing again); a duplicate snapshot while suppressed leaves it hidden instead of
 /// popping back up on its own.
+// Four independent facts about one snapshot; a struct would only name the same four
+#[allow(clippy::fn_params_excessive_bools)]
 const fn next_action(
     visible: bool,
     has_surface: bool,

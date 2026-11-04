@@ -8,7 +8,8 @@ use ab_glyph::{point, Font, FontArc, PxScale, ScaleFont};
 use anyhow::{Context, Result};
 use rustc_hash::FxHashMap;
 
-pub const REGULAR: &[u8] = include_bytes!("../../assets/fonts/AtkinsonHyperlegible-Regular.ttf");
+#[cfg(test)]
+const REGULAR: &[u8] = include_bytes!("../../assets/fonts/AtkinsonHyperlegible-Regular.ttf");
 pub const BOLD: &[u8] = include_bytes!("../../assets/fonts/AtkinsonHyperlegible-Bold.ttf");
 
 /// The embedded regular face, or the user's font file from `overlay: (font: Some(..))`.

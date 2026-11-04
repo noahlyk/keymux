@@ -233,26 +233,26 @@ impl Layout {
 
     /// Index of the first slot past the left hand (the left hand itself is `0..left_end()`).
     #[must_use]
-    pub const fn left_end(&self) -> usize {
+    pub(crate) const fn left_end(&self) -> usize {
         self.left.len()
     }
 
     /// Index of the star.
     #[must_use]
-    pub const fn star_slot(&self) -> usize {
+    pub(crate) const fn star_slot(&self) -> usize {
         self.left.len() + self.pre_star.len()
     }
 
     /// First slot a `-` allows: after it, the next key is the first past the star, never a
     /// thumb key before it or the star itself.
     #[must_use]
-    pub const fn after_hyphen(&self) -> usize {
+    pub(crate) const fn after_hyphen(&self) -> usize {
         self.star_slot() + 1
     }
 
     /// Index of the first right-hand key.
     #[must_use]
-    pub const fn right_start(&self) -> usize {
+    pub(crate) const fn right_start(&self) -> usize {
         self.after_hyphen() + self.post_star.len()
     }
 
@@ -772,7 +772,7 @@ pub fn preset(name: &str) -> Result<HashMap<String, KeyCode>, String> {
 
 /// Extract the physical key from a layout entry. Only plain `Key(KC_*)` is allowed.
 #[must_use]
-pub const fn key_from_action(action: &KeyAction) -> Option<KeyCode> {
+const fn key_from_action(action: &KeyAction) -> Option<KeyCode> {
     match action {
         KeyAction::Key(key) => Some(*key),
         _ => None,
@@ -1003,7 +1003,7 @@ mod tests {
         assert_eq!(map.len(), 23);
         let single = map
             .values()
-            .filter(|bits| bits.count_ones() == 1)
+            .filter(|bits| bits.is_power_of_two())
             .fold(0, |all, bits| all | bits);
         assert_eq!(single.count_ones(), 23);
     }

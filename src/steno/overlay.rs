@@ -8,7 +8,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
+use crate::lock;
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 /// Tape entries kept for the overlay: enough to fill a tall screen, since the tape runs the
@@ -226,13 +227,6 @@ impl OverlayHub {
         }
         changed
     }
-}
-
-/// A panic elsewhere must not take the overlay down with it: the state is plain data.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

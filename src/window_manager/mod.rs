@@ -48,16 +48,14 @@ pub trait WindowManager: Send + Sync + Clone + 'static {
     }
 }
 
-pub fn spawn_event_monitor<T: WindowManager + 'static>(
+pub(crate) fn spawn_event_monitor<T: WindowManager + 'static>(
     wm: &'static T,
     tx: UnboundedSender<WindowManagerEvent>,
 ) {
-    let _socket_path = if let Some(path) = wm.detect_socket() {
-        path
-    } else {
+    if wm.detect_socket().is_none() {
         error!("{}: No socket found, cannot start monitor", wm.name());
         return;
-    };
+    }
 
     thread::spawn(move || loop {
         info!("{}: Starting event stream monitor...", wm.name());
@@ -120,16 +118,14 @@ pub fn spawn_event_monitor<T: WindowManager + 'static>(
     });
 }
 
-pub fn spawn_event_monitor_sync<T: WindowManager + 'static>(
+pub(crate) fn spawn_event_monitor_sync<T: WindowManager + 'static>(
     wm: &'static T,
     tx: Sender<WindowManagerEvent>,
 ) {
-    let _socket_path = if let Some(path) = wm.detect_socket() {
-        path
-    } else {
+    if wm.detect_socket().is_none() {
         error!("{}: No socket found, cannot start monitor", wm.name());
         return;
-    };
+    }
 
     thread::spawn(move || loop {
         info!("{}: Starting event stream monitor...", wm.name());

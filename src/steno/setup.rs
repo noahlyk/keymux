@@ -22,12 +22,12 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// Plover's main dictionary, as shipped in its repository
-pub const MAIN_DICT_URL: &str =
+const MAIN_DICT_URL: &str =
     "https://raw.githubusercontent.com/openstenoproject/plover/master/plover/assets/main.json";
 
 /// SHA-256 of the `main.json` this release was tested against. A different
 /// download still installs, with a warning, since Plover's master changes.
-pub const MAIN_DICT_SHA256: &str =
+const MAIN_DICT_SHA256: &str =
     "6570873c7f703ecd39c9870083f643db3475b49462a8db80fe22fe33ac3cfe92";
 
 /// Shown when the config has no steno layer. Right Ctrl toggles steno on and off.
@@ -111,9 +111,9 @@ fn remove_old_cache(config_dir: &Path) {
 
 /// Lapwing's JSON dictionaries from plover-lapwing-aio. Its `.modal` and `.py` files need
 /// Plover's plugin runtime, so they aren't used here.
-pub const LAPWING_BASE_URL: &str =
+const LAPWING_BASE_URL: &str =
     "https://raw.githubusercontent.com/aerickt/plover-lapwing-aio/main/plover_lapwing/dictionaries/";
-pub const LAPWING_FILES: [&str; 6] = [
+pub(crate) const LAPWING_FILES: [&str; 6] = [
     "lapwing-base.json",
     "lapwing-numbers.json",
     "lapwing-commands.json",
@@ -510,11 +510,11 @@ fn switch_theory(
 
 /// Plover's own commands (`*` is undo, and the `{plover:...}` entries), which Plover loads
 /// before its main dictionary.
-pub const COMMANDS_DICT_URL: &str =
+const COMMANDS_DICT_URL: &str =
     "https://raw.githubusercontent.com/openstenoproject/plover/master/plover/assets/commands.json";
 
 /// The word list Plover's orthography uses to tell good spellings from bad.
-pub const WORDLIST_URL: &str =
+const WORDLIST_URL: &str =
     "https://raw.githubusercontent.com/openstenoproject/plover/master/plover/assets/american_english_words.txt";
 
 /// Download the orthography word list into the steno folder unless there is one somewhere in it.

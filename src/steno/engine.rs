@@ -524,7 +524,7 @@ impl StenoEngine {
                 "start_attached" => options.start_attached = truth,
                 "start_capitalized" => options.start_capitalized = truth,
                 "space_placement" => {
-                    options.spaces_after = value.eq_ignore_ascii_case("After Output")
+                    options.spaces_after = value.eq_ignore_ascii_case("After Output");
                 }
                 other => tracing::info!("steno option `{other}` is not one keymux has"),
             }

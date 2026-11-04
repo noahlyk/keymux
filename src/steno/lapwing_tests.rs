@@ -228,16 +228,13 @@ fn random_sessions_keep_the_screen_and_the_translator_in_step() {
         let mut translator = Translator::new(dict.clone());
         let mut screen = String::new();
         for step in 0..150 {
-            match next(100) {
-                0..=12 => {
-                    let output = translator.stroke(UNDO_STROKE);
-                    apply_output(&mut screen, output);
-                }
-                _ => {
-                    let stroke = pool[next(pool.len())];
-                    let output = translator.stroke(stroke);
-                    apply_output(&mut screen, output);
-                }
+            if let 0..=12 = next(100) {
+                let output = translator.stroke(UNDO_STROKE);
+                apply_output(&mut screen, output);
+            } else {
+                let stroke = pool[next(pool.len())];
+                let output = translator.stroke(stroke);
+                apply_output(&mut screen, output);
             }
             assert_eq!(
                 screen,

@@ -12,7 +12,7 @@ const CARRY: &str = "~|";
 
 /// A meta recognised in `{...}`: its name and what follows it.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Meta<'a> {
+pub(crate) struct Meta<'a> {
     pub name: String,
     pub param: &'a str,
 }

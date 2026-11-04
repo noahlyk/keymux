@@ -262,6 +262,7 @@ impl Dictionary {
     }
 
     /// Use this orthography, as if its word list had been read.
+    #[cfg(test)]
     pub fn set_orthography(&mut self, orthography: Orthography) {
         self.own().orthography = orthography;
     }

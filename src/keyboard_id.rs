@@ -74,7 +74,7 @@ impl KeyboardId {
     ///
     /// For non-USB devices (built-in, Bluetooth) the port component is omitted and
     /// the ID falls back to vendor:product:version:bustype as before.
-    pub fn from_device(device: &Device, path: &Path) -> Self {
+    pub(crate) fn from_device(device: &Device, path: &Path) -> Self {
         let id_vendor = device.input_id().vendor();
         let id_product = device.input_id().product();
         let id_version = device.input_id().version();

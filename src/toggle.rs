@@ -8,7 +8,7 @@ use keymux::ipc::{send_request, IpcRequest, IpcResponse};
 use keymux::keyboard_id::{find_all_keyboards, KeyboardId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ToggleAction {
+enum ToggleAction {
     Toggle,
     Enable,
     Disable,
@@ -175,7 +175,7 @@ fn handle_cli_patterns(
 
     // Save and notify
     config.save_enabled_keyboards_only_with_comments(config_path, Some(&pattern_comments))?;
-    send_reload_notification()?;
+    send_reload_notification();
 
     let status = if enable { "enabled" } else { "disabled" };
     println!(
@@ -278,7 +278,7 @@ pub fn handle_toggle_patterns(
         };
 
         config.save_enabled_keyboards_only_with_comments(config_path, Some(&pattern_comments))?;
-        send_reload_notification()?;
+        send_reload_notification();
 
         println!(
             "  {} {}: {}",
@@ -313,7 +313,7 @@ pub fn handle_toggle_patterns(
         };
 
         config.save_enabled_keyboards_only_with_comments(config_path, Some(&pattern_comments))?;
-        send_reload_notification()?;
+        send_reload_notification();
 
         println!(
             "  {} {}: {}",
@@ -542,7 +542,7 @@ fn run_multi_select(
     config.save_enabled_keyboards_only_with_comments(config_path, Some(&pattern_comments))?;
 
     // Send reload notification
-    send_reload_notification()?;
+    send_reload_notification();
 
     println!();
     println!(
@@ -615,7 +615,7 @@ fn merge_and_deduplicate(
     result
 }
 
-fn send_reload_notification() -> Result<()> {
+fn send_reload_notification() {
     match send_request(&IpcRequest::ToggleKeyboards) {
         Ok(IpcResponse::Ok) => {}
         Ok(_) => {
@@ -638,5 +638,4 @@ fn send_reload_notification() -> Result<()> {
             );
         }
     }
-    Ok(())
 }

@@ -34,11 +34,7 @@ impl SocdGroup {
         let new_active = self.held_stack.last().copied();
         self.active_key = new_active;
 
-        if old_active != new_active {
-            Some((old_active, new_active))
-        } else {
-            None
-        }
+        (old_active != new_active).then_some((old_active, new_active))
     }
 
     pub fn on_release(&mut self, keycode: KeyCode) -> Option<(Option<KeyCode>, Option<KeyCode>)> {
@@ -49,11 +45,7 @@ impl SocdGroup {
         let new_active = self.held_stack.last().copied();
         self.active_key = new_active;
 
-        if old_active != new_active {
-            Some((old_active, new_active))
-        } else {
-            None
-        }
+        (old_active != new_active).then_some((old_active, new_active))
     }
 }
 

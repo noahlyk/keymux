@@ -29,7 +29,7 @@ use std::time::Duration;
 /// entry using one won't parse through this path - only the daemon, which does have the real
 /// config, resolves those.
 #[must_use]
-pub fn load_dictionary(config_dir: &Path) -> Dictionary {
+fn load_dictionary(config_dir: &Path) -> Dictionary {
     let cache = cache_dir(config_dir);
     let files = expand(&default_dictionaries(config_dir), &cache);
     Dictionary::load_cached(&files, &cache, &Layout::plover())
@@ -40,7 +40,7 @@ pub fn load_dictionary(config_dir: &Path) -> Dictionary {
 ///
 /// [`Layout::plover`] only - see [`load_dictionary`].
 #[must_use]
-pub fn load_chain(config_dir: &Path) -> Chain {
+fn load_chain(config_dir: &Path) -> Chain {
     let cache = cache_dir(config_dir);
     let files = expand(&default_dictionaries(config_dir), &cache);
     Chain::load_cached(&files, &cache, &Layout::plover())
@@ -287,7 +287,7 @@ fn configured_keys_by_bit(
 /// One line of `keymux steno keys`: a word, its outline (the strokes that type it, joined by
 /// "/"), and the keys that press each stroke, one group per stroke.
 #[derive(Debug, PartialEq, Eq)]
-pub struct ChordRow {
+struct ChordRow {
     pub word: String,
     pub outline: String,
     pub keys: String,
@@ -309,7 +309,7 @@ const SEARCH_BUDGET: usize = 20_000;
 /// entry gets its shortest outline (see `shortest`), or a single row marked "no stroke"
 /// when no outline types it.
 #[must_use]
-pub fn chord_rows(
+fn chord_rows(
     dict: Dictionary,
     keys_by_bit: &HashMap<u32, KeyCode>,
     text: &str,
@@ -515,14 +515,13 @@ fn chars_as_spans(text: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// The outlines that type `word` properly in a sentence, fewest strokes first. Prefixes and
-/// suffixes that glue to a neighbouring word (`{under^}`, `{^under}`) are left out.
-#[must_use]
-pub fn proper_outlines(dict: &Dictionary, word: &str) -> Vec<Vec<u32>> {
+#[cfg(test)]
+fn proper_outlines(dict: &Dictionary, word: &str) -> Vec<Vec<u32>> {
     proper_outlines_in(&Translator::new(dict.clone()), word)
 }
 
-/// Like [`proper_outlines`], but over a translator that already has the dictionary.
+/// The outlines that type `word` properly in a sentence, fewest strokes first. Prefixes and
+/// suffixes that glue to a neighbouring word (`{under^}`, `{^under}`) are left out.
 ///
 /// Nothing is copied, so the live lookup can call this on every key press. `base` must have
 /// nothing typed: use [`Translator::fresh`].
@@ -645,7 +644,7 @@ const fn display_rank(mask: u32) -> u32 {
 
 /// How a physical key is written on the page: `KC_SCLN` is `;`, `KC_A` is `A`.
 #[must_use]
-pub fn key_label(key: KeyCode) -> String {
+fn key_label(key: KeyCode) -> String {
     let name = format!("{key:?}");
     let name = name.strip_prefix("KC_").unwrap_or(&name);
     match name {
@@ -805,7 +804,7 @@ pub fn tail_tape(home: &Path, lines: usize, follow: bool) -> Result<()> {
         let whole = complete.trim_end_matches('\n');
         let last = whole.rfind('\n').map_or(0, |i| i + 1);
         line_start += last;
-        shown = whole[last..].to_owned();
+        whole[last..].clone_into(&mut shown);
     }
 }
 

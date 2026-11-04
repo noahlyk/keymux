@@ -7,7 +7,7 @@
 use super::layout::slot_by_name;
 
 /// Bit of the `#` key in a stroke.
-pub const NUMBER_BIT: u32 = 1 << 22;
+pub(crate) const NUMBER_BIT: u32 = 1 << 22;
 
 /// Digits by slot name, in the order a stroke reads left to right.
 const DIGITS: [(&str, char); 10] = [

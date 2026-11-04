@@ -1,4 +1,29 @@
-#![allow(clippy::pedantic)]
+// The same pedantic opt-outs as the library, see src/lib.rs
+#![allow(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::doc_markdown,
+    clippy::float_cmp,
+    clippy::format_push_string,
+    clippy::implicit_hasher,
+    clippy::items_after_statements,
+    clippy::many_single_char_names,
+    clippy::map_unwrap_or,
+    clippy::match_same_arms,
+    clippy::missing_errors_doc,
+    clippy::missing_fields_in_debug,
+    clippy::missing_panics_doc,
+    clippy::must_use_candidate,
+    clippy::needless_pass_by_value,
+    clippy::redundant_closure_for_method_calls,
+    clippy::similar_names,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args,
+    clippy::unused_self
+)]
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
@@ -121,7 +146,7 @@ fn main() -> Result<()> {
             toggle::run_toggle(*multi, Some((false, patterns.clone())))?;
         }
         Some(cli::Commands::Gamemode { action }) => {
-            gamemode::handle_gamemode_action(action)?;
+            gamemode::handle_gamemode_action(action);
         }
         Some(cli::Commands::Reload) => {
             run_reload()?;
@@ -316,7 +341,7 @@ compdef _keymux {bin_name}
             }
             "fish" => {
                 println!(
-                    r#"function _keymux_completion
+                    r"function _keymux_completion
     set -l completions (COMPLETE=fish {bin} ${{argv}} 2>/dev/null)
     for comp in $completions
         echo $comp
@@ -324,7 +349,7 @@ compdef _keymux {bin_name}
 end
 complete -c {bin_name} -f -a '(_keymux_completion)'
 set -e COMPLETE
-"#,
+",
                     bin = bin_path.display(),
                     bin_name = bin_name
                 );

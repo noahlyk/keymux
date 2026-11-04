@@ -4,7 +4,7 @@ use colored::Colorize;
 use keymux::gamemode_state::{GlobalOverride, WindowOverride};
 use keymux::ipc::{send_request, IpcRequest, IpcResponse};
 
-pub fn handle_gamemode_action(action: &GamemodeAction) -> Result<()> {
+pub fn handle_gamemode_action(action: &GamemodeAction) {
     match action {
         GamemodeAction::Window { action } => handle_window_gamemode_action(action),
         GamemodeAction::Global { action } => handle_global_gamemode_action(action),
@@ -15,9 +15,9 @@ pub fn handle_gamemode_action(action: &GamemodeAction) -> Result<()> {
 /// argument if given, otherwise whatever window the daemon last saw
 /// focused (no compositor-specific code needed here at all - the daemon
 /// already knows, from whichever watcher process is running).
-fn resolve_app_id(explicit: &Option<String>) -> Result<Option<String>> {
+fn resolve_app_id(explicit: Option<&str>) -> Result<Option<String>> {
     if let Some(id) = explicit {
-        return Ok(Some(id.clone()));
+        return Ok(Some(id.to_owned()));
     }
     match send_request(&IpcRequest::GetFocusedWindow)? {
         IpcResponse::FocusedWindow(window) => Ok(window.app_id),
@@ -25,9 +25,10 @@ fn resolve_app_id(explicit: &Option<String>) -> Result<Option<String>> {
     }
 }
 
-pub fn handle_window_gamemode_action(action: &WindowGamemodeAction) -> Result<()> {
+fn handle_window_gamemode_action(action: &WindowGamemodeAction) {
     if matches!(action, WindowGamemodeAction::List) {
-        return print_window_overrides();
+        print_window_overrides();
+        return;
     }
 
     let app_id_arg = match action {
@@ -38,18 +39,18 @@ pub fn handle_window_gamemode_action(action: &WindowGamemodeAction) -> Result<()
         WindowGamemodeAction::List => unreachable!("handled above"),
     };
 
-    let app_id = match resolve_app_id(app_id_arg) {
+    let app_id = match resolve_app_id(app_id_arg.as_deref()) {
         Ok(Some(id)) => id,
         Ok(None) => {
             println!(
                 "  {} Could not determine the focused window's app_id (no watcher running, or nothing focused). Pass an app_id explicitly.",
                 "✗".bright_red()
             );
-            return Ok(());
+            return;
         }
         Err(e) => {
             print_daemon_unreachable(&e);
-            return Ok(());
+            return;
         }
     };
 
@@ -94,10 +95,9 @@ pub fn handle_window_gamemode_action(action: &WindowGamemodeAction) -> Result<()
         Err(e) => print_daemon_unreachable(&e),
     }
 
-    Ok(())
 }
 
-fn print_window_overrides() -> Result<()> {
+fn print_window_overrides() {
     println!();
     println!(
         "{}",
@@ -131,12 +131,12 @@ fn print_window_overrides() -> Result<()> {
         Err(e) => print_daemon_unreachable(&e),
     }
     println!();
-    Ok(())
 }
 
-pub fn handle_global_gamemode_action(action: &GlobalGamemodeAction) -> Result<()> {
+fn handle_global_gamemode_action(action: &GlobalGamemodeAction) {
     if matches!(action, GlobalGamemodeAction::Status) {
-        return print_global_status();
+        print_global_status();
+        return;
     }
 
     let state = match action {
@@ -157,10 +157,9 @@ pub fn handle_global_gamemode_action(action: &GlobalGamemodeAction) -> Result<()
         Ok(other) => print_unexpected_response(&other),
         Err(e) => print_daemon_unreachable(&e),
     }
-    Ok(())
 }
 
-fn print_global_status() -> Result<()> {
+fn print_global_status() {
     match send_request(&IpcRequest::GetGlobalOverride) {
         Ok(IpcResponse::GlobalOverrideStatus(state)) => {
             println!("  Global game mode: {}", describe_global(state));
@@ -168,7 +167,6 @@ fn print_global_status() -> Result<()> {
         Ok(other) => print_unexpected_response(&other),
         Err(e) => print_daemon_unreachable(&e),
     }
-    Ok(())
 }
 
 fn describe_global(state: GlobalOverride) -> String {

@@ -15,7 +15,7 @@
 use super::action::{rightmost_word, Action, Case};
 use super::formatter::Formatter;
 use super::translate::Translation;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 /// Which set of dictionaries made an entry: a hash of where they are loaded from. Zero is for
 /// anything made without one (tests, a lone translator).
@@ -99,7 +99,7 @@ fn registry() -> &'static Mutex<std::collections::HashMap<u32, SharedHistory>> {
 /// The history shared by all of `user`'s keyboards.
 #[must_use]
 pub fn for_user(user: u32) -> SharedHistory {
-    let mut users = registry().lock().unwrap_or_else(PoisonError::into_inner);
+    let mut users = crate::lock(registry());
     Arc::clone(
         users
             .entry(user)
@@ -109,7 +109,7 @@ pub fn for_user(user: u32) -> SharedHistory {
 
 /// Forget what is on screen for everyone: the focus moved to another window.
 pub fn fence_all() {
-    let users = registry().lock().unwrap_or_else(PoisonError::into_inner);
+    let users = crate::lock(registry());
     for history in users.values() {
         lock(history).fence();
     }
@@ -126,7 +126,7 @@ pub fn new_shared(formatter: Formatter) -> SharedHistory {
 
 /// Lock the history, even if a thread died holding it: the record is still the best we have.
 pub fn lock(shared: &SharedHistory) -> std::sync::MutexGuard<'_, History> {
-    shared.lock().unwrap_or_else(PoisonError::into_inner)
+    crate::lock(shared)
 }
 
 impl History {

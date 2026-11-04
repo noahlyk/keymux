@@ -70,6 +70,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use crate::lock;
 use std::sync::{Arc, Mutex};
 use wasmtime::{Engine, Instance, Memory, Module, Store, TypedFunc};
 
@@ -136,7 +137,7 @@ fn compiled(source: &Path, cache_dir: &Path) -> Result<PathBuf> {
 }
 
 /// One loaded plugin: a WebAssembly module, instantiated so its exports can be called.
-pub struct Plugin {
+pub(crate) struct Plugin {
     name: String,
     store: Store<()>,
     memory: Memory,
@@ -185,11 +186,6 @@ impl Plugin {
             joins,
             joins_known: rustc_hash::FxHashMap::default(),
         })
-    }
-
-    #[must_use]
-    pub fn name(&self) -> &str {
-        &self.name
     }
 
     /// Ask this plugin for a reading of a stroke outline that missed every dictionary, in
@@ -444,6 +440,12 @@ impl Chain {
         &self.dict
     }
 
+    /// The same merged view, to hand to another thread.
+    #[must_use]
+    pub fn dictionary(&self) -> Arc<Dictionary> {
+        Arc::clone(&self.dict)
+    }
+
     #[must_use]
     pub fn orthography(&self) -> &super::orthography::Orthography {
         self.dict.orthography()
@@ -455,11 +457,6 @@ impl Chain {
     }
 
     #[must_use]
-    pub fn strokes_for(&self, text: &str) -> Vec<Vec<u32>> {
-        self.dict.strokes_for(text)
-    }
-
-    #[must_use]
     pub fn len(&self) -> usize {
         self.dict.len()
     }
@@ -468,12 +465,6 @@ impl Chain {
     pub fn is_empty(&self) -> bool {
         self.dict.is_empty()
     }
-}
-
-fn lock(mutex: &Mutex<Plugin>) -> std::sync::MutexGuard<'_, Plugin> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

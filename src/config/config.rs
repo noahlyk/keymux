@@ -257,27 +257,6 @@ impl KeyAction {
     pub const fn is_transparent(&self) -> bool {
         matches!(self, Self::Transparent)
     }
-
-    /// Check if this action is a layer switch (To, Tg, Mo)
-    pub const fn is_layer_action(&self) -> bool {
-        matches!(self, Self::TO(_) | Self::TG(_) | Self::MO(_))
-    }
-
-    /// Extract layer from layer actions
-    pub const fn get_layer(&self) -> Option<&Layer> {
-        match self {
-            Self::TO(layer) | Self::TG(layer) | Self::MO(layer) => Some(layer),
-            _ => None,
-        }
-    }
-
-    /// Whether this action can emit key events (vs purely logical like layers/commands)
-    pub const fn is_key_emitter(&self) -> bool {
-        matches!(
-            self,
-            Self::Key(_) | Self::MT(_, _) | Self::DT(_, _) | Self::OSM(_) | Self::SOCD(_, _)
-        )
-    }
 }
 
 /// Layer configuration
@@ -587,11 +566,6 @@ pub enum EnabledKeyboards {
 }
 
 impl EnabledKeyboards {
-    /// Check if this is ExplicitNone (field was set to None)
-    pub const fn is_explicit_none(&self) -> bool {
-        matches!(self, Self::ExplicitNone | Self::SomeNone)
-    }
-
     /// Get the entries if this is a list
     pub fn entries(&self) -> Option<&[EnabledKeyboardEntry]> {
         match self {
@@ -601,6 +575,7 @@ impl EnabledKeyboards {
     }
 
     /// Normalize to canonical form (convert legacy Some* variants)
+    #[must_use]
     pub fn normalize(&self) -> Self {
         match self {
             Self::ExplicitNone => Self::ExplicitNone,
@@ -959,7 +934,7 @@ impl Config {
 
             let should_wrap = !is_hashmap_key
                 && !already_wrapped
-                && matches!(prev_char, Some(':') | Some('(') | Some(',') | Some('['));
+                && matches!(prev_char, Some(':' | '(' | ',' | '['));
 
             if should_wrap {
                 result.push_str(&format!("Key({})", keycode));
@@ -1051,7 +1026,7 @@ impl Config {
     /// Check if a keyboard should be enabled based on the enabled_keyboards config
     ///
     /// Parsing rules (applied in order):
-    /// 1. Field absent entirely → treat as ["*": Enable] (enable all)
+    /// 1. Field absent entirely → treat as `["*": Enable]` (enable all)
     /// 2. None (ExplicitNone) → disable all
     /// 3. List → use the list (last match wins). A keyboard that no entry matches is disabled
     ///    when the list has any entry that enables something (it is a list of the keyboards to
@@ -1223,14 +1198,8 @@ impl Config {
         }
     }
 
-    /// Save only `enabled_keyboards` field, preserving rest of file
-    #[allow(clippy::missing_errors_doc)]
-    /// Save only the enabled_keyboards field, preserving all other formatting
-    pub fn save_enabled_keyboards_only(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        self.save_enabled_keyboards_only_with_comments(path, None)
-    }
-
-    /// Save enabled_keyboards with optional comments for each pattern
+    /// Save only the `enabled_keyboards` field, with optional comments for each pattern,
+    /// preserving the rest of the file
     #[allow(clippy::missing_errors_doc)]
     pub fn save_enabled_keyboards_only_with_comments(
         &self,

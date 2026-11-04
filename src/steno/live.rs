@@ -22,7 +22,8 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use crate::lock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -105,10 +106,6 @@ fn hub() -> &'static Hub {
             jobs,
         }
     })
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Receive the dictionary made of `roots`, and every later version of it.
@@ -317,7 +314,7 @@ mod tests {
     }
 
     fn says(dict: &Chain, text: &str) -> bool {
-        !dict.strokes_for(text).is_empty()
+        !dict.as_dictionary().strokes_for(text).is_empty()
     }
 
     /// Keep receiving until a dictionary that satisfies `done` arrives.

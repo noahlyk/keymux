@@ -316,7 +316,7 @@ impl TextFormatter {
             .push_str(action.text.as_deref().unwrap_or_default());
         if self.spaces_after && !action.next_attach {
             self.appended_text.push_str(&action.space_char);
-            self.trailing_space = action.space_char.clone();
+            self.trailing_space.clone_from(&action.space_char);
         } else {
             self.trailing_space.clear();
         }
@@ -326,8 +326,10 @@ impl TextFormatter {
     fn begin(&mut self, last_action: Option<&Action>) {
         if self.spaces_after {
             if let Some(last) = last_action {
-                self.trailing_space = last.effective().trailing_space.clone();
-                self.appended_text = last.effective().trailing_space.clone();
+                self.trailing_space
+                    .clone_from(&last.effective().trailing_space);
+                self.appended_text
+                    .clone_from(&last.effective().trailing_space);
             }
         }
     }

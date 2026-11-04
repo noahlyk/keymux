@@ -109,7 +109,7 @@ pub fn get_root_socket_path() -> PathBuf {
 }
 
 /// Get the IPC socket path for user daemon (legacy, for compatibility)
-pub fn get_user_socket_path() -> PathBuf {
+pub(crate) fn get_user_socket_path() -> PathBuf {
     let (uid, _) = crate::get_actual_user_uid();
     let runtime_dir =
         std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| format!("/run/user/{}", uid));
@@ -117,7 +117,7 @@ pub fn get_user_socket_path() -> PathBuf {
 }
 
 /// Get the IPC socket path (tries root first, falls back to user)
-pub fn get_socket_path() -> PathBuf {
+pub(crate) fn get_socket_path() -> PathBuf {
     let root_sock = get_root_socket_path();
     if root_sock.exists() {
         root_sock

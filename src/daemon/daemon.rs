@@ -134,7 +134,7 @@ impl AsyncDaemon {
         self.refresh_sessions().await;
 
         info!("Discovering keyboards...");
-        self.discover_keyboards().await?;
+        self.discover_keyboards();
 
         // Load user configs and sync keyboards
         info!("Loading user configs...");
@@ -173,7 +173,7 @@ impl AsyncDaemon {
                     }
                 }
                 // Debounce timer fired — drain any remaining queued events then resync
-                _ = async {
+                () = async {
                     if let Some(deadline) = debounce_deadline {
                         tokio::time::sleep(deadline).await;
                     } else {
@@ -189,11 +189,8 @@ impl AsyncDaemon {
                     info!("Hotplug settled, resyncing keyboards...");
                     self.refresh_sessions().await;
                     self.load_user_configs().await;
-                    if let Err(e) = self.discover_keyboards().await {
-                        error!("Failed to rediscover keyboards: {}", e);
-                    } else {
-                        self.sync_keyboards_to_users().await;
-                    }
+                    self.discover_keyboards();
+                    self.sync_keyboards_to_users().await;
                 }
                 Some((request, resp_tx)) = ipc_rx.recv() => {
                     debug!("IPC request: {:?}", request);
@@ -201,7 +198,7 @@ impl AsyncDaemon {
                     let _ = resp_tx.send(response);
                 }
                 Some(event) = niri_rx.recv() => {
-                    self.process_niri_event(event).await;
+                    self.process_niri_event(event);
                 }
                 Some(()) = config_watch_rx.recv() => {
                     // Check if hot config reload is enabled for ANY user
@@ -254,7 +251,7 @@ impl AsyncDaemon {
     }
 
     /// Discover all keyboards (updates metadata only, doesn't start processors)
-    async fn discover_keyboards(&mut self) -> Result<()> {
+    fn discover_keyboards(&mut self) {
         info!("Discovering keyboards...");
 
         let keyboards = find_all_keyboards();
@@ -303,8 +300,6 @@ impl AsyncDaemon {
                 info!("Keyboard disconnected: {} ({})", meta.name, kbd_id);
             }
         }
-
-        Ok(())
     }
 
     /// Synchronize keyboards to active users based on their configs
@@ -401,46 +396,43 @@ impl AsyncDaemon {
             }
 
             // Start or stop processor based on assignment
-            match assigned_uid {
-                Some(uid) => {
-                    // Check if already running for this user by checking if ANY event path for this keyboard is active
-                    let has_active_processors = meta.paths.iter().any(|path| {
-                        self.active_processors
-                            .get(path)
-                            .map(|(_, owner_uid, _)| *owner_uid == uid)
-                            .unwrap_or(false)
-                    });
+            if let Some(uid) = assigned_uid {
+                // Check if already running for this user by checking if ANY event path for this keyboard is active
+                let has_active_processors = meta.paths.iter().any(|path| {
+                    self.active_processors
+                        .get(path)
+                        .map(|(_, owner_uid, _)| *owner_uid == uid)
+                        .unwrap_or(false)
+                });
 
-                    if !has_active_processors {
-                        // Stop any existing processors for this keyboard (might be owned by different user)
-                        let _ = self.stop_processors_for_keyboard(&kbd_id).await;
+                if !has_active_processors {
+                    // Stop any existing processors for this keyboard (might be owned by different user)
+                    let _ = self.stop_processors_for_keyboard(&kbd_id).await;
 
-                        // Start ONE THREAD PER EVENT FILE
-                        if let Err(e) = self
-                            .start_processors_for_keyboard(&kbd_id, &meta.name, &meta.paths, uid)
-                            .await
-                        {
-                            error!("Failed to start processors for user {}: {}", uid, e);
-                        } else {
-                            self.keyboard_owners.insert(kbd_id.clone(), uid);
-                        }
+                    // Start ONE THREAD PER EVENT FILE
+                    if let Err(e) = self
+                        .start_processors_for_keyboard(&kbd_id, &meta.name, &meta.paths, uid)
+                        .await
+                    {
+                        error!("Failed to start processors for user {}: {}", uid, e);
+                    } else {
+                        self.keyboard_owners.insert(kbd_id.clone(), uid);
                     }
                 }
-                None => {
-                    // No user wants this keyboard, stop if running
-                    let has_processors = meta
-                        .paths
-                        .iter()
-                        .any(|path| self.active_processors.contains_key(path));
+            } else {
+                // No user wants this keyboard, stop if running
+                let has_processors = meta
+                    .paths
+                    .iter()
+                    .any(|path| self.active_processors.contains_key(path));
 
-                    if has_processors {
-                        info!(
-                            "No active user wants keyboard {}, stopping processors",
-                            meta.name
-                        );
-                        let _ = self.stop_processors_for_keyboard(&kbd_id).await;
-                        self.keyboard_owners.remove(&kbd_id);
-                    }
+                if has_processors {
+                    info!(
+                        "No active user wants keyboard {}, stopping processors",
+                        meta.name
+                    );
+                    let _ = self.stop_processors_for_keyboard(&kbd_id).await;
+                    self.keyboard_owners.remove(&kbd_id);
                 }
             }
         }
@@ -459,7 +451,7 @@ impl AsyncDaemon {
             }
 
             // Get user's home directory
-            let home_dir = match self.get_user_home_dir(uid) {
+            let home_dir = match crate::get_user_home_dir(uid) {
                 Ok(dir) => dir,
                 Err(e) => {
                     warn!("Failed to get home directory for user {}: {}", uid, e);
@@ -522,28 +514,6 @@ impl AsyncDaemon {
         Ok(username)
     }
 
-    /// Get user's home directory
-    fn get_user_home_dir(&self, uid: u32) -> Result<PathBuf> {
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(format!("getent passwd {} | cut -d: -f6", uid))
-            .output()?;
-
-        if !output.status.success() {
-            return Err(anyhow::anyhow!(
-                "Failed to get home directory for UID {}",
-                uid
-            ));
-        }
-
-        let home = String::from_utf8(output.stdout)?.trim().to_string();
-
-        if home.is_empty() {
-            return Err(anyhow::anyhow!("Empty home directory for UID {}", uid));
-        }
-
-        Ok(PathBuf::from(home))
-    }
 
     /// Send desktop notification to a user
     fn send_notification(&self, uid: u32, title: &str, message: &str, urgency: &str) {
@@ -997,12 +967,9 @@ impl AsyncDaemon {
                 let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
 
                 // Resolve any symlinks in the directory path
-                let resolved_dir = match resolve_symlink(config_dir) {
-                    Some(dir) => dir,
-                    None => {
-                        warn!("Failed to resolve config directory: {:?}", config_dir);
-                        return;
-                    }
+                let Some(resolved_dir) = resolve_symlink(config_dir) else {
+                    warn!("Failed to resolve config directory: {:?}", config_dir);
+                    return;
                 };
 
                 // Watch the resolved directory
@@ -1040,8 +1007,8 @@ impl AsyncDaemon {
                     .map(|metadata| {
                         if metadata.file_type().is_symlink() {
                             format!(
-                                " (symlink -> {:?})",
-                                resolve_symlink(&config_path).unwrap_or_default()
+                                " (symlink -> {})",
+                                resolve_symlink(&config_path).unwrap_or_default().display()
                             )
                         } else {
                             String::new()
@@ -1049,7 +1016,11 @@ impl AsyncDaemon {
                     })
                     .unwrap_or_default();
 
-                info!("Watching config at {:?}{}", config_path, symlink_info);
+                info!(
+                    "Watching config at {}{}",
+                    config_path.display(),
+                    symlink_info
+                );
             }
 
             // Scan for users with keymux configs
@@ -1167,9 +1138,8 @@ impl AsyncDaemon {
         let mut validation_errors: HashMap<u32, String> = HashMap::new();
 
         for &uid in &active_uids {
-            let home_dir = match self.get_user_home_dir(uid) {
-                Ok(dir) => dir,
-                Err(_) => continue,
+            let Ok(home_dir) = crate::get_user_home_dir(uid) else {
+                continue;
             };
 
             let config_path = home_dir.join(".config/keymux/config.ron");
@@ -1277,7 +1247,7 @@ impl AsyncDaemon {
 
     /// Record a window focus event and apply its resulting game mode.
     /// Called for every focus-change event reported by any watcher process.
-    async fn handle_window_focus_changed(&mut self, window: WindowInfo) {
+    fn handle_window_focus_changed(&mut self, window: WindowInfo) {
         let state = self.resolve_effective_game_mode(&window);
         debug!(
             "Window focus changed: app_id={:?}, game mode={:?}",
@@ -1293,16 +1263,16 @@ impl AsyncDaemon {
             crate::steno::journal::fence_all();
         }
         self.last_focused_window = Some(window);
-        self.set_game_mode_all(state.is_game_mode()).await;
+        self.set_game_mode_all(state.is_game_mode());
     }
 
     /// Recompute game mode from the last known focused window and apply it.
     /// Called whenever an override changes, so the effect is immediate
     /// rather than waiting for the next focus-change event.
-    async fn recompute_and_apply_game_mode(&mut self) {
+    fn recompute_and_apply_game_mode(&mut self) {
         if let Some(window) = self.last_focused_window.clone() {
             let state = self.resolve_effective_game_mode(&window);
-            self.set_game_mode_all(state.is_game_mode()).await;
+            self.set_game_mode_all(state.is_game_mode());
         }
     }
 
@@ -1345,8 +1315,7 @@ impl AsyncDaemon {
         match request {
             IpcRequest::Ping => IpcResponse::Pong,
             IpcRequest::WindowFocusChanged { app_id, pid, title } => {
-                self.handle_window_focus_changed(WindowInfo { app_id, pid, title })
-                    .await;
+                self.handle_window_focus_changed(WindowInfo { app_id, pid, title });
                 IpcResponse::Ok
             }
             IpcRequest::GetFocusedWindow => {
@@ -1365,7 +1334,7 @@ impl AsyncDaemon {
                         self.window_overrides.remove(&app_id);
                     }
                 }
-                self.recompute_and_apply_game_mode().await;
+                self.recompute_and_apply_game_mode();
                 IpcResponse::Ok
             }
             IpcRequest::ToggleWindowOverride { app_id } => {
@@ -1395,7 +1364,7 @@ impl AsyncDaemon {
                     WindowOverride::On
                 };
                 self.window_overrides.insert(app_id, new_state);
-                self.recompute_and_apply_game_mode().await;
+                self.recompute_and_apply_game_mode();
                 IpcResponse::Ok
             }
             IpcRequest::ListWindowOverrides => {
@@ -1409,7 +1378,7 @@ impl AsyncDaemon {
             }
             IpcRequest::SetGlobalOverride(state) => {
                 self.global_override = state;
-                self.recompute_and_apply_game_mode().await;
+                self.recompute_and_apply_game_mode();
                 IpcResponse::Ok
             }
             IpcRequest::GetGlobalOverride => {
@@ -1562,7 +1531,7 @@ impl AsyncDaemon {
             }
             IpcRequest::SaveAdaptiveStats => {
                 info!("Save adaptive stats requested via IPC");
-                self.save_adaptive_stats_all().await;
+                self.save_adaptive_stats_all();
                 IpcResponse::Ok
             }
             IpcRequest::Shutdown => {
@@ -1592,16 +1561,16 @@ impl AsyncDaemon {
     /// (running as the user, reporting via `WindowFocusChanged` IPC) is what
     /// actually drives game mode detection in that setup. Both paths route
     /// through the same `handle_window_focus_changed` evaluator.
-    async fn process_niri_event(&mut self, event: crate::window_manager::WindowManagerEvent) {
+    fn process_niri_event(&mut self, event: crate::window_manager::WindowManagerEvent) {
         match event {
             crate::window_manager::WindowManagerEvent::WindowFocusChanged(window_info) => {
-                self.handle_window_focus_changed(window_info).await;
+                self.handle_window_focus_changed(window_info);
             }
         }
     }
 
     /// Set game mode for all active processors
-    async fn set_game_mode_all(&mut self, enabled: bool) {
+    fn set_game_mode_all(&mut self, enabled: bool) {
         // Only update if the state actually changed
         if self.game_mode_active == enabled {
             return;
@@ -1623,7 +1592,7 @@ impl AsyncDaemon {
     }
 
     /// Trigger adaptive stats save for all active processors
-    async fn save_adaptive_stats_all(&self) {
+    fn save_adaptive_stats_all(&self) {
         info!(
             "Triggering adaptive stats save for {} active threads",
             self.active_processors.len()

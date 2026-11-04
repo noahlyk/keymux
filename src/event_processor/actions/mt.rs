@@ -25,26 +25,20 @@ pub enum Hand {
 
 /// State of an MT key
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MtKeyState {
+pub(crate) enum MtKeyState {
     /// Key is undecided (waiting for tap/hold resolution)
     Undecided,
     /// Resolved to tap
     Tap,
     /// Resolved to hold (modifier active)
     Hold,
-    /// Resolved to tap and completed
-    TapCompleted,
-    /// Resolved to hold and completed
-    HoldCompleted,
     /// Unwrapped to tap (cross-hand unwrap)
     Unwrapped,
 }
 
 /// MT key tracking state
 #[derive(Debug, Clone)]
-pub struct MtKey {
-    /// Physical keycode
-    pub keycode: KeyCode,
+pub(crate) struct MtKey {
     /// Tap output (what key to emit on tap)
     pub tap_key: KeyCode,
     /// Hold output (what modifier to emit on hold)
@@ -60,9 +54,8 @@ pub struct MtKey {
 }
 
 impl MtKey {
-    pub fn new(keycode: KeyCode, tap_key: KeyCode, hold_key: KeyCode, hand: Hand) -> Self {
+    pub fn new(tap_key: KeyCode, hold_key: KeyCode, hand: Hand) -> Self {
         Self {
-            keycode,
             tap_key,
             hold_key,
             pressed_at: Instant::now(),
@@ -74,7 +67,7 @@ impl MtKey {
 
     /// Get duration since press
     pub fn duration(&self) -> Duration {
-        Instant::now() - self.pressed_at
+        self.pressed_at.elapsed()
     }
 
     /// Get duration in milliseconds
@@ -319,7 +312,6 @@ impl MtProcessor {
             KeyCode::KC_LSFT,
             KeyCode::KC_LALT,
             KeyCode::KC_LGUI,
-            KeyCode::KC_LCMD,
             // Numbers
             KeyCode::KC_1,
             KeyCode::KC_2,
@@ -351,7 +343,6 @@ impl MtProcessor {
             KeyCode::KC_RSFT,
             KeyCode::KC_RALT,
             KeyCode::KC_RGUI,
-            KeyCode::KC_RCMD,
             // Numbers
             KeyCode::KC_6,
             KeyCode::KC_7,
@@ -372,16 +363,11 @@ impl MtProcessor {
     }
 
     /// Get hand for a keycode
-    pub fn get_hand(&self, keycode: KeyCode) -> Hand {
+    pub(crate) fn get_hand(&self, keycode: KeyCode) -> Hand {
         self.hand_map
             .get(&keycode)
             .copied()
             .unwrap_or(Hand::Unknown)
-    }
-
-    /// Set hand for a keycode (for custom layouts)
-    pub fn set_hand(&mut self, keycode: KeyCode, hand: Hand) {
-        self.hand_map.insert(keycode, hand);
     }
 
     /// Add key press (MT key pressed)
@@ -408,7 +394,7 @@ impl MtProcessor {
         }
 
         let hand = self.get_hand(keycode);
-        let mut mt_key = MtKey::new(keycode, tap_key, hold_key, hand);
+        let mut mt_key = MtKey::new(tap_key, hold_key, hand);
 
         // Check for cross-hand unwrap
         if self.config.cross_hand_unwrap && hand != Hand::Unknown {
@@ -748,30 +734,6 @@ impl MtProcessor {
         stats.update_tap(duration_ms, target_margin);
     }
 
-    /// Check if any keys are pending (for external permissive hold logic)
-    pub fn has_pending_keys(&self) -> bool {
-        !self.undecided_keys.is_empty()
-    }
-
-    /// Get count of undecided keys
-    pub fn undecided_count(&self) -> usize {
-        self.undecided_keys.len()
-    }
-
-    /// Get adaptive stats for display/debugging
-    pub fn get_adaptive_stats(&self) -> Vec<(KeyCode, &RollingStats)> {
-        self.rolling_stats
-            .iter()
-            .filter_map(|((k1, k2), stats)| {
-                if k1 == k2 && stats.tap_sample_count > 0 {
-                    Some((*k1, stats))
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
     /// Set game mode (pauses adaptive timing learning when active)
     pub fn set_game_mode(&mut self, active: bool) {
         self.game_mode_active = active;
@@ -785,69 +747,6 @@ impl MtProcessor {
         );
     }
 
-    /// Save adaptive timing stats to file
-    pub fn save_stats(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
-        if !self.config.adaptive_timing {
-            return Ok(());
-        }
-
-        // Skip save if we have no stats (prevents overwriting with empty data)
-        if self.rolling_stats.is_empty() {
-            return Ok(());
-        }
-
-        // Load existing stats and merge with current stats
-        let mut merged_stats = if path.exists() {
-            let json = std::fs::read_to_string(path)?;
-            // Load from string keys (JSON format)
-            serde_json::from_str::<HashMap<String, RollingStats>>(&json)
-                .unwrap_or_else(|_| HashMap::new())
-        } else {
-            HashMap::new()
-        };
-
-        // Merge: prefer our stats if we have them, otherwise keep existing
-        // Convert tuple keys to string keys for JSON serialization
-        for (key, stats) in &self.rolling_stats {
-            let key_str = format!("{:?},{:?}", key.0, key.1);
-            merged_stats.insert(key_str, stats.clone());
-        }
-
-        let json = serde_json::to_string_pretty(&merged_stats)?;
-        std::fs::write(path, json)?;
-        Ok(())
-    }
-
-    /// Load adaptive timing stats from file
-    pub fn load_stats(&mut self, path: &std::path::Path) -> Result<(), std::io::Error> {
-        if !self.config.adaptive_timing {
-            return Ok(()); // Don't load if adaptive timing is disabled
-        }
-
-        if !path.exists() {
-            return Ok(()); // File doesn't exist yet, that's okay
-        }
-
-        let json = std::fs::read_to_string(path)?;
-        // Load from string keys (JSON format) and convert back to tuple keys
-        let string_map: HashMap<String, RollingStats> = serde_json::from_str(&json)?;
-
-        self.rolling_stats.clear();
-        for (key_str, stats) in string_map {
-            // Parse "KC_A,KC_A" format back to (KeyCode, KeyCode)
-            if let Some((key1_str, key2_str)) = key_str.split_once(',') {
-                // Parse KeyCode from debug format string (e.g., "KC_A")
-                if let (Ok(key1), Ok(key2)) = (
-                    serde_json::from_str::<KeyCode>(&format!("\"{}\"", key1_str.trim())),
-                    serde_json::from_str::<KeyCode>(&format!("\"{}\"", key2_str.trim())),
-                ) {
-                    self.rolling_stats.insert((key1, key2), stats);
-                }
-            }
-        }
-
-        Ok(())
-    }
 }
 
 /// MT resolution result
@@ -898,7 +797,7 @@ impl MtProcessor {
         self.on_release(keycode)
     }
 
-    pub fn resolution_to_events(&self, resolution: &MtResolution) -> Vec<(KeyCode, bool)> {
+    pub(crate) fn resolution_to_events(&self, resolution: &MtResolution) -> Vec<(KeyCode, bool)> {
         match resolution.action {
             MtAction::TapPress(key) => vec![(key, true)],
             MtAction::TapPressRelease(key) => vec![(key, true), (key, false)],

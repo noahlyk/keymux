@@ -54,7 +54,7 @@ const FADE_LINES: usize = 3;
 /// Colours. With no background, everything has to read over any wallpaper: text is bright with
 /// a dark halo, and unlit keys are a faint dark glass pad with a light outline.
 #[derive(Debug, Clone, Copy)]
-pub struct Theme {
+pub(crate) struct Theme {
     pub panel: [u8; 3],
     pub key: [u8; 4],
     pub outline: [u8; 4],

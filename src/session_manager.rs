@@ -7,14 +7,14 @@ use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
 #[derive(Debug, Clone)]
-pub struct UserSession {
+pub(crate) struct UserSession {
     pub uid: u32,
     pub username: String,
     pub state: SessionState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionState {
+pub(crate) enum SessionState {
     Active,
     Idle,
 }

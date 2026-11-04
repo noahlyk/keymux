@@ -15,19 +15,8 @@ pub struct Window {
 }
 
 impl Window {
-    /// Check if this window should be in game mode by the programmed
-    /// heuristics alone (does not account for any active override - use
-    /// `effective_game_mode_state` for that).
-    pub fn game_mode_state(&self) -> GameModeState {
-        crate::niri::gamemode_detection::detect_game_mode(
-            Some(&self.app_id),
-            Some(self.pid),
-            Some(&self.title),
-        )
-    }
-
-    /// Like `game_mode_state`, but also applies the daemon's current
-    /// global/per-app_id overrides (`keymux gamemode`), so callers like
+    /// The game mode this window should be in: the programmed heuristics, then the daemon's
+    /// current global/per-app_id overrides (`keymux gamemode`), so callers like
     /// `keymux debug` show what's actually active, not just the raw
     /// heuristic guess.
     pub fn effective_game_mode_state(
@@ -57,11 +46,11 @@ pub fn get_all_windows() -> Result<Vec<Window>, String> {
     }
 
     let text = String::from_utf8_lossy(&output.stdout);
-    parse_niri_windows(&text)
+    Ok(parse_niri_windows(&text))
 }
 
 /// Parse niri windows output
-fn parse_niri_windows(text: &str) -> Result<Vec<Window>, String> {
+fn parse_niri_windows(text: &str) -> Vec<Window> {
     let mut windows = Vec::new();
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0;
@@ -114,7 +103,7 @@ fn parse_niri_windows(text: &str) -> Result<Vec<Window>, String> {
         i += 1;
     }
 
-    Ok(windows)
+    windows
 }
 
 /// Get terminal width for responsive formatting

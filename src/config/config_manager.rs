@@ -21,7 +21,7 @@ impl ConfigManager {
     /// Create a new config manager
     pub fn new(config_path: PathBuf) -> Result<Self> {
         let config = Config::load(&config_path)
-            .with_context(|| format!("Failed to load config from {:?}", config_path))?;
+            .with_context(|| format!("Failed to load config from {}", config_path.display()))?;
 
         Ok(Self {
             config: Arc::new(RwLock::new(config)),

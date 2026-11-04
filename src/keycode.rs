@@ -296,23 +296,3 @@ define_keycodes! {
     KC_HAEN = 140, international,
     KC_HANJ = 141, international,
 }
-
-// Aliases for common alternative names (QMK compatibility)
-impl KeyCode {
-    /// Alias for KC_LGUI (Left Command key on Mac)
-    pub const KC_LCMD: Self = Self::KC_LGUI;
-    /// Alias for KC_RGUI (Right Command key on Mac)
-    pub const KC_RCMD: Self = Self::KC_RGUI;
-    /// Alias for KC_LGUI (Left Windows key)
-    pub const KC_LWIN: Self = Self::KC_LGUI;
-    /// Alias for KC_RGUI (Right Windows key)
-    pub const KC_RWIN: Self = Self::KC_RGUI;
-    /// Alias for KC_BSPC
-    pub const KC_BSPACE: Self = Self::KC_BSPC;
-    /// Alias for KC_ENT
-    pub const KC_ENTER: Self = Self::KC_ENT;
-    /// Alias for KC_ESC
-    pub const KC_ESCAPE: Self = Self::KC_ESC;
-    /// Alias for KC_SPC
-    pub const KC_SPACE: Self = Self::KC_SPC;
-}

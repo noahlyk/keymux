@@ -167,8 +167,8 @@ impl ConfigDisplay {
         } else {
             println!("  Status: {}", "✗ Not found".bright_red());
             println!(
-                "  Hint: Run `keymux init` to create a starter config at {:?}",
-                self.config_path
+                "  Hint: Run `keymux init` to create a starter config at {}",
+                self.config_path.display()
             );
         }
         println!();

@@ -23,7 +23,7 @@ pub fn generate_completions(shell: Shell) {
 }
 
 /// Get the clap Command with styles applied for colorized help
-pub fn get_clap_command() -> clap::Command {
+fn get_clap_command() -> clap::Command {
     use clap::builder::styling::{AnsiColor, Styles};
 
     let styles = Styles::styled()

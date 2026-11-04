@@ -17,17 +17,15 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TdState {
+pub(crate) enum TdState {
     Undecided,
     HoldingFirst,
     Tapped,
     TappingSecond,
-    HoldingSecond,
 }
 
 #[derive(Debug, Clone)]
-pub struct TdKey {
-    pub keycode: KeyCode,
+pub(crate) struct TdKey {
     pub tap_action: KeyAction,
     pub double_tap_action: KeyAction,
     pub first_press_at: Instant,
@@ -37,9 +35,8 @@ pub struct TdKey {
 }
 
 impl TdKey {
-    pub fn new(keycode: KeyCode, tap_action: KeyAction, double_tap_action: KeyAction) -> Self {
+    pub fn new(tap_action: KeyAction, double_tap_action: KeyAction) -> Self {
         Self {
-            keycode,
             tap_action,
             double_tap_action,
             first_press_at: Instant::now(),
@@ -49,7 +46,7 @@ impl TdKey {
         }
     }
 
-    pub fn elapsed_since_press(&self) -> u128 {
+    pub(crate) fn elapsed_since_press(&self) -> u128 {
         self.first_press_at.elapsed().as_millis()
     }
 }
@@ -64,11 +61,12 @@ pub enum TdResolution {
     Undecided,
 }
 
-pub struct TdConfig {
+// The suffix is the unit, and config.ron spells these the same way
+#[allow(clippy::struct_field_names)]
+pub(crate) struct TdConfig {
     pub tapping_term_ms: u32,
     pub double_tap_window_ms: u64,
     pub grace_period_ms: u64,
-    pub permissive_hold: bool,
 }
 
 impl Default for TdConfig {
@@ -77,7 +75,6 @@ impl Default for TdConfig {
             tapping_term_ms: 200,
             double_tap_window_ms: 250,
             grace_period_ms: 500,
-            permissive_hold: true,
         }
     }
 }
@@ -94,7 +91,6 @@ impl DtProcessor {
                 tapping_term_ms: config.tapping_term_ms,
                 double_tap_window_ms: config.double_tap_window_ms.unwrap_or(250),
                 grace_period_ms: 500,
-                permissive_hold: true,
             },
             tracked_keys: HashMap::new(),
         }
@@ -107,7 +103,7 @@ impl DtProcessor {
         vec![]
     }
 
-    pub fn emit_action(
+    pub(crate) fn emit_action(
         &mut self,
         keycode: KeyCode,
         tap_action: &KeyAction,
@@ -128,14 +124,14 @@ impl DtProcessor {
     }
 
     /// Check if any keys other than the given keycode are tracked
-    pub fn has_other_keys_tracked(&self, keycode: KeyCode) -> bool {
+    pub(crate) fn has_other_keys_tracked(&self, keycode: KeyCode) -> bool {
         self.tracked_keys.keys().any(|&k| k != keycode)
     }
 
     /// Check if a key is already in a holding state
-    pub fn is_holding(&self, keycode: KeyCode) -> bool {
+    pub(crate) fn is_holding(&self, keycode: KeyCode) -> bool {
         self.tracked_keys.get(&keycode).is_some_and(|td_key| {
-            matches!(td_key.state, TdState::HoldingFirst | TdState::HoldingSecond)
+            matches!(td_key.state, TdState::HoldingFirst)
         })
     }
 
@@ -170,7 +166,7 @@ impl DtProcessor {
                     }
                     self.tracked_keys.remove(&keycode);
                     let mut new_td =
-                        TdKey::new(keycode, (*tap_action).clone(), (*double_tap_action).clone());
+                        TdKey::new((*tap_action).clone(), (*double_tap_action).clone());
                     new_td.state = TdState::Undecided;
                     self.tracked_keys.insert(keycode, new_td);
                     TdResolution::Undecided
@@ -185,13 +181,10 @@ impl DtProcessor {
                     TdResolution::Undecided
                 }
                 TdState::HoldingFirst => TdResolution::EmitAction(td_key.tap_action.clone()),
-                TdState::HoldingSecond => {
-                    TdResolution::EmitAction(td_key.double_tap_action.clone())
-                }
             }
         } else {
             let mut td_key =
-                TdKey::new(keycode, (*tap_action).clone(), (*double_tap_action).clone());
+                TdKey::new((*tap_action).clone(), (*double_tap_action).clone());
             let elapsed = td_key.elapsed_since_press();
             if elapsed > self.config.tapping_term_ms as u128 {
                 td_key.state = TdState::HoldingFirst;
@@ -236,20 +229,10 @@ impl DtProcessor {
                     }
                     ProcessResult::None
                 }
-                TdState::HoldingSecond => {
-                    self.tracked_keys.remove(&keycode);
-                    ProcessResult::None
-                }
             }
         } else {
             ProcessResult::None
         }
-    }
-
-    pub fn get_last_emitted_action(&self, keycode: KeyCode) -> Option<KeyAction> {
-        self.tracked_keys
-            .get(&keycode)
-            .and_then(|td| td.last_emitted_action.clone())
     }
 
     /// When the earliest tracked key next needs its timeouts checked, if any is waiting on one.
@@ -260,7 +243,7 @@ impl DtProcessor {
                 let term_ms = match td_key.state {
                     TdState::Undecided => u64::from(self.config.tapping_term_ms),
                     TdState::Tapped | TdState::TappingSecond => self.config.double_tap_window_ms,
-                    TdState::HoldingFirst | TdState::HoldingSecond => return None,
+                    TdState::HoldingFirst => return None,
                 };
                 // The checks count whole milliseconds and fire once the term is exceeded
                 Some(td_key.first_press_at + Duration::from_millis(term_ms + 1))
@@ -290,7 +273,7 @@ impl DtProcessor {
                         }
                     }
                 }
-                TdState::HoldingFirst | TdState::HoldingSecond => {}
+                TdState::HoldingFirst => {}
             }
         }
 
@@ -314,10 +297,6 @@ impl DtProcessor {
         }
 
         events
-    }
-
-    pub fn tracked_count(&self) -> usize {
-        self.tracked_keys.len()
     }
 }
 

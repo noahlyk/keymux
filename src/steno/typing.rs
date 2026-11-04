@@ -48,6 +48,8 @@ impl TypingLayout {
 }
 
 /// The unshifted and shifted characters of a key on a US keyboard.
+// Every arm names a variant: the glob is the readable form here
+#[allow(clippy::enum_glob_use)]
 const fn us_pair(key: KeyCode) -> Option<(char, char)> {
     use KeyCode::*;
     Some(match key {

@@ -356,7 +356,7 @@ mod tests {
         let removed = parts.refresh(&ba[..1], &cache, &Layout::plover());
         assert!(removed.changed);
         assert_eq!(parts.layered(&ba[..1]).lookup(&[KAT]), Some("kitten"));
-        assert!(parts.by_path.len() == 1);
+        assert_eq!(parts.by_path.len(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -478,14 +478,14 @@ mod tests {
             let _ = parts.layered(&files);
         });
         time("nothing changed (is_current)", &mut || {
-            assert!(parts.is_current(&files) || true);
+            let _ = parts.is_current(&files);
         });
         let mut fresh = Parts::default();
         time("restart (restore every file from cache)", &mut || {
             fresh.refresh(&files, &cache, &layout);
         });
         let one = files.iter().find(|f| f.ends_with("02-lyk-extras.json")).unwrap().clone();
-        let text = fs::read_to_string(&one).unwrap().replacen("{", "{\"STKPWHRAOEUFRPBLGTSDZ\": \"zzbench\",", 1);
+        let text = fs::read_to_string(&one).unwrap().replacen('{', "{\"STKPWHRAOEUFRPBLGTSDZ\": \"zzbench\",", 1);
         put(&one, &text, 3);
         time("one small file changed (refresh)", &mut || {
             fresh.refresh(&files, &cache, &layout);
