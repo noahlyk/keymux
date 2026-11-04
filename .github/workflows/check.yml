@@ -12,8 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:latest
     steps:
+      # rust-wasm: the wasm32-unknown-unknown target the steno plugin tests compile real
+      # plugins to, which Arch ships apart from rust
       - name: Install system dependencies
-        run: pacman -Syu --noconfirm base-devel git rust
+        run: pacman -Syu --noconfirm base-devel git rust rust-wasm
       - uses: actions/checkout@v5
       - name: Format
         run: cargo fmt --all --check
