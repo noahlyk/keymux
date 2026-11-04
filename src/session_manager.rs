@@ -2,8 +2,6 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::process::Command;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
 #[derive(Debug, Clone)]
@@ -20,27 +18,20 @@ pub(crate) enum SessionState {
 }
 
 /// Session Manager — wraps loginctl session state.
-/// Keyboard ownership is tracked by AsyncDaemon directly, not here.
+/// Keyboard ownership is tracked by the daemon directly, not here.
+#[derive(Default)]
 pub struct SessionManager {
     /// Map of UID to user session info
-    user_sessions: Arc<RwLock<HashMap<u32, UserSession>>>,
-}
-
-impl Default for SessionManager {
-    fn default() -> Self {
-        Self::new()
-    }
+    user_sessions: HashMap<u32, UserSession>,
 }
 
 impl SessionManager {
     pub fn new() -> Self {
-        Self {
-            user_sessions: Arc::new(RwLock::new(HashMap::new())),
-        }
+        Self::default()
     }
 
     /// Refresh user session information from loginctl
-    pub async fn refresh_sessions(&self) -> Result<()> {
+    pub fn refresh_sessions(&mut self) -> Result<()> {
         let sessions = list_user_sessions()?;
         debug!("Found {} user sessions from loginctl", sessions.len());
         for s in &sessions {
@@ -50,35 +41,30 @@ impl SessionManager {
             );
         }
 
-        let mut user_sessions = self.user_sessions.write().await;
-
         // Upsert all sessions returned by loginctl
         for session in sessions {
-            user_sessions.insert(session.uid, session);
+            self.user_sessions.insert(session.uid, session);
         }
 
         // Drop sessions that are no longer reported as active by loginctl.
         // (Idle sessions are re-inserted on every refresh so they'll reappear
         // as Active once loginctl reports them that way again.)
-        user_sessions.retain(|_, s| s.state == SessionState::Active);
-        drop(user_sessions);
+        self.user_sessions
+            .retain(|_, s| s.state == SessionState::Active);
 
         Ok(())
     }
 
     /// Check if a user session is currently active
-    pub async fn is_user_active(&self, uid: u32) -> bool {
-        let sessions = self.user_sessions.read().await;
-        sessions
+    pub fn is_user_active(&self, uid: u32) -> bool {
+        self.user_sessions
             .get(&uid)
-            .map(|s| s.state == SessionState::Active)
-            .unwrap_or(false)
+            .is_some_and(|s| s.state == SessionState::Active)
     }
 
     /// Get all active user UIDs
-    pub async fn get_active_uids(&self) -> Vec<u32> {
-        let sessions = self.user_sessions.read().await;
-        sessions
+    pub fn get_active_uids(&self) -> Vec<u32> {
+        self.user_sessions
             .iter()
             .filter(|(_, session)| session.state == SessionState::Active)
             .map(|(&uid, _)| uid)

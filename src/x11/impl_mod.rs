@@ -1,10 +1,8 @@
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::mpsc::Sender;
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::error;
 
-use crate::window_manager::{WindowInfo, WindowManager, WindowManagerEvent};
+use crate::window_manager::{EventSink, WindowInfo, WindowManager};
 
 #[derive(Clone)]
 pub struct I3WindowManager;
@@ -239,16 +237,7 @@ pub fn is_bspwm_available() -> bool {
 
 // detect_x11_wm removed - not needed for basic functionality
 
-pub fn start_i3_monitor(tx: UnboundedSender<WindowManagerEvent>) {
-    let wm = I3WindowManager::new();
-    if !wm.is_available() {
-        error!("i3 socket not found - is i3 running?");
-        return;
-    }
-    wm.start_event_monitor(tx);
-}
-
-pub fn start_i3_monitor_sync(tx: Sender<WindowManagerEvent>) {
+pub fn start_i3_monitor_sync(tx: impl EventSink) {
     let wm = I3WindowManager::new();
     if !wm.is_available() {
         error!("i3 socket not found - is i3 running?");
@@ -257,16 +246,7 @@ pub fn start_i3_monitor_sync(tx: Sender<WindowManagerEvent>) {
     wm.start_event_monitor_sync(tx);
 }
 
-pub fn start_bspwm_monitor(tx: UnboundedSender<WindowManagerEvent>) {
-    let wm = BspwmWindowManager::new();
-    if !wm.is_available() {
-        error!("bspwm not available - is bspwm running?");
-        return;
-    }
-    wm.start_event_monitor(tx);
-}
-
-pub fn start_bspwm_monitor_sync(tx: Sender<WindowManagerEvent>) {
+pub fn start_bspwm_monitor_sync(tx: impl EventSink) {
     let wm = BspwmWindowManager::new();
     if !wm.is_available() {
         error!("bspwm not available - is bspwm running?");

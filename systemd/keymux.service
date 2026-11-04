@@ -9,8 +9,6 @@ ExecStart=/usr/bin/keymux daemon
 Restart=always
 RestartSec=5
 Environment="RUST_LOG=info"
-# Async runtime benefits from multiple threads
-Environment="TOKIO_WORKER_THREADS=4"
 
 # Capabilities needed for input device access
 CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SYS_RAWIO CAP_SETUID CAP_SETGID

@@ -1,7 +1,6 @@
-/// Async Daemon - Main orchestrator with async management layer
-///
-/// Provides async event handling for hotplug, IPC, config changes, and session management
-/// while maintaining synchronous event processors for zero-latency key processing.
+/// The daemon: one loop that reacts to hotplug, IPC, window focus, config changes and
+/// session changes, each arriving from a thread of its own, while every keyboard's event
+/// processor runs on its own thread and never waits on any of it.
 use crate::config::ConfigManager;
 use crate::event_processor;
 use crate::gamemode_state::{GlobalOverride, WindowOverride};
@@ -11,16 +10,15 @@ use crate::niri::gamemode_detection::resolve_effective_game_mode;
 use crate::session_manager::SessionManager;
 use crate::window_manager::WindowInfo;
 use anyhow::{Context, Result};
-
+use crossbeam_channel::{at, never, select, tick, unbounded, Receiver, Sender};
 use evdev::Device;
 use std::collections::{HashMap, HashSet};
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
-use tokio::sync::mpsc as tokio_mpsc;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 /// Metadata about a keyboard
@@ -40,8 +38,23 @@ struct ProcessorHandle {
     thread_handle: Option<thread::JoinHandle<()>>,
 }
 
-/// Async daemon orchestrator
-pub struct AsyncDaemon {
+/// A thread feeding the daemon's loop, named so a dead one can be taken out of the select
+/// instead of being selected on forever.
+#[derive(Clone, Copy)]
+enum Source {
+    Hotplug,
+    Ipc,
+    Niri,
+    ConfigWatch,
+}
+
+/// A source thread ended: say so, and take its place with a receiver that never fires.
+fn ended<T>(name: &str) -> Receiver<T> {
+    warn!("{name} thread ended; the daemon carries on without it");
+    never()
+}
+
+pub struct Daemon {
     /// Per-user configuration managers (uid -> ConfigManager)
     user_configs: HashMap<u32, ConfigManager>,
     /// Session manager for multi-user support
@@ -55,9 +68,9 @@ pub struct AsyncDaemon {
     /// Current game mode state (preserved across thread restarts)
     game_mode_active: bool,
     /// Receiver for processor thread death notifications (path of the dead processor)
-    processor_dead_rx: tokio_mpsc::UnboundedReceiver<PathBuf>,
+    processor_dead_rx: Receiver<PathBuf>,
     /// Sender side kept on the daemon to clone into each new ProcessorHandle
-    processor_dead_tx: tokio_mpsc::UnboundedSender<PathBuf>,
+    processor_dead_tx: Sender<PathBuf>,
 
     /// System-wide game mode override (`keymux gamemode global`). Ignores
     /// per-window heuristics/overrides entirely when not `Auto`. Session-only
@@ -76,8 +89,7 @@ pub struct AsyncDaemon {
     warned_missing_config: HashSet<u32>,
 }
 
-impl AsyncDaemon {
-    /// Create a new async daemon
+impl Daemon {
     pub fn new(_config_path: Option<PathBuf>, _user: Option<String>) -> Result<Self> {
         info!("Initializing async keyboard middleware daemon");
 
@@ -100,7 +112,7 @@ impl AsyncDaemon {
         }
 
         let session_manager = SessionManager::new();
-        let (processor_dead_tx, processor_dead_rx) = tokio_mpsc::unbounded_channel();
+        let (processor_dead_tx, processor_dead_rx) = unbounded();
 
         Ok(Self {
             user_configs: HashMap::new(),
@@ -118,134 +130,95 @@ impl AsyncDaemon {
         })
     }
 
-    /// Run the async daemon event loop
-    #[allow(clippy::future_not_send)]
-    pub async fn run(&mut self) -> Result<()> {
-        info!("Starting async keyboard middleware daemon (multi-user mode)");
+    /// Run the daemon's event loop.
+    pub fn run(&mut self) -> Result<()> {
+        info!("Starting keyboard middleware daemon (multi-user mode)");
 
         // Start background services
         let mut hotplug_rx = self.start_hotplug_monitor();
         let mut ipc_rx = self.start_ipc_server()?;
         let mut niri_rx = self.start_niri_monitor();
         let mut config_watch_rx = self.start_config_watcher();
+        let processor_dead_rx = self.processor_dead_rx.clone();
 
         // Initial session and keyboard discovery
         info!("Refreshing user sessions...");
-        self.refresh_sessions().await;
+        self.refresh_sessions();
 
         info!("Discovering keyboards...");
         self.discover_keyboards();
 
         // Load user configs and sync keyboards
         info!("Loading user configs...");
-        self.load_user_configs().await;
+        self.load_user_configs();
 
         info!("Syncing keyboards to users...");
-        self.sync_keyboards_to_users().await;
+        self.sync_keyboards_to_users();
 
-        // Main event loop - use async recv for zero CPU usage when idle
-        let mut session_check = tokio::time::interval(Duration::from_secs(5));
-        // Pending hotplug debounce: armed when we receive an add/remove event, fires after settling
-        let mut hotplug_debounce: Option<tokio::time::Instant> = None;
-        const HOTPLUG_DEBOUNCE_MS: u64 = 300;
+        let session_check = tick(Duration::from_secs(5));
+        // A single physical replug fires many udev events in rapid succession (with --udev,
+        // each only after udev's rules ran, so the device node is ready): the resync waits
+        // until they have settled
+        const HOTPLUG_DEBOUNCE: Duration = Duration::from_millis(300);
+        let mut hotplug_settle: Option<Instant> = None;
 
         loop {
-            // Compute how long until the debounce timer fires (if armed)
-            let debounce_deadline = hotplug_debounce.map(|t| {
-                let settle = t + Duration::from_millis(HOTPLUG_DEBOUNCE_MS);
-                let now = tokio::time::Instant::now();
-                if settle > now {
-                    settle - now
-                } else {
-                    Duration::ZERO
-                }
-            });
-
-            tokio::select! {
-                Some(event) = hotplug_rx.recv() => {
-                    // Only react to "add" and "remove" events. We use --udev so events only
-                    // fire after udev rule processing is complete (device node fully ready).
-                    // However, a single physical replug fires many udev events in rapid
-                    // succession — arm a debounce timer so we act once after things settle.
-                    if event.contains(" add ") || event.contains(" remove ") {
-                        debug!("Hotplug event (add/remove): {}", event);
-                        hotplug_debounce = Some(tokio::time::Instant::now());
+            let settle = hotplug_settle.map_or_else(never, at);
+            let mut closed: Option<Source> = None;
+            select! {
+                recv(hotplug_rx) -> event => match event {
+                    Ok(event) => {
+                        if event.contains(" add ") || event.contains(" remove ") {
+                            debug!("Hotplug event (add/remove): {}", event);
+                            hotplug_settle = Some(Instant::now() + HOTPLUG_DEBOUNCE);
+                        }
                     }
-                }
-                // Debounce timer fired — drain any remaining queued events then resync
-                () = async {
-                    if let Some(deadline) = debounce_deadline {
-                        tokio::time::sleep(deadline).await;
-                    } else {
-                        // Never fire if no debounce is armed
-                        std::future::pending::<()>().await;
-                    }
-                } => {
+                    Err(_) => closed = Some(Source::Hotplug),
+                },
+                recv(settle) -> _ => {
                     // Drain any events that arrived during the debounce window
                     while let Ok(event) = hotplug_rx.try_recv() {
                         debug!("Draining queued hotplug event: {}", event);
                     }
-                    hotplug_debounce = None;
+                    hotplug_settle = None;
                     info!("Hotplug settled, resyncing keyboards...");
-                    self.refresh_sessions().await;
-                    self.load_user_configs().await;
+                    self.refresh_sessions();
+                    self.load_user_configs();
                     self.discover_keyboards();
-                    self.sync_keyboards_to_users().await;
+                    self.sync_keyboards_to_users();
                 }
-                Some((request, resp_tx)) = ipc_rx.recv() => {
-                    debug!("IPC request: {:?}", request);
-                    let response = self.handle_ipc_request(request).await;
-                    let _ = resp_tx.send(response);
-                }
-                Some(event) = niri_rx.recv() => {
-                    self.process_niri_event(event);
-                }
-                Some(()) = config_watch_rx.recv() => {
-                    // Check if hot config reload is enabled for ANY user
-                    let mut hot_reload_enabled = false;
-                    for mgr in self.user_configs.values() {
-                        let config = mgr.get_config().await;
-                        if config.hot_config_reload {
-                            hot_reload_enabled = true;
-                            break;
-                        }
+                recv(ipc_rx) -> message => match message {
+                    Ok((request, resp_tx)) => {
+                        debug!("IPC request: {:?}", request);
+                        let response = self.handle_ipc_request(request);
+                        let _ = resp_tx.send(response);
                     }
-
-                    if hot_reload_enabled {
-                        // A save that changed nothing the daemon acts on (a comment, spacing,
-                        // a rewrite of the same text) must not restart every keyboard
-                        if self.config_changed_on_disk().await {
-                            info!("Config file changed, reloading...");
-                            if let Err(e) = self.reload_all_configs().await {
-                                error!("Config reload failed: {}", e);
-                            }
-                        } else {
-                            debug!("Config file saved with no change to how it behaves, not reloading");
-                        }
+                    Err(_) => closed = Some(Source::Ipc),
+                },
+                recv(niri_rx) -> event => match event {
+                    Ok(event) => self.process_niri_event(event),
+                    Err(_) => closed = Some(Source::Niri),
+                },
+                recv(config_watch_rx) -> changed => match changed {
+                    Ok(()) => self.config_file_changed(),
+                    Err(_) => closed = Some(Source::ConfigWatch),
+                },
+                recv(session_check) -> _ => {
+                    self.refresh_sessions();
+                    self.sync_keyboards_to_users();
+                }
+                recv(processor_dead_rx) -> dead => {
+                    if let Ok(dead_path) = dead {
+                        self.processor_died(&dead_path);
                     }
                 }
-                _ = session_check.tick() => {
-                    self.refresh_sessions().await;
-                    self.sync_keyboards_to_users().await;
-                }
-                Some(dead_path) = self.processor_dead_rx.recv() => {
-                    // A processor thread died (ENODEV or error) — clean up immediately
-                    // without waiting for a udev event to trigger rediscovery.
-                    if let Some((kbd_id, _, _)) = self.active_processors.remove(&dead_path) {
-                        info!("Processor thread died for: {} ({})", dead_path.display(), kbd_id);
-                        // If this was the last processor for this keyboard, mark it disconnected
-                        let any_remaining = self.active_processors
-                            .values()
-                            .any(|(k, _, _)| k == &kbd_id);
-                        if !any_remaining {
-                            info!("All processors dead for {}, marking disconnected", kbd_id);
-                            if let Some(meta) = self.all_keyboards.get_mut(&kbd_id) {
-                                meta.connected = false;
-                            }
-                            self.keyboard_owners.remove(&kbd_id);
-                        }
-                    }
-                }
+            }
+            match closed {
+                None => {}
+                Some(Source::Hotplug) => hotplug_rx = ended("hotplug monitor"),
+                Some(Source::Ipc) => ipc_rx = ended("IPC server"),
+                Some(Source::Niri) => niri_rx = ended("niri monitor"),
+                Some(Source::ConfigWatch) => config_watch_rx = ended("config watcher"),
             }
         }
     }
@@ -303,9 +276,9 @@ impl AsyncDaemon {
     }
 
     /// Synchronize keyboards to active users based on their configs
-    async fn sync_keyboards_to_users(&mut self) {
+    fn sync_keyboards_to_users(&mut self) {
         // Load configs for active users (if not already loaded)
-        self.load_user_configs().await;
+        self.load_user_configs();
 
         // First, stop processors for disconnected keyboards
         let disconnected_keyboards: Vec<_> = self
@@ -317,7 +290,7 @@ impl AsyncDaemon {
 
         for kbd_id in disconnected_keyboards {
             info!("Stopping processors for disconnected keyboard: {}", kbd_id);
-            let _ = self.stop_processors_for_keyboard(&kbd_id).await;
+            self.stop_processors_for_keyboard(&kbd_id);
             self.keyboard_owners.remove(&kbd_id);
         }
 
@@ -336,10 +309,10 @@ impl AsyncDaemon {
             // Check existing ownership first
             if let Some(&owner_uid) = self.keyboard_owners.get(&kbd_id) {
                 // Verify owner session is still active
-                if self.session_manager.is_user_active(owner_uid).await {
+                if self.session_manager.is_user_active(owner_uid) {
                     // Check if keyboard is still enabled in their config
                     if let Some(config_mgr) = self.user_configs.get(&owner_uid) {
-                        let config = config_mgr.get_config().await;
+                        let config = config_mgr.get_config();
                         let event_path = meta
                             .paths
                             .first()
@@ -372,11 +345,11 @@ impl AsyncDaemon {
                     .map(|(uid, cfg)| (*uid, cfg.clone()))
                     .collect();
                 for (uid, config_mgr) in user_configs {
-                    if !self.session_manager.is_user_active(uid).await {
+                    if !self.session_manager.is_user_active(uid) {
                         continue;
                     }
 
-                    let config = config_mgr.get_config().await;
+                    let config = config_mgr.get_config();
                     let event_path = meta
                         .paths
                         .first()
@@ -407,13 +380,12 @@ impl AsyncDaemon {
 
                 if !has_active_processors {
                     // Stop any existing processors for this keyboard (might be owned by different user)
-                    let _ = self.stop_processors_for_keyboard(&kbd_id).await;
+                    self.stop_processors_for_keyboard(&kbd_id);
 
                     // Start ONE THREAD PER EVENT FILE
                     if let Err(e) = self
                         .start_processors_for_keyboard(&kbd_id, &meta.name, &meta.paths, uid)
-                        .await
-                    {
+                                            {
                         error!("Failed to start processors for user {}: {}", uid, e);
                     } else {
                         self.keyboard_owners.insert(kbd_id.clone(), uid);
@@ -431,7 +403,7 @@ impl AsyncDaemon {
                         "No active user wants keyboard {}, stopping processors",
                         meta.name
                     );
-                    let _ = self.stop_processors_for_keyboard(&kbd_id).await;
+                    self.stop_processors_for_keyboard(&kbd_id);
                     self.keyboard_owners.remove(&kbd_id);
                 }
             }
@@ -439,9 +411,9 @@ impl AsyncDaemon {
     }
 
     /// Load configs for all active users
-    async fn load_user_configs(&mut self) {
+    fn load_user_configs(&mut self) {
         // Get active user UIDs (session state already refreshed by caller)
-        let active_uids = self.get_active_user_uids().await;
+        let active_uids = self.get_active_user_uids();
         debug!("Active user UIDs: {:?}", active_uids);
 
         for &uid in &active_uids {
@@ -490,9 +462,8 @@ impl AsyncDaemon {
     }
 
     /// Get list of active user UIDs
-    async fn get_active_user_uids(&self) -> Vec<u32> {
-        self.session_manager.get_active_uids().await
-    }
+    fn get_active_user_uids(&self) -> Vec<u32> {
+        self.session_manager.get_active_uids()    }
 
     /// Get username from UID
     fn get_username(&self, uid: u32) -> Result<String> {
@@ -555,7 +526,7 @@ impl AsyncDaemon {
     }
 
     /// Start event processors for ALL event files of a keyboard - ONE THREAD PER EVENT FILE!
-    async fn start_processors_for_keyboard(
+    fn start_processors_for_keyboard(
         &mut self,
         kbd_id: &KeyboardId,
         kbd_name: &str,
@@ -568,7 +539,7 @@ impl AsyncDaemon {
             .get(&uid)
             .context("User config not loaded")?
             .get_config()
-            .await;
+            ;
 
         // Get config path for command execution
         let config_path = self
@@ -694,7 +665,7 @@ impl AsyncDaemon {
     }
 
     /// Stop ALL event processors for a keyboard
-    async fn stop_processors_for_keyboard(&mut self, kbd_id: &KeyboardId) -> Result<()> {
+    fn stop_processors_for_keyboard(&mut self, kbd_id: &KeyboardId) {
         // Find all event paths for this keyboard
         let paths_to_stop: Vec<PathBuf> = self
             .active_processors
@@ -704,7 +675,7 @@ impl AsyncDaemon {
             .collect();
 
         if paths_to_stop.is_empty() {
-            return Ok(());
+            return;
         }
 
         info!(
@@ -734,31 +705,19 @@ impl AsyncDaemon {
             }
         }
 
-        // Spawn all join tasks concurrently so N threads shut down in parallel
-        // (worst-case time = slowest thread, not sum of all threads).
-        let join_futures: Vec<_> = join_tasks
-            .into_iter()
-            .map(|(path_str, thread_handle)| {
-                tokio::task::spawn_blocking(move || {
-                    let _ = thread_handle.join();
-                    path_str
-                })
-            })
-            .collect();
-
-        for fut in join_futures {
-            match fut.await {
-                Ok(path_str) => info!("Stopped processor for: {}", path_str),
-                Err(e) => warn!("Thread join task panicked: {}", e),
+        // Every thread was told to stop before any is waited for, so this takes as long as
+        // the slowest of them, not the sum
+        for (path_str, thread_handle) in join_tasks {
+            if thread_handle.join().is_err() {
+                warn!("Processor thread panicked: {}", path_str);
             }
+            info!("Stopped processor for: {}", path_str);
         }
-
-        Ok(())
     }
 
     /// Start hotplug monitor (udev)
-    fn start_hotplug_monitor(&self) -> tokio_mpsc::UnboundedReceiver<String> {
-        let (tx, rx) = tokio_mpsc::unbounded_channel();
+    fn start_hotplug_monitor(&self) -> Receiver<String> {
+        let (tx, rx) = unbounded();
 
         thread::spawn(move || {
             loop {
@@ -797,8 +756,8 @@ impl AsyncDaemon {
     /// Start IPC server
     fn start_ipc_server(
         &self,
-    ) -> Result<tokio_mpsc::UnboundedReceiver<(IpcRequest, mpsc::Sender<IpcResponse>)>> {
-        let (tx, rx) = tokio_mpsc::unbounded_channel();
+    ) -> Result<Receiver<(IpcRequest, mpsc::Sender<IpcResponse>)>> {
+        let (tx, rx) = unbounded();
         let socket_path = get_root_socket_path();
 
         // Remove old socket if exists
@@ -890,26 +849,23 @@ impl AsyncDaemon {
     /// Start niri window monitor
     fn start_niri_monitor(
         &self,
-    ) -> tokio_mpsc::UnboundedReceiver<crate::window_manager::WindowManagerEvent> {
-        let (tx, rx) = tokio_mpsc::unbounded_channel();
-
-        if crate::niri::is_niri_available() {
-            crate::niri::start_niri_monitor(tx);
-            info!("Started niri window monitor");
-        } else {
+    ) -> Receiver<crate::window_manager::WindowManagerEvent> {
+        if !crate::niri::is_niri_available() {
             debug!("Niri not available, skipping window monitor");
+            return never();
         }
-
+        let (tx, rx) = unbounded();
+        crate::niri::start_niri_monitor_sync(tx);
+        info!("Started niri window monitor");
         rx
     }
 
     /// Start config file watcher for automatic reload
     /// Returns: Receiver<()> that signals when any config changed
-    fn start_config_watcher(&self) -> tokio_mpsc::UnboundedReceiver<()> {
+    fn start_config_watcher(&self) -> Receiver<()> {
         use notify::{recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
-        use std::path::Path;
 
-        let (tx, rx) = tokio_mpsc::unbounded_channel();
+        let (tx, rx) = unbounded();
 
         thread::spawn(move || {
             let (watch_tx, watch_rx) = std::sync::mpsc::channel();
@@ -1110,7 +1066,7 @@ impl AsyncDaemon {
 
     /// Whether any loaded config differs, in how it behaves, from the file on disk now. A file
     /// that can't be read or parsed counts as changed, so the reload reports what is wrong.
-    async fn config_changed_on_disk(&self) -> bool {
+    fn config_changed_on_disk(&self) -> bool {
         // Nothing loaded yet, or a user who has no config loaded: a reload may load one
         if self.user_configs.is_empty() {
             return true;
@@ -1119,7 +1075,7 @@ impl AsyncDaemon {
             let Ok(on_disk) = crate::config::Config::load(&mgr.get_config_path()) else {
                 return true;
             };
-            if !mgr.get_config().await.behaves_like(&on_disk) {
+            if !mgr.get_config().behaves_like(&on_disk) {
                 return true;
             }
         }
@@ -1127,13 +1083,13 @@ impl AsyncDaemon {
     }
 
     /// Reload all user configs and restart processors
-    async fn reload_all_configs(&mut self) -> Result<()> {
+    fn reload_all_configs(&mut self) -> Result<()> {
         info!("Reloading all user configs...");
-        self.refresh_sessions().await;
+        self.refresh_sessions();
 
         // Step 1: Validate all configs before stopping anything
         info!("Validating configs...");
-        let active_uids = self.get_active_user_uids().await;
+        let active_uids = self.get_active_user_uids();
         debug!("Active UIDs for validation: {:?}", active_uids);
         let mut validation_errors: HashMap<u32, String> = HashMap::new();
 
@@ -1192,18 +1148,18 @@ impl AsyncDaemon {
         info!("Stopping all processors...");
         let all_kbd_ids: Vec<_> = self.keyboard_owners.keys().cloned().collect();
         for kbd_id in all_kbd_ids {
-            let _ = self.stop_processors_for_keyboard(&kbd_id).await;
+            self.stop_processors_for_keyboard(&kbd_id);
         }
         self.keyboard_owners.clear();
 
         // Step 3: Clear and reload configs
         info!("Reloading configs from disk...");
         self.user_configs.clear();
-        self.load_user_configs().await;
+        self.load_user_configs();
 
         // Step 4: Restart all processors with new configs
         info!("Restarting processors with new configs...");
-        self.sync_keyboards_to_users().await;
+        self.sync_keyboards_to_users();
 
         info!("Config reload complete!");
 
@@ -1277,7 +1233,7 @@ impl AsyncDaemon {
     }
 
     /// Stop every active processor thread. Used for graceful shutdown.
-    async fn stop_all_processors(&mut self) {
+    fn stop_all_processors(&mut self) {
         let paths: Vec<PathBuf> = self.active_processors.keys().cloned().collect();
         info!("Stopping {} processor thread(s) for shutdown", paths.len());
 
@@ -1291,27 +1247,16 @@ impl AsyncDaemon {
             }
         }
 
-        let join_futures: Vec<_> = join_tasks
-            .into_iter()
-            .map(|(path_str, thread_handle)| {
-                tokio::task::spawn_blocking(move || {
-                    let _ = thread_handle.join();
-                    path_str
-                })
-            })
-            .collect();
-
-        for fut in join_futures {
-            match fut.await {
-                Ok(path_str) => info!("Stopped processor for: {}", path_str),
-                Err(e) => warn!("Thread join task panicked during shutdown: {}", e),
+        for (path_str, thread_handle) in join_tasks {
+            if thread_handle.join().is_err() {
+                warn!("Processor thread panicked during shutdown: {}", path_str);
             }
+            info!("Stopped processor for: {}", path_str);
         }
     }
 
     /// Handle a single IPC request
-    #[allow(clippy::future_not_send)]
-    async fn handle_ipc_request(&mut self, request: IpcRequest) -> IpcResponse {
+    fn handle_ipc_request(&mut self, request: IpcRequest) -> IpcResponse {
         match request {
             IpcRequest::Ping => IpcResponse::Pong,
             IpcRequest::WindowFocusChanged { app_id, pid, title } => {
@@ -1388,7 +1333,7 @@ impl AsyncDaemon {
                 // Collect all enabled_keyboards entries from all user configs for annotation
                 let mut all_config_entries: Vec<(String, bool)> = Vec::new(); // (pattern, is_enable)
                 for config_mgr in self.user_configs.values() {
-                    let config = config_mgr.get_config().await;
+                    let config = config_mgr.get_config();
                     if let Some(entries) = config.get_enabled_keyboards_entries() {
                         for entry in entries {
                             let pattern = entry.pattern().to_string();
@@ -1482,7 +1427,7 @@ impl AsyncDaemon {
             }
             IpcRequest::ToggleKeyboards => {
                 info!("Toggle keyboards requested via IPC");
-                match self.reload_all_configs().await {
+                match self.reload_all_configs() {
                     Ok(()) => IpcResponse::Ok,
                     Err(e) => {
                         error!("Toggle reload failed: {}", e);
@@ -1500,7 +1445,7 @@ impl AsyncDaemon {
                     // In multi-user mode, we need to know which user's config to update
                     // For now, we'll trigger a resync which will check all user configs
                     info!("Keyboard {} found, triggering resync", hardware_id);
-                    self.sync_keyboards_to_users().await;
+                    self.sync_keyboards_to_users();
                     IpcResponse::Ok
                 } else {
                     IpcResponse::Error(format!("Keyboard not found: {}", hardware_id))
@@ -1508,20 +1453,14 @@ impl AsyncDaemon {
             }
             IpcRequest::DisableKeyboard(hardware_id) => {
                 info!("Disable keyboard requested via IPC: {}", hardware_id);
-                // Create KeyboardId from string
-                let kbd_id = crate::keyboard_id::KeyboardId::new(hardware_id.clone());
-                // Stop all processors for this keyboard
-                if let Err(e) = self.stop_processors_for_keyboard(&kbd_id).await {
-                    error!("Failed to stop processors: {}", e);
-                    IpcResponse::Error(format!("Failed to stop processors: {}", e))
-                } else {
-                    self.keyboard_owners.remove(&kbd_id);
-                    IpcResponse::Ok
-                }
+                let kbd_id = crate::keyboard_id::KeyboardId::new(hardware_id);
+                self.stop_processors_for_keyboard(&kbd_id);
+                self.keyboard_owners.remove(&kbd_id);
+                IpcResponse::Ok
             }
             IpcRequest::Reload => {
                 info!("Config reload requested via IPC");
-                match self.reload_all_configs().await {
+                match self.reload_all_configs() {
                     Ok(()) => IpcResponse::Ok,
                     Err(e) => {
                         error!("Config reload failed: {}", e);
@@ -1536,11 +1475,11 @@ impl AsyncDaemon {
             }
             IpcRequest::Shutdown => {
                 info!("Shutdown requested via IPC");
-                self.stop_all_processors().await;
+                self.stop_all_processors();
                 // Exit shortly after returning, so the client still gets its
                 // `Ok` response before the process disappears.
-                tokio::spawn(async {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                thread::spawn(|| {
+                    thread::sleep(Duration::from_millis(100));
                     info!("Daemon exiting after graceful shutdown");
                     std::process::exit(0);
                 });
@@ -1605,9 +1544,54 @@ impl AsyncDaemon {
     }
 
     /// Refresh user sessions
-    async fn refresh_sessions(&self) {
-        if let Err(e) = self.session_manager.refresh_sessions().await {
+    fn refresh_sessions(&mut self) {
+        if let Err(e) = self.session_manager.refresh_sessions() {
             error!("Failed to refresh sessions: {}", e);
+        }
+    }
+
+    /// The config file was written. It is reloaded only if some user asked for hot reload,
+    /// and only if the save changed how the config behaves: a comment, spacing or a rewrite
+    /// of the same text must not restart every keyboard.
+    fn config_file_changed(&mut self) {
+        let hot_reload_enabled = self
+            .user_configs
+            .values()
+            .any(|mgr| mgr.config().hot_config_reload);
+        if !hot_reload_enabled {
+            return;
+        }
+        if self.config_changed_on_disk() {
+            info!("Config file changed, reloading...");
+            if let Err(e) = self.reload_all_configs() {
+                error!("Config reload failed: {}", e);
+            }
+        } else {
+            debug!("Config file saved with no change to how it behaves, not reloading");
+        }
+    }
+
+    /// A processor thread died (ENODEV or an error): clean up now rather than when a udev
+    /// event next triggers rediscovery.
+    fn processor_died(&mut self, dead_path: &Path) {
+        let Some((kbd_id, _, _)) = self.active_processors.remove(dead_path) else {
+            return;
+        };
+        info!(
+            "Processor thread died for: {} ({})",
+            dead_path.display(),
+            kbd_id
+        );
+        let any_remaining = self
+            .active_processors
+            .values()
+            .any(|(k, _, _)| k == &kbd_id);
+        if !any_remaining {
+            info!("All processors dead for {}, marking disconnected", kbd_id);
+            if let Some(meta) = self.all_keyboards.get_mut(&kbd_id) {
+                meta.connected = false;
+            }
+            self.keyboard_owners.remove(&kbd_id);
         }
     }
 }

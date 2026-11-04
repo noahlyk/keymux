@@ -41,7 +41,7 @@ mod toggle;
 pub use keymux::{get_actual_user_uid, get_user_home_dir};
 
 use cli::Cli;
-use keymux::daemon::AsyncDaemon;
+use keymux::daemon::Daemon;
 
 fn main() -> Result<()> {
     // Handle dynamic shell completions manually (clap_complete's dynamic feature doesn't support subcommands)
@@ -60,14 +60,8 @@ fn main() -> Result<()> {
                 .with_file(false)
                 .init();
 
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-
-            runtime.block_on(async {
-                let mut daemon = AsyncDaemon::new(config.clone(), user.clone())?;
-                daemon.run().await
-            })?;
+            let mut daemon = Daemon::new(config.clone(), user.clone())?;
+            daemon.run()?;
         }
         Some(cli::Commands::NiriDaemon) => {
             keymux::niri::run_niri_daemon()?;

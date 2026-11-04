@@ -31,7 +31,6 @@ libc = "0.2"
 smallvec = "1.13"
 colored = "2.1"
 notify = "6.1"
-tokio = { version = "1.41", features = ["rt-multi-thread", "sync", "time", "macros"] }
 crossbeam-channel = "0.5"
 crossterm = "0.28"
 sha2 = "0.10"

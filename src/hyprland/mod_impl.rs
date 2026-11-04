@@ -1,11 +1,9 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::mpsc::Sender;
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::{error, info};
 
-use crate::window_manager::{WindowInfo, WindowManager, WindowManagerEvent};
+use crate::window_manager::{EventSink, WindowInfo, WindowManager};
 
 #[derive(Clone)]
 pub struct WaylandCompositor {
@@ -186,16 +184,7 @@ pub fn detect_wayland_compositor() -> Option<WaylandCompositor> {
     None
 }
 
-pub fn start_hyprland_monitor(tx: UnboundedSender<WindowManagerEvent>) {
-    let wm = WaylandCompositor::hyprland();
-    if !wm.is_available() {
-        error!("Hyprland socket not found - is Hyprland running?");
-        return;
-    }
-    wm.start_event_monitor(tx);
-}
-
-pub fn start_hyprland_monitor_sync(tx: Sender<WindowManagerEvent>) {
+pub fn start_hyprland_monitor_sync(tx: impl EventSink) {
     let wm = WaylandCompositor::hyprland();
     if !wm.is_available() {
         error!("Hyprland socket not found - is Hyprland running?");
@@ -204,16 +193,7 @@ pub fn start_hyprland_monitor_sync(tx: Sender<WindowManagerEvent>) {
     wm.start_event_monitor_sync(tx);
 }
 
-pub fn start_sway_monitor(tx: UnboundedSender<WindowManagerEvent>) {
-    let wm = WaylandCompositor::sway();
-    if !wm.is_available() {
-        error!("Sway socket not found - is Sway running?");
-        return;
-    }
-    wm.start_event_monitor(tx);
-}
-
-pub fn start_sway_monitor_sync(tx: Sender<WindowManagerEvent>) {
+pub fn start_sway_monitor_sync(tx: impl EventSink) {
     let wm = WaylandCompositor::sway();
     if !wm.is_available() {
         error!("Sway socket not found - is Sway running?");
