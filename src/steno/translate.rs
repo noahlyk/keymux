@@ -23,14 +23,14 @@ use tracing::{info, warn};
 type Strokes = SmallVec<[u32; 8]>;
 
 /// The stroke that undoes the last translation: the star on its own.
-pub const UNDO_STROKE: u32 = 1 << 9;
+pub(crate) const UNDO_STROKE: u32 = 1 << 9;
 
 /// The star key of a stroke.
 const STAR: u32 = 1 << 9;
 
 /// Keys that can be folded into a stroke as a suffix when the stroke has no entry of its own:
 /// `-Z`, `-D`, `-S`, `-G`, in the order Plover tries them.
-pub const SUFFIX_KEYS: [u32; 4] = [1 << 21, 1 << 20, 1 << 19, 1 << 17];
+pub(crate) const SUFFIX_KEYS: [u32; 4] = [1 << 21, 1 << 20, 1 << 19, 1 << 17];
 
 /// How many translations stay undoable at least. Plover's default.
 pub(crate) const UNDO_LENGTH: usize = 100;
@@ -92,7 +92,7 @@ impl Translation {
     /// Whether undoing it takes anything back: it typed something, or deleted something, or
     /// replaced other translations.
     #[must_use]
-    pub fn has_undo(&self) -> bool {
+    pub(crate) fn has_undo(&self) -> bool {
         if self.formatting.is_empty() || !self.replaced.is_empty() {
             return true;
         }
@@ -137,7 +137,7 @@ impl StenoOutput {
             match (merged.last_mut(), op) {
                 (Some(OutputOp::Text(before)), OutputOp::Text(after)) => before.push_str(&after),
                 (Some(OutputOp::Backspaces(before)), OutputOp::Backspaces(after)) => {
-                    *before += after
+                    *before += after;
                 }
                 (_, op) => merged.push(op),
             }
@@ -290,7 +290,7 @@ impl Translator {
     /// A translator over a dictionary chain others share, with these options. Its history is
     /// its own.
     #[must_use]
-    pub fn with_shared(dict: Arc<Chain>, options: Options) -> Self {
+    pub(crate) fn with_shared(dict: Arc<Chain>, options: Options) -> Self {
         Self::with_history(dict, journal::new_shared(Formatter::new(options)), 0)
     }
 
@@ -352,7 +352,7 @@ impl Translator {
     /// The dictionary, to look things up on another thread. `None` when nothing loaded.
     #[must_use]
     pub fn dictionary_handle(&self) -> Option<Arc<Dictionary>> {
-        (!self.dict.is_empty()).then(|| Arc::new(self.dict.as_dictionary().clone()))
+        (!self.dict.is_empty()).then(|| self.dict.dictionary())
     }
 
     /// How many entries the dictionary has.
@@ -573,10 +573,10 @@ impl Translator {
                 self.macro_repeat_text(&found.name, &found.cmdline, found.stroke);
             }
             "retro_delete_space" | "retrospective_delete_space" => {
-                self.macro_delete_space(found.stroke)
+                self.macro_delete_space(found.stroke);
             }
             "retro_insert_space" | "retrospective_insert_space" => {
-                self.macro_insert_space(found.stroke)
+                self.macro_insert_space(found.stroke);
             }
             "retrospective_toggle_asterisk" => {
                 let Some(last) = self.hist.state.translations.last().cloned() else {
