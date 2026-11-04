@@ -47,6 +47,14 @@ fancy-regex = "0.14"
 default = ["overlay"]
 overlay = ["dep:smithay-client-toolkit", "dep:tiny-skia", "dep:ab_glyph"]
 
+[dev-dependencies]
+criterion = "0.8"
+
+# `cargo bench`: the steno hot path in numbers, see benches/steno.rs
+[[bench]]
+name = "steno"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = "fat"
