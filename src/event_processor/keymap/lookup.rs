@@ -9,6 +9,7 @@ use crate::keycode::KeyCode;
 use crate::steno::lookup::{LookupInput, LookupKey};
 use crate::steno::typing::TypingLayout;
 use std::collections::HashSet;
+use std::time::Instant;
 
 pub(super) struct LookupCapture {
     /// Reads the keys that come out of the layers as input to the lookup
@@ -51,7 +52,12 @@ impl LookupCapture {
 impl KeymapProcessor {
     /// Returns `None` when no lookup is open, or the key is not one for it (a stroke key let go
     /// of, say).
-    pub(super) fn lookup_capture(&mut self, keycode: KeyCode, pressed: bool) -> Option<ProcessResult> {
+    pub(super) fn lookup_capture(
+        &mut self,
+        keycode: KeyCode,
+        pressed: bool,
+        at: Instant,
+    ) -> Option<ProcessResult> {
         let open = self
             .steno_engines
             .iter()
@@ -59,7 +65,7 @@ impl KeymapProcessor {
         let Some(layer) = open else {
             // Let go of after the lookup closed: still not the application's business
             if !pressed && self.lookup.keys.remove(&keycode) {
-                let result = self.process_key_release(keycode);
+                let result = self.process_key_release(keycode, at);
                 self.read_lookup_keys(&result);
                 return Some(ProcessResult::None);
             }
@@ -75,7 +81,7 @@ impl KeymapProcessor {
             if !self.lookup.keys.remove(&keycode) {
                 return None;
             }
-            let result = self.process_key_release(keycode);
+            let result = self.process_key_release(keycode, at);
             self.read_lookup_keys(&result);
             return Some(ProcessResult::None);
         }
@@ -88,7 +94,7 @@ impl KeymapProcessor {
         }
 
         self.lookup.keys.insert(keycode);
-        let result = self.process_key_press(keycode);
+        let result = self.process_key_press(keycode, at);
         self.read_lookup_keys(&result);
         // A key that left the steno layer (a remap to base, say) leaves the lookup behind
         if !self.layer_stack.layers().contains(&layer) {

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// - Predictive intent scoring
 /// - Configurable behavior options
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Hand assignment for a key (for chord detection)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -54,25 +54,20 @@ pub(crate) struct MtKey {
 }
 
 impl MtKey {
-    pub fn new(tap_key: KeyCode, hold_key: KeyCode, hand: Hand) -> Self {
+    pub const fn new(tap_key: KeyCode, hold_key: KeyCode, hand: Hand, pressed_at: Instant) -> Self {
         Self {
             tap_key,
             hold_key,
-            pressed_at: Instant::now(),
+            pressed_at,
             state: MtKeyState::Undecided,
             hold_intent_score: 0.0,
             hand,
         }
     }
 
-    /// Get duration since press
-    pub fn duration(&self) -> Duration {
-        self.pressed_at.elapsed()
-    }
-
-    /// Get duration in milliseconds
-    pub fn duration_ms(&self) -> u64 {
-        self.duration().as_millis() as u64
+    /// How long the key had been down at `at`, in milliseconds.
+    pub fn held_for(&self, at: Instant) -> u32 {
+        at.saturating_duration_since(self.pressed_at).as_millis() as u32
     }
 }
 
@@ -370,18 +365,19 @@ impl MtProcessor {
             .unwrap_or(Hand::Unknown)
     }
 
-    /// Add key press (MT key pressed)
+    /// Add key press (MT key pressed) at `at`
     /// Returns Some(resolution) if double-tap detected or cross-hand unwrap triggered
     pub fn on_press(
         &mut self,
         keycode: KeyCode,
         tap_key: KeyCode,
         hold_key: KeyCode,
+        at: Instant,
     ) -> Option<MtResolution> {
         // Check for double-tap
         if self.config.double_tap_then_hold {
             if let Some(last_tap) = self.last_tap_time.get(&keycode) {
-                let elapsed = Instant::now().duration_since(*last_tap).as_millis() as u32;
+                let elapsed = at.saturating_duration_since(*last_tap).as_millis() as u32;
                 if elapsed < self.config.double_tap_window_ms {
                     // Double-tap detected! Hold the tap key until released
                     self.holding_tap_key.insert(keycode, tap_key);
@@ -394,7 +390,7 @@ impl MtProcessor {
         }
 
         let hand = self.get_hand(keycode);
-        let mut mt_key = MtKey::new(tap_key, hold_key, hand);
+        let mut mt_key = MtKey::new(tap_key, hold_key, hand, at);
 
         // Check for cross-hand unwrap
         if self.config.cross_hand_unwrap && hand != Hand::Unknown {
@@ -418,11 +414,11 @@ impl MtProcessor {
 
         // Calculate initial hold intent score
         if self.config.predictive_scoring {
-            mt_key.hold_intent_score = self.calculate_hold_intent(&mt_key);
+            mt_key.hold_intent_score = self.calculate_hold_intent(&mt_key, at);
         }
 
         // Add to recent presses history
-        self.recent_presses.push((keycode, Instant::now()));
+        self.recent_presses.push((keycode, at));
         if self.recent_presses.len() > self.max_history {
             self.recent_presses.remove(0);
         }
@@ -431,8 +427,8 @@ impl MtProcessor {
         None
     }
 
-    /// Another key pressed while MT key is pending (permissive hold trigger)
-    pub fn on_other_key_press(&mut self, other_keycode: KeyCode) -> Vec<MtResolution> {
+    /// Another key pressed at `at` while MT key is pending (permissive hold trigger)
+    pub fn on_other_key_press(&mut self, other_keycode: KeyCode, at: Instant) -> Vec<MtResolution> {
         let mut resolutions = Vec::new();
 
         if !self.config.permissive_hold
@@ -443,14 +439,13 @@ impl MtProcessor {
         }
 
         let other_hand = self.get_hand(other_keycode);
-        let now = Instant::now();
 
         // Check each undecided key
         let undecided: Vec<_> = self.undecided_keys.keys().copied().collect();
 
         for keycode in undecided {
             if let Some(mt_key) = self.undecided_keys.get(&keycode) {
-                let time_since_press = (now - mt_key.pressed_at).as_millis() as u32;
+                let time_since_press = mt_key.held_for(at);
 
                 // Check for same-hand roll
                 if self.config.same_hand_roll_detection
@@ -497,8 +492,8 @@ impl MtProcessor {
         resolutions
     }
 
-    /// MT key released
-    pub fn on_release(&mut self, keycode: KeyCode) -> Option<MtResolution> {
+    /// MT key released at `at`
+    pub fn on_release(&mut self, keycode: KeyCode, at: Instant) -> Option<MtResolution> {
         // Check if this key is holding its tap key (double-tap-then-hold)
         if let Some(tap_key) = self.holding_tap_key.remove(&keycode) {
             // Release the held tap key
@@ -510,7 +505,7 @@ impl MtProcessor {
 
         // Check if it's an undecided key
         if let Some(mt_key) = self.undecided_keys.remove(&keycode) {
-            let duration_ms = mt_key.duration_ms() as u32;
+            let duration_ms = mt_key.held_for(at);
 
             // Decide based on timing and intent score
             let effective_threshold = if self.config.adaptive_timing {
@@ -537,7 +532,7 @@ impl MtProcessor {
                 // Hold-do-nothing-emits-tap: emit tap even though held past threshold
                 // Record tap time for double-tap detection
                 if self.config.double_tap_then_hold {
-                    self.last_tap_time.insert(keycode, Instant::now());
+                    self.last_tap_time.insert(keycode, at);
                 }
 
                 // Record ONLY taps (below threshold) for adaptive timing
@@ -565,7 +560,7 @@ impl MtProcessor {
                 // Tap: emit tap key press and release
                 // Record tap time for double-tap detection
                 if self.config.double_tap_then_hold {
-                    self.last_tap_time.insert(keycode, Instant::now());
+                    self.last_tap_time.insert(keycode, at);
                 }
 
                 // Record ONLY taps (below threshold) for adaptive timing
@@ -677,8 +672,8 @@ impl MtProcessor {
         resolutions
     }
 
-    /// Calculate hold intent score based on context
-    fn calculate_hold_intent(&self, mt_key: &MtKey) -> f32 {
+    /// Calculate hold intent score based on context, for a key pressed at `at`
+    fn calculate_hold_intent(&self, mt_key: &MtKey, at: Instant) -> f32 {
         let mut score: f32 = 0.0;
 
         // Check if there are other undecided keys
@@ -688,13 +683,12 @@ impl MtProcessor {
         }
 
         // Check recent key press patterns
-        let now = Instant::now();
         let recent_same_hand = self
             .recent_presses
             .iter()
-            .filter(|(keycode, timestamp)| {
+            .filter(|(keycode, pressed_at)| {
                 let hand = self.get_hand(*keycode);
-                hand == mt_key.hand && (now - *timestamp).as_millis() < 200
+                hand == mt_key.hand && at.saturating_duration_since(*pressed_at).as_millis() < 200
             })
             .count();
 
@@ -774,27 +768,25 @@ pub enum MtAction {
 }
 
 impl MtProcessor {
+    /// A mod-tap key went down at `at`: the events to send now, if any. Other mod-taps still
+    /// undecided resolve first, as they would for any key.
     pub fn handle_press(
         &mut self,
         keycode: KeyCode,
         tap_key: KeyCode,
         hold_key: KeyCode,
-    ) -> (Vec<(KeyCode, bool)>, Option<MtResolution>) {
-        let other_resolutions = self.on_other_key_press(tap_key);
+        at: Instant,
+    ) -> Vec<(KeyCode, bool)> {
+        let other_resolutions = self.on_other_key_press(tap_key, at);
         let mut events = self.resolutions_to_events(&other_resolutions);
-
-        if let Some(resolution) = self.on_press(keycode, tap_key, hold_key) {
+        if let Some(resolution) = self.on_press(keycode, tap_key, hold_key, at) {
             events.extend(self.resolution_to_events(&resolution));
-            (events, None)
-        } else if !other_resolutions.is_empty() {
-            (events, None)
-        } else {
-            (Vec::new(), None)
         }
+        events
     }
 
-    pub fn handle_release(&mut self, keycode: KeyCode) -> Option<MtResolution> {
-        self.on_release(keycode)
+    pub fn handle_release(&mut self, keycode: KeyCode, at: Instant) -> Option<MtResolution> {
+        self.on_release(keycode, at)
     }
 
     pub(crate) fn resolution_to_events(&self, resolution: &MtResolution) -> Vec<(KeyCode, bool)> {
@@ -814,36 +806,6 @@ impl MtProcessor {
         }
         events
     }
-
-    pub fn on_other_key_press_for_resolutions(
-        &mut self,
-        other_keycode: KeyCode,
-    ) -> Vec<MtResolution> {
-        self.on_other_key_press(other_keycode)
-    }
-}
-
-const fn extract_keycode(action: &KeyAction) -> Option<KeyCode> {
-    match action {
-        KeyAction::Key(kc) => Some(*kc),
-        _ => None,
-    }
-}
-
-pub fn handle_mt_action(
-    mt_processor: &mut MtProcessor,
-    keycode: KeyCode,
-    tap_action: &KeyAction,
-    hold_action: &KeyAction,
-) -> (Vec<(KeyCode, bool)>, Option<MtResolution>) {
-    let tap_key_opt = extract_keycode(tap_action);
-    let hold_key_opt = extract_keycode(hold_action);
-
-    if let (Some(tap_key), Some(hold_key)) = (tap_key_opt, hold_key_opt) {
-        mt_processor.handle_press(keycode, tap_key, hold_key)
-    } else {
-        (Vec::new(), None)
-    }
 }
 
 fn apply_mt_resolution(resolution: MtResolution) -> EmitResult {
@@ -861,28 +823,21 @@ pub fn emit_mt(
     keycode: KeyCode,
     ctx: &mut super::HandleContext<'_>,
 ) -> (EmitResult, Option<HeldAction>) {
-    match action {
-        KeyAction::MT(tap_action, hold_action) => {
-            let tap_key = tap_action.as_keycode();
-            let hold_key = hold_action.as_keycode();
-            if let (Some(tap_kc), Some(hold_kc)) = (tap_key, hold_key) {
-                let (events, _) = handle_mt_action(
-                    ctx.mt_processor,
-                    keycode,
-                    &KeyAction::Key(tap_kc),
-                    &KeyAction::Key(hold_kc),
-                );
-                if events.is_empty() {
-                    (EmitResult::None, Some(HeldAction::MtManaged))
-                } else {
-                    (EmitResult::EmitKeys(events), Some(HeldAction::MtManaged))
-                }
+    let KeyAction::MT(tap_action, hold_action) = action else {
+        return (EmitResult::None, None);
+    };
+    let result = match (tap_action.as_keycode(), hold_action.as_keycode()) {
+        (Some(tap_key), Some(hold_key)) => {
+            let events = ctx.mt_processor.handle_press(keycode, tap_key, hold_key, ctx.at);
+            if events.is_empty() {
+                EmitResult::None
             } else {
-                (EmitResult::None, Some(HeldAction::MtManaged))
+                EmitResult::EmitKeys(events)
             }
         }
-        _ => (EmitResult::None, None),
-    }
+        _ => EmitResult::None,
+    };
+    (result, Some(HeldAction::MtManaged))
 }
 
 pub fn unemit_mt(
@@ -894,10 +849,8 @@ pub fn unemit_mt(
     match (action, held_action) {
         (KeyAction::MT(_, _), HeldAction::MtManaged) => ctx
             .mt_processor
-            .handle_release(keycode)
-            .map_or(EmitResult::None, |resolution| {
-                apply_mt_resolution(resolution)
-            }),
+            .handle_release(keycode, ctx.at)
+            .map_or(EmitResult::None, apply_mt_resolution),
         _ => EmitResult::None,
     }
 }

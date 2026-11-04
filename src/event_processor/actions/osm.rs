@@ -1,15 +1,8 @@
-/// OneShot Modifier (OSM) processor - QMK-inspired one-shot keys
-///
-/// Implements one-shot modifier behavior:
-/// - Tap: Activates modifier for ONE subsequent keypress
-/// - Hold: Acts as normal modifier (stays active while held)
-/// - Timeout: Deactivates after 5 seconds of no activity (QMK default)
-///
-/// Follows QMK one-shot behavior:
-/// - Modifier activates on tap
-/// - Auto-releases after next non-modifier keypress
-/// - Can stack multiple one-shots
-/// - Timeout prevents accidental stuck modifiers
+//! One-shot modifiers (`OSM`), after QMK.
+//!
+//! Tapped, the modifier is held for the next key; held past the tapping term, it is an
+//! ordinary modifier for as long as it is down; armed and then left alone past the timeout,
+//! it lets go.
 use crate::config::{Config, KeyAction};
 use crate::event_processor::actions::{EmitResult, HeldAction, ProcessResult};
 use crate::keycode::KeyCode;
@@ -32,24 +25,24 @@ pub(crate) enum OsmState {
 pub(crate) struct OsmKey {
     /// Modifier key to emit
     pub modifier_key: KeyCode,
-    /// When this was activated
+    /// When this was pressed, and then when it was armed
     pub activated_at: Instant,
     /// Current state
     pub state: OsmState,
 }
 
 impl OsmKey {
-    pub fn new(modifier_key: KeyCode) -> Self {
+    pub const fn new(modifier_key: KeyCode, activated_at: Instant) -> Self {
         Self {
             modifier_key,
-            activated_at: Instant::now(),
+            activated_at,
             state: OsmState::Pressed,
         }
     }
 
-    /// Time since activation
-    pub fn elapsed(&self) -> u128 {
-        self.activated_at.elapsed().as_millis()
+    /// Milliseconds from activation to `at`.
+    pub fn elapsed(&self, at: Instant) -> u128 {
+        at.saturating_duration_since(self.activated_at).as_millis()
     }
 }
 
@@ -73,29 +66,16 @@ pub(crate) struct OsmConfig {
     pub tapping_term_ms: u32,
 }
 
-impl Default for OsmConfig {
-    fn default() -> Self {
-        Self {
-            oneshot_timeout_ms: 5000, // QMK default
-            tapping_term_ms: 200,     // Detect hold vs tap
-        }
-    }
-}
-
 /// OneShot processor - manages all OSM keys
 pub struct OsmProcessor {
-    /// Config
     config: OsmConfig,
-
-    /// Currently tracked OSM keys
+    /// One-shot keys down right now, by the physical key
     tracked_keys: HashMap<KeyCode, OsmKey>,
-
     /// Active one-shots waiting for next keypress (modifier_key -> OsmKey)
     active_oneshots: HashMap<KeyCode, OsmKey>,
 }
 
 impl OsmProcessor {
-    /// Create new OSM processor
     pub fn new(config: &Config) -> Self {
         Self {
             config: OsmConfig {
@@ -107,50 +87,25 @@ impl OsmProcessor {
         }
     }
 
-    pub fn handle_press(&mut self, keycode: KeyCode, modifier_key: KeyCode) -> OsmResolution {
-        let _timeouts = self.check_timeouts();
-        let _resolution = self.on_press(keycode, modifier_key);
-        OsmResolution::None
+    /// The key went down at `at`. Tap or hold is decided when it comes up.
+    pub fn on_press(&mut self, keycode: KeyCode, modifier_key: KeyCode, at: Instant) {
+        self.tracked_keys
+            .insert(keycode, OsmKey::new(modifier_key, at));
     }
 
-    pub fn handle_release(&mut self, keycode: KeyCode) -> OsmResolution {
-        self.on_release(keycode)
-    }
-
-    pub fn handle_check_timeouts(&mut self) -> Vec<(KeyCode, OsmResolution)> {
-        self.check_timeouts()
-    }
-
-    /// Handle OSM key press
-    pub fn on_press(&mut self, keycode: KeyCode, modifier_key: KeyCode) -> OsmResolution {
-        let osm_key = OsmKey::new(modifier_key);
-        self.tracked_keys.insert(keycode, osm_key);
-
-        // Don't emit yet - wait to see if it's a tap or hold
-        OsmResolution::None
-    }
-
-    /// Handle OSM key release
-    pub fn on_release(&mut self, keycode: KeyCode) -> OsmResolution {
-        if let Some(mut osm_key) = self.tracked_keys.remove(&keycode) {
-            let duration_ms = osm_key.elapsed();
-
-            // Tapped (released quickly) - activate one-shot
-            if duration_ms < self.config.tapping_term_ms as u128 {
-                osm_key.state = OsmState::Active;
-                osm_key.activated_at = Instant::now(); // Reset timer for timeout
-                let modifier_key = osm_key.modifier_key;
-                self.active_oneshots.insert(modifier_key, osm_key);
-
-                // Emit modifier press
-                return OsmResolution::ActivateModifier(modifier_key);
-            }
-            // Held (released after long press) - was acting as normal modifier
-            // Release it now
-            return OsmResolution::ReleaseModifier(osm_key.modifier_key);
+    /// The key came up at `at`: a tap arms the modifier for the next key, a hold lets it go.
+    pub fn on_release(&mut self, keycode: KeyCode, at: Instant) -> OsmResolution {
+        let Some(mut osm_key) = self.tracked_keys.remove(&keycode) else {
+            return OsmResolution::None;
+        };
+        if osm_key.elapsed(at) < u128::from(self.config.tapping_term_ms) {
+            osm_key.state = OsmState::Active;
+            osm_key.activated_at = at;
+            let modifier_key = osm_key.modifier_key;
+            self.active_oneshots.insert(modifier_key, osm_key);
+            return OsmResolution::ActivateModifier(modifier_key);
         }
-
-        OsmResolution::None
+        OsmResolution::ReleaseModifier(osm_key.modifier_key)
     }
 
     /// Called when ANY other key is pressed
@@ -174,55 +129,31 @@ impl OsmProcessor {
         resolutions
     }
 
-    /// Check for timeouts and deactivate expired one-shots
-    pub fn check_timeouts(&mut self) -> Vec<(KeyCode, OsmResolution)> {
-        let mut resolutions = Vec::new();
-        let timeout_ms = self.config.oneshot_timeout_ms;
-
-        // Find expired one-shots
+    /// Let go of any armed modifier that has waited past the timeout, as of `now`.
+    pub fn check_timeouts(&mut self, now: Instant) -> Vec<(KeyCode, OsmResolution)> {
+        let timeout = u128::from(self.config.oneshot_timeout_ms);
         let expired: Vec<KeyCode> = self
             .active_oneshots
             .iter()
-            .filter_map(|(modifier_key, osm_key)| {
-                if osm_key.elapsed() > timeout_ms as u128 {
-                    Some(*modifier_key)
-                } else {
-                    None
-                }
-            })
+            .filter(|(_, osm_key)| osm_key.elapsed(now) > timeout)
+            .map(|(modifier_key, _)| *modifier_key)
             .collect();
-
-        // Release expired one-shots
-        for modifier_key in expired {
-            self.active_oneshots.remove(&modifier_key);
-            resolutions.push((modifier_key, OsmResolution::ReleaseModifier(modifier_key)));
+        for modifier_key in &expired {
+            self.active_oneshots.remove(modifier_key);
         }
-
-        resolutions
+        expired
+            .into_iter()
+            .map(|modifier_key| (modifier_key, OsmResolution::ReleaseModifier(modifier_key)))
+            .collect()
     }
 }
 
-const fn extract_keycode(action: &KeyAction) -> Option<KeyCode> {
-    match action {
-        KeyAction::Key(kc) => Some(*kc),
-        _ => None,
-    }
-}
-
-pub fn handle_osm_action(
+pub fn handle_osm_release(
     osm_processor: &mut OsmProcessor,
     keycode: KeyCode,
-    modifier_action: &KeyAction,
-) -> OsmResolution {
-    if let Some(modifier_key) = extract_keycode(modifier_action) {
-        let _ = osm_processor.handle_press(keycode, modifier_key);
-    }
-    OsmResolution::None
-}
-
-pub fn handle_osm_release(osm_processor: &mut OsmProcessor, keycode: KeyCode) -> ProcessResult {
-    let resolution = osm_processor.handle_release(keycode);
-    match resolution {
+    at: Instant,
+) -> ProcessResult {
+    match osm_processor.on_release(keycode, at) {
         OsmResolution::ActivateModifier(mod_key) => ProcessResult::EmitKey(mod_key, true),
         OsmResolution::ReleaseModifier(mod_key) => ProcessResult::EmitKey(mod_key, false),
         OsmResolution::None => ProcessResult::None,
@@ -231,19 +162,17 @@ pub fn handle_osm_release(osm_processor: &mut OsmProcessor, keycode: KeyCode) ->
 
 pub fn emit_osm(
     action: &KeyAction,
-    _keycode: KeyCode,
+    keycode: KeyCode,
     ctx: &mut super::HandleContext<'_>,
 ) -> (EmitResult, Option<HeldAction>) {
-    match action {
-        KeyAction::OSM(modifier_action) => {
-            let mod_key = modifier_action.as_keycode();
-            if let Some(key) = mod_key {
-                let _ = handle_osm_action(ctx.osm_processor, key, modifier_action);
-            }
-            (EmitResult::None, Some(HeldAction::OsmManaged))
-        }
-        _ => (EmitResult::None, None),
+    let KeyAction::OSM(modifier_action) = action else {
+        return (EmitResult::None, None);
+    };
+    if let Some(modifier_key) = modifier_action.as_keycode() {
+        let _ = ctx.osm_processor.check_timeouts(ctx.at);
+        ctx.osm_processor.on_press(keycode, modifier_key, ctx.at);
     }
+    (EmitResult::None, Some(HeldAction::OsmManaged))
 }
 
 pub fn unemit_osm(
@@ -252,11 +181,8 @@ pub fn unemit_osm(
     keycode: KeyCode,
     ctx: &mut super::HandleContext<'_>,
 ) -> EmitResult {
-    match (action, held_action) {
-        (KeyAction::OSM(_), HeldAction::OsmManaged) => {
-            let _ = handle_osm_release(ctx.osm_processor, keycode);
-            EmitResult::None
-        }
-        _ => EmitResult::None,
+    if matches!((action, held_action), (KeyAction::OSM(_), HeldAction::OsmManaged)) {
+        let _ = handle_osm_release(ctx.osm_processor, keycode, ctx.at);
     }
+    EmitResult::None
 }

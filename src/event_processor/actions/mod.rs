@@ -18,6 +18,7 @@ pub mod socd;
 use crate::config::{KeyAction, Layer};
 use crate::event_processor::layer_stack::LayerStack;
 use crate::keycode::KeyCode;
+use std::time::Instant;
 
 /// What the keymap wants sent to the virtual keyboard for one key event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,10 +94,9 @@ pub enum HeldAction {
     Layer(Layer),
     MtManaged,
     SocdManaged,
-    DtManaged {
-        tap_action: KeyAction,
-        double_tap_action: KeyAction,
-    },
+    /// A tap-dance key, with the action its press ended up pressing (and what that left held),
+    /// if any
+    DtManaged(Option<Box<(KeyAction, Self)>>),
     OsmManaged,
     /// A stroke key captured by the steno layer with this name. Released by the
     /// keymap processor, which owns the chord state.
@@ -116,12 +116,16 @@ pub struct HandleContext<'a> {
     pub layer_stack: &'a mut LayerStack,
     pub config_dir: &'a std::path::Path,
     pub user_id: u32,
+    /// When the key event being handled happened: the moment the keyboard reported it, which
+    /// is earlier than now for an event that waited to be read. Every tap-or-hold decision
+    /// and every duration measures against this, never against the clock.
+    pub at: Instant,
 }
 
 pub fn handle_action_release(
     action: HeldAction,
     keycode: KeyCode,
-    ctx: HandleContext<'_>,
+    mut ctx: HandleContext<'_>,
 ) -> ProcessResult {
     match action {
         HeldAction::RegularKey(key) => ProcessResult::EmitKey(key, false),
@@ -131,31 +135,42 @@ pub fn handle_action_release(
         }
         HeldAction::MtManaged => ctx
             .mt_processor
-            .handle_release(keycode)
+            .handle_release(keycode, ctx.at)
             .map_or(ProcessResult::None, |resolution| {
                 apply_mt_resolution_to_process_result(resolution)
             }),
-        HeldAction::SocdManaged => {
-            let result: ProcessResult = ctx.socd_processor.handle_release(keycode).into();
-            result
+        HeldAction::SocdManaged => ctx.socd_processor.handle_release(keycode).into(),
+        HeldAction::DtManaged(pressed) => {
+            ctx.dt_processor.unemit_action(keycode, ctx.at);
+            pressed.map_or(ProcessResult::None, |pressed| {
+                let (action, held) = *pressed;
+                action.unemit(held, keycode, &mut ctx).to_process_result()
+            })
         }
-        HeldAction::DtManaged {
-            tap_action,
-            double_tap_action,
-        } => ctx
-            .dt_processor
-            .unemit_action(keycode, &tap_action, &double_tap_action),
         HeldAction::OsmManaged => {
-            let _ = osm::handle_osm_release(ctx.osm_processor, keycode);
+            let _ = osm::handle_osm_release(ctx.osm_processor, keycode, ctx.at);
             ProcessResult::None
         }
         // Steno releases are intercepted by KeymapProcessor before reaching here
         HeldAction::StenoManaged(_) | HeldAction::SwallowedBySteno => ProcessResult::None,
         HeldAction::MultiManaged(children) => {
-            let mut ctx = ctx;
             unemit_multi(children, keycode, &mut ctx).to_process_result()
         }
     }
+}
+
+/// A plain key goes down. Any mod-tap still undecided resolves first (permissive hold), so
+/// its modifier is down before this key is.
+fn emit_plain_key(key: KeyCode, ctx: &mut HandleContext<'_>) -> (EmitResult, Option<HeldAction>) {
+    let resolutions = ctx.mt_processor.on_other_key_press(key, ctx.at);
+    let result = if resolutions.is_empty() {
+        EmitResult::EmitKey(key, true)
+    } else {
+        let mut events = ctx.mt_processor.resolutions_to_events(&resolutions);
+        events.push((key, true));
+        EmitResult::EmitKeys(events)
+    };
+    (result, Some(HeldAction::RegularKey(key)))
 }
 
 /// Press each child of a MULTI, in order, and report their events as one output.
@@ -223,24 +238,7 @@ impl KeyAction {
         ctx: &mut HandleContext<'_>,
     ) -> (EmitResult, Option<HeldAction>) {
         match self {
-            Self::Key(output_key) => {
-                let events = ctx
-                    .mt_processor
-                    .on_other_key_press_for_resolutions(*output_key);
-                if events.is_empty() {
-                    (
-                        EmitResult::EmitKey(*output_key, true),
-                        Some(HeldAction::RegularKey(*output_key)),
-                    )
-                } else {
-                    let mut all_events = ctx.mt_processor.resolutions_to_events(&events);
-                    all_events.push((*output_key, true));
-                    (
-                        EmitResult::EmitKeys(all_events),
-                        Some(HeldAction::RegularKey(*output_key)),
-                    )
-                }
-            }
+            Self::Key(output_key) => emit_plain_key(*output_key, ctx),
             Self::MT(..) => emit_mt(self, keycode, ctx),
             Self::TO(..) | Self::TG(..) | Self::MO(..) => {
                 emit_layer(self, keycode, ctx.layer_stack)
@@ -250,22 +248,7 @@ impl KeyAction {
             Self::CMD(..) => emit_cmd(self, keycode, ctx),
             Self::OSM(..) => emit_osm(self, keycode, ctx),
             Self::DT(..) => emit_dt(self, keycode, ctx),
-            Self::Transparent => {
-                let resolutions = ctx.mt_processor.on_other_key_press_for_resolutions(keycode);
-                if resolutions.is_empty() {
-                    (
-                        EmitResult::EmitKey(keycode, true),
-                        Some(HeldAction::RegularKey(keycode)),
-                    )
-                } else {
-                    let mut events = ctx.mt_processor.resolutions_to_events(&resolutions);
-                    events.push((keycode, true));
-                    (
-                        EmitResult::EmitKeys(events),
-                        Some(HeldAction::RegularKey(keycode)),
-                    )
-                }
-            }
+            Self::Transparent => emit_plain_key(keycode, ctx),
         }
     }
 
@@ -282,7 +265,7 @@ impl KeyAction {
             }
             (Self::MT(..), HeldAction::MtManaged) => unemit_mt(self, action, keycode, ctx),
             (Self::SOCD(..), HeldAction::SocdManaged) => unemit_socd(self, action, keycode, ctx),
-            (Self::DT(..), HeldAction::DtManaged { .. }) => unemit_dt(self, action, keycode, ctx),
+            (Self::DT(..), HeldAction::DtManaged(_)) => unemit_dt(self, action, keycode, ctx),
             (Self::OSM(..), HeldAction::OsmManaged) => unemit_osm(self, action, keycode, ctx),
             (Self::CMD(..), _) => unemit_cmd(self, action, keycode, ctx),
             (Self::MULTI(..), HeldAction::MultiManaged(children)) => {
@@ -302,13 +285,103 @@ impl KeyAction {
 
 // Re-export commonly used types and emit/unemit functions
 pub use cmd::{emit_cmd, unemit_cmd};
-pub use dt::{emit_dt, handle_dt_action, handle_dt_release, unemit_dt, DtProcessor, TdResolution};
+pub use dt::{emit_dt, unemit_dt, DtProcessor, TdResolution};
 pub use layer::{emit_layer, unemit_layer};
-pub use mt::{
-    emit_mt, handle_mt_action, unemit_mt, MtAction, MtProcessor, MtResolution, RollingStats,
-};
-pub use osm::{emit_osm, handle_osm_action, handle_osm_release, unemit_osm, OsmProcessor};
+pub use mt::{emit_mt, unemit_mt, MtAction, MtProcessor, MtResolution, RollingStats};
+pub use osm::{emit_osm, handle_osm_release, unemit_osm, OsmProcessor};
 pub use socd::{emit_socd, handle_socd_action, unemit_socd, SocdProcessor, SocdResolution};
+
+/// Events are judged by when the keyboard reported them. A press and release 50ms apart that
+/// both waited a second to be read are still a 50ms tap.
+#[cfg(test)]
+mod timing_tests {
+    use crate::config::Config;
+    use crate::event_processor::{KeymapProcessor, ProcessResult};
+    use crate::keycode::KeyCode;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    fn processor() -> KeymapProcessor {
+        let config: Config = ron::from_str(
+            r"(
+                tapping_term_ms: 130,
+                mt_config: (hold_do_nothing_emits_tap: false, enable_adaptive_timing: false),
+                remaps: {
+                    KC_A: MT(Key(KC_A), Key(KC_LSFT)),
+                    KC_B: DT(Key(KC_B), Key(KC_C)),
+                },
+            )",
+        )
+        .unwrap();
+        KeymapProcessor::new(&config, PathBuf::from("config.ron"), 0)
+    }
+
+    /// A moment well before now: events stamped here have waited to be read.
+    fn long_ago() -> Instant {
+        Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("the process has been up for a second")
+    }
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[test]
+    fn a_mod_tap_read_late_is_judged_by_when_it_happened() {
+        let mut p = processor();
+        let t = long_ago();
+        assert_eq!(p.process_key_at(KeyCode::KC_A, true, t), ProcessResult::None);
+        assert_eq!(
+            p.process_key_at(KeyCode::KC_A, false, t + ms(50)),
+            ProcessResult::MultipleEvents(vec![(KeyCode::KC_A, true), (KeyCode::KC_A, false)])
+        );
+        // Held past the term by the keyboard's clock: a hold, however promptly it was read
+        let t = t + ms(1000);
+        p.process_key_at(KeyCode::KC_A, true, t);
+        assert_eq!(
+            p.process_key_at(KeyCode::KC_A, false, t + ms(300)),
+            ProcessResult::MultipleEvents(vec![
+                (KeyCode::KC_LSFT, true),
+                (KeyCode::KC_LSFT, false)
+            ])
+        );
+    }
+
+    #[test]
+    fn a_tap_dance_read_late_still_sees_its_second_tap_inside_the_window() {
+        let mut p = processor();
+        let t = long_ago();
+        assert_eq!(p.process_key_at(KeyCode::KC_B, true, t), ProcessResult::None);
+        assert_eq!(
+            p.process_key_at(KeyCode::KC_B, false, t + ms(50)),
+            ProcessResult::None
+        );
+        // 100ms after the first press is inside the 250ms window
+        assert_eq!(
+            p.process_key_at(KeyCode::KC_B, true, t + ms(100)),
+            ProcessResult::EmitKey(KeyCode::KC_C, true)
+        );
+        // And what the second tap pressed is released with it
+        assert_eq!(
+            p.process_key_at(KeyCode::KC_B, false, t + ms(150)),
+            ProcessResult::EmitKey(KeyCode::KC_C, false)
+        );
+    }
+
+    #[test]
+    fn adaptive_stats_learn_the_tap_as_the_keyboard_timed_it() {
+        let mut p = processor();
+        let t = long_ago();
+        p.process_key_at(KeyCode::KC_A, true, t);
+        p.process_key_at(KeyCode::KC_A, false, t + ms(50));
+        let stats = p.get_all_key_stats();
+        let a = &stats[&KeyCode::KC_A];
+        assert_eq!(a.tap_sample_count, 1);
+        assert!((a.avg_tap_duration - 50.0).abs() < 1.0, "{}", a.avg_tap_duration);
+    }
+
+}
 
 #[cfg(test)]
 mod multi_tests {

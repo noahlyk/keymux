@@ -151,13 +151,11 @@ impl KeymapProcessor {
         self.remap.mt.set_game_mode(active);
     }
 
+    /// Settle any tap-dance that time alone decides. Nothing is typed by that: a first press
+    /// held past the term becomes a hold, whose action goes out when the key next matters.
     pub fn check_dt_timeouts(&mut self) -> ProcessResult {
-        let events = self.remap.dt.handle_check_timeouts();
-        if events.is_empty() {
-            ProcessResult::None
-        } else {
-            ProcessResult::MultipleEvents(events)
-        }
+        self.remap.dt.expire(Instant::now());
+        ProcessResult::None
     }
 
     /// When a timeout next needs checking with no key to prompt it: a tap-dance or a steno
@@ -201,15 +199,15 @@ impl KeymapProcessor {
     /// [`Self::process_key`] for an event that happened at `at`: when the keyboard reported
     /// it, which is earlier than now for events that waited to be read.
     pub fn process_key_at(&mut self, keycode: KeyCode, pressed: bool, at: Instant) -> ProcessResult {
-        if let Some(result) = self.lookup_capture(keycode, pressed) {
+        if let Some(result) = self.lookup_capture(keycode, pressed, at) {
             self.publish_overlay_layer();
             return result;
         }
         let result = self.steno_capture(keycode, pressed, at).unwrap_or_else(|| {
             let result = if pressed {
-                self.process_key_press(keycode)
+                self.process_key_press(keycode, at)
             } else {
-                self.process_key_release(keycode)
+                self.process_key_release(keycode, at)
             };
             // What reached the application from a plain layer, steno never typed
             self.watch_typing(&result);
