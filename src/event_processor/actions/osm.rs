@@ -181,7 +181,10 @@ pub fn unemit_osm(
     keycode: KeyCode,
     ctx: &mut super::HandleContext<'_>,
 ) -> EmitResult {
-    if matches!((action, held_action), (KeyAction::OSM(_), HeldAction::OsmManaged)) {
+    if matches!(
+        (action, held_action),
+        (KeyAction::OSM(_), HeldAction::OsmManaged)
+    ) {
         let _ = handle_osm_release(ctx.osm_processor, keycode, ctx.at);
     }
     EmitResult::None

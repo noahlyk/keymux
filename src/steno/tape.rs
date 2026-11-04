@@ -303,10 +303,8 @@ pub fn note_typed(path: &Path, dict: Option<Arc<Dictionary>>, word: String) {
             .name("steno-tape-notes".into())
             .spawn(move || {
                 for (path, dict, word) in notes {
-                    let line = dict.map_or_else(
-                        || format!("{word:?}"),
-                        |dict| describe_typed(&dict, &word),
-                    );
+                    let line = dict
+                        .map_or_else(|| format!("{word:?}"), |dict| describe_typed(&dict, &word));
                     append_note(&path, "typed", &line);
                 }
             });
@@ -316,7 +314,10 @@ pub fn note_typed(path: &Path, dict: Option<Arc<Dictionary>>, word: String) {
         sender
     });
     if notes.send((path.to_path_buf(), dict, word)).is_err() {
-        warn!("steno tape {}: nothing is noting typed words", path.display());
+        warn!(
+            "steno tape {}: nothing is noting typed words",
+            path.display()
+        );
     }
 }
 
@@ -414,7 +415,8 @@ mod tests {
     #[test]
     fn a_word_typed_by_hand_shows_the_stroke_that_would_have_typed_it() {
         let mut dict = crate::steno::dict::Dictionary::default();
-        dict.merge_json(r#"{"KAT": "cat"}"#, &Layout::plover()).unwrap();
+        dict.merge_json(r#"{"KAT": "cat"}"#, &Layout::plover())
+            .unwrap();
         assert_eq!(describe_typed(&dict, "cat "), "\"cat \"  could be KAT");
         // No dictionary entry, and too long to fingerspell: nothing to suggest
         assert_eq!(describe_typed(&dict, "elephant"), "\"elephant\"");
@@ -490,7 +492,10 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 3, "{text}");
         assert_eq!(lines[1], "by hand");
-        assert!(lines[2].ends_with("\" cat\"") && !lines[2].contains("x2"), "{text}");
+        assert!(
+            lines[2].ends_with("\" cat\"") && !lines[2].contains("x2"),
+            "{text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

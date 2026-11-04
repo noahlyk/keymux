@@ -155,7 +155,12 @@ impl Renderer {
     }
 
     /// Like [`Self::new`], for a specific theory's own key layout instead of [`Layout::plover`].
-    pub fn with_layout(config: &OverlayConfig, scale: u32, height: u32, layout: Layout) -> Result<Self> {
+    pub fn with_layout(
+        config: &OverlayConfig,
+        scale: u32,
+        height: u32,
+        layout: Layout,
+    ) -> Result<Self> {
         let scale = scale.max(1) as f32;
         let bold = glyphs::load_font(config.font.as_deref(), glyphs::BOLD)?;
 
@@ -169,7 +174,9 @@ impl Renderer {
         let text_scale = config.text_scale.clamp(0.5, 3.0);
 
         // The keyboard sits at the bottom. Laying it out once at the origin gives its height.
-        let keys_height = Keyboard::new(0.0, 0.0, inner, &layout, &config.overlay_overrides).size.1;
+        let keys_height = Keyboard::new(0.0, 0.0, inner, &layout, &config.overlay_overrides)
+            .size
+            .1;
         let keyboard = config.keyboard.then(|| {
             Keyboard::new(
                 pad_x,
@@ -179,7 +186,8 @@ impl Renderer {
                 &config.overlay_overrides,
             )
         });
-        let key_width = Keyboard::new(0.0, 0.0, inner, &layout, &config.overlay_overrides).keys[1].w;
+        let key_width =
+            Keyboard::new(0.0, 0.0, inner, &layout, &config.overlay_overrides).keys[1].w;
         // Every size is nudged to where the letters' flat tops and bottoms land on whole pixel
         // rows (`crisp_size`); at an arbitrary size they smear over two rows and the text looks
         // soft. Capitals (key labels, steno letters) snap on `H`, lowercase words on `x`.
@@ -197,7 +205,11 @@ impl Renderer {
         let probe_total: f32 = extra_labels
             .iter()
             .copied()
-            .chain(paper_order.iter().map(|&slot| Keyboard::label(&layout, slot)))
+            .chain(
+                paper_order
+                    .iter()
+                    .map(|&slot| Keyboard::label(&layout, slot)),
+            )
             .map(|ch| probe.get(ch).advance * (1.0 + SLOT_GAP))
             .sum();
         let stroke_px = glyphs::crisp_size(
@@ -435,8 +447,18 @@ impl Renderer {
                 .0
                 .len()
             } else {
-                let outline_lines = wrap_text(&mut self.strokes, &row.outline, paper_right - self.paper_left).len();
-                let text_lines = wrap_text(&mut self.words, &row.text, self.words_right - self.words_left).len();
+                let outline_lines = wrap_text(
+                    &mut self.strokes,
+                    &row.outline,
+                    paper_right - self.paper_left,
+                )
+                .len();
+                let text_lines = wrap_text(
+                    &mut self.words,
+                    &row.text,
+                    self.words_right - self.words_left,
+                )
+                .len();
                 outline_lines.max(text_lines)
             }
             .max(1);
@@ -513,10 +535,21 @@ impl Renderer {
             // more lines to wrap than its outline does, so the shorter column is centred within
             // the row's full height rather than pinned to its top - otherwise it reads as
             // orphaned above a tall gap instead of belonging to the row.
-            let outline_lines = wrap_text(&mut self.strokes, &row.outline, paper_right - self.paper_left).len();
-            let text_lines = wrap_text(&mut self.words, &row.text, self.words_right - self.words_left).len();
+            let outline_lines = wrap_text(
+                &mut self.strokes,
+                &row.outline,
+                paper_right - self.paper_left,
+            )
+            .len();
+            let text_lines = wrap_text(
+                &mut self.words,
+                &row.text,
+                self.words_right - self.words_left,
+            )
+            .len();
             let center = |col_lines: usize| {
-                ((row_lines - col_lines) as f32 / 2.0).mul_add(line_height, row_top) + baseline_in_line
+                ((row_lines - col_lines) as f32 / 2.0).mul_add(line_height, row_top)
+                    + baseline_in_line
             };
             draw_text_wrapped(
                 pixmap,
@@ -1182,7 +1215,14 @@ mod tests {
         // A phrase breaks at its spaces when a break is available there
         let lines = wrap_text(&mut glyphs, "tell me how to do this", width);
         assert!(lines.len() > 1, "{lines:?}");
-        assert_eq!(lines.join(" ").split_whitespace().collect::<Vec<_>>().join(" "), "tell me how to do this");
+        assert_eq!(
+            lines
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+            "tell me how to do this"
+        );
 
         // A stroke outline breaks at its own "/" separators the same way
         let lines = wrap_text(&mut glyphs, "KAPBD/TKEU/HRAOEUT/SRAOEUT", width);
@@ -1195,7 +1235,10 @@ mod tests {
         // A phrase: one stroke-group per word, lining up 1:1.
         assert_eq!(
             word_groups("I want to go", "EU / WAUNT / TO / TKPWOE"),
-            Some((vec!["I", "want", "to", "go"], vec!["EU", "WAUNT", "TO", "TKPWOE"]))
+            Some((
+                vec!["I", "want", "to", "go"],
+                vec!["EU", "WAUNT", "TO", "TKPWOE"]
+            ))
         );
         // A single word has nothing to sync against another word, even with a multi-stroke
         // outline (whose own strokes join with a bare "/", never " / ").
@@ -1215,12 +1258,28 @@ mod tests {
         let mut strokes_glyphs = GlyphCache::new(font.clone(), 16.0);
         let mut words_glyphs = GlyphCache::new(font, 16.0);
 
-        let words = ["I", "want", "to", "go", "to", "the", "store", "and", "buy", "cookies"];
-        let strokes = ["EU", "WAUNT", "TO", "TKPWOE", "TO", "-T", "STOR", "APBD", "PWEU", "KAOBG/KEUS"];
+        let words = [
+            "I", "want", "to", "go", "to", "the", "store", "and", "buy", "cookies",
+        ];
+        let strokes = [
+            "EU",
+            "WAUNT",
+            "TO",
+            "TKPWOE",
+            "TO",
+            "-T",
+            "STOR",
+            "APBD",
+            "PWEU",
+            "KAOBG/KEUS",
+        ];
 
         // Wide enough for every outline on one line; only wide enough for about 4 words.
         let outline_max = strokes_glyphs.measure(&strokes.join(" / "));
-        let words_max = 3.0f32.mul_add(words_glyphs.measure(" "), 4.0 * words_glyphs.measure("store"));
+        let words_max = 3.0f32.mul_add(
+            words_glyphs.measure(" "),
+            4.0 * words_glyphs.measure("store"),
+        );
 
         let (outline_lines, text_lines) = wrap_paired(
             &mut strokes_glyphs,
@@ -1265,9 +1324,7 @@ mod tests {
             layer: Some("steno".into()),
             ..OverlaySnapshot::default()
         };
-        snapshot
-            .tape
-            .push_back(tape_entry(1, "KAT", long_word));
+        snapshot.tape.push_back(tape_entry(1, "KAT", long_word));
         renderer.draw(&snapshot, &mut pixmap.as_mut());
 
         // The newest (only) entry's text, were it a single clipped line, would draw somewhere
@@ -1577,7 +1634,10 @@ mod tests {
             .flat_map(|py| (x0..x1).map(move |px| (px, py)))
             .filter_map(|(px, py)| pixmap.pixel(px, py))
             .any(|p| p.alpha() > 0);
-        assert!(lit, "the extra key's letter should be drawn somewhere in its tape column");
+        assert!(
+            lit,
+            "the extra key's letter should be drawn somewhere in its tape column"
+        );
     }
 
     #[test]
@@ -1609,7 +1669,10 @@ mod tests {
 
         // Nothing pressed, nothing on the tape yet: the newest line is blank
         renderer.draw(&OverlaySnapshot::default(), &mut pixmap.as_mut());
-        assert!(!sample(&pixmap), "nothing held: the newest line should be blank");
+        assert!(
+            !sample(&pixmap),
+            "nothing held: the newest line should be blank"
+        );
 
         // T- held, the stroke not released yet, so it has no dictionary match or text: its
         // letter still appears on the newest line right away, without waiting for a release
@@ -2129,7 +2192,8 @@ mod tests {
                 query: "i want to go to the store and buy cookies".into(),
                 rows: vec![LookupRow {
                     text: "I want to go to the store and buy cookies".into(),
-                    outline: "EU / WAUNT / TO / TKPWOE / TO / -T / STOR / APBD / PWEU / KAOBG/KEUS".into(),
+                    outline: "EU / WAUNT / TO / TKPWOE / TO / -T / STOR / APBD / PWEU / KAOBG/KEUS"
+                        .into(),
                 }],
                 hint: 0,
                 mode: LookupMode::Phrase,
@@ -2258,7 +2322,9 @@ mod tests {
                     },
                     LookupRow {
                         text: "I want to go to the store and buy cookies".into(),
-                        outline: "EU / WAUNT / TO / TKPWOE / TO / -T / STOR / APBD / PWEU / KAOBG/KEUS".into(),
+                        outline:
+                            "EU / WAUNT / TO / TKPWOE / TO / -T / STOR / APBD / PWEU / KAOBG/KEUS"
+                                .into(),
                     },
                     LookupRow {
                         text: "candy".into(),

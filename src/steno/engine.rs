@@ -111,8 +111,8 @@ impl StenoEngine {
         history: &SharedHistory,
         label: &str,
     ) -> Result<Self> {
-        let layout = Layout::plover_with(&config.extra_keys)
-            .map_err(|errors| anyhow!(errors.join("; ")))?;
+        let layout =
+            Layout::plover_with(&config.extra_keys).map_err(|errors| anyhow!(errors.join("; ")))?;
         let preset = preset(&config.layout).map_err(|e| anyhow!(e))?;
         let overrides: HashMap<String, KeyAction> = config.layout_overrides.clone();
         let keys = layout
@@ -347,7 +347,10 @@ impl StenoEngine {
             .filter(|&(stroke, _)| self.chord.is_fresh() && self.chord.pending() == stroke)
             .map(|(_, since)| since + self.timing.repeat_delay);
         let next_repeat = self.repeating.map(|repeating| repeating.next);
-        [stuck, repeat_starts, next_repeat].into_iter().flatten().min()
+        [stuck, repeat_starts, next_repeat]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Check the stuck-key timeout and pick up finished dictionary loads.
@@ -774,7 +777,8 @@ mod tests {
         }
 
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KAT": "cat"}"#, &Layout::plover()).unwrap();
+        dict.merge_json(r#"{"KAT": "cat"}"#, &Layout::plover())
+            .unwrap();
         sender.send(Arc::new(Chain::from(dict))).unwrap();
         assert_eq!(engine.tick(now), Some(StenoOutput::Type("cat".to_string())));
     }
@@ -1095,7 +1099,10 @@ mod tests {
     fn only_a_stroke_that_is_nothing_but_commands_stays_off_the_tape() {
         let command = || OutputOp::Command("LOOKUP".to_owned());
         assert!(is_command_only(Some(&StenoOutput::Ops(vec![command()]))));
-        assert!(is_command_only(Some(&StenoOutput::Ops(vec![command(), command()]))));
+        assert!(is_command_only(Some(&StenoOutput::Ops(vec![
+            command(),
+            command()
+        ]))));
         let with_text = StenoOutput::Ops(vec![command(), OutputOp::Text("a".to_owned())]);
         assert!(!is_command_only(Some(&with_text)));
         let with_backspace = StenoOutput::Ops(vec![OutputOp::Backspaces(1), command()]);

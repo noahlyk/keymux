@@ -5,10 +5,10 @@
 //! hub keeps only the latest state plus a generation counter, not a queue of events. A
 //! slow subscriber skips the states it missed, so it can never hold up typing.
 
+use crate::lock;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use crate::lock;
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;
 

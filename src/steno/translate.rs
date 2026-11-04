@@ -189,7 +189,6 @@ struct Macro {
     cmdline: String,
 }
 
-
 /// The macro a mapping stands for. Nothing mapped is the undo stroke's macro when the stroke is
 /// the undo stroke.
 fn mapping_to_macro(mapping: Option<&str>, stroke: u32) -> Option<Macro> {
@@ -1078,7 +1077,9 @@ mod tests {
         if text == "*" {
             return UNDO_STROKE;
         }
-        Layout::plover().parse_stroke(text).unwrap_or_else(|| panic!("{text} is not a stroke"))
+        Layout::plover()
+            .parse_stroke(text)
+            .unwrap_or_else(|| panic!("{text} is not a stroke"))
     }
 
     fn translator(json: &str) -> Translator {
@@ -1169,7 +1170,11 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         let plugin_path = dir.join("02-shout.rs");
         fs::write(&dict_path, dict).unwrap();
         fs::write(&plugin_path, SHOUT_PLUGIN).unwrap();
-        let chain = Chain::load_cached(&[dict_path, plugin_path], &dir.join("cache"), &Layout::plover());
+        let chain = Chain::load_cached(
+            &[dict_path, plugin_path],
+            &dir.join("cache"),
+            &Layout::plover(),
+        );
         Translator::with_shared(
             Arc::new(chain),
             Options {
@@ -1240,7 +1245,11 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         let plugin_path = dir.join("02-blank-for-symbols.rs");
         fs::write(&dict_path, r#"{"KAT": "cat"}"#).unwrap();
         fs::write(&plugin_path, BLANK_FOR_SYMBOLS_PLUGIN).unwrap();
-        let chain = Chain::load_cached(&[dict_path, plugin_path], &dir.join("cache"), &Layout::plover());
+        let chain = Chain::load_cached(
+            &[dict_path, plugin_path],
+            &dir.join("cache"),
+            &Layout::plover(),
+        );
         let mut t = Translator::with_shared(
             Arc::new(chain),
             Options {
@@ -1411,7 +1420,8 @@ pub extern "C" fn joins(bits: i64) -> i32 {
     /// `JOIN_ONLY_PLUGIN` so that join bit is actually reachable through the chain.
     fn join_dict_translator() -> Translator {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KAT": "cat", "-G": "ging"}"#, &Layout::plover()).unwrap();
+        dict.merge_json(r#"{"KAT": "cat", "-G": "ging"}"#, &Layout::plover())
+            .unwrap();
         let kat = Layout::plover().parse_stroke("KAT").unwrap();
         let joined_g = Layout::plover().parse_stroke("-G").unwrap() | (1 << 23);
         dict.insert(vec![kat, joined_g], "catting");
@@ -1923,7 +1933,10 @@ pub extern "C" fn joins(bits: i64) -> i32 {
     fn undoing_a_longer_entry_never_puts_back_the_commands_it_replaced() {
         // PHR*UP then TKOG becomes the one entry "lookdog", replacing the command's translation;
         // undoing "lookdog" puts that translation back, which must not run the command again
-        for strokes in [vec!["PHR*UP", "TKOG", "*"], vec!["KAT", "PHR*UP", "TKOG", "*"]] {
+        for strokes in [
+            vec!["PHR*UP", "TKOG", "*"],
+            vec!["KAT", "PHR*UP", "TKOG", "*"],
+        ] {
             let mut t = translator(COMMAND_JSON);
             let mut last = Vec::new();
             for s in &strokes {

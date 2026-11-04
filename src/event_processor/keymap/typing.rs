@@ -18,7 +18,11 @@ pub(super) struct TypingWatch {
 }
 
 impl TypingWatch {
-    pub(super) const fn new(typist: Option<Typist>, history: SharedHistory, tape: Option<PathBuf>) -> Self {
+    pub(super) const fn new(
+        typist: Option<Typist>,
+        history: SharedHistory,
+        tape: Option<PathBuf>,
+    ) -> Self {
         Self {
             typist,
             history,

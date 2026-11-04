@@ -18,11 +18,11 @@ use super::layout::Layout;
 use super::parts::Parts;
 use super::plugin::Chain;
 use super::source::expand;
+use crate::lock;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use crate::lock;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
@@ -116,7 +116,11 @@ fn hub() -> &'static Hub {
 #[must_use]
 pub fn subscribe(roots: Vec<PathBuf>, cache_dir: PathBuf, layout: Layout) -> Receiver<Arc<Chain>> {
     let hub = hub();
-    let key = Key { roots, cache_dir, layout };
+    let key = Key {
+        roots,
+        cache_dir,
+        layout,
+    };
     let (sender, receiver) = mpsc::channel();
     {
         let mut interest = lock(&hub.interest);
@@ -194,11 +198,17 @@ fn refresh(key: &Key) {
             return;
         };
         let first_time = entry.latest.is_none();
-        if !first_time && entry.parts.is_current(&files) && entry.built_from == entry.parts.generation()
+        if !first_time
+            && entry.parts.is_current(&files)
+            && entry.built_from == entry.parts.generation()
         {
             return;
         }
-        let taken = (std::mem::take(&mut entry.parts), entry.built_from, first_time);
+        let taken = (
+            std::mem::take(&mut entry.parts),
+            entry.built_from,
+            first_time,
+        );
         drop(state);
         taken
     };
@@ -213,8 +223,14 @@ fn refresh(key: &Key) {
             report.problems.join("; ")
         );
     }
-    let dict = (!up_to_date && !keep_old)
-        .then(|| Arc::new(Chain::from_parts(&files, &parts, &key.cache_dir, &key.layout)));
+    let dict = (!up_to_date && !keep_old).then(|| {
+        Arc::new(Chain::from_parts(
+            &files,
+            &parts,
+            &key.cache_dir,
+            &key.layout,
+        ))
+    });
     if let Some(dict) = &dict {
         info!(
             "steno dictionaries {}: {} entries from {} files in {:?}",

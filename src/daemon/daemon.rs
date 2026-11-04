@@ -383,9 +383,9 @@ impl Daemon {
                     self.stop_processors_for_keyboard(&kbd_id);
 
                     // Start ONE THREAD PER EVENT FILE
-                    if let Err(e) = self
-                        .start_processors_for_keyboard(&kbd_id, &meta.name, &meta.paths, uid)
-                                            {
+                    if let Err(e) =
+                        self.start_processors_for_keyboard(&kbd_id, &meta.name, &meta.paths, uid)
+                    {
                         error!("Failed to start processors for user {}: {}", uid, e);
                     } else {
                         self.keyboard_owners.insert(kbd_id.clone(), uid);
@@ -463,7 +463,8 @@ impl Daemon {
 
     /// Get list of active user UIDs
     fn get_active_user_uids(&self) -> Vec<u32> {
-        self.session_manager.get_active_uids()    }
+        self.session_manager.get_active_uids()
+    }
 
     /// Get username from UID
     fn get_username(&self, uid: u32) -> Result<String> {
@@ -484,7 +485,6 @@ impl Daemon {
 
         Ok(username)
     }
-
 
     /// Send desktop notification to a user
     fn send_notification(&self, uid: u32, title: &str, message: &str, urgency: &str) {
@@ -538,8 +538,7 @@ impl Daemon {
             .user_configs
             .get(&uid)
             .context("User config not loaded")?
-            .get_config()
-            ;
+            .get_config();
 
         // Get config path for command execution
         let config_path = self
@@ -754,9 +753,7 @@ impl Daemon {
     }
 
     /// Start IPC server
-    fn start_ipc_server(
-        &self,
-    ) -> Result<Receiver<(IpcRequest, mpsc::Sender<IpcResponse>)>> {
+    fn start_ipc_server(&self) -> Result<Receiver<(IpcRequest, mpsc::Sender<IpcResponse>)>> {
         let (tx, rx) = unbounded();
         let socket_path = get_root_socket_path();
 
@@ -847,9 +844,7 @@ impl Daemon {
     }
 
     /// Start niri window monitor
-    fn start_niri_monitor(
-        &self,
-    ) -> Receiver<crate::window_manager::WindowManagerEvent> {
+    fn start_niri_monitor(&self) -> Receiver<crate::window_manager::WindowManagerEvent> {
         if !crate::niri::is_niri_available() {
             debug!("Niri not available, skipping window monitor");
             return never();

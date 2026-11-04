@@ -135,7 +135,12 @@ impl Dictionary {
     }
 
     /// Like [`Self::merge_file`], for the contents of `path` already read.
-    pub fn merge_bytes(&mut self, path: &Path, bytes: &[u8], layout: &Layout) -> Result<MergeStats> {
+    pub fn merge_bytes(
+        &mut self,
+        path: &Path,
+        bytes: &[u8],
+        layout: &Layout,
+    ) -> Result<MergeStats> {
         let name = path.file_name().and_then(|n| n.to_str());
         if name == Some(WORDLIST_FILE) {
             let words = Orthography::from_wordlist(&decode_text(bytes));
@@ -221,7 +226,9 @@ impl Dictionary {
 
     /// Whether any table has an entry (a deletion counts) for the outline.
     fn has_entry(&self, strokes: &[u32]) -> bool {
-        self.tables.iter().any(|table| table.entries.contains_key(strokes))
+        self.tables
+            .iter()
+            .any(|table| table.entries.contains_key(strokes))
     }
 
     /// Add one entry by its outline bits directly, bypassing stroke-notation parsing - for a
@@ -283,7 +290,11 @@ impl Dictionary {
     /// The length in strokes of the longest outline.
     #[must_use]
     pub fn longest_key(&self) -> usize {
-        self.tables.iter().map(|table| table.max_len).max().unwrap_or(0)
+        self.tables
+            .iter()
+            .map(|table| table.max_len)
+            .max()
+            .unwrap_or(0)
     }
 
     /// Every stroke sequence whose translation is exactly `text`, ignoring the
@@ -339,7 +350,10 @@ impl Dictionary {
     /// only otherwise: see [`Parts`].
     #[must_use]
     pub fn load_cached(paths: &[impl AsRef<Path>], cache_dir: &Path, layout: &Layout) -> Self {
-        let files: Vec<PathBuf> = paths.iter().map(|path| path.as_ref().to_path_buf()).collect();
+        let files: Vec<PathBuf> = paths
+            .iter()
+            .map(|path| path.as_ref().to_path_buf())
+            .collect();
         let mut parts = Parts::default();
         parts.refresh(&files, cache_dir, layout);
         parts.layered(&files)
@@ -371,7 +385,9 @@ impl Dictionary {
                         .entries
                         .keys()
                         .filter(|strokes| {
-                            !tables[..i].iter().any(|earlier| earlier.entries.contains_key(*strokes))
+                            !tables[..i]
+                                .iter()
+                                .any(|earlier| earlier.entries.contains_key(*strokes))
                         })
                         .count()
                 })
@@ -493,7 +509,9 @@ mod tests {
         assert_eq!(dict.lookup(&[KAT]), Some("cat"));
         assert_eq!(dict.lookup(&[KPA, TKAOEU]), Some("example"));
         // Commands are entries like any other: they are run when the stroke is typed
-        assert!(dict.lookup(&[Layout::plover().parse_strokes("-PB").unwrap()[0]]).is_some());
+        assert!(dict
+            .lookup(&[Layout::plover().parse_strokes("-PB").unwrap()[0]])
+            .is_some());
         assert_eq!(
             stats,
             MergeStats {
@@ -508,7 +526,8 @@ mod tests {
         let mut dict = Dictionary::default();
         dict.merge_json(&format!(r#"{{"KAT": "{DELETED}"}}"#), &Layout::plover())
             .unwrap();
-        dict.merge_json(r#"{"KAT": "cat", "TKOG": "dog"}"#, &Layout::plover()).unwrap();
+        dict.merge_json(r#"{"KAT": "cat", "TKOG": "dog"}"#, &Layout::plover())
+            .unwrap();
         assert_eq!(dict.lookup(&[KAT]), None);
         assert!(
             dict.strokes_for("cat").is_empty(),
@@ -518,7 +537,10 @@ mod tests {
         // In any letter case
         let mut upper = Dictionary::default();
         upper
-            .merge_json(&format!(r#"{{"KAT": "{}"}}"#, DELETED.to_uppercase()), &Layout::plover())
+            .merge_json(
+                &format!(r#"{{"KAT": "{}"}}"#, DELETED.to_uppercase()),
+                &Layout::plover(),
+            )
             .unwrap();
         assert_eq!(upper.lookup(&[KAT]), None);
     }
@@ -526,9 +548,15 @@ mod tests {
     #[test]
     fn number_keys_and_the_word_boundary_stroke_are_read_in_keys() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"1": "one", "1-9": "x", "/S": "{prefix^}"}"#, &Layout::plover())
-            .unwrap();
-        assert_eq!(dict.lookup(&[Layout::plover().parse_strokes("1").unwrap()[0]]), Some("one"));
+        dict.merge_json(
+            r#"{"1": "one", "1-9": "x", "/S": "{prefix^}"}"#,
+            &Layout::plover(),
+        )
+        .unwrap();
+        assert_eq!(
+            dict.lookup(&[Layout::plover().parse_strokes("1").unwrap()[0]]),
+            Some("one")
+        );
         assert_eq!(
             dict.lookup(&[0, Layout::plover().parse_strokes("S").unwrap()[0]]),
             Some("{prefix^}")
@@ -553,15 +581,19 @@ mod tests {
     #[test]
     fn longest_entry_length_is_tracked() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KPA/TKAOEU": "example"}"#, &Layout::plover()).unwrap();
+        dict.merge_json(r#"{"KPA/TKAOEU": "example"}"#, &Layout::plover())
+            .unwrap();
         assert_eq!(dict.longest_key(), 2);
     }
 
     #[test]
     fn strokes_for_finds_every_stroke_sequence_for_a_word() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KAT": "cat", "KPA/TKAOEU": "example"}"#, &Layout::plover())
-            .unwrap();
+        dict.merge_json(
+            r#"{"KAT": "cat", "KPA/TKAOEU": "example"}"#,
+            &Layout::plover(),
+        )
+        .unwrap();
         assert_eq!(dict.strokes_for("cat"), vec![vec![KAT]]);
         assert_eq!(dict.strokes_for("example"), vec![vec![KPA, TKAOEU]]);
         assert!(dict.strokes_for("dog").is_empty());
@@ -625,7 +657,11 @@ mod tests {
         );
         let _ = load(&[&extra]);
         let _ = load(&[&file, &extra]);
-        assert_eq!(cache_files(&cache), 2, "a copy per file, not per combination");
+        assert_eq!(
+            cache_files(&cache),
+            2,
+            "a copy per file, not per combination"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -644,8 +680,11 @@ mod tests {
     #[test]
     fn strokes_for_finds_every_outline_through_the_word_index() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KAT": "cat", "KAT/-PB": "cat", "KWRAT": "{^}cat"}"#, &Layout::plover())
-            .unwrap();
+        dict.merge_json(
+            r#"{"KAT": "cat", "KAT/-PB": "cat", "KWRAT": "{^}cat"}"#,
+            &Layout::plover(),
+        )
+        .unwrap();
         // The leading space that spacing adds is ignored, and the index covers every entry
         assert_eq!(dict.strokes_for("cat").len(), 3);
     }
@@ -653,8 +692,10 @@ mod tests {
     #[test]
     fn earlier_merges_win() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KAT": "kitty"}"#, &Layout::plover()).unwrap();
-        dict.merge_json(r#"{"KAT": "cat"}"#, &Layout::plover()).unwrap();
+        dict.merge_json(r#"{"KAT": "kitty"}"#, &Layout::plover())
+            .unwrap();
+        dict.merge_json(r#"{"KAT": "cat"}"#, &Layout::plover())
+            .unwrap();
         assert_eq!(dict.lookup(&[KAT]), Some("kitty"));
     }
 
@@ -675,7 +716,10 @@ mod tests {
         fs::write(&words, "cats 5\ncarries 9\n").unwrap();
 
         // The first dictionary wins, whichever format it is
-        let dict = Dictionary::load(&[json.as_path(), rtf.as_path(), words.as_path()], &Layout::plover());
+        let dict = Dictionary::load(
+            &[json.as_path(), rtf.as_path(), words.as_path()],
+            &Layout::plover(),
+        );
         assert_eq!(dict.lookup(&[KAT]), Some("kitty"));
         assert_eq!(
             dict.lookup(&[Layout::plover().parse_strokes("-S").unwrap()[0]]),
@@ -696,7 +740,10 @@ mod tests {
 
     #[test]
     fn missing_file_is_skipped() {
-        let dict = Dictionary::load(&[Path::new("/nonexistent/steno/main.json")], &Layout::plover());
+        let dict = Dictionary::load(
+            &[Path::new("/nonexistent/steno/main.json")],
+            &Layout::plover(),
+        );
         assert!(dict.is_empty());
     }
 }

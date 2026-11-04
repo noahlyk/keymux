@@ -29,7 +29,8 @@ pub enum Query {
 #[must_use]
 pub fn classify(input: &str) -> Query {
     let trimmed = input.trim();
-    let looks_like_a_stroke = !trimmed.is_empty() && !trimmed.chars().any(|c| c.is_ascii_lowercase());
+    let looks_like_a_stroke =
+        !trimmed.is_empty() && !trimmed.chars().any(|c| c.is_ascii_lowercase());
     if looks_like_a_stroke {
         if let Some(strokes) = parse_strokes_trimmed(trimmed) {
             return Query::Stroke(strokes);
@@ -143,7 +144,10 @@ pub fn nearby_strokes(dict: &Dictionary, strokes: &[u32], limit: usize) -> Vec<V
         candidates.truncate(limit);
     }
     candidates.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
-    candidates.into_iter().map(|(_, outline)| outline.clone()).collect()
+    candidates
+        .into_iter()
+        .map(|(_, outline)| outline.clone())
+        .collect()
 }
 
 /// `segments` rendered for a human.
@@ -201,14 +205,20 @@ mod tests {
     fn an_all_caps_stroke_classifies_as_a_stroke() {
         assert_eq!(
             classify("KAT/-D"),
-            Query::Stroke(vec![Layout::plover().parse_stroke("KAT").unwrap(), Layout::plover().parse_stroke("-D").unwrap()])
+            Query::Stroke(vec![
+                Layout::plover().parse_stroke("KAT").unwrap(),
+                Layout::plover().parse_stroke("-D").unwrap()
+            ])
         );
     }
 
     #[test]
     fn lowercase_text_classifies_as_text_even_if_it_would_parse() {
         assert_eq!(classify("kat"), Query::Text("kat".to_string()));
-        assert_eq!(classify("a whole phrase"), Query::Text("a whole phrase".to_string()));
+        assert_eq!(
+            classify("a whole phrase"),
+            Query::Text("a whole phrase".to_string())
+        );
     }
 
     #[test]
@@ -305,8 +315,11 @@ mod tests {
     #[test]
     fn nearby_strokes_respects_its_limit() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KAT": "cat", "KA": "ca", "TKAT": "dat", "GAT": "gat"}"#, &Layout::plover())
-            .unwrap();
+        dict.merge_json(
+            r#"{"KAT": "cat", "KA": "ca", "TKAT": "dat", "GAT": "gat"}"#,
+            &Layout::plover(),
+        )
+        .unwrap();
         let kat = Layout::plover().parse_stroke("KAT").unwrap();
         assert_eq!(nearby_strokes(&dict, &[kat], 2).len(), 2);
         assert_eq!(nearby_strokes(&dict, &[kat], 0).len(), 0);

@@ -57,7 +57,10 @@ mod tests {
     fn a_press_right_after_that_keys_own_release_is_chatter() {
         let mut debounce = Debounce::default();
         let t0 = Instant::now();
-        assert!(!debounce.is_chatter(30, false, t0), "a release is never chatter on its own");
+        assert!(
+            !debounce.is_chatter(30, false, t0),
+            "a release is never chatter on its own"
+        );
         assert!(
             debounce.is_chatter(30, true, t0 + Duration::from_millis(5)),
             "5ms after that same key's release is well inside bounce territory"

@@ -35,7 +35,10 @@ fn first_word(dict: Dictionary, stroke: &str) -> Option<StenoOutput> {
 #[test]
 fn every_book_vector_is_a_valid_stroke() {
     for (stroke, _) in vectors() {
-        assert!(Layout::plover().parse_stroke(stroke).is_some(), "{stroke} should parse");
+        assert!(
+            Layout::plover().parse_stroke(stroke).is_some(),
+            "{stroke} should parse"
+        );
     }
 }
 
@@ -89,7 +92,9 @@ fn real_lapwing_dictionaries_have_no_invalid_strokes() {
     let dir = PathBuf::from(home).join(".config/keymux/steno/lapwing");
     for file in LAPWING_FILES {
         let json = std::fs::read_to_string(dir.join(file)).unwrap();
-        let stats = Dictionary::default().merge_json(&json, &Layout::plover()).unwrap();
+        let stats = Dictionary::default()
+            .merge_json(&json, &Layout::plover())
+            .unwrap();
         assert_eq!(stats.invalid, 0, "{file} has strokes keymux cannot parse");
     }
 }
@@ -115,7 +120,10 @@ fn type_with(dict: Dictionary, strokes: &[&str]) -> String {
     let mut translator = Translator::new(dict);
     let mut typed = String::new();
     for stroke in strokes {
-        apply_output(&mut typed, translator.stroke(Layout::plover().parse_stroke(stroke).unwrap()));
+        apply_output(
+            &mut typed,
+            translator.stroke(Layout::plover().parse_stroke(stroke).unwrap()),
+        );
     }
     typed
 }
@@ -215,7 +223,11 @@ fn random_sessions_keep_the_screen_and_the_translator_in_step() {
         .flat_map(|line| line.split('\t').next().unwrap().split('/'))
         .map(|s| Layout::plover().parse_stroke(s).unwrap())
         .collect();
-    pool.extend(vectors().iter().map(|(s, _)| Layout::plover().parse_stroke(s).unwrap()));
+    pool.extend(
+        vectors()
+            .iter()
+            .map(|(s, _)| Layout::plover().parse_stroke(s).unwrap()),
+    );
     pool.push(UNDO_STROKE);
     pool.push(NUMBER_BIT);
 
@@ -397,6 +409,10 @@ fn every_lapwing_entry_loads_and_formats() {
 fn real_lapwing_dictionaries_support_chapter_20_case_commands() {
     // KPA is "capitalize next" (`{:case:cap_first_word}`), not a skipped plugin command
     let dict = lapwing_dictionary();
-    assert!(dict.lookup(&[Layout::plover().parse_stroke("KPA").unwrap()]).is_some());
-    assert!(dict.lookup(&[Layout::plover().parse_stroke("KA*PD").unwrap()]).is_some());
+    assert!(dict
+        .lookup(&[Layout::plover().parse_stroke("KPA").unwrap()])
+        .is_some());
+    assert!(dict
+        .lookup(&[Layout::plover().parse_stroke("KA*PD").unwrap()])
+        .is_some());
 }

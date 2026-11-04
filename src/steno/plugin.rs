@@ -64,13 +64,13 @@ use super::dict::Dictionary;
 use super::layout::Layout;
 use super::parts::Parts;
 use super::source::is_plugin_file;
+use crate::lock;
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use crate::lock;
 use std::sync::{Arc, Mutex};
 use wasmtime::{Engine, Instance, Memory, Module, Store, TypedFunc};
 
@@ -176,7 +176,9 @@ impl Plugin {
             .map_err(|e| {
                 anyhow::anyhow!("plugin {name:?} has no fallback(ptr, len) -> packed: {e}")
             })?;
-        let joins = instance.get_typed_func::<i64, i32>(&mut store, "joins").ok();
+        let joins = instance
+            .get_typed_func::<i64, i32>(&mut store, "joins")
+            .ok();
         Ok(Self {
             name,
             store,
@@ -304,15 +306,14 @@ impl Chain {
     /// dictionary *file* could express) with one plugin, loaded the normal way. `pub(crate)`
     /// since this exists for tests that need both at once, not as a general-purpose
     /// constructor - `load_cached` is that, for the files a real steno folder actually has.
-    pub(crate) fn test_with_plugin(
-        dict: Dictionary,
-        plugin_file: &Path,
-        cache_dir: &Path,
-    ) -> Self {
+    pub(crate) fn test_with_plugin(dict: Dictionary, plugin_file: &Path, cache_dir: &Path) -> Self {
         let plugin = load_one(plugin_file, cache_dir).expect("test plugin should load");
         let dict = Arc::new(dict);
         Self {
-            steps: vec![Step::Dict(Arc::clone(&dict)), Step::Plugin(Box::new(Mutex::new(plugin)))],
+            steps: vec![
+                Step::Dict(Arc::clone(&dict)),
+                Step::Plugin(Box::new(Mutex::new(plugin))),
+            ],
             dict,
             layout: Layout::plover(),
         }
@@ -649,8 +650,7 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         // for every one of them (it never really runs out of letters to double), swallowing
         // whatever came before into one guess instead of leaving each stroke to be judged on
         // its own.
-        let dir =
-            tmp_dir().join("a_plugin_is_never_asked_about_unrelated_strokes_together");
+        let dir = tmp_dir().join("a_plugin_is_never_asked_about_unrelated_strokes_together");
         fs::create_dir_all(&dir).unwrap();
         let source = dir.join("doubler.rs");
         fs::write(&source, DOUBLER).unwrap();
@@ -684,7 +684,10 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         let kat = Layout::plover().parse_stroke("KAT").unwrap();
         // Bit 23 is this test's own made-up join key - keymux has no built-in notion of one.
         let joined_top = Layout::plover().parse_stroke("TOP").unwrap() | (1 << 23);
-        assert!(chain.joins(joined_top), "the plugin's own joins() must be reachable through the chain");
+        assert!(
+            chain.joins(joined_top),
+            "the plugin's own joins() must be reachable through the chain"
+        );
         assert_eq!(
             chain.lookup(&[kat, joined_top]),
             Some("KKAATT//TTOOPP".to_string()),

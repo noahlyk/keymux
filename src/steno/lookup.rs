@@ -330,8 +330,11 @@ mod tests {
     #[test]
     fn one_letter_gives_no_suggestions_but_an_exact_word_still_does() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"-T": "the", "A": "a", "AB": "about"}"#, &Layout::plover())
-            .unwrap();
+        dict.merge_json(
+            r#"{"-T": "the", "A": "a", "AB": "about"}"#,
+            &Layout::plover(),
+        )
+        .unwrap();
         let base = Translator::new(dict);
         let rows = typed("a").view(&base).rows;
         assert_eq!(rows.len(), 1, "{rows:?}");
@@ -426,15 +429,21 @@ mod tests {
         let outlines: Vec<&str> = view.rows.iter().map(|r| r.outline.as_str()).collect();
         assert_eq!(outlines.len(), 7, "{outlines:?}");
         for expected in ["-T", "KAPBD", "KAPBL", "KAPBT", "KA", "SPH-PL"] {
-            assert!(outlines.contains(&expected), "expected {expected} in {outlines:?}");
+            assert!(
+                outlines.contains(&expected),
+                "expected {expected} in {outlines:?}"
+            );
         }
     }
 
     #[test]
     fn a_query_with_a_space_looks_up_the_whole_phrase_as_one_row() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"KAPB": "can", "-T": "the", "KAPBD": "candy"}"#, &Layout::plover())
-            .unwrap();
+        dict.merge_json(
+            r#"{"KAPB": "can", "-T": "the", "KAPBD": "candy"}"#,
+            &Layout::plover(),
+        )
+        .unwrap();
         let view = typed("can the candy").view(&Translator::new(dict));
         assert_eq!(view.rows.len(), 1);
         assert_eq!(view.rows[0].text, "can the candy");
@@ -452,8 +461,11 @@ mod tests {
     #[test]
     fn a_word_with_no_dictionary_entry_falls_back_to_fingerspelling_in_quotes() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"TPH": "{&n}", "SR*": "{&v}", "SKW*": "{&i}", "PH*": "{&m}"}"#, &Layout::plover())
-            .unwrap();
+        dict.merge_json(
+            r#"{"TPH": "{&n}", "SR*": "{&v}", "SKW*": "{&i}", "PH*": "{&m}"}"#,
+            &Layout::plover(),
+        )
+        .unwrap();
         let view = typed("nvim").view(&Translator::new(dict));
         assert_eq!(view.rows.len(), 1);
         assert_eq!(view.rows[0].text, "\"nvim\"");

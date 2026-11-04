@@ -1362,7 +1362,12 @@ impl Config {
             keyboard
                 .remaps
                 .iter()
-                .chain(keyboard.layers.iter().flat_map(|layers| layers.values().map(|layer| &layer.remaps)))
+                .chain(
+                    keyboard
+                        .layers
+                        .iter()
+                        .flat_map(|layers| layers.values().map(|layer| &layer.remaps)),
+                )
                 .chain(keyboard.game_mode.iter().map(|game| &game.remaps))
         });
         global.chain(per_keyboard)
@@ -1439,9 +1444,9 @@ impl Config {
         }
         for (name, value) in settings {
             if value == 0 || value > 1000 {
-                check.errors.push(format!(
-                    "{name} out of reasonable range (0-1000): {value}"
-                ));
+                check
+                    .errors
+                    .push(format!("{name} out of reasonable range (0-1000): {value}"));
             }
         }
         check
@@ -1480,7 +1485,12 @@ impl Config {
             let own: Vec<&HashMap<KeyCode, KeyAction>> = keyboard
                 .remaps
                 .iter()
-                .chain(keyboard.layers.iter().flat_map(|layers| layers.values().map(|layer| &layer.remaps)))
+                .chain(
+                    keyboard
+                        .layers
+                        .iter()
+                        .flat_map(|layers| layers.values().map(|layer| &layer.remaps)),
+                )
                 .collect();
             for name in referenced(&own, keyboard.default_layer.as_ref()) {
                 if !defined(&name, keyboard.layers.as_ref()) {
@@ -1498,9 +1508,15 @@ impl Config {
         use crate::steno::layout::{preset, Layout};
         let mut check = Check::new("steno layers");
         let mut count = 0;
-        let own_layers = self.per_keyboard_overrides.iter().filter_map(|(id, keyboard)| {
-            keyboard.layers.as_ref().map(|layers| (Some(id.as_str()), layers))
-        });
+        let own_layers = self
+            .per_keyboard_overrides
+            .iter()
+            .filter_map(|(id, keyboard)| {
+                keyboard
+                    .layers
+                    .as_ref()
+                    .map(|layers| (Some(id.as_str()), layers))
+            });
         for (keyboard, layers) in std::iter::once((None, &self.layers)).chain(own_layers) {
             for (layer, config) in layers {
                 let LayerKind::Steno(steno) = &config.kind else {
@@ -1517,9 +1533,11 @@ impl Config {
                         .and_then(|preset| layout.build_key_map(&preset, &steno.layout_overrides))
                 });
                 if let Err(problems) = key_map {
-                    check
-                        .errors
-                        .extend(problems.into_iter().map(|problem| format!("{name}: {problem}")));
+                    check.errors.extend(
+                        problems
+                            .into_iter()
+                            .map(|problem| format!("{name}: {problem}")),
+                    );
                 }
                 if steno.translation_timeout_ms.is_some() {
                     check.warnings.push(format!(
@@ -1537,10 +1555,9 @@ impl Config {
                     );
                     if !path.exists() {
                         // Not fatal: the layer loads without this dictionary
-                        check.warnings.push(format!(
-                            "{name}: dictionary not found: {}",
-                            path.display()
-                        ));
+                        check
+                            .warnings
+                            .push(format!("{name}: dictionary not found: {}", path.display()));
                     }
                 }
             }
@@ -1555,9 +1572,11 @@ impl Config {
         let mut check = Check::new("overlay");
         let overlay = &self.overlay;
         match crate::steno::layout::Layout::plover_with(&overlay.extra_keys) {
-            Err(problems) => check
-                .errors
-                .extend(problems.into_iter().map(|problem| format!("overlay: {problem}"))),
+            Err(problems) => check.errors.extend(
+                problems
+                    .into_iter()
+                    .map(|problem| format!("overlay: {problem}")),
+            ),
             Ok(layout) => {
                 for (key, placement) in &overlay.overlay_overrides {
                     let mut chars = key.chars();
@@ -1705,7 +1724,10 @@ mod tests {
         assert!(report.is_ok(), "{:?}", report.errors().collect::<Vec<_>>());
         let warnings: Vec<&str> = report.warnings().collect();
         assert_eq!(warnings.len(), 2, "{warnings:?}");
-        assert!(warnings.iter().any(|w| w.contains("\"Q-\"")), "{warnings:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains("\"Q-\"")),
+            "{warnings:?}"
+        );
         assert!(warnings.iter().any(|w| w.contains("\"^\"")), "{warnings:?}");
     }
 

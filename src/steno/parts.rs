@@ -162,7 +162,11 @@ impl Parts {
         // The stamp is taken before the contents are read: a write in between leaves the stamp
         // older than the contents, so the next check sees a difference and reads again.
         let stamp = Stamp::of(path).with_context(|| format!("reading {}", path.display()))?;
-        if self.by_path.get(path).is_some_and(|part| !part.racy && part.stamp == stamp) {
+        if self
+            .by_path
+            .get(path)
+            .is_some_and(|part| !part.racy && part.stamp == stamp)
+        {
             return Ok(Update::Same);
         }
         // A time in the future (a clock set back) can't be trusted either
@@ -184,7 +188,11 @@ impl Parts {
             let source: Vec<Source> = vec![(path.display().to_string(), digest.clone())];
             let copy = parts_dir.join(format!("{}.bin", cache_name(path)));
             if let Some(dict) = read_cache(&copy, &source, layout) {
-                debug!("steno dictionary {} restored from {}", path.display(), copy.display());
+                debug!(
+                    "steno dictionary {} restored from {}",
+                    path.display(),
+                    copy.display()
+                );
                 (Some(Arc::new(dict)), true)
             } else {
                 let mut dict = Dictionary::default();
@@ -199,8 +207,20 @@ impl Parts {
                 (Some(Arc::new(dict)), false)
             }
         };
-        self.by_path.insert(path.to_path_buf(), Part { stamp, digest, racy, dict });
-        Ok(if restored { Update::Restored } else { Update::Parsed })
+        self.by_path.insert(
+            path.to_path_buf(),
+            Part {
+                stamp,
+                digest,
+                racy,
+                dict,
+            },
+        );
+        Ok(if restored {
+            Update::Restored
+        } else {
+            Update::Parsed
+        })
     }
 
     /// The dictionary files among `files`, layered in the order given. A file with no part (one
@@ -241,7 +261,12 @@ mod tests {
     fn put(path: &Path, json: &str, hours: u64) {
         fs::write(path, json).unwrap();
         let then = SystemTime::now() - Duration::from_secs(hours * 3600);
-        fs::File::options().write(true).open(path).unwrap().set_modified(then).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(then)
+            .unwrap();
     }
 
     fn files(dir: &Path, names: &[&str]) -> Vec<PathBuf> {
@@ -261,10 +286,17 @@ mod tests {
         assert_eq!((first.parsed, first.unchanged, first.changed), (2, 0, true));
         assert!(parts.is_current(&files));
 
-        put(&dir.join("b.json"), r#"{"TKOG": "hound", "KAT": "kitten"}"#, 4);
+        put(
+            &dir.join("b.json"),
+            r#"{"TKOG": "hound", "KAT": "kitten"}"#,
+            4,
+        );
         assert!(!parts.is_current(&files));
         let second = parts.refresh(&files, &cache, &Layout::plover());
-        assert_eq!((second.parsed, second.unchanged, second.changed), (1, 1, true));
+        assert_eq!(
+            (second.parsed, second.unchanged, second.changed),
+            (1, 1, true)
+        );
         let dict = parts.layered(&files);
         assert_eq!(dict.strokes_for("hound").len(), 1);
         assert_eq!(
@@ -365,7 +397,11 @@ mod tests {
     #[test]
     fn a_deletion_in_an_earlier_file_hides_the_entry_in_a_later_one() {
         let dir = folder("deleted");
-        put(&dir.join("a.json"), &format!(r#"{{"KAT": "{}"}}"#, super::super::dict::DELETED), 5);
+        put(
+            &dir.join("a.json"),
+            &format!(r#"{{"KAT": "{}"}}"#, super::super::dict::DELETED),
+            5,
+        );
         put(&dir.join("b.json"), r#"{"KAT": "cat", "TKOG": "dog"}"#, 5);
         let files = files(&dir, &["a.json", "b.json"]);
         let mut parts = Parts::default();
@@ -415,7 +451,10 @@ mod tests {
         let files = vec![a.clone()];
         let mut parts = Parts::default();
         parts.refresh(&files, &dir.join("cache"), &Layout::plover());
-        assert!(!parts.is_current(&files), "modified a moment ago, so not provably unchanged");
+        assert!(
+            !parts.is_current(&files),
+            "modified a moment ago, so not provably unchanged"
+        );
         // The same size, written straight away: the contents are what is compared
         fs::write(&a, r#"{"KAT": "dog"}"#).unwrap();
         let report = parts.refresh(&files, &dir.join("cache"), &Layout::plover());
@@ -429,8 +468,19 @@ mod tests {
         let dir = folder("views");
         // a.json says KAT is "cat" and deletes TKOG; b.json would give KAT "kitten", TKOG "dog"
         // and has KWRAT "catalog" besides
-        put(&dir.join("a.json"), &format!(r#"{{"KAT": "cat", "TKOG": "{}"}}"#, super::super::dict::DELETED), 5);
-        put(&dir.join("b.json"), r#"{"KAT": "kitten", "TKOG": "dog", "KWRAT": "catalog"}"#, 5);
+        put(
+            &dir.join("a.json"),
+            &format!(
+                r#"{{"KAT": "cat", "TKOG": "{}"}}"#,
+                super::super::dict::DELETED
+            ),
+            5,
+        );
+        put(
+            &dir.join("b.json"),
+            r#"{"KAT": "kitten", "TKOG": "dog", "KWRAT": "catalog"}"#,
+            5,
+        );
         let files = files(&dir, &["a.json", "b.json"]);
         let mut parts = Parts::default();
         parts.refresh(&files, &dir.join("cache"), &Layout::plover());
@@ -452,7 +502,9 @@ mod tests {
     #[test]
     #[ignore = "timing only; needs KEYMUX_BENCH_DIR"]
     fn bench_reload_after_one_file_changes() {
-        let Some(dir) = std::env::var_os("KEYMUX_BENCH_DIR") else { return };
+        let Some(dir) = std::env::var_os("KEYMUX_BENCH_DIR") else {
+            return;
+        };
         let copy = folder("bench");
         let mut files = Vec::new();
         for entry in fs::read_dir(dir).unwrap().flatten() {
@@ -484,8 +536,16 @@ mod tests {
         time("restart (restore every file from cache)", &mut || {
             fresh.refresh(&files, &cache, &layout);
         });
-        let one = files.iter().find(|f| f.ends_with("02-lyk-extras.json")).unwrap().clone();
-        let text = fs::read_to_string(&one).unwrap().replacen('{', "{\"STKPWHRAOEUFRPBLGTSDZ\": \"zzbench\",", 1);
+        let one = files
+            .iter()
+            .find(|f| f.ends_with("02-lyk-extras.json"))
+            .unwrap()
+            .clone();
+        let text = fs::read_to_string(&one).unwrap().replacen(
+            '{',
+            "{\"STKPWHRAOEUFRPBLGTSDZ\": \"zzbench\",",
+            1,
+        );
         put(&one, &text, 3);
         time("one small file changed (refresh)", &mut || {
             fresh.refresh(&files, &cache, &layout);

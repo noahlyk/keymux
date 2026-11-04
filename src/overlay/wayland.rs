@@ -467,7 +467,12 @@ impl LayerShellHandler for Overlay {
         // The compositor picks the height (the output's); lay the tape out to fill it
         let height = configure.new_size.1;
         if height > 0 && height != self.height {
-            match Renderer::with_layout(&self.config, self.scale as u32, height, layout_for(&self.config)) {
+            match Renderer::with_layout(
+                &self.config,
+                self.scale as u32,
+                height,
+                layout_for(&self.config),
+            ) {
                 Ok(renderer) => {
                     self.renderer = renderer;
                     self.height = height;
@@ -521,10 +526,7 @@ mod tests {
             (Action::Show, false)
         );
         // Was suppressed, but this is a real change (a stroke, a layer toggle): shows again
-        assert_eq!(
-            next_action(true, false, false, true),
-            (Action::Show, false)
-        );
+        assert_eq!(next_action(true, false, false, true), (Action::Show, false));
     }
 
     #[test]
@@ -535,7 +537,10 @@ mod tests {
 
     #[test]
     fn leaving_the_steno_layer_hides_regardless_of_suppression() {
-        assert_eq!(next_action(false, true, false, false), (Action::Hide, false));
+        assert_eq!(
+            next_action(false, true, false, false),
+            (Action::Hide, false)
+        );
         assert_eq!(next_action(false, true, true, true), (Action::Hide, true));
     }
 
@@ -550,6 +555,9 @@ mod tests {
     #[test]
     fn nothing_happens_when_nothing_changed_and_nothing_is_suppressed() {
         assert_eq!(next_action(true, true, true, false), (Action::Idle, false));
-        assert_eq!(next_action(false, false, true, false), (Action::Idle, false));
+        assert_eq!(
+            next_action(false, false, true, false),
+            (Action::Idle, false)
+        );
     }
 }

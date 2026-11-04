@@ -43,7 +43,8 @@ impl TdKey {
 
     /// Milliseconds from the first press to `at`.
     pub(crate) fn elapsed_since_press(&self, at: Instant) -> u128 {
-        at.saturating_duration_since(self.first_press_at).as_millis()
+        at.saturating_duration_since(self.first_press_at)
+            .as_millis()
     }
 }
 

@@ -47,10 +47,10 @@ const DICT: &str = r#"{
 
 /// That run as the tape recorded it: every misstroke, and the `*` that took it back.
 const SCRIPT: &[&str] = &[
-    "KAUL", "THE", "U", "PHAE", "TPAES", "*", "TPAES", "TKPWEPBS", "*", "TKPWEPBS", "UT",
-    "RAET", "ORT", "*", "ORD", "-T", "-D", "PERPB", "AOUS", "TKP-P", "*", "TK-P", "TPH",
-    "O*ET", "OET", "*", "OLD", "HOLD", "STKEUPB", "KORS", "*", "KORS", "HRAEUG", "*",
-    "HRAEUBG", "*", "HRAOEUBG", "PHOFT", "WEUFP",
+    "KAUL", "THE", "U", "PHAE", "TPAES", "*", "TPAES", "TKPWEPBS", "*", "TKPWEPBS", "UT", "RAET",
+    "ORT", "*", "ORD", "-T", "-D", "PERPB", "AOUS", "TKP-P", "*", "TK-P", "TPH", "O*ET", "OET",
+    "*", "OLD", "HOLD", "STKEUPB", "KORS", "*", "KORS", "HRAEUG", "*", "HRAEUBG", "*", "HRAOEUBG",
+    "PHOFT", "WEUFP",
 ];
 
 const EXPECTED: &str = "call they you may face against but great order the do person use \
@@ -130,7 +130,10 @@ impl VirtualKeyboard {
                 .filter(|(_, &b)| b == bit)
                 .map(|(&key, _)| key)
                 .collect();
-            assert!(!candidates.is_empty(), "no key for bit {bit:#x} of {notation}");
+            assert!(
+                !candidates.is_empty(),
+                "no key for bit {bit:#x} of {notation}"
+            );
             candidates.sort_by_key(|key| key.code());
             let pick = usize::try_from(self.rng.below(candidates.len() as u64)).unwrap();
             keys.push(candidates[pick]);
@@ -265,7 +268,10 @@ fn assert_runs_identical(runs: usize) {
             other_tape.get(first),
         );
     }
-    eprintln!("soak: {runs} runs typed the same text, in {:.1?}", started.elapsed());
+    eprintln!(
+        "soak: {runs} runs typed the same text, in {:.1?}",
+        started.elapsed()
+    );
 }
 
 /// A handful of runs, so the harness itself is checked on every `cargo test`.

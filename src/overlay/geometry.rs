@@ -138,7 +138,11 @@ impl Keyboard {
         let key_h = unit * KEY_ASPECT;
         let thumb_h = unit * THUMB_ASPECT;
         let extra_h = unit * EXTRA_ROW;
-        let number_y = if needs_badge_row { y + extra_h + gap } else { y };
+        let number_y = if needs_badge_row {
+            y + extra_h + gap
+        } else {
+            y
+        };
         let top = number_y + unit * NUMBER_BAR + gap;
         let bottom = top + key_h + gap;
         let thumb = bottom + key_h + gap + unit * THUMB_DROP;
@@ -235,7 +239,14 @@ impl Keyboard {
 /// An extra key's spot in the default badge row, the `badge_slots`-th one assigned so far —
 /// not necessarily its own index among every extra key, since one reassigned onto an existing
 /// key via `SplitKey` takes no spot in this row at all.
-const fn badge_rect(x: f32, y: f32, step: f32, unit: f32, extra_h: f32, badge_slots: usize) -> Rect {
+const fn badge_rect(
+    x: f32,
+    y: f32,
+    step: f32,
+    unit: f32,
+    extra_h: f32,
+    badge_slots: usize,
+) -> Rect {
     Rect {
         x: (badge_slots as f32).mul_add(step, x),
         y,
@@ -283,7 +294,9 @@ mod tests {
     /// treats specially.
     fn layout_with_join() -> Layout {
         use crate::steno::layout::KeySpec;
-        Layout::plover().with_extra(KeySpec::new('+', "join")).unwrap()
+        Layout::plover()
+            .with_extra(KeySpec::new('+', "join"))
+            .unwrap()
     }
 
     fn overlaps(a: &Rect, b: &Rect) -> bool {
@@ -369,15 +382,27 @@ mod tests {
         let half_height = (star.h - gap) / 2.0;
         assert!((badge.x - s.x).abs() < 0.01, "same column as S-");
         assert!((badge.w - s.w).abs() < 0.01, "same width as S-");
-        assert!((badge.y - star.y).abs() < 0.01, "top half starts where a tall key starts");
-        assert!((badge.h - half_height).abs() < 0.01, "half a tall key's height, minus the gap");
+        assert!(
+            (badge.y - star.y).abs() < 0.01,
+            "top half starts where a tall key starts"
+        );
+        assert!(
+            (badge.h - half_height).abs() < 0.01,
+            "half a tall key's height, minus the gap"
+        );
         // S- itself must have shrunk to the other half, not stayed full height underneath it.
-        assert!((s.h - half_height).abs() < 0.01, "S- shrank the same way: {s:?}");
+        assert!(
+            (s.h - half_height).abs() < 0.01,
+            "S- shrank the same way: {s:?}"
+        );
         assert!(
             (s.y - (badge.bottom() + gap)).abs() < 0.01,
             "S- starts a full gap below the badge, same as any other row: {s:?} {badge:?}"
         );
-        assert!(!overlaps(&badge, &s), "badge and S- must stack, not overlap: {badge:?} {s:?}");
+        assert!(
+            !overlaps(&badge, &s),
+            "badge and S- must stack, not overlap: {badge:?} {s:?}"
+        );
     }
 
     #[test]
@@ -426,7 +451,11 @@ mod tests {
         let with_badge_row = Keyboard::new(0.0, y, 250.0, &layout, &HashMap::new());
         // With every extra key reassigned onto an existing slot, the # bar starts right where
         // the panel itself does: no row reserved above it, unlike the default badge-row case.
-        assert!((with_split.keys[22].y - y).abs() < 0.01, "{:?}", with_split.keys[22].y);
+        assert!(
+            (with_split.keys[22].y - y).abs() < 0.01,
+            "{:?}",
+            with_split.keys[22].y
+        );
         assert!(
             with_badge_row.keys[22].y > with_split.keys[22].y + 0.01,
             "the default badge row should still take real space: {:?} vs {:?}",

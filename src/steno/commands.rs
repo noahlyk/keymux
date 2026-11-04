@@ -73,7 +73,10 @@ fn print_forward(config_dir: &Path, strokes: &[u32]) {
         .filter(|_| strokes.len() == 1)
         .and_then(|&s| number_text(s))
     {
-        println!("{}  ->  {digits:?} (number stroke)", format_strokes(strokes));
+        println!(
+            "{}  ->  {digits:?} (number stroke)",
+            format_strokes(strokes)
+        );
     } else {
         println!("{} has no translation", format_strokes(strokes));
     }
@@ -93,7 +96,10 @@ fn print_reverse(config_dir: &Path, phrase: &str) {
     }
     let (words, strokes) = super::reverse::display(&segments);
     println!("{words}  ->  {strokes}");
-    if segments.iter().any(|s| s.as_ref().is_some_and(|s| s.fingerspelled)) {
+    if segments
+        .iter()
+        .any(|s| s.as_ref().is_some_and(|s| s.fingerspelled))
+    {
         println!("(a quoted word has no dictionary entry — shown fingerspelled instead)");
     }
 }
@@ -120,8 +126,12 @@ pub fn keys(
     fast: bool,
 ) -> Result<()> {
     let resolved = configured_layout(config_path);
-    let preset_name = resolved.as_ref().map_or("qwerty", |(name, _)| name.as_str());
-    let overrides = resolved.as_ref().map_or_else(HashMap::new, |(_, o)| o.clone());
+    let preset_name = resolved
+        .as_ref()
+        .map_or("qwerty", |(name, _)| name.as_str());
+    let overrides = resolved
+        .as_ref()
+        .map_or_else(HashMap::new, |(_, o)| o.clone());
     let keys_by_bit = configured_keys_by_bit(preset_name, &overrides)?;
     let dict = load_dictionary(config_dir);
     match text {
@@ -180,8 +190,12 @@ const PLOVER_SLOT_SOUNDS: [&str; 23] = [
 pub fn layout(config_path: &Path) -> Result<()> {
     let plover = Layout::plover();
     let resolved = configured_layout(config_path);
-    let preset_name = resolved.as_ref().map_or("qwerty", |(name, _)| name.as_str());
-    let overrides = resolved.as_ref().map_or_else(HashMap::new, |(_, o)| o.clone());
+    let preset_name = resolved
+        .as_ref()
+        .map_or("qwerty", |(name, _)| name.as_str());
+    let overrides = resolved
+        .as_ref()
+        .map_or_else(HashMap::new, |(_, o)| o.clone());
     let keys_by_bit = configured_keys_by_bit(preset_name, &overrides)?;
     let extras: Vec<[String; 3]> = extra_keys(&preset(preset_name).map_err(|e| anyhow!(e))?)
         .into_iter()
@@ -211,7 +225,12 @@ pub fn layout(config_path: &Path) -> Result<()> {
         .map(|(&bits, &key)| {
             let parts: Vec<(&str, &str)> = (0..23)
                 .filter(|slot| bits & (1 << slot) != 0)
-                .map(|slot| (plover.key_at(slot).unwrap().name.as_str(), PLOVER_SLOT_SOUNDS[slot]))
+                .map(|slot| {
+                    (
+                        plover.key_at(slot).unwrap().name.as_str(),
+                        PLOVER_SLOT_SOUNDS[slot],
+                    )
+                })
                 .collect();
             [
                 parts
@@ -279,8 +298,7 @@ fn configured_keys_by_bit(
 ) -> Result<HashMap<u32, KeyCode>> {
     // Main keys only, so each stroke key names one physical key
     let preset = without_extra_keys(preset(preset_name).map_err(|e| anyhow!(e))?);
-    let layout =
-        build_key_map(&preset, overrides).map_err(|errs| anyhow!(errs.join("; ")))?;
+    let layout = build_key_map(&preset, overrides).map_err(|errs| anyhow!(errs.join("; ")))?;
     Ok(layout.into_iter().map(|(key, bit)| (bit, key)).collect())
 }
 
@@ -957,8 +975,11 @@ mod tests {
     fn keys_pick_the_stroke_that_types_the_text_exactly() {
         // AOT attaches "out" to the next word, so "out with" needs the plain "A" instead
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"AOT": "{out^}", "A": "out", "W": "with"}"#, &Layout::plover())
-            .unwrap();
+        dict.merge_json(
+            r#"{"AOT": "{out^}", "A": "out", "W": "with"}"#,
+            &Layout::plover(),
+        )
+        .unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "out with", true);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].outline, "A");
@@ -968,8 +989,11 @@ mod tests {
     #[test]
     fn unknown_word_does_not_stop_the_rest_from_matching() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"AOT": "{out^}", "A": "out", "W": "with"}"#, &Layout::plover())
-            .unwrap();
+        dict.merge_json(
+            r#"{"AOT": "{out^}", "A": "out", "W": "with"}"#,
+            &Layout::plover(),
+        )
+        .unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "out zzyzx with", true);
         let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
         assert_eq!(outlines, ["A", "no stroke", "W"]);
@@ -997,7 +1021,10 @@ mod tests {
         // default preset has no combined keys
         let stroke = Layout::plover().parse_stroke("KAO-T").unwrap();
         assert_eq!(stroke_keys(stroke, &keys), ["S", "C", "V", "P"]);
-        assert_eq!(stroke_keys(Layout::plover().parse_stroke("KA").unwrap(), &keys), ["S", "C"]);
+        assert_eq!(
+            stroke_keys(Layout::plover().parse_stroke("KA").unwrap(), &keys),
+            ["S", "C"]
+        );
     }
 
     #[test]
@@ -1045,8 +1072,11 @@ mod tests {
     fn a_prefix_that_glues_to_the_next_word_is_not_listed_as_the_word() {
         // `{be^}` types "be" but attaches the word after it, so only the plain "be" is an outline
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"-T": "the", "-B": "be", "PWE": "{be^}"}"#, &Layout::plover())
-            .unwrap();
+        dict.merge_json(
+            r#"{"-T": "the", "-B": "be", "PWE": "{be^}"}"#,
+            &Layout::plover(),
+        )
+        .unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "be", false);
         let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
         assert_eq!(outlines, ["-B"]);
@@ -1056,8 +1086,11 @@ mod tests {
     fn an_outline_that_attaches_to_the_word_before_is_not_listed() {
         // `{^under}` glues onto "the", so "the under" would type "theunder"
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"-T": "the", "UPBD": "under", "TPH-PB": "{^under}"}"#, &Layout::plover())
-            .unwrap();
+        dict.merge_json(
+            r#"{"-T": "the", "UPBD": "under", "TPH-PB": "{^under}"}"#,
+            &Layout::plover(),
+        )
+        .unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "under", false);
         let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
         assert_eq!(outlines, ["UPBD"]);
@@ -1084,8 +1117,11 @@ mod tests {
     #[test]
     fn lookup_leaves_out_glued_outlines_too() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"-T": "the", "UPBD": "under", "UPB/TKER": "{under^}"}"#, &Layout::plover())
-            .unwrap();
+        dict.merge_json(
+            r#"{"-T": "the", "UPBD": "under", "UPB/TKER": "{under^}"}"#,
+            &Layout::plover(),
+        )
+        .unwrap();
         assert_eq!(
             proper_outlines(&dict, "under"),
             vec![vec![Layout::plover().parse_stroke("UPBD").unwrap()]]
@@ -1113,7 +1149,8 @@ mod tests {
     #[test]
     fn a_word_with_no_letter_stroke_still_gets_no_stroke() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"TPH": "{&n}"}"#, &Layout::plover()).unwrap();
+        dict.merge_json(r#"{"TPH": "{&n}"}"#, &Layout::plover())
+            .unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "n1", false);
         assert_eq!(rows[0].outline, "no stroke");
     }
@@ -1121,7 +1158,8 @@ mod tests {
     #[test]
     fn trailing_punctuation_is_its_own_word() {
         let mut dict = sample_dict();
-        dict.merge_json(r#"{"TPHOU": "now", "KW-B": ","}"#, &Layout::plover()).unwrap();
+        dict.merge_json(r#"{"TPHOU": "now", "KW-B": ","}"#, &Layout::plover())
+            .unwrap();
         let rows = chord_rows(dict, &qwerty_keys_by_bit(), "now, the", false);
         let words: Vec<&str> = rows.iter().map(|row| row.word.as_str()).collect();
         assert_eq!(words, ["now", ",", "the"]);

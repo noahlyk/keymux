@@ -331,7 +331,10 @@ mod timing_tests {
     fn a_mod_tap_read_late_is_judged_by_when_it_happened() {
         let mut p = processor();
         let t = long_ago();
-        assert_eq!(p.process_key_at(KeyCode::KC_A, true, t), ProcessResult::None);
+        assert_eq!(
+            p.process_key_at(KeyCode::KC_A, true, t),
+            ProcessResult::None
+        );
         assert_eq!(
             p.process_key_at(KeyCode::KC_A, false, t + ms(50)),
             ProcessResult::MultipleEvents(vec![(KeyCode::KC_A, true), (KeyCode::KC_A, false)])
@@ -352,7 +355,10 @@ mod timing_tests {
     fn a_tap_dance_read_late_still_sees_its_second_tap_inside_the_window() {
         let mut p = processor();
         let t = long_ago();
-        assert_eq!(p.process_key_at(KeyCode::KC_B, true, t), ProcessResult::None);
+        assert_eq!(
+            p.process_key_at(KeyCode::KC_B, true, t),
+            ProcessResult::None
+        );
         assert_eq!(
             p.process_key_at(KeyCode::KC_B, false, t + ms(50)),
             ProcessResult::None
@@ -378,9 +384,12 @@ mod timing_tests {
         let stats = p.get_all_key_stats();
         let a = &stats[&KeyCode::KC_A];
         assert_eq!(a.tap_sample_count, 1);
-        assert!((a.avg_tap_duration - 50.0).abs() < 1.0, "{}", a.avg_tap_duration);
+        assert!(
+            (a.avg_tap_duration - 50.0).abs() < 1.0,
+            "{}",
+            a.avg_tap_duration
+        );
     }
-
 }
 
 #[cfg(test)]

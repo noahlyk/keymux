@@ -39,7 +39,11 @@ impl Remap {
     }
 
     /// Everything an action runs with, borrowed together, for an event that happened at `at`.
-    fn context<'a>(&'a mut self, layer_stack: &'a mut LayerStack, at: Instant) -> HandleContext<'a> {
+    fn context<'a>(
+        &'a mut self,
+        layer_stack: &'a mut LayerStack,
+        at: Instant,
+    ) -> HandleContext<'a> {
         HandleContext {
             mt_processor: &mut self.mt,
             dt_processor: &mut self.dt,
@@ -61,7 +65,8 @@ impl KeymapProcessor {
             .lookup_action(keycode)
             .cloned()
             .unwrap_or(KeyAction::Key(keycode));
-        let (result, held) = action.emit(keycode, &mut self.remap.context(&mut self.layer_stack, at));
+        let (result, held) =
+            action.emit(keycode, &mut self.remap.context(&mut self.layer_stack, at));
         if let Some(held) = held {
             self.held_keys.insert(keycode, held);
         }

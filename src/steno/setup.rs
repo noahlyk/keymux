@@ -27,8 +27,7 @@ const MAIN_DICT_URL: &str =
 
 /// SHA-256 of the `main.json` this release was tested against. A different
 /// download still installs, with a warning, since Plover's master changes.
-const MAIN_DICT_SHA256: &str =
-    "6570873c7f703ecd39c9870083f643db3475b49462a8db80fe22fe33ac3cfe92";
+const MAIN_DICT_SHA256: &str = "6570873c7f703ecd39c9870083f643db3475b49462a8db80fe22fe33ac3cfe92";
 
 /// Shown when the config has no steno layer. Right Ctrl toggles steno on and off.
 const LAYER_SNIPPET: &str = r#"

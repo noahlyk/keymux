@@ -740,7 +740,6 @@ impl MtProcessor {
             }
         );
     }
-
 }
 
 /// MT resolution result
@@ -828,7 +827,9 @@ pub fn emit_mt(
     };
     let result = match (tap_action.as_keycode(), hold_action.as_keycode()) {
         (Some(tap_key), Some(hold_key)) => {
-            let events = ctx.mt_processor.handle_press(keycode, tap_key, hold_key, ctx.at);
+            let events = ctx
+                .mt_processor
+                .handle_press(keycode, tap_key, hold_key, ctx.at);
             if events.is_empty() {
                 EmitResult::None
             } else {

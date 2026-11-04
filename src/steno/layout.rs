@@ -362,15 +362,12 @@ impl Layout {
     /// name, ...).
     #[must_use]
     pub fn slot_by_name(&self, name: &str) -> Option<usize> {
-        self.flat()
-            .iter()
-            .position(|k| k.name == name)
-            .or_else(|| {
-                self.extra
-                    .iter()
-                    .position(|k| k.name == name)
-                    .map(|i| self.extra_start() + i)
-            })
+        self.flat().iter().position(|k| k.name == name).or_else(|| {
+            self.extra
+                .iter()
+                .position(|k| k.name == name)
+                .map(|i| self.extra_start() + i)
+        })
     }
 
     /// Parse one stroke in Plover's notation: `KAT`, `TEFT`, `-PB`, `1-9`, `12K` or `#S`.
@@ -588,7 +585,9 @@ impl Layout {
             // key may be named after its own stroke character) - only once that fails is `+`
             // read as joining several keys onto one physical key, e.g. "A-+O-" on V.
             let resolves = self.slot_by_name(slot).is_some()
-                || slot.split('+').all(|part| self.slot_by_name(part).is_some());
+                || slot
+                    .split('+')
+                    .all(|part| self.slot_by_name(part).is_some());
             if !resolves {
                 errors.push(format!("layout override for unknown steno key \"{slot}\""));
                 continue;
@@ -831,7 +830,10 @@ mod tests {
     fn parses_known_strokes() {
         let layout = Layout::plover();
         // K + A + right T = "cat"
-        assert_eq!(layout.parse_stroke("KAT"), Some((1 << 2) | (1 << 7) | (1 << 18)));
+        assert_eq!(
+            layout.parse_stroke("KAT"),
+            Some((1 << 2) | (1 << 7) | (1 << 18))
+        );
         // Right-only strokes need the dash
         assert_eq!(layout.parse_stroke("-PB"), Some((1 << 14) | (1 << 15)));
         // T E F T: the vowel separates the left T from the right F and T
@@ -958,9 +960,12 @@ mod tests {
                     .map(|s| s.as_str().unwrap().to_string())
                     .collect()
             });
-            let got = layout
-                .parse_strokes(text)
-                .map(|strokes| strokes.into_iter().map(|s| layout.render_stroke(s)).collect::<Vec<_>>());
+            let got = layout.parse_strokes(text).map(|strokes| {
+                strokes
+                    .into_iter()
+                    .map(|s| layout.render_stroke(s))
+                    .collect::<Vec<_>>()
+            });
             if got != expected {
                 mismatches.push(format!("{text:?}: Plover {expected:?}, keymux {got:?}"));
             }
@@ -1154,12 +1159,18 @@ mod tests {
             layout.parse_stroke("+HR"),
             Some((1 << extra_start) | bit("H-") | bit("R-"))
         );
-        assert_eq!(layout.render_stroke(layout.parse_stroke("+HR").unwrap()), "+HR");
+        assert_eq!(
+            layout.render_stroke(layout.parse_stroke("+HR").unwrap()),
+            "+HR"
+        );
         assert_eq!(
             layout.parse_stroke("+-G"),
             Some((1 << extra_start) | bit("-G"))
         );
-        assert_eq!(layout.render_stroke(layout.parse_stroke("+-G").unwrap()), "+-G");
+        assert_eq!(
+            layout.render_stroke(layout.parse_stroke("+-G").unwrap()),
+            "+-G"
+        );
         // Multi-stroke dictionary keys carry it on whichever stroke has it
         assert_eq!(
             layout.parse_strokes("KAT/+-G"),

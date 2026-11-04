@@ -130,11 +130,7 @@ impl KeymapProcessor {
             setup_hint: Cooldown::new(Duration::from_secs(3)),
             lookup: LookupCapture::new(layout.unwrap_or_default()),
             overlay_hub: OverlayHub::global(),
-            typing: TypingWatch::new(
-                typist,
-                history,
-                home.as_deref().map(tape::default_path),
-            ),
+            typing: TypingWatch::new(typist, history, home.as_deref().map(tape::default_path)),
         };
         // A keyboard that starts on a steno layer (`default_layer`) shows the overlay now,
         // not on its first key press. One that starts on base publishes nothing yet, so it
@@ -166,12 +162,7 @@ impl KeymapProcessor {
             .steno_engines
             .values()
             .filter_map(StenoEngine::next_deadline);
-        self.remap
-            .dt
-            .next_deadline()
-            .into_iter()
-            .chain(steno)
-            .min()
+        self.remap.dt.next_deadline().into_iter().chain(steno).min()
     }
 
     #[must_use]
@@ -198,7 +189,12 @@ impl KeymapProcessor {
 
     /// [`Self::process_key`] for an event that happened at `at`: when the keyboard reported
     /// it, which is earlier than now for events that waited to be read.
-    pub fn process_key_at(&mut self, keycode: KeyCode, pressed: bool, at: Instant) -> ProcessResult {
+    pub fn process_key_at(
+        &mut self,
+        keycode: KeyCode,
+        pressed: bool,
+        at: Instant,
+    ) -> ProcessResult {
         if let Some(result) = self.lookup_capture(keycode, pressed, at) {
             self.publish_overlay_layer();
             return result;

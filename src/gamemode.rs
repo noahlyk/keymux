@@ -94,7 +94,6 @@ fn handle_window_gamemode_action(action: &WindowGamemodeAction) {
         Ok(other) => print_unexpected_response(&other),
         Err(e) => print_daemon_unreachable(&e),
     }
-
 }
 
 fn print_window_overrides() {
