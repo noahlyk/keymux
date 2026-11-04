@@ -18,7 +18,10 @@
 //! The cache folder holds one `.bin` per dictionary file, named for its path, so there is no
 //! whole-set copy to throw away and rewrite when a single file changes.
 
-use super::dict::{cache_name, prune_cache, read_cache, write_cache, Dictionary, Source};
+use super::dict::{
+    cache_name, prune_cache, read_cache, read_cache_by_stamp, set_cache_stamp, write_cache,
+    Dictionary, Source, StampKey,
+};
 use super::layout::Layout;
 use super::source::is_plugin_file;
 use sha2::{Digest, Sha256};
@@ -44,6 +47,17 @@ struct Stamp {
 }
 
 impl Stamp {
+    /// The stamp as bytes for a cache file, if the file's time is known and old enough that a
+    /// later write couldn't have left it the same (see [`RACY`]).
+    fn key(self) -> Option<StampKey> {
+        let since_epoch = self.modified?.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+        let mut key = [0_u8; 20];
+        key[..8].copy_from_slice(&self.len.to_le_bytes());
+        key[8..16].copy_from_slice(&since_epoch.as_secs().to_le_bytes());
+        key[16..].copy_from_slice(&since_epoch.subsec_nanos().to_le_bytes());
+        Some(key)
+    }
+
     fn of(path: &Path) -> std::io::Result<Self> {
         let meta = fs::metadata(path)?;
         Ok(Self {
@@ -173,6 +187,25 @@ impl Parts {
         let racy = stamp
             .modified
             .is_none_or(|time| time.elapsed().map_or(true, |age| age < RACY));
+        let copy = parts_dir.join(format!("{}.bin", cache_name(path)));
+        let key = stamp.key().filter(|_| !racy);
+        // A file that looks as it did when its copy was made is not read: this is a start of
+        // keymux, and a theory's files can be hundreds of megabytes
+        if let (Some(key), false, true) = (&key, self.by_path.contains_key(path), !is_plugin_file(path)) {
+            if let Some((dict, digest)) = read_cache_by_stamp(&copy, path, key, layout) {
+                debug!("steno dictionary {} restored without reading it", path.display());
+                self.by_path.insert(
+                    path.to_path_buf(),
+                    Part {
+                        stamp,
+                        digest,
+                        racy,
+                        dict: Some(Arc::new(dict)),
+                    },
+                );
+                return Ok(Update::Restored);
+            }
+        }
         let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let digest = format!("{:x}", Sha256::digest(&bytes));
         if let Some(part) = self.by_path.get_mut(path) {
@@ -186,8 +219,8 @@ impl Parts {
             (None, false)
         } else {
             let source: Vec<Source> = vec![(path.display().to_string(), digest.clone())];
-            let copy = parts_dir.join(format!("{}.bin", cache_name(path)));
             if let Some(dict) = read_cache(&copy, &source, layout) {
+                set_cache_stamp(&copy, key.as_ref());
                 debug!(
                     "steno dictionary {} restored from {}",
                     path.display(),
@@ -203,7 +236,7 @@ impl Parts {
                     stats.loaded,
                     stats.invalid
                 );
-                write_cache(&copy, &source, &dict, layout);
+                write_cache(&copy, &source, key.as_ref(), &dict, layout);
                 (Some(Arc::new(dict)), false)
             }
         };
@@ -492,7 +525,7 @@ mod tests {
         assert_eq!(dict.completions("ca", 10), ["cat", "catalog"]);
         assert!(dict.completions("ki", 10).is_empty());
         assert_eq!(dict.len(), 3, "KAT, TKOG (a deletion counts) and KWRAT");
-        let mut listed: Vec<&str> = dict.iter().map(|(_, text)| text.as_str()).collect();
+        let mut listed: Vec<&str> = dict.iter().map(|(_, text)| text).collect();
         listed.sort_unstable();
         assert_eq!(listed, ["cat", "catalog"]);
         let _ = fs::remove_dir_all(&dir);

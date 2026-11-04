@@ -12,6 +12,7 @@
 use super::formatter::plain_text;
 use super::layout::Layout;
 use super::orthography::{Orthography, WORDLIST_FILE};
+use super::packed::{Builder, Packed};
 use super::parts::Parts;
 use anyhow::{Context, Result};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -23,7 +24,7 @@ use std::sync::{Arc, OnceLock};
 use tracing::warn;
 
 /// Bumped when the cached layout changes, so older cache files are ignored.
-const CACHE_LAYOUT: u32 = 4;
+const CACHE_LAYOUT: u32 = 6;
 
 /// The value that deletes an entry of a dictionary after this one.
 pub const DELETED: &str = "{plover:deleted}";
@@ -34,15 +35,117 @@ const fn is_deleted(translation: &str) -> bool {
 }
 
 /// What one file holds, parsed: the unit that is cached and shared.
+///
+/// A file's entries are [`Packed`]. Entries added one at a time (a dictionary built in code) are
+/// kept loose beside them and win over them; a file is read in one go, so only it has packed ones.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct Table {
-    /// Each outline and its translation as written, deletions included
+    /// The file's entries, deletions included
+    packed: Packed,
+    /// Entries added one by one, and their translations as written, deletions included
     entries: FxHashMap<Vec<u32>, String>,
-    /// Stroke sequences grouped by the text they type, for reverse lookup
+    /// Loose stroke sequences grouped by the text they type, for reverse lookup
     by_text: FxHashMap<String, Vec<Vec<u32>>>,
     max_len: usize,
     /// How suffixes are spelled: Plover's rules and, when there is one, its word list
     orthography: Orthography,
+}
+
+impl Table {
+    fn get(&self, strokes: &[u32]) -> Option<&str> {
+        self.entries
+            .get(strokes)
+            .map(String::as_str)
+            .or_else(|| self.packed.get(strokes))
+    }
+
+    fn has(&self, strokes: &[u32]) -> bool {
+        self.entries.contains_key(strokes) || self.packed.contains(strokes)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty() && self.packed.is_empty()
+    }
+
+    /// Add a loose entry, replacing one with the same outline.
+    fn put(&mut self, strokes: Vec<u32>, text: String) {
+        self.max_len = self.max_len.max(strokes.len());
+        if !is_deleted(&text) {
+            if let Some(typed) = plain_text(&text) {
+                self.by_text.entry(typed).or_default().push(strokes.clone());
+            }
+        }
+        self.entries.insert(strokes, text);
+    }
+
+    /// How many outlines, a loose one that replaces a packed one counted once.
+    fn len(&self) -> usize {
+        let replacing = self
+            .entries
+            .keys()
+            .filter(|strokes| self.packed.contains(strokes))
+            .count();
+        self.packed.len() + self.entries.len() - replacing
+    }
+
+    /// Every entry: its outline and translation as written.
+    fn iter(&self) -> impl Iterator<Item = (&[u32], &str)> {
+        let loose = self
+            .entries
+            .iter()
+            .map(|(strokes, text)| (strokes.as_slice(), text.as_str()));
+        let packed = self
+            .packed
+            .iter()
+            .filter(|(strokes, _)| self.entries.is_empty() || !self.entries.contains_key(*strokes))
+            .map(|(strokes, raw)| (strokes, self.packed.raw(raw)));
+        loose.chain(packed)
+    }
+
+    /// Like [`Self::iter`], for the entries whose translation satisfies `wanted`, which is asked
+    /// once of each distinct packed translation, not of each entry.
+    fn iter_where<'a>(
+        &'a self,
+        wanted: &'a (impl Fn(&str) -> bool + 'a),
+    ) -> impl Iterator<Item = (&'a [u32], &'a str)> + 'a {
+        let raws = self.packed.raws_where(wanted);
+        let loose = self
+            .entries
+            .iter()
+            .filter(move |(_, text)| wanted(text))
+            .map(|(strokes, text)| (strokes.as_slice(), text.as_str()));
+        let packed = self
+            .packed
+            .iter()
+            .filter(move |&(strokes, raw)| {
+                raws[raw] && (self.entries.is_empty() || !self.entries.contains_key(strokes))
+            })
+            .map(|(strokes, raw)| (strokes, self.packed.raw(raw)));
+        loose.chain(packed)
+    }
+
+    /// Every outline of `len` strokes.
+    fn of_len(&self, len: usize) -> impl Iterator<Item = &[u32]> {
+        self.entries
+            .keys()
+            .filter(move |strokes| strokes.len() == len)
+            .map(Vec::as_slice)
+            .chain(
+                self.packed
+                    .of_len(len)
+                    .filter(|strokes| self.entries.is_empty() || !self.entries.contains_key(*strokes)),
+            )
+    }
+
+    /// The outlines whose translation types exactly `text`.
+    fn strokes_typing(&self, text: &str) -> impl Iterator<Item = &[u32]> {
+        self.by_text
+            .get(text)
+            .into_iter()
+            .flatten()
+            .map(Vec::as_slice)
+            .chain(self.packed.strokes_typing(text))
+    }
 }
 
 /// Dictionary entries, as one or more layers of parsed tables, highest priority first.
@@ -104,9 +207,108 @@ pub struct MergeStats {
 }
 
 /// Read bytes as text the way Plover reads a dictionary: UTF-8, or failing that Latin-1.
-fn decode_text(bytes: &[u8]) -> String {
-    String::from_utf8(bytes.to_vec())
-        .unwrap_or_else(|_| bytes.iter().map(|&b| char::from(b)).collect())
+fn decode_text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    std::str::from_utf8(bytes).map_or_else(
+        |_| bytes.iter().map(|&b| char::from(b)).collect::<String>().into(),
+        std::borrow::Cow::Borrowed,
+    )
+}
+
+/// Call `each` with every key of a JSON object and its value if that is a string, in order,
+/// without building the object: the strings are borrowed from `json` unless they have escapes.
+fn read_entries(json: &str, each: impl FnMut(&str, Option<&str>)) -> serde_json::Result<()> {
+    use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+    use std::borrow::Cow;
+    use std::fmt;
+
+    /// A string, borrowed when it can be
+    struct Text<'de>(Cow<'de, str>);
+    impl<'de> Deserialize<'de> for Text<'de> {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Borrow;
+            impl<'de> Visitor<'de> for Borrow {
+                type Value = Text<'de>;
+                fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    f.write_str("a string")
+                }
+                fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Text<'de>, E> {
+                    Ok(Text(Cow::Borrowed(v)))
+                }
+                fn visit_str<E>(self, v: &str) -> Result<Text<'de>, E> {
+                    Ok(Text(Cow::Owned(v.to_string())))
+                }
+                fn visit_string<E>(self, v: String) -> Result<Text<'de>, E> {
+                    Ok(Text(Cow::Owned(v)))
+                }
+            }
+            deserializer.deserialize_str(Borrow)
+        }
+    }
+
+    /// A value: its text if it is a string, nothing for anything else
+    struct Value<'de>(Option<Cow<'de, str>>);
+    impl<'de> Deserialize<'de> for Value<'de> {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Any;
+            impl<'de> Visitor<'de> for Any {
+                type Value = Value<'de>;
+                fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    f.write_str("any JSON value")
+                }
+                fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Value<'de>, E> {
+                    Ok(Value(Some(Cow::Borrowed(v))))
+                }
+                fn visit_str<E>(self, v: &str) -> Result<Value<'de>, E> {
+                    Ok(Value(Some(Cow::Owned(v.to_string()))))
+                }
+                fn visit_string<E>(self, v: String) -> Result<Value<'de>, E> {
+                    Ok(Value(Some(Cow::Owned(v))))
+                }
+                fn visit_bool<E>(self, _: bool) -> Result<Value<'de>, E> {
+                    Ok(Value(None))
+                }
+                fn visit_i64<E>(self, _: i64) -> Result<Value<'de>, E> {
+                    Ok(Value(None))
+                }
+                fn visit_u64<E>(self, _: u64) -> Result<Value<'de>, E> {
+                    Ok(Value(None))
+                }
+                fn visit_f64<E>(self, _: f64) -> Result<Value<'de>, E> {
+                    Ok(Value(None))
+                }
+                fn visit_unit<E>(self) -> Result<Value<'de>, E> {
+                    Ok(Value(None))
+                }
+                fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value<'de>, A::Error> {
+                    while seq.next_element::<IgnoredAny>()?.is_some() {}
+                    Ok(Value(None))
+                }
+                fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value<'de>, A::Error> {
+                    while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                    Ok(Value(None))
+                }
+            }
+            deserializer.deserialize_any(Any)
+        }
+    }
+
+    struct Entries<F>(F);
+    impl<'de, F: FnMut(&str, Option<&str>)> Visitor<'de> for Entries<F> {
+        type Value = ();
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a JSON object")
+        }
+        fn visit_map<A: MapAccess<'de>>(mut self, mut map: A) -> Result<(), A::Error> {
+            while let Some((Text(key), Value(value))) = map.next_entry()? {
+                (self.0)(&key, value.as_deref());
+            }
+            Ok(())
+        }
+    }
+
+    let mut deserializer = serde_json::Deserializer::from_str(json);
+    deserializer.deserialize_map(Entries(each))?;
+    deserializer.end()
 }
 
 fn has_extension(path: &Path, extension: &str) -> bool {
@@ -159,22 +361,31 @@ impl Dictionary {
 
     /// Merge one Plover JSON dictionary. Entries already present are kept.
     pub fn merge_json(&mut self, json: &str, layout: &Layout) -> Result<MergeStats> {
-        let raw: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(json).context("dictionary is not a JSON object")?;
         let mut stats = MergeStats::default();
+        let fresh = self.tables.iter().all(|table| table.is_empty());
+        let mut builder = Builder::default();
+        let mut loose: Vec<(Vec<u32>, String)> = Vec::new();
         // Within one file the last of two spellings of the same outline wins, as in Plover
-        let mut entries: FxHashMap<Vec<u32>, String> = FxHashMap::default();
-        for (key, value) in raw {
-            match (layout.parse_strokes(&key), value.as_str()) {
-                (Some(strokes), Some(text)) => {
-                    entries.insert(strokes, text.to_string());
-                }
-                _ => stats.invalid += 1,
+        read_entries(json, |key, text| match (layout.parse_strokes(key), text) {
+            (Some(strokes), Some(text)) if fresh => {
+                builder.add(&strokes, text);
             }
-        }
-        for (strokes, text) in entries {
-            if self.add(strokes, text) {
-                stats.loaded += 1;
+            (Some(strokes), Some(text)) => loose.push((strokes, text.to_string())),
+            _ => stats.invalid += 1,
+        })
+        .context("dictionary is not a JSON object")?;
+        if fresh {
+            let own = self.own();
+            own.packed = builder.finish(is_deleted);
+            own.max_len = own.max_len.max(own.packed.max_len());
+            stats.loaded = own.packed.len();
+        } else {
+            let mut last: FxHashMap<Vec<u32>, String> = FxHashMap::default();
+            last.extend(loose);
+            for (strokes, text) in last {
+                if self.add(strokes, text) {
+                    stats.loaded += 1;
+                }
             }
         }
         Ok(stats)
@@ -228,7 +439,7 @@ impl Dictionary {
     fn has_entry(&self, strokes: &[u32]) -> bool {
         self.tables
             .iter()
-            .any(|table| table.entries.contains_key(strokes))
+            .any(|table| table.has(strokes))
     }
 
     /// Add one entry by its outline bits directly, bypassing stroke-notation parsing - for a
@@ -237,8 +448,10 @@ impl Dictionary {
     /// (`merge_json`/`merge_file` always parse against keymux's own default Plover layout).
     /// Unlike `merge_json`, an existing entry for the same outline is replaced, not kept.
     pub fn insert(&mut self, strokes: Vec<u32>, text: impl Into<String>) {
-        self.own().entries.remove(&strokes);
-        self.add(strokes, text.into());
+        // A loose entry wins over a packed one, so this replaces either
+        let own = self.own();
+        own.entries.remove(&strokes);
+        own.put(strokes, text.into());
     }
 
     /// Add an entry unless an earlier dictionary already has one for the outline.
@@ -246,14 +459,7 @@ impl Dictionary {
         if self.has_entry(&strokes) {
             return false;
         }
-        let own = self.own();
-        own.max_len = own.max_len.max(strokes.len());
-        if !is_deleted(&text) {
-            if let Some(typed) = plain_text(&text) {
-                own.by_text.entry(typed).or_default().push(strokes.clone());
-            }
-        }
-        own.entries.insert(strokes, text);
+        self.own().put(strokes, text);
         true
     }
 
@@ -263,8 +469,7 @@ impl Dictionary {
     pub fn lookup(&self, strokes: &[u32]) -> Option<&str> {
         self.tables
             .iter()
-            .find_map(|table| table.entries.get(strokes))
-            .map(String::as_str)
+            .find_map(|table| table.get(strokes))
             .filter(|translation| !is_deleted(translation))
     }
 
@@ -303,13 +508,10 @@ impl Dictionary {
     pub fn strokes_for(&self, text: &str) -> Vec<Vec<u32>> {
         let mut found = Vec::new();
         for (i, table) in self.tables.iter().enumerate() {
-            for strokes in table.by_text.get(text).into_iter().flatten() {
+            for strokes in table.strokes_typing(text) {
                 // An earlier table's entry for the outline, even a deletion, hides this one
-                let hidden = self.tables[..i]
-                    .iter()
-                    .any(|earlier| earlier.entries.contains_key(strokes));
-                if !hidden {
-                    found.push(strokes.clone());
+                if !self.hidden_before(i, strokes) {
+                    found.push(strokes.to_vec());
                 }
             }
         }
@@ -323,15 +525,20 @@ impl Dictionary {
     ///
     /// Scans every distinct translation, so keep `prefix` to a couple of characters or more.
     #[must_use]
-    pub fn completions(&self, prefix: &str, limit: usize) -> Vec<&str> {
+    pub fn completions<'a>(&'a self, prefix: &str, limit: usize) -> Vec<&'a str> {
         let candidates: FxHashSet<&str> = self
             .tables
             .iter()
-            .flat_map(|table| table.by_text.keys())
-            .map(String::as_str)
+            .flat_map(|table| {
+                table
+                    .by_text
+                    .keys()
+                    .map(String::as_str)
+                    .filter(|text| text.starts_with(prefix))
+                    .chain(table.packed.typed_starting_with(prefix))
+            })
             .filter(|text| {
                 text.len() > prefix.len()
-                    && text.starts_with(prefix)
                     && text
                         .chars()
                         .all(|c| c.is_alphanumeric() || c == '\'' || c == '-')
@@ -344,6 +551,7 @@ impl Dictionary {
         found.truncate(limit);
         found
     }
+
 
     /// Like `load`, but each file is restored from its own binary copy in `cache_dir` while its
     /// contents are what they were when the copy was made, and parsed (and the copy renewed)
@@ -359,26 +567,82 @@ impl Dictionary {
         parts.layered(&files)
     }
 
+    /// Whether a table before the `i`th has an entry (a deletion counts) for the outline.
+    fn hidden_before(&self, i: usize, strokes: &[u32]) -> bool {
+        self.tables[..i].iter().any(|earlier| earlier.has(strokes))
+    }
+
     /// Every entry that is in force, for listing and search.
-    pub fn iter(&self) -> impl Iterator<Item = (&Vec<u32>, &String)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&[u32], &str)> {
         self.tables.iter().enumerate().flat_map(move |(i, table)| {
-            table.entries.iter().filter(move |(strokes, translation)| {
-                !is_deleted(translation)
-                    && !self.tables[..i]
-                        .iter()
-                        .any(|earlier| earlier.entries.contains_key(*strokes))
+            table.iter().filter(move |&(strokes, translation)| {
+                !is_deleted(translation) && !self.hidden_before(i, strokes)
             })
         })
     }
 
-    /// Every outline with an entry (deletions included), each once.
-    fn outlines(&self) -> impl Iterator<Item = &Vec<u32>> {
+    /// Every entry in force whose translation, as written, satisfies `wanted`: what [`Self::iter`]
+    /// and a filter would find, without asking about each entry of a packed file, only about each
+    /// distinct translation.
+    pub fn iter_where<'a>(
+        &'a self,
+        wanted: &'a (impl Fn(&str) -> bool + 'a),
+    ) -> impl Iterator<Item = (&'a [u32], &'a str)> + 'a {
         self.tables.iter().enumerate().flat_map(move |(i, table)| {
-            table.entries.keys().filter(move |strokes| {
-                !self.tables[..i]
-                    .iter()
-                    .any(|earlier| earlier.entries.contains_key(*strokes))
+            table.iter_where(wanted).filter(move |&(strokes, translation)| {
+                !is_deleted(translation) && !self.hidden_before(i, strokes)
             })
+        })
+    }
+
+    /// The `limit` outlines of as many strokes as `strokes` with the fewest keys different from
+    /// it (never `strokes` itself), nearest first and then in key order.
+    ///
+    /// Compares only the entries of that length, which a packed file keeps as one run, and
+    /// checks that an entry is in force only when it would make the cut.
+    #[must_use]
+    pub fn nearest(&self, strokes: &[u32], limit: usize) -> Vec<Vec<u32>> {
+        use std::collections::BinaryHeap;
+        if limit == 0 || strokes.is_empty() {
+            return Vec::new();
+        }
+        let mut best: BinaryHeap<(u32, &[u32])> = BinaryHeap::with_capacity(limit + 1);
+        for (i, table) in self.tables.iter().enumerate() {
+            for outline in table.of_len(strokes.len()) {
+                let distance: u32 = outline
+                    .iter()
+                    .zip(strokes)
+                    .map(|(&a, &b)| (a ^ b).count_ones())
+                    .sum();
+                let candidate = (distance, outline);
+                if best.len() == limit && best.peek().is_some_and(|worst| *worst <= candidate) {
+                    continue;
+                }
+                if outline == strokes
+                    || self.hidden_before(i, outline)
+                    || table.get(outline).is_none_or(is_deleted)
+                {
+                    continue;
+                }
+                best.push(candidate);
+                if best.len() > limit {
+                    best.pop();
+                }
+            }
+        }
+        best.into_sorted_vec()
+            .into_iter()
+            .map(|(_, outline)| outline.to_vec())
+            .collect()
+    }
+
+    /// Every outline with an entry (deletions included), each once.
+    fn outlines(&self) -> impl Iterator<Item = &[u32]> {
+        self.tables.iter().enumerate().flat_map(move |(i, table)| {
+            table
+                .iter()
+                .map(|(strokes, _)| strokes)
+                .filter(move |strokes| !self.hidden_before(i, strokes))
         })
     }
 
@@ -389,7 +653,7 @@ impl Dictionary {
     pub fn len(&self) -> usize {
         match self.tables.as_slice() {
             [] => 0,
-            [only] => only.entries.len(),
+            [only] => only.len(),
             _ => self.outlines().count(),
         }
     }
@@ -402,7 +666,7 @@ impl Dictionary {
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.tables.iter().all(|table| table.entries.is_empty())
+        self.tables.iter().all(|table| table.is_empty())
     }
 }
 
@@ -417,31 +681,98 @@ pub fn cache_name(path: &Path) -> String {
     format!("{:x}", hasher.finalize())[..16].to_string()
 }
 
+/// What `stat` showed of the file a cache was made from, as bytes: size, then modification time
+/// in seconds and nanoseconds.
+pub(super) type StampKey = [u8; 20];
+
+/// Bytes at the start of a cache file for its source's [`StampKey`]: a flag (1 if one is set),
+/// then the key. Fixed in size so a key can be written without rewriting the dictionary behind it.
+const STAMP_SLOT: usize = 21;
+
 /// The cached dictionary, if it was built from files with these exact contents.
 pub(super) fn read_cache(file: &Path, sources: &[Source], layout: &Layout) -> Option<Dictionary> {
     let bytes = fs::read(file).ok()?;
-    let cache: CacheIn = bincode::deserialize(&bytes).ok()?;
+    let cache: CacheIn = bincode::deserialize(bytes.get(STAMP_SLOT..)?).ok()?;
     (cache.version == cache_version(layout) && cache.sources == sources).then(|| Dictionary {
         tables: vec![Arc::new(cache.dict)],
     })
 }
 
+/// The cached dictionary and the sha256 of the file it was built from, if the file still looks
+/// the way it did then (`stamp`) - so the file need not be read to be sure.
+pub(super) fn read_cache_by_stamp(
+    file: &Path,
+    source: &Path,
+    stamp: &StampKey,
+    layout: &Layout,
+) -> Option<(Dictionary, String)> {
+    let bytes = fs::read(file).ok()?;
+    let slot = bytes.get(..STAMP_SLOT)?;
+    if slot[0] != 1 || slot[1..] != stamp[..] {
+        return None;
+    }
+    let cache: CacheIn = bincode::deserialize(&bytes[STAMP_SLOT..]).ok()?;
+    let [(path, digest)] = cache.sources.as_slice() else {
+        return None;
+    };
+    (cache.version == cache_version(layout) && *path == source.display().to_string()).then(|| {
+        let digest = digest.clone();
+        (
+            Dictionary {
+                tables: vec![Arc::new(cache.dict)],
+            },
+            digest,
+        )
+    })
+}
+
+/// Record in a cache file that its source looked like `stamp` when it was read, or (`None`) that
+/// that can't be told.
+pub(super) fn set_cache_stamp(file: &Path, stamp: Option<&StampKey>) {
+    use std::io::Write as _;
+    let mut slot = [0_u8; STAMP_SLOT];
+    if let Some(stamp) = stamp {
+        slot[0] = 1;
+        slot[1..].copy_from_slice(stamp);
+    }
+    let written = fs::OpenOptions::new()
+        .write(true)
+        .open(file)
+        .and_then(|mut cache| cache.write_all(&slot));
+    if let Err(e) = written {
+        warn!("steno cache {}: {e}", file.display());
+    }
+}
+
 /// Save the dictionary for these files. A cache that can't be written only costs time next
 /// start, so failures are logged and not returned.
-pub(super) fn write_cache(file: &Path, sources: &[Source], dict: &Dictionary, layout: &Layout) {
+pub(super) fn write_cache(
+    file: &Path,
+    sources: &[Source],
+    stamp: Option<&StampKey>,
+    dict: &Dictionary,
+    layout: &Layout,
+) {
     // Only a dictionary read from one file is ever cached, and that is one table
     let [table] = dict.tables.as_slice() else {
         return;
     };
     let version = cache_version(layout);
-    let bytes = match bincode::serialize(&CacheOut {
-        version: &version,
-        sources,
-        dict: table,
-    }) {
-        Ok(bytes) => bytes,
-        Err(e) => return warn!("steno cache not saved: {e}"),
-    };
+    let mut bytes = vec![0_u8; STAMP_SLOT];
+    if let Some(stamp) = stamp {
+        bytes[0] = 1;
+        bytes[1..].copy_from_slice(stamp);
+    }
+    if let Err(e) = bincode::serialize_into(
+        &mut bytes,
+        &CacheOut {
+            version: &version,
+            sources,
+            dict: table,
+        },
+    ) {
+        return warn!("steno cache not saved: {e}");
+    }
     let tmp: PathBuf = file.with_extension("bin.part");
     let saved = file
         .parent()

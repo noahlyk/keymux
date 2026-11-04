@@ -90,16 +90,16 @@ fn spelled_outline(letters: &HashMap<char, u32>, target: &[char]) -> Option<Vec<
 
 /// The fewest-stroke dictionary entry whose plain text is exactly `target`.
 fn whole_word_outline(dict: &Dictionary, target: &[char]) -> Option<Vec<u32>> {
-    dict.iter()
-        .filter(|(_, translation)| translation.chars().eq(target.iter().copied()))
-        .map(|(strokes, _)| strokes.clone())
+    dict.iter_where(&|translation: &str| translation.chars().eq(target.iter().copied()))
+        .map(|(strokes, _)| strokes)
         .min_by_key(|strokes| {
             (
                 strokes.len(),
                 strokes.iter().map(|s| s.count_ones()).sum::<u32>(),
-                strokes.clone(),
+                *strokes,
             )
         })
+        .map(<[u32]>::to_vec)
 }
 
 /// Keep `candidate` if the slot is empty or it uses fewer strokes.
@@ -112,20 +112,23 @@ fn relax(slot: &mut Option<Vec<u32>>, candidate: Vec<u32>) {
     }
 }
 
+/// What a `{&x}` translation fingerspells.
+fn fingerspelled_letters(translation: &str) -> Option<&str> {
+    // `{>}` only keeps the letter lowercase, which it already is
+    let body = translation.strip_prefix("{>}").unwrap_or(translation);
+    body.strip_prefix("{&")
+        .and_then(|rest| rest.strip_suffix('}'))
+}
+
 /// The stroke that fingerspells each letter, from the dictionary's `{&x}` entries. Where a
 /// letter has more than one, the lowest stroke is used so the answer doesn't depend on order.
 fn letter_strokes(dict: &Dictionary) -> HashMap<char, u32> {
     let mut map: HashMap<char, u32> = HashMap::new();
-    for (strokes, translation) in dict.iter() {
-        // `{>}` only keeps the letter lowercase, which it already is
-        let body = translation.strip_prefix("{>}").unwrap_or(translation);
-        let Some(letters) = body
-            .strip_prefix("{&")
-            .and_then(|rest| rest.strip_suffix('}'))
-        else {
+    for (strokes, translation) in dict.iter_where(&|t: &str| fingerspelled_letters(t).is_some()) {
+        let Some(letters) = fingerspelled_letters(translation) else {
             continue;
         };
-        let [stroke] = strokes.as_slice() else {
+        let [stroke] = strokes else {
             continue;
         };
         let mut chars = letters.chars();

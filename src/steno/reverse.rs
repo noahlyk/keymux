@@ -117,37 +117,11 @@ pub fn reverse_phrase(base: &Translator, dict: &Dictionary, phrase: &str) -> Vec
 ///
 /// So Engine Resolver mode can show more than the one exact (and maybe empty) answer. Only
 /// entries with the same number of strokes are compared, key by key, by how many keys
-/// differ in total (`a ^ b` leaves only the bits that differ, and `count_ones` counts them -
-/// cheap enough to run on every one of a dictionary's entries, every keystroke, with room to
-/// spare); `strokes` itself is left out, since that's already shown as the exact answer. Keeps
-/// only the closest `limit`, without ever fully sorting a large dictionary: the rest are
-/// discarded by a single partition before the final sort.
+/// differ in total; `strokes` itself is left out, since that's already shown as the exact answer.
+/// See [`Dictionary::nearest`], which does this over the entries of that length alone.
 #[must_use]
 pub fn nearby_strokes(dict: &Dictionary, strokes: &[u32], limit: usize) -> Vec<Vec<u32>> {
-    if limit == 0 || strokes.is_empty() {
-        return Vec::new();
-    }
-    let mut candidates: Vec<(u32, &Vec<u32>)> = dict
-        .iter()
-        .filter(|(outline, _)| outline.len() == strokes.len() && outline.as_slice() != strokes)
-        .map(|(outline, _)| {
-            let distance = outline
-                .iter()
-                .zip(strokes)
-                .map(|(&a, &b)| (a ^ b).count_ones())
-                .sum();
-            (distance, outline)
-        })
-        .collect();
-    if limit < candidates.len() {
-        candidates.select_nth_unstable_by_key(limit - 1, |&(distance, _)| distance);
-        candidates.truncate(limit);
-    }
-    candidates.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
-    candidates
-        .into_iter()
-        .map(|(_, outline)| outline.clone())
-        .collect()
+    dict.nearest(strokes, limit)
 }
 
 /// `segments` rendered for a human.
