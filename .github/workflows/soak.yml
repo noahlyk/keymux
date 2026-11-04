@@ -1,0 +1,27 @@
+name: Soak
+
+# The steno engine under a virtual keyboard, thousands of runs with the timing shaken up,
+# every run having to type the same text (src/steno/soak_tests.rs). Too slow for every
+# push: weekly, and whenever someone asks.
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: How many runs of each soak
+        default: "10000"
+        required: false
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install system dependencies
+        run: pacman -Syu --noconfirm base-devel git rust
+      - uses: actions/checkout@v5
+      - name: Soak
+        env:
+          KEYMUX_SOAK_RUNS: ${{ inputs.runs || '10000' }}
+        run: cargo test --release --lib soak -- --ignored --nocapture

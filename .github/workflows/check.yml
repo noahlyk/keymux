@@ -1,0 +1,29 @@
+name: Check
+
+# The bar every change is held to: formatted, no clippy finding (the crate's own lint
+# configuration lives in lib.rs and main.rs), every test green including the quick soak
+# checks, the daemon still builds without the overlay, and no dependency nothing uses.
+# Called by the PR and release workflows, so a release never ships what a PR couldn't.
+on:
+  workflow_call:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install system dependencies
+        run: pacman -Syu --noconfirm base-devel git rust
+      - uses: actions/checkout@v5
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --lib
+      - name: Daemon without the overlay
+        run: cargo build --no-default-features
+      - name: Unused dependencies
+        run: |
+          cargo install cargo-machete --locked
+          cargo machete

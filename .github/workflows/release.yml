@@ -78,8 +78,13 @@ jobs:
           echo "old_version=$OLD_VERSION" >> $GITHUB_OUTPUT
           echo "Bumping $OLD_VERSION -> $NEW_VERSION"
 
+  check:
+    needs: [check-skip]
+    if: needs.check-skip.outputs.should_skip == 'false'
+    uses: ./.github/workflows/check.yml
+
   build:
-    needs: [version]
+    needs: [version, check]
     runs-on: ubuntu-latest
     container: archlinux:latest
     steps:

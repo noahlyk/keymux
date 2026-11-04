@@ -614,7 +614,7 @@ Key
 **Data Structures:**
 ```rust
 struct KeymapProcessor {
-    held_keys: HashMap<KeyCode, Vec<KeyAction>>,
+    held_keys: HashMap<KeyCode, HeldAction>,  // what each held key resolved to when it went down
     hrm_last_tap: HashMap<KeyCode, Instant>,  // Generic, not fixed array
     pending_hrm: HashSet<KeyCode>,             // Generic, any key can be HR mod
     double_tap_window_ms: u32,
@@ -809,16 +809,16 @@ Config Change → Analyze Changes → Restart ONLY Affected Threads
 
 **Purpose**: Turn physical key events into output keys, synchronously.
 
-- `run_processor` starts one thread per keyboard, grabs its device, and writes the results to a virtual keyboard created with uinput.
-- `KeymapProcessor` (`keymap.rs`) holds the layer stack, the state of every held key, the MT/DT/OSM/SOCD processors and the steno engines. Each key press is resolved when it goes down and remembered until it comes up.
+- `run_processor` starts one thread per keyboard, grabs its device, and writes the results to a virtual keyboard created with uinput. Every event is handled at the moment the kernel stamped it, so a batch that waited while the thread was busy is replayed with its real timing. With nothing to read, the thread polls the device until the keymap's next deadline (a mod-tap term, a stuck chord, a repeat tick) and wakes exactly then, or the moment a key arrives; it never ticks on a timer of its own. One `emit_result` turns every `ProcessResult` into paced events.
+- `KeymapProcessor` (`keymap/`) is a coordinator over modules that each own one concern: `remap` (the MT/DT/OSM/SOCD processors and adaptive timing), `steno` (stroke capture and the steno timeouts), `lookup` (the live lookup eating keys), `overlay` (what the overlay shows) and `typing` (following plain typing into the shared history and the tape). The coordinator keeps only what they share: the held keys, the layer stack and the steno engines. Each key press is resolved when it goes down and remembered until it comes up.
 - `LayerStack` (`layer_stack.rs`) is the ordered list of active layers described under Layer Switching.
-- `AltF12` (`mod.rs`) watches the first key press after a keyboard attaches for the Alt+F12 release chord.
-- Key handling is synchronous: no async work happens per key press.
+- `AltF12` (`mod.rs`) watches the first key press after a keyboard attaches for the Alt+F12 release chord; `debounce.rs` drops switch-bounce chatter before the keymap sees it.
+- Key handling is synchronous: no async work happens per key press. The steno tape is the one thing written to disk per stroke, and that goes to a writer thread of its own so a stroke never waits on the file.
 
 ### Config (`src/config/`)
 
-- `config.rs`: the RON schema, its defaults, and `for_keyboard`, which merges per-keyboard overrides into the global config.
-- `validator.rs`: what `keymux validate` checks: SOCD pairs, timing ranges, layer references (including nested ones), steno layouts and dictionary paths.
+- `config.rs`: the RON schema, its defaults, `for_keyboard`, which merges per-keyboard overrides into the global config, and `Config::validate`: every check in one place, as a report of named checks with their errors and warnings - SOCD pairs, timing ranges, layer references (including nested ones), steno layouts and dictionary paths, the per-keyboard override layers, and the overlay's own keys. The daemon's hot reload turns the report into a result; `keymux validate` prints it. Both see the same checks.
+- `validator.rs`: the printing of that report for `keymux validate`.
 - `config_manager.rs`: loads the config file for the daemon.
 
 ### Steno (`src/steno/`)
@@ -831,7 +831,7 @@ See the Steno section above.
 
 ### Target Metrics
 
-- **Key latency**: < 1ms (hot path priority)
+- **Key latency**: < 1ms (hot path priority; the event thread wakes on input, not on a timer, and a steno stroke translates in a few microseconds)
 - **Hot-reload**: < 100ms without interruption
 - **Device discovery**: < 50ms on hotplug
 - **Session tracking**: < 10ms for ownership changes

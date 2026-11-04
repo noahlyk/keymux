@@ -799,7 +799,8 @@ keymux toggle --multi
 keymux enable --multi
 keymux disable --multi
 
-# Validate your config
+# Validate your config: the same checks the daemon runs when it reloads, including
+# per-keyboard override layers, steno layouts and the overlay's own keys
 keymux validate
 
 # Reload config (automatic on file save, but manual trigger available)
@@ -922,6 +923,25 @@ Each has different strengths - choose based on your platform, performance needs,
 ## 🤝 Contributing
 
 Contributions are welcome! Feel free to open issues or submit pull requests.
+
+CI holds every change to the same bar, so run it before pushing:
+
+```bash
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings   # the crate's lint configuration is in lib.rs and main.rs
+cargo test --lib                            # includes the Plover goldens and a quick soak
+cargo build --no-default-features           # the daemon without the overlay
+cargo machete                               # no dependency nothing uses
+```
+
+The steno engine also has a soak test: thousands of runs of the same strokes under a
+virtual keyboard with the timing shaken up each run, every run having to type the same
+text. It is too slow for every `cargo test`, so it runs weekly in CI and on request:
+
+```bash
+cargo test --release --lib soak -- --ignored --nocapture
+KEYMUX_SOAK_RUNS=100000 cargo test --release --lib soak -- --ignored --nocapture
+```
 
 ## 📄 License
 
