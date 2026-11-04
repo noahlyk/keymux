@@ -1,223 +1,193 @@
+//! SOCD (Simultaneous Opposite Cardinal Direction).
+//!
+//! Of a set of opposing keys, the one pressed most recently is the only one the application
+//! sees down. Letting it go hands the press back to the one still held.
+
 use crate::config::{Config, KeyAction};
-use crate::event_processor::actions::{EmitResult, HeldAction, ProcessResult};
+use crate::event_processor::actions::{EmitResult, HandleContext, HeldAction};
 use crate::keycode::KeyCode;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SocdResolution {
-    EmitKey(KeyCode, bool),
-    MultipleEvents(Vec<(KeyCode, bool)>),
-    None,
+/// One set of opposing keys: the ones physically held, oldest first. The last is the one
+/// the application sees down.
+#[derive(Debug, Default)]
+struct Group {
+    held: Vec<KeyCode>,
 }
 
-#[derive(Debug, Clone)]
-pub struct SocdGroup {
-    held_stack: Vec<KeyCode>,
-    active_key: Option<KeyCode>,
+impl Group {
+    fn active(&self) -> Option<KeyCode> {
+        self.held.last().copied()
+    }
+
+    fn press(&mut self, key: KeyCode) -> Vec<(KeyCode, bool)> {
+        let before = self.active();
+        if !self.held.contains(&key) {
+            self.held.push(key);
+        }
+        transition(before, self.active())
+    }
+
+    fn release(&mut self, key: KeyCode) -> Vec<(KeyCode, bool)> {
+        let before = self.active();
+        self.held.retain(|&held| held != key);
+        transition(before, self.active())
+    }
 }
 
-impl SocdGroup {
-    pub fn new(_all_keys: Vec<KeyCode>) -> Self {
-        Self {
-            held_stack: Vec::new(),
-            active_key: None,
-        }
+/// The key events that take a group from one active key to another: the old one up, then the
+/// new one down. Nothing when the active key stays.
+fn transition(before: Option<KeyCode>, after: Option<KeyCode>) -> Vec<(KeyCode, bool)> {
+    if before == after {
+        return Vec::new();
     }
-
-    pub fn on_press(&mut self, keycode: KeyCode) -> Option<(Option<KeyCode>, Option<KeyCode>)> {
-        let old_active = self.active_key;
-
-        if !self.held_stack.contains(&keycode) {
-            self.held_stack.push(keycode);
-        }
-
-        let new_active = self.held_stack.last().copied();
-        self.active_key = new_active;
-
-        (old_active != new_active).then_some((old_active, new_active))
-    }
-
-    pub fn on_release(&mut self, keycode: KeyCode) -> Option<(Option<KeyCode>, Option<KeyCode>)> {
-        let old_active = self.active_key;
-
-        self.held_stack.retain(|&k| k != keycode);
-
-        let new_active = self.held_stack.last().copied();
-        self.active_key = new_active;
-
-        (old_active != new_active).then_some((old_active, new_active))
-    }
+    before
+        .map(|key| (key, false))
+        .into_iter()
+        .chain(after.map(|key| (key, true)))
+        .collect()
 }
 
 pub struct SocdProcessor {
     key_to_group: HashMap<KeyCode, usize>,
-    groups: Vec<SocdGroup>,
+    groups: Vec<Group>,
 }
 
 impl SocdProcessor {
-    pub fn new(
-        socd_definitions: HashMap<KeyCode, Vec<KeyCode>>,
-    ) -> (Self, HashMap<KeyCode, usize>, Vec<SocdGroup>) {
-        let mut groups = Vec::new();
-        let mut key_to_group = HashMap::new();
-
-        for (this_key, opposing_keys) in socd_definitions {
-            let mut all_keys = vec![this_key];
-            all_keys.extend(opposing_keys);
-
-            let group_id = groups.len();
-            groups.push(SocdGroup::new(all_keys.clone()));
-
-            for key in all_keys {
-                key_to_group.insert(key, group_id);
-            }
-        }
-
-        let processor = Self {
-            key_to_group: key_to_group.clone(),
-            groups: groups.clone(),
-        };
-
-        (processor, key_to_group, groups)
-    }
-
-    pub fn on_press(&mut self, keycode: KeyCode) -> Option<(Option<KeyCode>, Option<KeyCode>)> {
-        if let Some(&group_id) = self.key_to_group.get(&keycode) {
-            if let Some(group) = self.groups.get_mut(group_id) {
-                return group.on_press(keycode);
-            }
-        }
-        None
-    }
-
-    pub fn on_release(&mut self, keycode: KeyCode) -> Option<(Option<KeyCode>, Option<KeyCode>)> {
-        if let Some(&group_id) = self.key_to_group.get(&keycode) {
-            if let Some(group) = self.groups.get_mut(group_id) {
-                return group.on_release(keycode);
-            }
-        }
-        None
-    }
-}
-
-impl SocdProcessor {
+    /// One group per SOCD action in any remap table, keyed by the keys it names. An action
+    /// naming a key that is already in a group joins that group, so the two halves of a pair,
+    /// and the same pair repeated on several layers, share one.
     pub fn from_config(config: &Config) -> Self {
-        let socd_definitions = build_socd_definitions(config);
-        let (processor, _, _) = Self::new(socd_definitions);
-        processor
-    }
-
-    pub fn handle_press(&mut self, keycode: KeyCode) -> SocdResolution {
-        if let Some((old_active, new_active)) = self.on_press(keycode) {
-            generate_socd_transition(old_active, new_active)
-        } else {
-            SocdResolution::None
-        }
-    }
-
-    pub fn handle_release(&mut self, keycode: KeyCode) -> SocdResolution {
-        if let Some((old_active, new_active)) = self.on_release(keycode) {
-            generate_socd_transition(old_active, new_active)
-        } else {
-            SocdResolution::None
-        }
-    }
-}
-
-fn build_socd_definitions(config: &Config) -> HashMap<KeyCode, Vec<KeyCode>> {
-    let mut socd_definitions: HashMap<KeyCode, Vec<KeyCode>> = HashMap::new();
-    let extract_socd = |remaps: &HashMap<KeyCode, KeyAction>,
-                        defs: &mut HashMap<KeyCode, Vec<KeyCode>>| {
-        for action in remaps.values() {
-            if let KeyAction::SOCD(this_action, opposing_actions) = action {
-                if let KeyAction::Key(this_key) = this_action.as_ref() {
-                    let mut opposing_keys = Vec::new();
-                    for opp_action in opposing_actions {
-                        if let KeyAction::Key(opp_key) = opp_action.as_ref() {
-                            opposing_keys.push(*opp_key);
-                        }
-                    }
-                    if !opposing_keys.is_empty() {
-                        defs.insert(*this_key, opposing_keys);
-                    }
-                }
+        let mut groups: Vec<Group> = Vec::new();
+        let mut key_to_group = HashMap::new();
+        let tables = std::iter::once(&config.remaps)
+            .chain(config.layers.values().map(|layer| &layer.remaps))
+            .chain(std::iter::once(&config.game_mode.remaps));
+        for action in tables.flat_map(HashMap::values) {
+            let KeyAction::SOCD(this, opposing) = action else {
+                continue;
+            };
+            let Some(this_key) = this.as_keycode() else {
+                continue;
+            };
+            let keys: Vec<KeyCode> = std::iter::once(this_key)
+                .chain(opposing.iter().filter_map(|other| other.as_keycode()))
+                .collect();
+            if keys.len() < 2 {
+                continue;
+            }
+            let id = keys
+                .iter()
+                .find_map(|key| key_to_group.get(key).copied())
+                .unwrap_or_else(|| {
+                    groups.push(Group::default());
+                    groups.len() - 1
+                });
+            for key in keys {
+                key_to_group.insert(key, id);
             }
         }
-    };
-    extract_socd(&config.remaps, &mut socd_definitions);
-    for layer_config in config.layers.values() {
-        extract_socd(&layer_config.remaps, &mut socd_definitions);
-    }
-    extract_socd(&config.game_mode.remaps, &mut socd_definitions);
-    socd_definitions
-}
-
-fn generate_socd_transition(
-    old_active: Option<KeyCode>,
-    new_active: Option<KeyCode>,
-) -> SocdResolution {
-    match (old_active, new_active) {
-        (None, None) => SocdResolution::None,
-        (None, Some(new_key)) => SocdResolution::EmitKey(new_key, true),
-        (Some(old_key), None) => SocdResolution::EmitKey(old_key, false),
-        (Some(old_key), Some(new_key)) if old_key == new_key => SocdResolution::None,
-        (Some(old_key), Some(new_key)) => {
-            SocdResolution::MultipleEvents(vec![(old_key, false), (new_key, true)])
+        Self {
+            key_to_group,
+            groups,
         }
     }
-}
 
-const fn extract_keycode(action: &KeyAction) -> Option<KeyCode> {
-    match action {
-        KeyAction::Key(kc) => Some(*kc),
-        _ => None,
+    fn group(&mut self, key: KeyCode) -> Option<&mut Group> {
+        let id = *self.key_to_group.get(&key)?;
+        self.groups.get_mut(id)
+    }
+
+    /// `key` goes down: the events that makes the application see.
+    pub fn press(&mut self, key: KeyCode) -> Vec<(KeyCode, bool)> {
+        self.group(key)
+            .map_or_else(Vec::new, |group| group.press(key))
+    }
+
+    /// `key` comes up: the events that makes the application see.
+    pub fn release(&mut self, key: KeyCode) -> Vec<(KeyCode, bool)> {
+        self.group(key)
+            .map_or_else(Vec::new, |group| group.release(key))
     }
 }
 
-pub fn handle_socd_action(
-    socd_processor: &mut SocdProcessor,
-    _keycode: KeyCode,
-    this_action: &KeyAction,
-) -> SocdResolution {
-    extract_keycode(this_action).map_or(SocdResolution::None, |this_key| {
-        socd_processor.handle_press(this_key)
-    })
-}
-
+/// Press the key a SOCD action names. What is held is that key, not the physical one, since
+/// that is what the release must take out of the group.
 pub fn emit_socd(
     action: &KeyAction,
-    _keycode: KeyCode,
-    ctx: &mut super::HandleContext<'_>,
+    ctx: &mut HandleContext<'_>,
 ) -> (EmitResult, Option<HeldAction>) {
-    match action {
-        KeyAction::SOCD(this_action, _) => {
-            let this_key = this_action.as_keycode();
-            if let Some(key) = this_key {
-                let result = handle_socd_action(ctx.socd_processor, key, this_action);
-                (result.into(), Some(HeldAction::SocdManaged))
-            } else {
-                (EmitResult::None, Some(HeldAction::SocdManaged))
-            }
-        }
-        _ => (EmitResult::None, None),
-    }
+    let KeyAction::SOCD(this, _) = action else {
+        return (EmitResult::None, None);
+    };
+    let Some(key) = this.as_keycode() else {
+        return (EmitResult::None, None);
+    };
+    (
+        EmitResult::EmitKeys(ctx.socd_processor.press(key)),
+        Some(HeldAction::SocdManaged(key)),
+    )
 }
 
-pub fn unemit_socd(
-    action: &KeyAction,
-    held_action: HeldAction,
-    keycode: KeyCode,
-    ctx: &mut super::HandleContext<'_>,
-) -> EmitResult {
-    match (action, held_action) {
-        (KeyAction::SOCD(_, _), HeldAction::SocdManaged) => {
-            let result: ProcessResult = ctx.socd_processor.handle_release(keycode).into();
-            match result {
-                ProcessResult::EmitKey(kc, pressed) => EmitResult::EmitKey(kc, pressed),
-                ProcessResult::MultipleEvents(events) => EmitResult::EmitKeys(events),
-                _ => EmitResult::None,
-            }
-        }
-        _ => EmitResult::None,
+#[cfg(test)]
+mod tests {
+    use crate::config::Config;
+    use crate::event_processor::{KeymapProcessor, ProcessResult};
+    use crate::keycode::KeyCode;
+    use std::path::PathBuf;
+
+    fn processor(remaps: &str) -> KeymapProcessor {
+        let config: Config = ron::from_str(&format!("(remaps: {{ {remaps} }})")).unwrap();
+        KeymapProcessor::new(&config, PathBuf::from("config.ron"), 0)
+    }
+
+    #[test]
+    fn the_key_pressed_last_wins_and_hands_back_on_release() {
+        let mut p =
+            processor("KC_A: SOCD(Key(KC_A), [Key(KC_D)]), KC_D: SOCD(Key(KC_D), [Key(KC_A)]),");
+        assert_eq!(
+            p.process_key(KeyCode::KC_A, true),
+            ProcessResult::EmitKey(KeyCode::KC_A, true)
+        );
+        assert_eq!(
+            p.process_key(KeyCode::KC_D, true),
+            ProcessResult::MultipleEvents(vec![(KeyCode::KC_A, false), (KeyCode::KC_D, true)])
+        );
+        assert_eq!(
+            p.process_key(KeyCode::KC_D, false),
+            ProcessResult::MultipleEvents(vec![(KeyCode::KC_D, false), (KeyCode::KC_A, true)])
+        );
+        assert_eq!(
+            p.process_key(KeyCode::KC_A, false),
+            ProcessResult::EmitKey(KeyCode::KC_A, false)
+        );
+    }
+
+    /// The physical key and the key it sends differ: the release must let go of the one that
+    /// was sent, or it stays down for good.
+    #[test]
+    fn a_socd_key_that_sends_another_key_lets_it_go_on_release() {
+        let mut p = processor(
+            "KC_A: SOCD(Key(KC_LEFT), [Key(KC_RGHT)]), \
+             KC_D: SOCD(Key(KC_RGHT), [Key(KC_LEFT)]),",
+        );
+        assert_eq!(
+            p.process_key(KeyCode::KC_A, true),
+            ProcessResult::EmitKey(KeyCode::KC_LEFT, true)
+        );
+        assert_eq!(
+            p.process_key(KeyCode::KC_A, false),
+            ProcessResult::EmitKey(KeyCode::KC_LEFT, false)
+        );
+    }
+
+    #[test]
+    fn a_key_in_no_group_is_not_touched() {
+        let mut p =
+            processor("KC_A: SOCD(Key(KC_A), [Key(KC_D)]), KC_D: SOCD(Key(KC_D), [Key(KC_A)]),");
+        assert_eq!(
+            p.process_key(KeyCode::KC_W, true),
+            ProcessResult::EmitKey(KeyCode::KC_W, true)
+        );
     }
 }

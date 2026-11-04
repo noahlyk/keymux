@@ -48,33 +48,13 @@ impl ProcessResult {
     }
 }
 
-impl From<SocdResolution> for ProcessResult {
-    fn from(res: SocdResolution) -> Self {
-        match res {
-            SocdResolution::EmitKey(key, pressed) => Self::EmitKey(key, pressed),
-            SocdResolution::MultipleEvents(events) => Self::MultipleEvents(events),
-            SocdResolution::None => Self::None,
-        }
-    }
-}
-
+/// What one action's press or release sends. Layer switches send nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmitResult {
     EmitKey(KeyCode, bool),
     EmitKeys(Vec<(KeyCode, bool)>),
     TapKey(KeyCode),
-    LayerAction(Layer),
     None,
-}
-
-impl From<SocdResolution> for EmitResult {
-    fn from(res: SocdResolution) -> Self {
-        match res {
-            SocdResolution::EmitKey(key, pressed) => Self::EmitKey(key, pressed),
-            SocdResolution::MultipleEvents(events) => Self::EmitKeys(events),
-            SocdResolution::None => Self::None,
-        }
-    }
 }
 
 impl EmitResult {
@@ -83,7 +63,7 @@ impl EmitResult {
             Self::EmitKey(kc, pressed) => ProcessResult::EmitKey(kc, pressed),
             Self::EmitKeys(events) => ProcessResult::from_events(events),
             Self::TapKey(kc) => ProcessResult::MultipleEvents(vec![(kc, true), (kc, false)]),
-            Self::LayerAction(_) | Self::None => ProcessResult::None,
+            Self::None => ProcessResult::None,
         }
     }
 }
@@ -93,7 +73,8 @@ pub enum HeldAction {
     RegularKey(KeyCode),
     Layer(Layer),
     MtManaged,
-    SocdManaged,
+    /// A SOCD key, with the key it sent: the one to take out of its group on release
+    SocdManaged(KeyCode),
     /// A tap-dance key, with the action its press ended up pressing (and what that left held),
     /// if any
     DtManaged(Option<Box<(KeyAction, Self)>>),
@@ -139,7 +120,7 @@ pub fn handle_action_release(
             .map_or(ProcessResult::None, |resolution| {
                 apply_mt_resolution_to_process_result(resolution)
             }),
-        HeldAction::SocdManaged => ctx.socd_processor.handle_release(keycode).into(),
+        HeldAction::SocdManaged(key) => ProcessResult::from_events(ctx.socd_processor.release(key)),
         HeldAction::DtManaged(pressed) => {
             ctx.dt_processor.unemit_action(keycode, ctx.at);
             pressed.map_or(ProcessResult::None, |pressed| {
@@ -203,7 +184,6 @@ fn unemit_multi(
 }
 
 /// Combine several children's results into one, keeping every key event in order.
-/// Layer changes have already happened by now, so they produce no key events.
 fn merge_results(results: Vec<EmitResult>) -> EmitResult {
     let mut events = Vec::new();
     for result in results {
@@ -214,7 +194,7 @@ fn merge_results(results: Vec<EmitResult>) -> EmitResult {
                 events.push((key, true));
                 events.push((key, false));
             }
-            EmitResult::LayerAction(_) | EmitResult::None => {}
+            EmitResult::None => {}
         }
     }
     EmitResult::EmitKeys(events)
@@ -241,35 +221,37 @@ impl KeyAction {
             Self::Key(output_key) => emit_plain_key(*output_key, ctx),
             Self::MT(..) => emit_mt(self, keycode, ctx),
             Self::TO(..) | Self::TG(..) | Self::MO(..) => {
-                emit_layer(self, keycode, ctx.layer_stack)
+                (EmitResult::None, emit_layer(self, ctx.layer_stack))
             }
             Self::MULTI(children) => emit_multi(children, keycode, ctx),
-            Self::SOCD(..) => emit_socd(self, keycode, ctx),
-            Self::CMD(..) => emit_cmd(self, keycode, ctx),
+            Self::SOCD(..) => emit_socd(self, ctx),
+            Self::CMD(command) => emit_cmd(command, ctx),
             Self::OSM(..) => emit_osm(self, keycode, ctx),
             Self::DT(..) => emit_dt(self, keycode, ctx),
             Self::Transparent => emit_plain_key(keycode, ctx),
         }
     }
 
+    /// Let go of what this action's press left held.
     pub fn unemit(
         &self,
-        action: HeldAction,
+        held: HeldAction,
         keycode: KeyCode,
         ctx: &mut HandleContext<'_>,
     ) -> EmitResult {
-        match (&self, action.clone()) {
-            (_, HeldAction::RegularKey(key)) => EmitResult::EmitKey(key, false),
-            (Self::MO(..), HeldAction::Layer(_)) => {
-                unemit_layer(self, action, keycode, ctx.layer_stack)
+        match held {
+            HeldAction::RegularKey(key) => EmitResult::EmitKey(key, false),
+            HeldAction::Layer(_) => unemit_layer(&held, ctx.layer_stack),
+            HeldAction::SocdManaged(key) => EmitResult::EmitKeys(ctx.socd_processor.release(key)),
+            HeldAction::MultiManaged(children) => unemit_multi(children, keycode, ctx),
+            HeldAction::MtManaged if matches!(self, Self::MT(..)) => {
+                unemit_mt(self, held, keycode, ctx)
             }
-            (Self::MT(..), HeldAction::MtManaged) => unemit_mt(self, action, keycode, ctx),
-            (Self::SOCD(..), HeldAction::SocdManaged) => unemit_socd(self, action, keycode, ctx),
-            (Self::DT(..), HeldAction::DtManaged(_)) => unemit_dt(self, action, keycode, ctx),
-            (Self::OSM(..), HeldAction::OsmManaged) => unemit_osm(self, action, keycode, ctx),
-            (Self::CMD(..), _) => unemit_cmd(self, action, keycode, ctx),
-            (Self::MULTI(..), HeldAction::MultiManaged(children)) => {
-                unemit_multi(children, keycode, ctx)
+            HeldAction::DtManaged(_) if matches!(self, Self::DT(..)) => {
+                unemit_dt(self, held, keycode, ctx)
+            }
+            HeldAction::OsmManaged if matches!(self, Self::OSM(..)) => {
+                unemit_osm(self, held, keycode, ctx)
             }
             _ => EmitResult::None,
         }
@@ -284,12 +266,12 @@ impl KeyAction {
 }
 
 // Re-export commonly used types and emit/unemit functions
-pub use cmd::{emit_cmd, unemit_cmd};
+use cmd::emit_cmd;
 pub use dt::{emit_dt, unemit_dt, DtProcessor, TdResolution};
-pub use layer::{emit_layer, unemit_layer};
+use layer::{emit_layer, unemit_layer};
 pub use mt::{emit_mt, unemit_mt, MtAction, MtProcessor, MtResolution, RollingStats};
 pub use osm::{emit_osm, handle_osm_release, unemit_osm, OsmProcessor};
-pub use socd::{emit_socd, handle_socd_action, unemit_socd, SocdProcessor, SocdResolution};
+pub use socd::{emit_socd, SocdProcessor};
 
 /// Events are judged by when the keyboard reported them. A press and release 50ms apart that
 /// both waited a second to be read are still a 50ms tap.

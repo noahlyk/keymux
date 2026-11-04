@@ -14,16 +14,11 @@ pub struct LayerStack {
 
 impl LayerStack {
     pub fn new(config: &Config) -> Self {
-        let mut layer_configs = HashMap::new();
-        for (layer, layer_config) in &config.layers {
-            layer_configs.insert(layer.clone(), layer_config.clone());
-        }
-
         // The base layer, then the default layer on top of it if one is set. A default layer
         // that isn't defined is ignored, so a typo can't leave the keyboard with no layer to type on.
         let mut stack = Self {
             layers: vec![Layer::base()],
-            layer_configs,
+            layer_configs: config.layers.clone(),
             base_remaps: config.remaps.clone(),
             game_mode_active: false,
             game_mode_remaps: config.game_mode.remaps.clone(),
