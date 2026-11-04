@@ -1,27 +1,28 @@
 use crate::keyboard_id::KeyboardId;
-use crate::keycode::KeyCode;
-use crate::steno::translate::OutputOp;
 pub use actions::ProcessResult;
 use anyhow::{Context, Result};
 use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
-use evdev::{AttributeSet, Device, EventType, InputEvent, Key};
+use evdev::{AttributeSet, Device, Key};
 pub use keymap::KeymapProcessor;
-use std::os::unix::io::{AsRawFd, RawFd};
+use pump::{Pump, Step};
+use std::os::unix::io::AsRawFd;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 pub mod actions;
 pub mod adaptive;
 mod debounce;
+#[cfg(test)]
+mod emission_tests;
 pub mod keymap;
 pub mod layer_stack;
+mod output;
+mod pump;
 #[cfg(test)]
 mod steno_tests;
 
-// SYN event constants
-const SYN_REPORT: i32 = 0;
-const SYN_CODE: u16 = 0;
+#[cfg(test)]
+pub(crate) use output::{char_to_key, retype_keystrokes, Pacer, SAFE_EVENTS, UNREAD_WINDOW};
 
 /// Run the event processor loop for a single keyboard event file.
 ///
@@ -70,196 +71,52 @@ fn run_event_processor(
         keyboard_name, keyboard_id
     );
 
-    // Set device to non-blocking mode so we can check shutdown signal
+    // Reads must not block: with nothing queued the loop runs the timeouts and waits itself
     let fd = device.as_raw_fd();
+    // SAFETY: fd is the open device's own descriptor, and only its flags are touched
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL, 0);
         libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
 
-    // Grab the device for exclusive access
     device.grab().context("Failed to grab device")?;
     info!("Grabbed device: {}", keyboard_name);
 
-    // Create virtual uinput device
     let mut virtual_device = create_virtual_device(device, keyboard_name)?;
     info!("Created virtual device for: {}", keyboard_name);
-    let mut pacer = Pacer::default();
 
-    // SAFETY: Release all keys immediately on startup to prevent stuck keys
-    // This fixes the hotplug bug where keys remain held after reconnection
-    release_all_keys_on_startup(&mut virtual_device);
+    // A keyboard replugged with keys down would otherwise leave them stuck
+    output::release_all_keys_on_startup(&mut virtual_device);
     info!("Released all keys on startup for safety: {}", keyboard_name);
 
-    // Track last save time for periodic stats saving
-    let mut alt_f12 = AltF12::default();
-    let mut debounce = debounce::Debounce::default();
-    let mut last_stats_save = Instant::now();
-    const STATS_SAVE_INTERVAL: Duration = Duration::from_secs(30);
-
-    // Event processing loop. Each pass locks the keyboard's shared keymap, so the
-    // device threads for one keyboard take turns and see one chord and layer state.
+    let mut pump = Pump::new(
+        keyboard_name.to_string(),
+        user_id,
+        shutdown_rx,
+        game_mode_rx,
+        save_stats_rx,
+    );
     loop {
-        let mut keymap = shared_keymap
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match shutdown_rx.try_recv() {
-            Err(crossbeam_channel::TryRecvError::Empty) => {}
-            // Asked to stop, or no one left to ask: the keyboard is given back either way
-            signal => {
-                warn!(
-                    "{} for: {keyboard_name}",
-                    if signal.is_ok() {
-                        "Shutdown signal received"
-                    } else {
-                        "Shutdown channel disconnected"
-                    }
-                );
-                let _ = keymap.save_adaptive_stats(user_id);
-                release_all_keys(&mut virtual_device, &keymap);
+        match pump.step(shared_keymap, device, &mut virtual_device)? {
+            Step::Read | Step::Idle => {}
+            Step::Shutdown => {
                 let _ = device.ungrab();
                 info!("Device ungrabbed and released for: {keyboard_name}");
                 return Ok(());
             }
-        }
-        if let Ok(active) = game_mode_rx.try_recv() {
-            info!(
-                "Game mode {} for: {keyboard_name}",
-                if active { "enabled" } else { "disabled" }
-            );
-            keymap.set_game_mode(active);
-        }
-        // Adaptive timing stats go to disk on request, and every so often regardless
-        if save_stats_rx.try_recv().is_ok() || last_stats_save.elapsed() >= STATS_SAVE_INTERVAL {
-            let _ = keymap.save_adaptive_stats(user_id);
-            last_stats_save = Instant::now();
-        }
-
-        // Read events from physical keyboard (non-blocking)
-        let mut escaped = false;
-        match device.fetch_events() {
-            Ok(events) => {
-                // The kernel stamps each event when it happened. A batch that waited while
-                // this thread was busy or asleep is replayed at those moments, so the wait
-                // never looks like a key held for longer than it was.
-                let anchor = (Instant::now(), std::time::SystemTime::now());
-                for ev in events {
-                    // Alt+F12 releases this keyboard from keymux. It's checked on the raw key,
-                    // before the keymap, so no layer or remap can swallow it.
-                    if ev.event_type() == EventType::KEY
-                        && alt_f12.feed(Key::new(ev.code()), ev.value())
-                    {
-                        // Let go of anything keymux is holding down before the keyboard is given back
-                        warn!(
-                            "Alt+F12 pressed on {}; releasing it from keymux",
-                            keyboard_name
-                        );
-                        let _ = keymap.save_adaptive_stats(user_id);
-                        release_all_keys(&mut virtual_device, &keymap);
-                        escaped = true;
-                        break;
-                    }
-
-                    if ev.event_type() == EventType::KEY {
-                        if let Some(input_key) = KeyCode::from_evdev_code(ev.code()) {
-                            // 1 is a press, 0 a release; 2, the kernel's own auto-repeat, is
-                            // dropped: the keymap decides what a held key does
-                            if ev.value() == 2 {
-                                continue;
-                            }
-                            let pressed = ev.value() == 1;
-
-                            let age = anchor
-                                .1
-                                .duration_since(ev.timestamp())
-                                .unwrap_or_default();
-                            let at = anchor.0.checked_sub(age).unwrap_or(anchor.0);
-
-                            // Drop switch-bounce chatter (and its matching half of the pair)
-                            // before it ever reaches the keymap - see debounce.rs. Judged by
-                            // when the key really bounced, not by when the batch was read.
-                            if debounce.is_chatter(ev.code(), pressed, at) {
-                                continue;
-                            }
-
-                            let result = keymap.process_key_at(input_key, pressed, at);
-                            emit_result(&mut virtual_device, &mut pacer, result)?;
-                            continue;
-                        }
-                    }
-                    // A key keymux doesn't know, or no key at all (SYN...): through unchanged
-                    virtual_device.emit(&[ev])?;
-                }
+            Step::Escaped => {
+                // Give the keyboard back to the system
+                let _ = device.ungrab();
+                crate::steno::setup::notify_user(
+                    user_id,
+                    "keymux released a keyboard",
+                    &format!(
+                        "Alt+F12 released {keyboard_name} from keymux. Replug it to use keymux again."
+                    ),
+                );
+                return Ok(());
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // With no key to prompt them, timeouts resolve by themselves: a tap-dance
-                // held past its term, a stuck stroke, a held stroke repeating
-                let tap_dance = keymap.check_dt_timeouts();
-                emit_result(&mut virtual_device, &mut pacer, tap_dance)?;
-                let steno = keymap.check_steno_timeouts();
-                emit_result(&mut virtual_device, &mut pacer, steno)?;
-                let deadline = keymap.next_deadline();
-                // Let the keyboard's other device threads in before waiting
-                drop(keymap);
-                wait_for_input(fd, deadline);
-            }
-            Err(e) => return Err(e.into()),
         }
-
-        if escaped {
-            // Give the keyboard back to the system
-            let _ = device.ungrab();
-            crate::steno::setup::notify_user(
-                user_id,
-                "keymux released a keyboard",
-                &format!(
-                    "Alt+F12 released {keyboard_name} from keymux. Replug it to use keymux again."
-                ),
-            );
-            return Ok(());
-        }
-    }
-}
-
-/// Watches one keyboard's raw key events for Alt+F12, the chord that releases it from keymux.
-/// It only counts as the very first key press after the keyboard is attached: the first press
-/// decides, and anything other than Alt+F12 disarms the chord for good. Either Alt counts.
-#[derive(Debug)]
-struct AltF12 {
-    left: bool,
-    right: bool,
-    armed: bool,
-}
-
-impl Default for AltF12 {
-    fn default() -> Self {
-        Self {
-            left: false,
-            right: false,
-            armed: true,
-        }
-    }
-}
-
-impl AltF12 {
-    /// Feed one raw key event, where `value` is 1 for press, 0 for release, 2 for repeat.
-    /// True when Alt+F12 is the first key press: the keyboard should be released.
-    fn feed(&mut self, key: Key, value: i32) -> bool {
-        if key == Key::KEY_LEFTALT {
-            self.left = value != 0;
-            return false;
-        }
-        if key == Key::KEY_RIGHTALT {
-            self.right = value != 0;
-            return false;
-        }
-        // Releases and repeats aren't presses, so they don't decide anything
-        if value != 1 {
-            return false;
-        }
-        let escape = self.armed && key == Key::KEY_F12 && (self.left || self.right);
-        self.armed = false;
-        escape
     }
 }
 
@@ -292,520 +149,4 @@ fn create_virtual_device(physical_device: &Device, keyboard_name: &str) -> Resul
         };
         try_build(&truncated)
     })
-}
-
-/// Release all keys on startup (before keymap exists) to fix hotplug stuck keys
-fn release_all_keys_on_startup(virtual_device: &mut VirtualDevice) {
-    use evdev::InputEvent;
-
-    // Release all modifiers (most critical for stuck keys)
-    let modifiers = [
-        Key::KEY_LEFTCTRL,
-        Key::KEY_RIGHTCTRL,
-        Key::KEY_LEFTSHIFT,
-        Key::KEY_RIGHTSHIFT,
-        Key::KEY_LEFTALT,
-        Key::KEY_RIGHTALT,
-        Key::KEY_LEFTMETA,
-        Key::KEY_RIGHTMETA,
-    ];
-
-    for key in &modifiers {
-        let event = InputEvent::new_now(EventType::KEY, key.code(), 0);
-        let _ = virtual_device.emit(&[event]);
-    }
-
-    // Release all letter keys (common for WASD/typing)
-    let letters = [
-        Key::KEY_A,
-        Key::KEY_B,
-        Key::KEY_C,
-        Key::KEY_D,
-        Key::KEY_E,
-        Key::KEY_F,
-        Key::KEY_G,
-        Key::KEY_H,
-        Key::KEY_I,
-        Key::KEY_J,
-        Key::KEY_K,
-        Key::KEY_L,
-        Key::KEY_M,
-        Key::KEY_N,
-        Key::KEY_O,
-        Key::KEY_P,
-        Key::KEY_Q,
-        Key::KEY_R,
-        Key::KEY_S,
-        Key::KEY_T,
-        Key::KEY_U,
-        Key::KEY_V,
-        Key::KEY_W,
-        Key::KEY_X,
-        Key::KEY_Y,
-        Key::KEY_Z,
-    ];
-
-    for key in &letters {
-        let event = InputEvent::new_now(EventType::KEY, key.code(), 0);
-        let _ = virtual_device.emit(&[event]);
-    }
-
-    // Release common navigation/control keys
-    let nav_keys = [
-        Key::KEY_UP,
-        Key::KEY_DOWN,
-        Key::KEY_LEFT,
-        Key::KEY_RIGHT,
-        Key::KEY_SPACE,
-        Key::KEY_ENTER,
-        Key::KEY_TAB,
-        Key::KEY_ESC,
-    ];
-
-    for key in &nav_keys {
-        let event = InputEvent::new_now(EventType::KEY, key.code(), 0);
-        let _ = virtual_device.emit(&[event]);
-    }
-    let _ = virtual_device.emit(&[syn_report()]);
-}
-
-/// Release all potentially held keys before shutdown
-fn release_all_keys(virtual_device: &mut VirtualDevice, keymap: &KeymapProcessor) {
-    let held_keys = keymap.get_held_keys();
-    if !held_keys.is_empty() {
-        info!(
-            "Gracefully releasing {} held key(s) before shutdown",
-            held_keys.len()
-        );
-        for keycode in held_keys {
-            let _ = virtual_device.emit(&[key_event(keycode, false)]);
-        }
-        let _ = virtual_device.emit(&[syn_report()]);
-    }
-
-    // Also release common modifiers as a safety measure
-    let modifiers = [
-        Key::KEY_LEFTCTRL,
-        Key::KEY_RIGHTCTRL,
-        Key::KEY_LEFTSHIFT,
-        Key::KEY_RIGHTSHIFT,
-        Key::KEY_LEFTALT,
-        Key::KEY_RIGHTALT,
-        Key::KEY_LEFTMETA,
-        Key::KEY_RIGHTMETA,
-    ];
-
-    for key in &modifiers {
-        let event = InputEvent::new_now(EventType::KEY, key.code(), 0);
-        let _ = virtual_device.emit(&[event]);
-    }
-    let _ = virtual_device.emit(&[syn_report()]);
-}
-
-/// How long the loop waits with no key and no timeout due before it looks at its channels
-/// (shutdown, game mode, stats) again.
-const IDLE_WAIT: Duration = Duration::from_millis(25);
-
-/// Wait until the keyboard has an event to read, `deadline` comes, or `IDLE_WAIT` passes,
-/// whichever is first. A key always wakes it at once.
-fn wait_for_input(fd: RawFd, deadline: Option<Instant>) {
-    let now = Instant::now();
-    let wait = deadline.map_or(IDLE_WAIT, |at| {
-        at.saturating_duration_since(now).min(IDLE_WAIT)
-    });
-    // poll counts whole milliseconds; round up so a deadline is never woken for early
-    let millis = i32::try_from(wait.as_nanos().div_ceil(1_000_000)).unwrap_or(i32::MAX);
-    let mut pollfd = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: `pollfd` is one valid, initialized entry, and 1 says so
-    unsafe { libc::poll(std::ptr::from_mut(&mut pollfd), 1, millis) };
-}
-
-/// Send what the keymap decided to the virtual keyboard.
-fn emit_result(
-    virtual_device: &mut VirtualDevice,
-    pacer: &mut Pacer,
-    result: ProcessResult,
-) -> Result<()> {
-    match result {
-        // One event of an ordinary key: straight out, nothing to pace
-        ProcessResult::EmitKey(key, pressed) => Ok(virtual_device.emit(&[key_event(key, pressed)])?),
-        ProcessResult::MultipleEvents(events) => emit_key_events(virtual_device, pacer, &events),
-        ProcessResult::TypeString(text) => retype(virtual_device, pacer, 0, &text),
-        ProcessResult::Retype { backspaces, text } => {
-            retype(virtual_device, pacer, backspaces, &text)
-        }
-        ProcessResult::Ops(ops) => emit_ops(virtual_device, pacer, &ops),
-        ProcessResult::None => Ok(()),
-    }
-}
-
-fn key_event(key: KeyCode, pressed: bool) -> InputEvent {
-    InputEvent::new_now(EventType::KEY, Key::new(key.code()).code(), i32::from(pressed))
-}
-
-fn syn_report() -> InputEvent {
-    InputEvent::new_now(EventType::SYNCHRONIZATION, SYN_CODE, SYN_REPORT)
-}
-
-/// Press and release keys one event at a time, in order, as the pacer allows.
-fn emit_key_events(
-    virtual_device: &mut VirtualDevice,
-    pacer: &mut Pacer,
-    events: &[(KeyCode, bool)],
-) -> Result<()> {
-    let groups: Vec<Vec<InputEvent>> = events
-        .iter()
-        .map(|&(key, pressed)| vec![key_event(key, pressed), syn_report()])
-        .collect();
-    emit_keystrokes(virtual_device, pacer, &groups)
-}
-
-/// The most input events allowed unread at once. The kernel keeps 63 per reader of a
-/// keyboard (measured with a test device), and when one more arrives it throws away
-/// everything queued for that reader, so letters vanish from the middle of a word. A keystroke
-/// is 4 events, so this is 12 of them, with room left for keys sent elsewhere (modifiers).
-const SAFE_EVENTS: usize = 48;
-
-/// How long an event counts as possibly unread. An app or compositor busy for longer than
-/// this can still lose events, but nothing sent at once ever can: up to `SAFE_EVENTS` go out
-/// together, whatever the delay.
-const UNREAD_WINDOW: Duration = Duration::from_millis(15);
-
-/// Keeps what is sent to one virtual keyboard from outrunning whoever reads it. Output that fits
-/// goes out at once. Only what doesn't fit waits, just until earlier events are old enough
-/// to have been read.
-#[derive(Default)]
-struct Pacer {
-    /// When events were sent, and how many, for the last `UNREAD_WINDOW`
-    sent: std::collections::VecDeque<(Instant, usize)>,
-}
-
-impl Pacer {
-    /// Plan when to send keystrokes of `sizes` events each, starting at `now`. Each part is
-    /// the time to send and the keystrokes to send together. A keystroke is never split
-    /// across two parts, so shift is never left held between them.
-    fn schedule(
-        &mut self,
-        now: Instant,
-        sizes: &[usize],
-    ) -> Vec<(Instant, std::ops::Range<usize>)> {
-        let mut parts = Vec::new();
-        // Never before something already planned, so output stays in order
-        let mut at = self.sent.back().map_or(now, |&(time, _)| time.max(now));
-        let mut next = 0;
-        while next < sizes.len() {
-            while self
-                .sent
-                .front()
-                .is_some_and(|&(time, _)| time + UNREAD_WINDOW <= at)
-            {
-                self.sent.pop_front();
-            }
-            let in_flight: usize = self.sent.iter().map(|&(_, events)| events).sum();
-            let (mut end, mut used) = (next, 0);
-            while end < sizes.len() && in_flight + used + sizes[end] <= SAFE_EVENTS {
-                used += sizes[end];
-                end += 1;
-            }
-            if end == next {
-                if let Some(&(time, _)) = self.sent.front() {
-                    // Nothing fits yet: wait for the oldest events to age out
-                    at = time + UNREAD_WINDOW;
-                    continue;
-                }
-                // A keystroke bigger than the whole budget still has to go
-                (end, used) = (next + 1, sizes[next]);
-            }
-            parts.push((at, next..end));
-            self.sent.push_back((at, used));
-            next = end;
-        }
-        parts
-    }
-}
-
-/// One key press and release, each followed by a SYN_REPORT, with shift held around it if needed
-fn keystroke(key: Key, shift: bool) -> Vec<InputEvent> {
-    let tap = |key: Key, pressed: bool| {
-        [
-            InputEvent::new_now(EventType::KEY, key.code(), i32::from(pressed)),
-            syn_report(),
-        ]
-    };
-    let mut events = Vec::with_capacity(8);
-    if shift {
-        events.extend(tap(Key::KEY_LEFTSHIFT, true));
-    }
-    events.extend(tap(key, true));
-    events.extend(tap(key, false));
-    if shift {
-        events.extend(tap(Key::KEY_LEFTSHIFT, false));
-    }
-    events
-}
-
-/// Emit keystrokes in order, as the pacer allows
-fn emit_keystrokes(
-    virtual_device: &mut VirtualDevice,
-    pacer: &mut Pacer,
-    keystrokes: &[Vec<InputEvent>],
-) -> Result<()> {
-    let sizes: Vec<usize> = keystrokes.iter().map(Vec::len).collect();
-    for (at, range) in pacer.schedule(Instant::now(), &sizes) {
-        if let Some(wait) = at.checked_duration_since(Instant::now()) {
-            std::thread::sleep(wait);
-        }
-        virtual_device.emit(&keystrokes[range].concat())?;
-    }
-    Ok(())
-}
-
-/// The keystrokes that delete `backspaces` characters then type `text`
-fn retype_keystrokes(backspaces: usize, text: &str) -> Vec<Vec<InputEvent>> {
-    let deletes = (0..backspaces).map(|_| keystroke(Key::KEY_BACKSPACE, false));
-    let typed = text.chars().filter_map(|ch| {
-        let (key, shift) = char_to_key(ch);
-        key.map(|key| keystroke(key, shift))
-    });
-    deletes.chain(typed).collect()
-}
-
-/// Delete `backspaces` characters before the cursor, then type `text`
-fn retype(
-    virtual_device: &mut VirtualDevice,
-    pacer: &mut Pacer,
-    backspaces: usize,
-    text: &str,
-) -> Result<()> {
-    emit_keystrokes(virtual_device, pacer, &retype_keystrokes(backspaces, text))
-}
-
-/// Do what a steno stroke asked for, in order: delete, type, press keys.
-fn emit_ops(virtual_device: &mut VirtualDevice, pacer: &mut Pacer, ops: &[OutputOp]) -> Result<()> {
-    let mut i = 0;
-    while i < ops.len() {
-        match &ops[i] {
-            OutputOp::Backspaces(count) => {
-                // The text that replaces what was deleted goes out with it
-                if let Some(OutputOp::Text(text)) = ops.get(i + 1) {
-                    retype(virtual_device, pacer, *count, text)?;
-                    i += 1;
-                } else {
-                    retype(virtual_device, pacer, *count, "")?;
-                }
-            }
-            OutputOp::Text(text) => retype(virtual_device, pacer, 0, text)?,
-            OutputOp::Keys(events) => emit_key_events(virtual_device, pacer, events)?,
-            // Commands were run by the steno engine
-            OutputOp::Command(_) => {}
-        }
-        i += 1;
-    }
-    Ok(())
-}
-
-/// Convert a character to an evdev Key and whether shift is needed
-const fn char_to_key(ch: char) -> (Option<Key>, bool) {
-    match ch {
-        'a' => (Some(Key::KEY_A), false),
-        'b' => (Some(Key::KEY_B), false),
-        'c' => (Some(Key::KEY_C), false),
-        'd' => (Some(Key::KEY_D), false),
-        'e' => (Some(Key::KEY_E), false),
-        'f' => (Some(Key::KEY_F), false),
-        'g' => (Some(Key::KEY_G), false),
-        'h' => (Some(Key::KEY_H), false),
-        'i' => (Some(Key::KEY_I), false),
-        'j' => (Some(Key::KEY_J), false),
-        'k' => (Some(Key::KEY_K), false),
-        'l' => (Some(Key::KEY_L), false),
-        'm' => (Some(Key::KEY_M), false),
-        'n' => (Some(Key::KEY_N), false),
-        'o' => (Some(Key::KEY_O), false),
-        'p' => (Some(Key::KEY_P), false),
-        'q' => (Some(Key::KEY_Q), false),
-        'r' => (Some(Key::KEY_R), false),
-        's' => (Some(Key::KEY_S), false),
-        't' => (Some(Key::KEY_T), false),
-        'u' => (Some(Key::KEY_U), false),
-        'v' => (Some(Key::KEY_V), false),
-        'w' => (Some(Key::KEY_W), false),
-        'x' => (Some(Key::KEY_X), false),
-        'y' => (Some(Key::KEY_Y), false),
-        'z' => (Some(Key::KEY_Z), false),
-
-        'A' => (Some(Key::KEY_A), true),
-        'B' => (Some(Key::KEY_B), true),
-        'C' => (Some(Key::KEY_C), true),
-        'D' => (Some(Key::KEY_D), true),
-        'E' => (Some(Key::KEY_E), true),
-        'F' => (Some(Key::KEY_F), true),
-        'G' => (Some(Key::KEY_G), true),
-        'H' => (Some(Key::KEY_H), true),
-        'I' => (Some(Key::KEY_I), true),
-        'J' => (Some(Key::KEY_J), true),
-        'K' => (Some(Key::KEY_K), true),
-        'L' => (Some(Key::KEY_L), true),
-        'M' => (Some(Key::KEY_M), true),
-        'N' => (Some(Key::KEY_N), true),
-        'O' => (Some(Key::KEY_O), true),
-        'P' => (Some(Key::KEY_P), true),
-        'Q' => (Some(Key::KEY_Q), true),
-        'R' => (Some(Key::KEY_R), true),
-        'S' => (Some(Key::KEY_S), true),
-        'T' => (Some(Key::KEY_T), true),
-        'U' => (Some(Key::KEY_U), true),
-        'V' => (Some(Key::KEY_V), true),
-        'W' => (Some(Key::KEY_W), true),
-        'X' => (Some(Key::KEY_X), true),
-        'Y' => (Some(Key::KEY_Y), true),
-        'Z' => (Some(Key::KEY_Z), true),
-
-        '0' => (Some(Key::KEY_0), false),
-        '1' => (Some(Key::KEY_1), false),
-        '2' => (Some(Key::KEY_2), false),
-        '3' => (Some(Key::KEY_3), false),
-        '4' => (Some(Key::KEY_4), false),
-        '5' => (Some(Key::KEY_5), false),
-        '6' => (Some(Key::KEY_6), false),
-        '7' => (Some(Key::KEY_7), false),
-        '8' => (Some(Key::KEY_8), false),
-        '9' => (Some(Key::KEY_9), false),
-
-        '!' => (Some(Key::KEY_1), true),
-        '@' => (Some(Key::KEY_2), true),
-        '#' => (Some(Key::KEY_3), true),
-        '$' => (Some(Key::KEY_4), true),
-        '%' => (Some(Key::KEY_5), true),
-        '^' => (Some(Key::KEY_6), true),
-        '&' => (Some(Key::KEY_7), true),
-        '*' => (Some(Key::KEY_8), true),
-        '(' => (Some(Key::KEY_9), true),
-        ')' => (Some(Key::KEY_0), true),
-
-        ' ' => (Some(Key::KEY_SPACE), false),
-        // Enter and Tab are keys, not characters, so they're typed by pressing those keys
-        '\n' => (Some(Key::KEY_ENTER), false),
-        '\t' => (Some(Key::KEY_TAB), false),
-        '-' => (Some(Key::KEY_MINUS), false),
-        '_' => (Some(Key::KEY_MINUS), true),
-        '=' => (Some(Key::KEY_EQUAL), false),
-        '+' => (Some(Key::KEY_EQUAL), true),
-        '[' => (Some(Key::KEY_LEFTBRACE), false),
-        '{' => (Some(Key::KEY_LEFTBRACE), true),
-        ']' => (Some(Key::KEY_RIGHTBRACE), false),
-        '}' => (Some(Key::KEY_RIGHTBRACE), true),
-        '\\' => (Some(Key::KEY_BACKSLASH), false),
-        '|' => (Some(Key::KEY_BACKSLASH), true),
-        ';' => (Some(Key::KEY_SEMICOLON), false),
-        ':' => (Some(Key::KEY_SEMICOLON), true),
-        '\'' => (Some(Key::KEY_APOSTROPHE), false),
-        '"' => (Some(Key::KEY_APOSTROPHE), true),
-        ',' => (Some(Key::KEY_COMMA), false),
-        '<' => (Some(Key::KEY_COMMA), true),
-        '.' => (Some(Key::KEY_DOT), false),
-        '>' => (Some(Key::KEY_DOT), true),
-        '/' => (Some(Key::KEY_SLASH), false),
-        '?' => (Some(Key::KEY_SLASH), true),
-        '`' => (Some(Key::KEY_GRAVE), false),
-        '~' => (Some(Key::KEY_GRAVE), true),
-
-        _ => (None, false),
-    }
-}
-
-#[cfg(test)]
-mod alt_f12_tests {
-    use super::*;
-
-    /// Whether the chord fires for these events, in order, starting from a freshly attached keyboard.
-    fn fires(events: &[(Key, i32)]) -> bool {
-        let mut chord = AltF12::default();
-        events.iter().any(|&(key, value)| chord.feed(key, value))
-    }
-
-    #[test]
-    fn left_alt_then_f12_fires() {
-        assert!(fires(&[(Key::KEY_LEFTALT, 1), (Key::KEY_F12, 1)]));
-    }
-
-    #[test]
-    fn right_alt_then_f12_fires() {
-        assert!(fires(&[(Key::KEY_RIGHTALT, 1), (Key::KEY_F12, 1)]));
-    }
-
-    #[test]
-    fn f12_alone_does_not_fire() {
-        assert!(!fires(&[(Key::KEY_F12, 1)]));
-    }
-
-    #[test]
-    fn alt_released_before_f12_does_not_fire() {
-        assert!(!fires(&[
-            (Key::KEY_LEFTALT, 1),
-            (Key::KEY_LEFTALT, 0),
-            (Key::KEY_F12, 1)
-        ]));
-    }
-
-    #[test]
-    fn holding_one_alt_while_pressing_the_other_keeps_it_held() {
-        // Left alt down, right alt down, left alt up: right alt still holds, so F12 fires
-        assert!(fires(&[
-            (Key::KEY_LEFTALT, 1),
-            (Key::KEY_RIGHTALT, 1),
-            (Key::KEY_LEFTALT, 0),
-            (Key::KEY_F12, 1),
-        ]));
-    }
-
-    #[test]
-    fn f12_repeat_and_release_do_not_fire() {
-        assert!(!fires(&[(Key::KEY_LEFTALT, 1), (Key::KEY_F12, 2)]));
-        assert!(!fires(&[(Key::KEY_LEFTALT, 1), (Key::KEY_F12, 0)]));
-    }
-
-    #[test]
-    fn alt_f12_after_another_key_press_does_not_fire() {
-        assert!(!fires(&[
-            (Key::KEY_A, 1),
-            (Key::KEY_A, 0),
-            (Key::KEY_LEFTALT, 1),
-            (Key::KEY_F12, 1)
-        ]));
-    }
-
-    #[test]
-    fn alt_f12_after_a_modifier_press_does_not_fire() {
-        // Ctrl+Alt+F12 is not the escape: Ctrl was the first press
-        assert!(!fires(&[
-            (Key::KEY_LEFTCTRL, 1),
-            (Key::KEY_LEFTALT, 1),
-            (Key::KEY_F12, 1)
-        ]));
-    }
-
-    #[test]
-    fn alt_f12_after_a_long_gap_still_needs_to_be_first() {
-        // Any press in between disarms it, even after the keyboard has been quiet
-        assert!(!fires(&[
-            (Key::KEY_LEFTSHIFT, 1),
-            (Key::KEY_LEFTSHIFT, 0),
-            (Key::KEY_LEFTALT, 1),
-            (Key::KEY_F12, 1)
-        ]));
-    }
-
-    #[test]
-    fn a_release_before_the_chord_does_not_disarm_it() {
-        assert!(fires(&[
-            (Key::KEY_A, 0),
-            (Key::KEY_LEFTALT, 1),
-            (Key::KEY_F12, 1)
-        ]));
-    }
 }
