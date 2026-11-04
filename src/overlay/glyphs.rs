@@ -8,11 +8,9 @@ use ab_glyph::{point, Font, FontArc, PxScale, ScaleFont};
 use anyhow::{Context, Result};
 use rustc_hash::FxHashMap;
 
-#[cfg(test)]
-const REGULAR: &[u8] = include_bytes!("../../assets/fonts/AtkinsonHyperlegible-Regular.ttf");
 pub const BOLD: &[u8] = include_bytes!("../../assets/fonts/AtkinsonHyperlegible-Bold.ttf");
 
-/// The embedded regular face, or the user's font file from `overlay: (font: Some(..))`.
+/// The embedded face, or the user's font file from `overlay: (font: Some(..))`.
 pub fn load_font(path: Option<&str>, embedded: &'static [u8]) -> Result<FontArc> {
     match path {
         Some(path) => {
@@ -245,15 +243,13 @@ mod tests {
 
     #[test]
     fn the_embedded_fonts_load_and_draw_steno_letters() {
-        for face in [REGULAR, BOLD] {
-            let mut cache = GlyphCache::new(load_font(None, face).unwrap(), 16.0);
-            for c in "#STKPWHRAO*EUFRPBLGTSDZ".chars() {
-                let glyph = cache.get(c);
-                assert!(
-                    glyph.width > 0 && glyph.mask.iter().any(|&a| a > 0),
-                    "{c:?} is blank"
-                );
-            }
+        let mut cache = GlyphCache::new(load_font(None, BOLD).unwrap(), 16.0);
+        for c in "#STKPWHRAO*EUFRPBLGTSDZ".chars() {
+            let glyph = cache.get(c);
+            assert!(
+                glyph.width > 0 && glyph.mask.iter().any(|&a| a > 0),
+                "{c:?} is blank"
+            );
             assert_eq!(cache.get(' ').width, 0);
             assert!(cache.measure("STKPW") > 0.0);
         }
@@ -351,7 +347,7 @@ mod tests {
 
     #[test]
     fn a_glyph_drawn_at_a_fractional_position_differs_from_the_whole_pixel_one() {
-        let mut cache = GlyphCache::new(load_font(None, REGULAR).unwrap(), 16.0);
+        let mut cache = GlyphCache::new(load_font(None, BOLD).unwrap(), 16.0);
         let whole = cache.place('l', 10.0).0.mask.to_vec();
         let (half, x) = cache.place('l', 10.5);
         assert_eq!(x, 10, "the pen is still in pixel 10");
@@ -364,7 +360,7 @@ mod tests {
 
     #[test]
     fn rounding_up_to_the_next_pixel_carries_into_the_whole_part() {
-        let mut cache = GlyphCache::new(load_font(None, REGULAR).unwrap(), 16.0);
+        let mut cache = GlyphCache::new(load_font(None, BOLD).unwrap(), 16.0);
         // 10.9 is closer to 11.0 than to 10.75, so it is pixel 11 with no sub-pixel offset
         assert_eq!(cache.place('l', 10.9).1, 11);
         assert_eq!(cache.place('l', 10.76).1, 10);

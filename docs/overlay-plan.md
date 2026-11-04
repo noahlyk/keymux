@@ -118,8 +118,8 @@ started first; it takes over on its first key.
 
 Atkinson Hyperlegible, the font the steno-lessons site uses for keys (`--key-font`),
 designed by the Braille Institute so that easily confused letters stay distinct.
-Regular + Bold are embedded with `include_bytes!` from `assets/fonts/` (≈110 KB, SIL OFL
-1.1, `assets/fonts/OFL.txt` ships beside them). Embedded means no fontconfig lookup and
+The Bold face is embedded with `include_bytes!` from `assets/fonts/` (≈55 KB, SIL OFL
+1.1, `assets/fonts/OFL.txt` ships beside it). Embedded means no fontconfig lookup and
 the same look on every machine. `font: Some(path)` in config overrides it.
 
 It's proportional, so the tape doesn't rely on monospace: every slot has its own column,
