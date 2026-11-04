@@ -180,12 +180,12 @@ remaps: {
 }
 ```
 
-**How it works:**
-1. Press key once → starts timer, waits for potential second tap
-2. Release before double_tap_window_ms → check for second press
-3. Second press detected within window → double tap action triggers
-4. No second press → single tap action triggers
-5. Timeout expires → single tap action triggers
+**How it works** (every decision is judged by when the keyboard reported the key, not by when it was read):
+1. Press → undecided until the tapping term, a release, or another key decides it
+2. Release inside `tapping_term_ms` → a tap, kept for `double_tap_window_ms` (counted from the release)
+3. Second press inside the window → the double-tap action is pressed, and released when the key comes up
+4. Window passes with no second press, or another key is pressed meanwhile → the single-tap action is tapped
+5. Held past the term with no second press, or another key pressed while it is down → the single-tap action is held until the key comes up
 
 ---
 

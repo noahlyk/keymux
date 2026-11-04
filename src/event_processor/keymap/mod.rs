@@ -147,11 +147,10 @@ impl KeymapProcessor {
         self.remap.mt.set_game_mode(active);
     }
 
-    /// Settle any tap-dance that time alone decides. Nothing is typed by that: a first press
-    /// held past the term becomes a hold, whose action goes out when the key next matters.
+    /// Settle any tap-dance that time alone decides, as of now: a first press held past the
+    /// term is pressed and held, a tap whose window passed with no second tap is tapped.
     pub fn check_dt_timeouts(&mut self) -> ProcessResult {
-        self.remap.dt.expire(Instant::now());
-        ProcessResult::None
+        ProcessResult::from_events(self.settle_tap_dances(Instant::now()))
     }
 
     /// When a timeout next needs checking with no key to prompt it: a tap-dance or a steno

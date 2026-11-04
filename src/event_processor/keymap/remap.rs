@@ -5,8 +5,8 @@
 use super::KeymapProcessor;
 use crate::config::{Config, KeyAction};
 use crate::event_processor::actions::{
-    handle_action_release, DtProcessor, HandleContext, MtProcessor, OsmProcessor, ProcessResult,
-    SocdProcessor,
+    dt::Due, handle_action_release, DtProcessor, HandleContext, HeldAction, MtProcessor,
+    OsmProcessor, ProcessResult, SocdProcessor,
 };
 use crate::event_processor::adaptive::AdaptiveProcessor;
 use crate::event_processor::layer_stack::LayerStack;
@@ -60,7 +60,10 @@ impl Remap {
 impl KeymapProcessor {
     pub(super) fn process_key_press(&mut self, keycode: KeyCode, at: Instant) -> ProcessResult {
         self.remap.adaptive.record_key_press(keycode, at);
-        self.remap.dt.expire(at);
+        // What time and this key decide for the tap-dances goes out before the key does
+        let mut events = self.settle_tap_dances(at);
+        let interrupted = self.remap.dt.interrupted_by(keycode);
+        events.extend(self.perform_due(interrupted, at));
         let action = self
             .lookup_action(keycode)
             .cloned()
@@ -70,24 +73,66 @@ impl KeymapProcessor {
         if let Some(held) = held {
             self.held_keys.insert(keycode, held);
         }
-        result.to_process_result()
+        events.extend(result.into_events());
+        ProcessResult::from_events(events)
     }
 
     pub(super) fn process_key_release(&mut self, keycode: KeyCode, at: Instant) -> ProcessResult {
         self.remap
             .adaptive
             .record_key_release(keycode, at, self.layer_stack.is_game_mode_active());
-        self.remap.dt.expire(at);
-        let Some(held) = self.held_keys.remove(&keycode) else {
-            return ProcessResult::None;
-        };
-        let ctx = self.remap.context(&mut self.layer_stack, at);
-        match handle_action_release(held, keycode, ctx) {
-            ProcessResult::EmitKey(key, pressed) => ProcessResult::EmitKey(key, pressed),
-            ProcessResult::MultipleEvents(events) => ProcessResult::from_events(events),
-            // Letting go of a key only ever lets go of keys
-            _ => ProcessResult::None,
+        let mut events = self.settle_tap_dances(at);
+        if let Some(held) = self.held_keys.remove(&keycode) {
+            let ctx = self.remap.context(&mut self.layer_stack, at);
+            match handle_action_release(held, keycode, ctx) {
+                ProcessResult::EmitKey(key, pressed) => events.push((key, pressed)),
+                ProcessResult::MultipleEvents(more) => events.extend(more),
+                // Letting go of a key only ever lets go of keys
+                _ => {}
+            }
         }
+        ProcessResult::from_events(events)
+    }
+
+    /// Perform what time has decided for the tap-dances as of `at`: a first press down past
+    /// the term is pressed and held, a tap whose window passed is tapped.
+    pub(super) fn settle_tap_dances(&mut self, at: Instant) -> Vec<(KeyCode, bool)> {
+        let due = self.remap.dt.due(at);
+        self.perform_due(due, at)
+    }
+
+    fn perform_due(&mut self, due: Vec<Due>, at: Instant) -> Vec<(KeyCode, bool)> {
+        let mut events = Vec::new();
+        for item in due {
+            let mut ctx = self.remap.context(&mut self.layer_stack, at);
+            match item {
+                Due::Hold(key, action) => {
+                    let (result, held) = action.emit(key, &mut ctx);
+                    events.extend(result.into_events());
+                    match self.held_keys.get_mut(&key) {
+                        // The key is down, so its release lets go of what was just pressed
+                        Some(HeldAction::DtManaged(pressed)) => {
+                            *pressed = held.map(|held| Box::new((action, held)));
+                        }
+                        // Not held as a tap-dance of its own (inside a MULTI): nothing would
+                        // release it, so it is tapped instead of left down
+                        _ => {
+                            if let Some(held) = held {
+                                events.extend(action.unemit(held, key, &mut ctx).into_events());
+                            }
+                        }
+                    }
+                }
+                Due::Tap(key, action) => {
+                    let (result, held) = action.emit(key, &mut ctx);
+                    events.extend(result.into_events());
+                    if let Some(held) = held {
+                        events.extend(action.unemit(held, key, &mut ctx).into_events());
+                    }
+                }
+            }
+        }
+        events
     }
 
     fn lookup_action(&self, keycode: KeyCode) -> Option<&KeyAction> {

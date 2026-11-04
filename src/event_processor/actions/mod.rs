@@ -66,6 +66,16 @@ impl EmitResult {
             Self::None => ProcessResult::None,
         }
     }
+
+    /// The key events in this result, in order.
+    pub fn into_events(self) -> Vec<(KeyCode, bool)> {
+        match self {
+            Self::EmitKey(key, pressed) => vec![(key, pressed)],
+            Self::EmitKeys(events) => events,
+            Self::TapKey(key) => vec![(key, true), (key, false)],
+            Self::None => Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -122,11 +132,7 @@ pub fn handle_action_release(
             }),
         HeldAction::SocdManaged(key) => ProcessResult::from_events(ctx.socd_processor.release(key)),
         HeldAction::DtManaged(pressed) => {
-            ctx.dt_processor.unemit_action(keycode, ctx.at);
-            pressed.map_or(ProcessResult::None, |pressed| {
-                let (action, held) = *pressed;
-                action.unemit(held, keycode, &mut ctx).to_process_result()
-            })
+            dt::release_dt(pressed, keycode, &mut ctx).to_process_result()
         }
         HeldAction::OsmManaged => {
             let _ = osm::handle_osm_release(ctx.osm_processor, keycode, ctx.at);
@@ -185,19 +191,12 @@ fn unemit_multi(
 
 /// Combine several children's results into one, keeping every key event in order.
 fn merge_results(results: Vec<EmitResult>) -> EmitResult {
-    let mut events = Vec::new();
-    for result in results {
-        match result {
-            EmitResult::EmitKey(key, pressed) => events.push((key, pressed)),
-            EmitResult::EmitKeys(more) => events.extend(more),
-            EmitResult::TapKey(key) => {
-                events.push((key, true));
-                events.push((key, false));
-            }
-            EmitResult::None => {}
-        }
-    }
-    EmitResult::EmitKeys(events)
+    EmitResult::EmitKeys(
+        results
+            .into_iter()
+            .flat_map(EmitResult::into_events)
+            .collect(),
+    )
 }
 
 fn apply_mt_resolution_to_process_result(resolution: MtResolution) -> ProcessResult {
@@ -267,7 +266,7 @@ impl KeyAction {
 
 // Re-export commonly used types and emit/unemit functions
 use cmd::emit_cmd;
-pub use dt::{emit_dt, unemit_dt, DtProcessor, TdResolution};
+pub use dt::{emit_dt, unemit_dt, DtProcessor};
 use layer::{emit_layer, unemit_layer};
 pub use mt::{emit_mt, unemit_mt, MtAction, MtProcessor, MtResolution, RollingStats};
 pub use osm::{emit_osm, handle_osm_release, unemit_osm, OsmProcessor};

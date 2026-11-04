@@ -313,7 +313,7 @@ KC_LSFT: OSM(KC_LSFT),
 ```
 
 #### DT(single_tap, double_tap)
-Tap dance: a single tap does the first action, and a double tap within `double_tap_window_ms` (default 250) does the second.
+Tap dance: a single tap does the first action, a second tap within `double_tap_window_ms` (default 250) of the first's release holds the second action until the key comes up, and holding the key past `tapping_term_ms` holds the first. A single tap goes out once the window passes, or at once when another key is pressed.
 ```ron
 KC_LALT: DT(KC_LALT, MO("nav")),   // Tap for Alt, double-tap for nav
 ```
