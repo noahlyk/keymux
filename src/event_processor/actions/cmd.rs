@@ -83,7 +83,7 @@ pub fn emit_cmd(
     match action {
         KeyAction::CMD(command) => {
             let cmd = command.clone();
-            let config_dir = ctx.config_dir.clone();
+            let config_dir = ctx.config_dir.to_path_buf();
             let user_id = ctx.user_id;
 
             std::thread::spawn(move || {

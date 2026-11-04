@@ -19,12 +19,12 @@ use crate::config::{KeyAction, Layer};
 use crate::event_processor::layer_stack::LayerStack;
 use crate::keycode::KeyCode;
 
+/// What the keymap wants sent to the virtual keyboard for one key event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcessResult {
     EmitKey(KeyCode, bool),
-    TapKeyPressRelease(KeyCode),
     MultipleEvents(Vec<(KeyCode, bool)>),
-    TypeString(String, bool),
+    TypeString(String),
     /// Delete `backspaces` characters, then type `text` (used for undo)
     Retype {
         backspaces: usize,
@@ -33,6 +33,18 @@ pub enum ProcessResult {
     /// Several things in order: typing, deleting, key presses (what a steno stroke can ask for)
     Ops(Vec<crate::steno::translate::OutputOp>),
     None,
+}
+
+impl ProcessResult {
+    /// Key events as a result: none, the one, or all of them.
+    #[must_use]
+    pub fn from_events(events: Vec<(KeyCode, bool)>) -> Self {
+        match events.as_slice() {
+            [] => Self::None,
+            [(key, pressed)] => Self::EmitKey(*key, *pressed),
+            _ => Self::MultipleEvents(events),
+        }
+    }
 }
 
 impl From<SocdResolution> for ProcessResult {
@@ -68,16 +80,8 @@ impl EmitResult {
     pub fn to_process_result(self) -> ProcessResult {
         match self {
             Self::EmitKey(kc, pressed) => ProcessResult::EmitKey(kc, pressed),
-            Self::EmitKeys(events) => {
-                if events.is_empty() {
-                    ProcessResult::None
-                } else if events.len() == 1 {
-                    ProcessResult::EmitKey(events[0].0, events[0].1)
-                } else {
-                    ProcessResult::MultipleEvents(events)
-                }
-            }
-            Self::TapKey(kc) => ProcessResult::TapKeyPressRelease(kc),
+            Self::EmitKeys(events) => ProcessResult::from_events(events),
+            Self::TapKey(kc) => ProcessResult::MultipleEvents(vec![(kc, true), (kc, false)]),
             Self::LayerAction(_) | Self::None => ProcessResult::None,
         }
     }
@@ -110,7 +114,7 @@ pub struct HandleContext<'a> {
     pub osm_processor: &'a mut OsmProcessor,
     pub socd_processor: &'a mut SocdProcessor,
     pub layer_stack: &'a mut LayerStack,
-    pub config_dir: std::path::PathBuf,
+    pub config_dir: &'a std::path::Path,
     pub user_id: u32,
 }
 
@@ -204,10 +208,8 @@ fn merge_results(results: Vec<EmitResult>) -> EmitResult {
 fn apply_mt_resolution_to_process_result(resolution: MtResolution) -> ProcessResult {
     use mt::MtAction;
     match resolution.action {
-        MtAction::TapPress(key) => ProcessResult::EmitKey(key, true),
-        MtAction::TapPressRelease(key) => ProcessResult::TapKeyPressRelease(key),
-        MtAction::HoldPress(key) => ProcessResult::EmitKey(key, true),
-        MtAction::HoldPressRelease(key) => {
+        MtAction::TapPress(key) | MtAction::HoldPress(key) => ProcessResult::EmitKey(key, true),
+        MtAction::TapPressRelease(key) | MtAction::HoldPressRelease(key) => {
             ProcessResult::MultipleEvents(vec![(key, true), (key, false)])
         }
         MtAction::ReleaseHold(key) => ProcessResult::EmitKey(key, false),
@@ -225,16 +227,16 @@ impl KeyAction {
                 let events = ctx
                     .mt_processor
                     .on_other_key_press_for_resolutions(*output_key);
-                if !events.is_empty() {
+                if events.is_empty() {
+                    (
+                        EmitResult::EmitKey(*output_key, true),
+                        Some(HeldAction::RegularKey(*output_key)),
+                    )
+                } else {
                     let mut all_events = ctx.mt_processor.resolutions_to_events(&events);
                     all_events.push((*output_key, true));
                     (
                         EmitResult::EmitKeys(all_events),
-                        Some(HeldAction::RegularKey(*output_key)),
-                    )
-                } else {
-                    (
-                        EmitResult::EmitKey(*output_key, true),
                         Some(HeldAction::RegularKey(*output_key)),
                     )
                 }
@@ -250,16 +252,16 @@ impl KeyAction {
             Self::DT(..) => emit_dt(self, keycode, ctx),
             Self::Transparent => {
                 let resolutions = ctx.mt_processor.on_other_key_press_for_resolutions(keycode);
-                if !resolutions.is_empty() {
+                if resolutions.is_empty() {
+                    (
+                        EmitResult::EmitKey(keycode, true),
+                        Some(HeldAction::RegularKey(keycode)),
+                    )
+                } else {
                     let mut events = ctx.mt_processor.resolutions_to_events(&resolutions);
                     events.push((keycode, true));
                     (
                         EmitResult::EmitKeys(events),
-                        Some(HeldAction::RegularKey(keycode)),
-                    )
-                } else {
-                    (
-                        EmitResult::EmitKey(keycode, true),
                         Some(HeldAction::RegularKey(keycode)),
                     )
                 }

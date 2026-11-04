@@ -9,7 +9,7 @@ pub use keymap::KeymapProcessor;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 pub mod actions;
 pub mod adaptive;
@@ -103,67 +103,34 @@ fn run_event_processor(
         let mut keymap = shared_keymap
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Check for shutdown signal (non-blocking)
         match shutdown_rx.try_recv() {
-            Ok(()) => {
-                warn!("Shutdown signal received for: {}", keyboard_name);
-                // Save adaptive timing stats before shutdown
-                let _ = keymap.save_adaptive_stats(user_id);
-                // Release all held keys before exiting (graceful shutdown)
-                release_all_keys(&mut virtual_device, &keymap);
-                // Ungrab device before exiting
-                let _ = device.ungrab();
-                info!("Device ungrabbed and released for: {}", keyboard_name);
-                return Ok(());
-            }
-            Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                warn!("Shutdown channel disconnected for: {}", keyboard_name);
-                // Release all held keys before exiting (graceful shutdown)
-                release_all_keys(&mut virtual_device, &keymap);
-                let _ = device.ungrab();
-                return Ok(());
-            }
-            Err(crossbeam_channel::TryRecvError::Empty) => {
-                // No shutdown signal, continue
-            }
-        }
-
-        // Check for game mode toggle (non-blocking)
-        match game_mode_rx.try_recv() {
-            Ok(active) => {
-                info!(
-                    "Game mode {} for: {}",
-                    if active { "enabled" } else { "disabled" },
-                    keyboard_name
+            Err(crossbeam_channel::TryRecvError::Empty) => {}
+            // Asked to stop, or no one left to ask: the keyboard is given back either way
+            signal => {
+                warn!(
+                    "{} for: {keyboard_name}",
+                    if signal.is_ok() {
+                        "Shutdown signal received"
+                    } else {
+                        "Shutdown channel disconnected"
+                    }
                 );
-                keymap.set_game_mode(active);
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                // No game mode toggle, continue
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                // Game mode channel disconnected, just log and continue
-                debug!("Game mode channel disconnected for: {}", keyboard_name);
-            }
-        }
-
-        // Check for save stats request (non-blocking)
-        match save_stats_rx.try_recv() {
-            Ok(()) => {
-                info!("Save stats requested for: {}", keyboard_name);
                 let _ = keymap.save_adaptive_stats(user_id);
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                // No save request, continue
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                // Save stats channel disconnected, just log and continue
-                debug!("Save stats channel disconnected for: {}", keyboard_name);
+                release_all_keys(&mut virtual_device, &keymap);
+                let _ = device.ungrab();
+                info!("Device ungrabbed and released for: {keyboard_name}");
+                return Ok(());
             }
         }
-
-        // Periodically save adaptive timing stats
-        if last_stats_save.elapsed() >= STATS_SAVE_INTERVAL {
+        if let Ok(active) = game_mode_rx.try_recv() {
+            info!(
+                "Game mode {} for: {keyboard_name}",
+                if active { "enabled" } else { "disabled" }
+            );
+            keymap.set_game_mode(active);
+        }
+        // Adaptive timing stats go to disk on request, and every so often regardless
+        if save_stats_rx.try_recv().is_ok() || last_stats_save.elapsed() >= STATS_SAVE_INTERVAL {
             let _ = keymap.save_adaptive_stats(user_id);
             last_stats_save = Instant::now();
         }
@@ -193,17 +160,14 @@ fn run_event_processor(
                         break;
                     }
 
-                    // Process key events through keymap
-                    if ev.event_type() == evdev::EventType::KEY {
-                        // Convert evdev key code to our KeyCode enum
+                    if ev.event_type() == EventType::KEY {
                         if let Some(input_key) = KeyCode::from_evdev_code(ev.code()) {
-                            let pressed = ev.value() == 1; // 1 = press, 0 = release, 2 = repeat
-                            let repeat = ev.value() == 2;
-
-                            // Ignore repeat events
-                            if repeat {
+                            // 1 is a press, 0 a release; 2, the kernel's own auto-repeat, is
+                            // dropped: the keymap decides what a held key does
+                            if ev.value() == 2 {
                                 continue;
                             }
+                            let pressed = ev.value() == 1;
 
                             let age = anchor
                                 .1
@@ -220,14 +184,11 @@ fn run_event_processor(
 
                             let result = keymap.process_key_at(input_key, pressed, at);
                             emit_result(&mut virtual_device, &mut pacer, result)?;
-                        } else {
-                            // Unsupported key, pass through unchanged
-                            virtual_device.emit(&[ev])?;
+                            continue;
                         }
-                    } else {
-                        // Non-key event (SYN, etc.), pass through
-                        virtual_device.emit(&[ev])?;
                     }
+                    // A key keymux doesn't know, or no key at all (SYN...): through unchanged
+                    virtual_device.emit(&[ev])?;
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -460,7 +421,7 @@ fn wait_for_input(fd: RawFd, deadline: Option<Instant>) {
         revents: 0,
     };
     // SAFETY: `pollfd` is one valid, initialized entry, and 1 says so
-    unsafe { libc::poll(&mut pollfd, 1, millis) };
+    unsafe { libc::poll(std::ptr::from_mut(&mut pollfd), 1, millis) };
 }
 
 /// Send what the keymap decided to the virtual keyboard.
@@ -472,11 +433,8 @@ fn emit_result(
     match result {
         // One event of an ordinary key: straight out, nothing to pace
         ProcessResult::EmitKey(key, pressed) => Ok(virtual_device.emit(&[key_event(key, pressed)])?),
-        ProcessResult::TapKeyPressRelease(key) => {
-            emit_keystrokes(virtual_device, pacer, &[keystroke(Key::new(key.code()), false)])
-        }
         ProcessResult::MultipleEvents(events) => emit_key_events(virtual_device, pacer, &events),
-        ProcessResult::TypeString(text, _) => retype(virtual_device, pacer, 0, &text),
+        ProcessResult::TypeString(text) => retype(virtual_device, pacer, 0, &text),
         ProcessResult::Retype { backspaces, text } => {
             retype(virtual_device, pacer, backspaces, &text)
         }

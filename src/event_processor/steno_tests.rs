@@ -114,7 +114,7 @@ fn tg_latches_after_release_and_toggles_off() {
     // Strokes work while latched
     assert_eq!(
         chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]),
-        ProcessResult::TypeString("cat".to_string(), false)
+        ProcessResult::TypeString("cat".to_string())
     );
 
     // Pressing it again on the steno layer exits it (via the layer's own remap)
@@ -144,7 +144,7 @@ fn stray_space_during_a_chord_does_not_disturb_the_stroke() {
     assert_eq!(p.process_key(KeyCode::KC_C, false), ProcessResult::None);
     assert_eq!(
         p.process_key(KeyCode::KC_P, false),
-        ProcessResult::TypeString("cat".to_string(), false)
+        ProcessResult::TypeString("cat".to_string())
     );
 }
 
@@ -213,7 +213,7 @@ fn chord_on_steno_layer_types_dictionary_text() {
 
     // K- A- -T is "cat"
     let result = chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]);
-    assert_eq!(result, ProcessResult::TypeString("cat".to_string(), false));
+    assert_eq!(result, ProcessResult::TypeString("cat".to_string()));
 }
 
 #[test]
@@ -229,7 +229,7 @@ fn unmapped_keys_are_swallowed_not_leaked_to_base() {
     assert_eq!(p.process_key(KeyCode::KC_Q, true), ProcessResult::None);
     assert_eq!(
         p.process_key(KeyCode::KC_Q, false),
-        ProcessResult::TypeString("S-".to_string(), false)
+        ProcessResult::TypeString("S-".to_string())
     );
 }
 
@@ -275,7 +275,7 @@ fn stroke_released_after_layer_exit_still_types() {
     assert_eq!(p.process_key(KeyCode::KC_C, false), ProcessResult::None);
     assert_eq!(
         p.process_key(KeyCode::KC_P, false),
-        ProcessResult::TypeString("cat".to_string(), false)
+        ProcessResult::TypeString("cat".to_string())
     );
 }
 
@@ -287,7 +287,7 @@ fn reentering_a_steno_layer_carries_on_from_what_was_typed() {
     let cat = [KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P];
     assert_eq!(
         chord(&mut p, &cat),
-        ProcessResult::TypeString("cat".to_string(), false)
+        ProcessResult::TypeString("cat".to_string())
     );
 
     // Leaving and coming back carries on: the cursor is still after "cat"
@@ -295,7 +295,7 @@ fn reentering_a_steno_layer_carries_on_from_what_was_typed() {
     enter_steno(&mut p);
     assert_eq!(
         chord(&mut p, &cat),
-        ProcessResult::TypeString(" cat".to_string(), false)
+        ProcessResult::TypeString(" cat".to_string())
     );
 }
 
@@ -310,13 +310,13 @@ fn a_layer_can_start_a_fresh_sentence_each_time_it_is_entered() {
     let cat = [KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P];
     assert_eq!(
         chord(&mut p, &cat),
-        ProcessResult::TypeString("cat".to_string(), false)
+        ProcessResult::TypeString("cat".to_string())
     );
     p.deactivate_layer_for_test(&Layer("chords".to_string()));
     enter_steno(&mut p);
     assert_eq!(
         chord(&mut p, &cat),
-        ProcessResult::TypeString("cat".to_string(), false)
+        ProcessResult::TypeString("cat".to_string())
     );
 }
 
@@ -344,7 +344,7 @@ fn words_typed_by_hand_are_undone_by_steno_a_word_at_a_time() {
     // The word after a word typed by hand is spaced from it
     assert_eq!(
         chord(&mut p, &cat),
-        ProcessResult::TypeString(" cat".to_string(), false)
+        ProcessResult::TypeString(" cat".to_string())
     );
     assert_eq!(
         chord(&mut p, &[KeyCode::KC_T]),
@@ -374,7 +374,7 @@ fn a_caret_key_makes_steno_forget_what_was_typed_by_hand() {
     // Where the caret is now is unknown, so nothing is undone by guessing
     assert_eq!(
         chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P]),
-        ProcessResult::TypeString("cat".to_string(), false)
+        ProcessResult::TypeString("cat".to_string())
     );
 }
 
@@ -391,7 +391,7 @@ fn two_keyboards_share_what_was_typed_and_either_can_undo_it() {
     let cat = [KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P];
     assert_eq!(
         chord(&mut a, &cat),
-        ProcessResult::TypeString("cat".to_string(), false)
+        ProcessResult::TypeString("cat".to_string())
     );
     // The other keyboard takes it back
     assert_eq!(
@@ -411,7 +411,7 @@ fn space_types_a_space_and_the_next_word_does_not_add_another() {
     let cat = [KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P];
     assert_eq!(
         chord(&mut p, &cat),
-        ProcessResult::TypeString("cat".to_string(), false)
+        ProcessResult::TypeString("cat".to_string())
     );
 
     // Space is swallowed while "cat" is on the tape: it types nothing
@@ -421,7 +421,7 @@ fn space_types_a_space_and_the_next_word_does_not_add_another() {
     // "and" gets its own leading space, since the screen has "cat" before it
     assert_eq!(
         chord(&mut p, &[KeyCode::KC_I, KeyCode::KC_K]),
-        ProcessResult::TypeString(" and".to_string(), false)
+        ProcessResult::TypeString(" and".to_string())
     );
 }
 
@@ -484,7 +484,7 @@ fn toggling_back_into_steno_carries_on_from_what_was_typed_between() {
     p.process_key(KeyCode::KC_RCTL, false);
     assert_eq!(
         chord(&mut p, &cat),
-        ProcessResult::TypeString("cat".to_string(), false)
+        ProcessResult::TypeString("cat".to_string())
     );
     p.process_key(KeyCode::KC_RCTL, true);
     p.process_key(KeyCode::KC_RCTL, false);
@@ -498,7 +498,7 @@ fn toggling_back_into_steno_carries_on_from_what_was_typed_between() {
     assert_eq!(p.current_layer_name(), "steno");
     assert_eq!(
         chord(&mut p, &cat),
-        ProcessResult::TypeString(" cat".to_string(), false)
+        ProcessResult::TypeString(" cat".to_string())
     );
 }
 
@@ -523,7 +523,7 @@ fn enter_outlines_produce_their_output() {
     // R-R: F is the left R and J the right R
     assert_eq!(
         chord(&mut p, &[KeyCode::KC_F, KeyCode::KC_J]),
-        ProcessResult::TypeString("\n".to_string(), false)
+        ProcessResult::TypeString("\n".to_string())
     );
     // #R-R: number key 1 (#), F (R-) and J (-R)
     assert_eq!(
@@ -761,7 +761,7 @@ fn leaving_steno_in_the_middle_of_a_lookup_closes_it_and_does_not_keep_eating_ke
     assert_eq!(
         chord(&mut p, &[KeyCode::KC_S, KeyCode::KC_C]),
         // After the "a" typed on the base layer
-        ProcessResult::TypeString(" KA-".to_string(), false),
+        ProcessResult::TypeString(" KA-".to_string()),
         "a stroke, not lookup letters"
     );
 }
@@ -781,11 +781,11 @@ fn a_two_stroke_word_still_combines_after_a_stroke_that_matched_nothing() {
     // A stroke with no entry (just K-): it types its keys
     assert_eq!(
         chord(&mut p, &[KeyCode::KC_S]),
-        ProcessResult::TypeString("K-".to_string(), false)
+        ProcessResult::TypeString("K-".to_string())
     );
     assert_eq!(
         chord(&mut p, &[KeyCode::KC_E, KeyCode::KC_N, KeyCode::KC_J]),
-        ProcessResult::TypeString(" per".to_string(), false)
+        ProcessResult::TypeString(" per".to_string())
     );
     let tpebgt = [
         KeyCode::KC_W,
@@ -798,7 +798,7 @@ fn a_two_stroke_word_still_combines_after_a_stroke_that_matched_nothing() {
     // The second stroke finishes the word: "fect" goes after "per", not " effect"
     assert_eq!(
         chord(&mut p, &tpebgt),
-        ProcessResult::TypeString("fect".to_string(), false)
+        ProcessResult::TypeString("fect".to_string())
     );
 }
 
@@ -911,19 +911,19 @@ fn a_key_that_reaches_the_screen_makes_the_next_word_start_fresh() {
     let cat = [KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P];
     assert_eq!(
         chord(&mut p, &cat),
-        ProcessResult::TypeString("cat".to_string(), false)
+        ProcessResult::TypeString("cat".to_string())
     );
     // Without anything in between, the second word follows the first
     assert_eq!(
         chord(&mut p, &cat),
-        ProcessResult::TypeString(" cat".to_string(), false)
+        ProcessResult::TypeString(" cat".to_string())
     );
 
     p.process_key(KeyCode::KC_DEL, true);
     p.process_key(KeyCode::KC_DEL, false);
     assert_eq!(
         chord(&mut p, &cat),
-        ProcessResult::TypeString("cat".to_string(), false)
+        ProcessResult::TypeString("cat".to_string())
     );
 }
 
@@ -1083,7 +1083,7 @@ fn with_no_dictionary_strokes_type_as_they_are_and_one_dropped_in_takes_over_whi
     // Nothing installed: the stroke types its keys
     assert_eq!(
         chord(&mut p, &cat),
-        ProcessResult::TypeString("KA-T".to_string(), false)
+        ProcessResult::TypeString("KA-T".to_string())
     );
 
     // A dictionary dropped into the folder is used without restarting anything or leaving
@@ -1092,7 +1092,7 @@ fn with_no_dictionary_strokes_type_as_they_are_and_one_dropped_in_takes_over_whi
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         p.check_steno_timeouts();
-        if chord(&mut p, &cat) == ProcessResult::TypeString(" cat".to_string(), false) {
+        if chord(&mut p, &cat) == ProcessResult::TypeString(" cat".to_string()) {
             break;
         }
         assert!(
@@ -1108,7 +1108,7 @@ fn with_no_dictionary_strokes_type_as_they_are_and_one_dropped_in_takes_over_whi
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         p.check_steno_timeouts();
-        if chord(&mut p, &cat) == ProcessResult::TypeString(" kitten".to_string(), false) {
+        if chord(&mut p, &cat) == ProcessResult::TypeString(" kitten".to_string()) {
             break;
         }
         assert!(
