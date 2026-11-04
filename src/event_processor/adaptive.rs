@@ -13,6 +13,8 @@ const TARGET_MARGIN_MS: f32 = 30.0;
 pub struct AdaptiveProcessor {
     all_key_stats: HashMap<KeyCode, RollingStats>,
     key_press_times: HashMap<KeyCode, Instant>,
+    /// Something was learned since the stats were last written to disk
+    unsaved: bool,
 }
 
 impl AdaptiveProcessor {
@@ -20,7 +22,13 @@ impl AdaptiveProcessor {
         Self {
             all_key_stats: HashMap::new(),
             key_press_times: HashMap::new(),
+            unsaved: false,
         }
+    }
+
+    #[must_use]
+    pub const fn has_unsaved_stats(&self) -> bool {
+        self.unsaved
     }
 
     /// The key went down at `at`.
@@ -39,13 +47,16 @@ impl AdaptiveProcessor {
                 .entry(keycode)
                 .or_insert_with(|| RollingStats::new(TAP_THRESHOLD_MS))
                 .update_tap(duration_ms, TARGET_MARGIN_MS);
+            self.unsaved = true;
         }
     }
 
-    pub fn save_adaptive_stats(&self, user_id: u32) -> Result<(), std::io::Error> {
-        if self.all_key_stats.is_empty() {
+    /// Write the stats to disk, if anything was learned since they were last written.
+    pub fn save_adaptive_stats(&mut self, user_id: u32) -> Result<(), std::io::Error> {
+        if !self.unsaved {
             return Ok(());
         }
+        self.unsaved = false;
         let stats_map: HashMap<String, &RollingStats> = self
             .all_key_stats
             .iter()

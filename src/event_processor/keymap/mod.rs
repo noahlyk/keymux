@@ -170,8 +170,13 @@ impl KeymapProcessor {
         self.held_keys.keys().copied().collect()
     }
 
-    pub fn save_adaptive_stats(&self, user_id: u32) -> std::io::Result<()> {
+    pub fn save_adaptive_stats(&mut self, user_id: u32) -> std::io::Result<()> {
         self.remap.adaptive.save_adaptive_stats(user_id)
+    }
+
+    #[must_use]
+    pub const fn has_unsaved_adaptive_stats(&self) -> bool {
+        self.remap.adaptive.has_unsaved_stats()
     }
 
     pub fn load_adaptive_stats(&mut self, user_id: u32) -> std::io::Result<()> {

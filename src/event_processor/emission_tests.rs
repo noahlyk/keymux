@@ -2,6 +2,7 @@
 //! those events, paced, and a pass of the loop gives each key to the keymap at the moment the
 //! keyboard reported it. The `uinput` test goes through a real virtual device.
 
+use super::control::{self, Control, Doorbell, Signal};
 use super::output::{self, Pacer, Sink, SAFE_EVENTS, UNREAD_WINDOW};
 use super::pump::{Pump, Source, Step};
 use super::{KeymapProcessor, ProcessResult};
@@ -238,7 +239,7 @@ impl Source for Script {
         )
     }
 
-    fn wait(&mut self, deadline: Option<Instant>) {
+    fn wait(&mut self, deadline: Option<Instant>, _bell: &Doorbell) {
         self.waits.push(deadline);
     }
 }
@@ -257,31 +258,19 @@ fn key_at(key: Key, value: i32, at: SystemTime) -> InputEvent {
     })
 }
 
-/// A pump with its channels, which must outlive it: a dropped shutdown sender reads as a
-/// shutdown.
+/// A pump with the daemon's end of its line, which must outlive it: dropping that end reads
+/// as a shutdown.
 struct Harness {
     pump: Pump,
-    shutdown: crossbeam_channel::Sender<()>,
-    _game_mode: std::sync::mpsc::Sender<bool>,
-    _save_stats: std::sync::mpsc::Sender<()>,
+    control: Control,
 }
 
 impl Harness {
     fn new() -> Self {
-        let (shutdown, shutdown_rx) = crossbeam_channel::unbounded();
-        let (game_mode, game_mode_rx) = std::sync::mpsc::channel();
-        let (save_stats, save_stats_rx) = std::sync::mpsc::channel();
+        let (control, controlled) = control::channel().unwrap();
         Self {
-            pump: Pump::new(
-                "test keyboard".into(),
-                0,
-                shutdown_rx,
-                game_mode_rx,
-                save_stats_rx,
-            ),
-            shutdown,
-            _game_mode: game_mode,
-            _save_stats: save_stats,
+            pump: Pump::new("test keyboard".into(), 0, controlled),
+            control,
         }
     }
 }
@@ -393,7 +382,7 @@ fn a_shutdown_signal_releases_everything_and_stops() {
     let mut harness = Harness::new();
     let mut source = Script::default();
     let mut out = Recorder::default();
-    harness.shutdown.send(()).unwrap();
+    harness.control.send(Signal::Shutdown);
 
     assert_eq!(
         harness.pump.step(&shared, &mut source, &mut out).unwrap(),

@@ -1,6 +1,7 @@
 use crate::keyboard_id::KeyboardId;
 pub use actions::ProcessResult;
 use anyhow::{Context, Result};
+use control::Controlled;
 use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
 use evdev::{AttributeSet, Device, Key};
 pub use keymap::KeymapProcessor;
@@ -11,6 +12,7 @@ use tracing::{error, info};
 
 pub mod actions;
 pub mod adaptive;
+pub mod control;
 mod debounce;
 #[cfg(test)]
 mod emission_tests;
@@ -29,16 +31,13 @@ pub(crate) use output::{char_to_key, retype_keystrokes, Pacer, SAFE_EVENTS, UNRE
 /// This is called directly inside the thread spawned by the daemon.
 /// It blocks until the keyboard is unplugged (ENODEV), a shutdown signal
 /// is received, or an unrecoverable error occurs.
-#[allow(clippy::too_many_arguments)]
 pub fn run_processor(
     keyboard_id: KeyboardId,
     mut device: Device,
     keyboard_name: String,
     keymap: Arc<Mutex<KeymapProcessor>>,
     user_id: u32,
-    shutdown_rx: crossbeam_channel::Receiver<()>,
-    game_mode_rx: std::sync::mpsc::Receiver<bool>,
-    save_stats_rx: std::sync::mpsc::Receiver<()>,
+    control: Controlled,
 ) {
     if let Err(e) = run_event_processor(
         &keyboard_id,
@@ -46,25 +45,20 @@ pub fn run_processor(
         &keyboard_name,
         &keymap,
         user_id,
-        shutdown_rx,
-        game_mode_rx,
-        save_stats_rx,
+        control,
     ) {
         error!("Event processor for {} failed: {}", keyboard_id, e);
     }
     info!("Event processor thread exiting for: {}", keyboard_id);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_event_processor(
     keyboard_id: &KeyboardId,
     device: &mut Device,
     keyboard_name: &str,
     shared_keymap: &Arc<Mutex<KeymapProcessor>>,
     user_id: u32,
-    shutdown_rx: crossbeam_channel::Receiver<()>,
-    game_mode_rx: std::sync::mpsc::Receiver<bool>,
-    save_stats_rx: std::sync::mpsc::Receiver<()>,
+    control: Controlled,
 ) -> Result<()> {
     info!(
         "Starting event processor for: {} ({})",
@@ -89,13 +83,7 @@ fn run_event_processor(
     output::release_all_keys_on_startup(&mut virtual_device);
     info!("Released all keys on startup for safety: {}", keyboard_name);
 
-    let mut pump = Pump::new(
-        keyboard_name.to_string(),
-        user_id,
-        shutdown_rx,
-        game_mode_rx,
-        save_stats_rx,
-    );
+    let mut pump = Pump::new(keyboard_name.to_string(), user_id, control);
     loop {
         match pump.step(shared_keymap, device, &mut virtual_device)? {
             Step::Read | Step::Idle => {}

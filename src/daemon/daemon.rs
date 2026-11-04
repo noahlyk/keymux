@@ -2,7 +2,7 @@
 /// session changes, each arriving from a thread of its own, while every keyboard's event
 /// processor runs on its own thread and never waits on any of it.
 use crate::config::ConfigManager;
-use crate::event_processor;
+use crate::event_processor::{self, control};
 use crate::gamemode_state::{GlobalOverride, WindowOverride};
 use crate::ipc::{get_root_socket_path, IpcRequest, IpcResponse};
 use crate::keyboard_id::{find_all_keyboards, KeyboardId};
@@ -10,6 +10,7 @@ use crate::niri::gamemode_detection::resolve_effective_game_mode;
 use crate::session_manager::SessionManager;
 use crate::window_manager::WindowInfo;
 use anyhow::{Context, Result};
+use control::{Control, Signal};
 use crossbeam_channel::{at, never, select, tick, unbounded, Receiver, Sender};
 use evdev::Device;
 use std::collections::{HashMap, HashSet};
@@ -32,9 +33,7 @@ struct KeyboardMeta {
 
 /// Active event processor thread handle
 struct ProcessorHandle {
-    shutdown_tx: crossbeam_channel::Sender<()>,
-    game_mode_tx: mpsc::Sender<bool>,
-    save_stats_tx: mpsc::Sender<()>,
+    control: Control,
     thread_handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -584,7 +583,7 @@ impl Daemon {
                     // Shut down any processors we already started in this call
                     for path in &started_paths {
                         if let Some((_, _, mut handle)) = self.active_processors.remove(path) {
-                            let _ = handle.shutdown_tx.send(());
+                            handle.control.send(Signal::Shutdown);
                             if let Some(th) = handle.thread_handle.take() {
                                 let _ = th.join();
                             }
@@ -594,10 +593,8 @@ impl Daemon {
                 }
             };
 
-            // Create channels
-            let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
-            let (game_mode_tx, game_mode_rx) = mpsc::channel();
-            let (save_stats_tx, save_stats_rx) = mpsc::channel();
+            let (control, controlled) =
+                control::channel().context("Failed to create a processor's control line")?;
 
             // Spawn ONE real thread per event file — no wrapper, the JoinHandle
             // tracks the actual processor loop.  A clone of dead_tx is moved into
@@ -621,13 +618,14 @@ impl Daemon {
                     kbd_name_clone,
                     shared_keymap_clone,
                     uid,
-                    shutdown_rx,
-                    game_mode_rx,
-                    save_stats_rx,
+                    controlled,
                 );
                 // Notify daemon that this processor is gone
                 let _ = dead_tx.send(event_path_clone);
             });
+
+            // Send current game mode state to the new thread to preserve state across restarts
+            control.send(Signal::GameMode(self.game_mode_active));
 
             // Store processor handle indexed by EVENT PATH
             self.active_processors.insert(
@@ -636,9 +634,7 @@ impl Daemon {
                     kbd_id.clone(),
                     uid,
                     ProcessorHandle {
-                        shutdown_tx,
-                        game_mode_tx: game_mode_tx.clone(),
-                        save_stats_tx: save_stats_tx.clone(),
+                        control,
                         thread_handle: Some(handle),
                     },
                 ),
@@ -646,9 +642,6 @@ impl Daemon {
 
             // Track this path for rollback purposes
             started_paths.push(event_path.clone());
-
-            // Send current game mode state to the new thread to preserve state across restarts
-            let _ = game_mode_tx.send(self.game_mode_active);
 
             info!(
                 "Started thread {}/{} for {} at {} (game_mode: {})",
@@ -690,8 +683,7 @@ impl Daemon {
 
         for path in paths_to_stop {
             if let Some((_, _, mut handle)) = self.active_processors.remove(&path) {
-                // Send shutdown signal
-                let _ = handle.shutdown_tx.send(());
+                handle.control.send(Signal::Shutdown);
 
                 if let Some(thread_handle) = handle.thread_handle.take() {
                     // Await the thread with a generous timeout so we don't block forever
@@ -1235,7 +1227,7 @@ impl Daemon {
         let mut join_tasks = Vec::new();
         for path in paths {
             if let Some((_, _, mut handle)) = self.active_processors.remove(&path) {
-                let _ = handle.shutdown_tx.send(());
+                handle.control.send(Signal::Shutdown);
                 if let Some(thread_handle) = handle.thread_handle.take() {
                     join_tasks.push((path.display().to_string(), thread_handle));
                 }
@@ -1521,7 +1513,7 @@ impl Daemon {
 
         // Send to all active threads
         for (_, _, handle) in self.active_processors.values() {
-            let _ = handle.game_mode_tx.send(enabled);
+            handle.control.send(Signal::GameMode(enabled));
         }
     }
 
@@ -1534,7 +1526,7 @@ impl Daemon {
 
         // Send save signal to all active threads
         for (_, _, handle) in self.active_processors.values() {
-            let _ = handle.save_stats_tx.send(());
+            handle.control.send(Signal::SaveStats);
         }
     }
 

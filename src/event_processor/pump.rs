@@ -3,13 +3,14 @@
 //! and wait. The keyboard and the virtual keyboard sit behind traits, so a test can script
 //! the one and record the other.
 
+use super::control::{Controlled, Doorbell, Signal};
 use super::debounce::Debounce;
 use super::output::{self, Pacer, Sink};
 use super::KeymapProcessor;
 use crate::keycode::KeyCode;
 use evdev::{Device, EventType, InputEvent, Key};
 use std::io;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::AsRawFd;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::{info, warn};
@@ -18,9 +19,9 @@ use tracing::{info, warn};
 pub trait Source {
     /// Read everything queued into `into`. `WouldBlock` when nothing is.
     fn read(&mut self, into: &mut Vec<InputEvent>) -> io::Result<()>;
-    /// Nothing was queued: sleep until something is, `deadline` comes, or a short while
-    /// passes, whichever is first.
-    fn wait(&mut self, deadline: Option<Instant>);
+    /// Nothing was queued: sleep until something is, `deadline` comes, or the daemon rings
+    /// `bell`, whichever is first. With no deadline, that is as long as it takes.
+    fn wait(&mut self, deadline: Option<Instant>, bell: &Doorbell);
 }
 
 impl Source for Device {
@@ -29,8 +30,30 @@ impl Source for Device {
         Ok(())
     }
 
-    fn wait(&mut self, deadline: Option<Instant>) {
-        wait_for_input(self.as_raw_fd(), deadline);
+    fn wait(&mut self, deadline: Option<Instant>, bell: &Doorbell) {
+        let timeout = deadline.map(|at| at.saturating_duration_since(Instant::now()));
+        // poll counts whole milliseconds; round up so a deadline is never woken for early
+        let millis = timeout.map_or(-1, |wait| {
+            i32::try_from(wait.as_nanos().div_ceil(1_000_000)).unwrap_or(i32::MAX)
+        });
+        let mut fds = [
+            libc::pollfd {
+                fd: self.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: bell.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        // SAFETY: `fds` is two valid, initialized entries, and 2 says so
+        unsafe { libc::poll(fds.as_mut_ptr(), 2, millis) };
+        if fds[1].revents & libc::POLLIN != 0 {
+            // Silenced before the signal is taken, so a ring after the take is never lost
+            bell.silence();
+        }
     }
 }
 
@@ -47,16 +70,14 @@ pub enum Step {
     Escaped,
 }
 
-/// How often the adaptive timing stats go to disk unasked.
+/// How long learned tap timings may sit in memory before they go to disk unasked.
 const STATS_SAVE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The state of one keyboard's loop between passes.
 pub struct Pump {
     name: String,
     user_id: u32,
-    shutdown_rx: crossbeam_channel::Receiver<()>,
-    game_mode_rx: std::sync::mpsc::Receiver<bool>,
-    save_stats_rx: std::sync::mpsc::Receiver<()>,
+    control: Controlled,
     alt_f12: AltF12,
     debounce: Debounce,
     pacer: Pacer,
@@ -65,19 +86,11 @@ pub struct Pump {
 }
 
 impl Pump {
-    pub fn new(
-        name: String,
-        user_id: u32,
-        shutdown_rx: crossbeam_channel::Receiver<()>,
-        game_mode_rx: std::sync::mpsc::Receiver<bool>,
-        save_stats_rx: std::sync::mpsc::Receiver<()>,
-    ) -> Self {
+    pub fn new(name: String, user_id: u32, control: Controlled) -> Self {
         Self {
             name,
             user_id,
-            shutdown_rx,
-            game_mode_rx,
-            save_stats_rx,
+            control,
             alt_f12: AltF12::default(),
             debounce: Debounce::default(),
             pacer: Pacer::default(),
@@ -96,38 +109,29 @@ impl Pump {
         sink: &mut O,
     ) -> io::Result<Step> {
         let mut keymap = crate::lock(shared);
-        match self.shutdown_rx.try_recv() {
-            Err(crossbeam_channel::TryRecvError::Empty) => {}
-            // Asked to stop, or no one left to ask: the keyboard is given back either way
-            signal => {
-                warn!(
-                    "{} for: {}",
-                    if signal.is_ok() {
-                        "Shutdown signal received"
-                    } else {
-                        "Shutdown channel disconnected"
-                    },
-                    self.name
-                );
-                let _ = keymap.save_adaptive_stats(self.user_id);
-                output::release_all_keys(sink, &keymap);
-                return Ok(Step::Shutdown);
+        while let Some(signal) = self.control.take() {
+            match signal {
+                // Asked to stop, or no one left to ask: the keyboard is given back either way
+                Signal::Shutdown => {
+                    warn!("Shutdown signal received for: {}", self.name);
+                    let _ = keymap.save_adaptive_stats(self.user_id);
+                    output::release_all_keys(sink, &keymap);
+                    return Ok(Step::Shutdown);
+                }
+                Signal::GameMode(active) => {
+                    info!(
+                        "Game mode {} for: {}",
+                        if active { "enabled" } else { "disabled" },
+                        self.name
+                    );
+                    keymap.set_game_mode(active);
+                }
+                Signal::SaveStats => self.save_stats(&mut keymap),
             }
         }
-        if let Ok(active) = self.game_mode_rx.try_recv() {
-            info!(
-                "Game mode {} for: {}",
-                if active { "enabled" } else { "disabled" },
-                self.name
-            );
-            keymap.set_game_mode(active);
-        }
-        // Adaptive timing stats go to disk on request, and every so often regardless
-        if self.save_stats_rx.try_recv().is_ok()
-            || self.last_stats_save.elapsed() >= STATS_SAVE_INTERVAL
-        {
-            let _ = keymap.save_adaptive_stats(self.user_id);
-            self.last_stats_save = Instant::now();
+        // Learned timings go to disk every so often regardless, while there are any to save
+        if self.last_stats_save.elapsed() >= STATS_SAVE_INTERVAL {
+            self.save_stats(&mut keymap);
         }
 
         self.events.clear();
@@ -140,10 +144,13 @@ impl Pump {
                 output::emit_result(sink, &mut self.pacer, tap_dance)?;
                 let steno = keymap.check_steno_timeouts();
                 output::emit_result(sink, &mut self.pacer, steno)?;
-                let deadline = keymap.next_deadline();
+                let stats_due = keymap
+                    .has_unsaved_adaptive_stats()
+                    .then(|| self.last_stats_save + STATS_SAVE_INTERVAL);
+                let deadline = keymap.next_deadline().into_iter().chain(stats_due).min();
                 // Let the keyboard's other device threads in before waiting
                 drop(keymap);
-                source.wait(deadline);
+                source.wait(deadline, self.control.bell());
                 return Ok(Step::Idle);
             }
             Err(e) => return Err(e),
@@ -188,6 +195,11 @@ impl Pump {
         }
         Ok(Step::Read)
     }
+
+    fn save_stats(&mut self, keymap: &mut KeymapProcessor) {
+        let _ = keymap.save_adaptive_stats(self.user_id);
+        self.last_stats_save = Instant::now();
+    }
 }
 
 /// When `event` happened, on the monotonic clock: the kernel stamped it on the system clock
@@ -198,28 +210,6 @@ fn moment_of(anchor: (Instant, SystemTime), event: &InputEvent) -> Instant {
         .duration_since(event.timestamp())
         .unwrap_or_default();
     anchor.0.checked_sub(age).unwrap_or(anchor.0)
-}
-
-/// How long the loop waits with no key and no timeout due before it looks at its channels
-/// (shutdown, game mode, stats) again.
-const IDLE_WAIT: Duration = Duration::from_millis(25);
-
-/// Wait until the keyboard has an event to read, `deadline` comes, or `IDLE_WAIT` passes,
-/// whichever is first. A key always wakes it at once.
-fn wait_for_input(fd: RawFd, deadline: Option<Instant>) {
-    let now = Instant::now();
-    let wait = deadline.map_or(IDLE_WAIT, |at| {
-        at.saturating_duration_since(now).min(IDLE_WAIT)
-    });
-    // poll counts whole milliseconds; round up so a deadline is never woken for early
-    let millis = i32::try_from(wait.as_nanos().div_ceil(1_000_000)).unwrap_or(i32::MAX);
-    let mut pollfd = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: `pollfd` is one valid, initialized entry, and 1 says so
-    unsafe { libc::poll(std::ptr::from_mut(&mut pollfd), 1, millis) };
 }
 
 /// Watches one keyboard's raw key events for Alt+F12, the chord that releases it from keymux.
