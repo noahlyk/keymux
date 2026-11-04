@@ -5,8 +5,8 @@
 use super::KeymapProcessor;
 use crate::config::{Config, KeyAction};
 use crate::event_processor::actions::{
-    dt::Due, handle_action_release, DtProcessor, HandleContext, HeldAction, MtProcessor,
-    OsmProcessor, ProcessResult, SocdProcessor,
+    consumes_one_shot, dt::Due, handle_action_release, DtProcessor, HandleContext, HeldAction,
+    MtProcessor, OsmProcessor, ProcessResult, SocdProcessor,
 };
 use crate::event_processor::adaptive::AdaptiveProcessor;
 use crate::event_processor::layer_stack::LayerStack;
@@ -18,7 +18,7 @@ use std::time::Instant;
 pub(super) struct Remap {
     pub(super) mt: MtProcessor,
     pub(super) dt: DtProcessor,
-    osm: OsmProcessor,
+    pub(super) osm: OsmProcessor,
     socd: SocdProcessor,
     pub(super) adaptive: AdaptiveProcessor,
     config_dir: PathBuf,
@@ -60,10 +60,12 @@ impl Remap {
 impl KeymapProcessor {
     pub(super) fn process_key_press(&mut self, keycode: KeyCode, at: Instant) -> ProcessResult {
         self.remap.adaptive.record_key_press(keycode, at);
-        // What time and this key decide for the tap-dances goes out before the key does
+        // What time and this key decide for the tap-dances goes out before the key does, and
+        // a one-shot modifier left alone past its timeout came up before this key went down
         let mut events = self.settle_tap_dances(at);
         let interrupted = self.remap.dt.interrupted_by(keycode);
         events.extend(self.perform_due(interrupted, at));
+        events.extend(released(self.remap.osm.expire(at)));
         let action = self
             .lookup_action(keycode)
             .cloned()
@@ -74,6 +76,16 @@ impl KeymapProcessor {
             self.held_keys.insert(keycode, held);
         }
         events.extend(result.into_events());
+        if matches!(
+            action,
+            KeyAction::TO(_) | KeyAction::TG(_) | KeyAction::MO(_)
+        ) {
+            // The layer under an armed one-shot changed: it comes up, so the new layer's keys
+            // aren't typed under it
+            events.extend(released(self.remap.osm.release_all()));
+        } else if consumes_one_shot(&action, keycode) {
+            self.remap.osm.on_other_key_press(keycode);
+        }
         ProcessResult::from_events(events)
     }
 
@@ -82,6 +94,7 @@ impl KeymapProcessor {
             .adaptive
             .record_key_release(keycode, at, self.layer_stack.is_game_mode_active());
         let mut events = self.settle_tap_dances(at);
+        events.extend(released(self.remap.osm.expire(at)));
         if let Some(held) = self.held_keys.remove(&keycode) {
             let ctx = self.remap.context(&mut self.layer_stack, at);
             match handle_action_release(held, keycode, ctx) {
@@ -91,6 +104,8 @@ impl KeymapProcessor {
                 _ => {}
             }
         }
+        // A one-shot modifier this key was pressed under comes up after it
+        events.extend(released(self.remap.osm.on_other_key_release(keycode)));
         ProcessResult::from_events(events)
     }
 
@@ -156,4 +171,12 @@ impl KeymapProcessor {
         }
         self.layer_stack.base_remaps().get(&keycode)
     }
+}
+
+/// The release of each of `modifiers`.
+fn released(modifiers: Vec<KeyCode>) -> Vec<(KeyCode, bool)> {
+    modifiers
+        .into_iter()
+        .map(|modifier| (modifier, false))
+        .collect()
 }

@@ -153,9 +153,11 @@ remaps: {
 ```
 
 **How it works:**
-1. Press OSM key → modifier activates
-2. Press any other key → modifier activates with that key, then OSM deactivates
-3. If no key pressed within timeout → OSM auto-releases
+1. Tap the OSM key → the modifier goes down and stays down, armed
+2. Press any other key → it is typed under the modifier, which comes up when that key does
+3. No key within the timeout → the modifier comes up by itself
+4. Hold the OSM key past the tapping term, or press a key while holding it → an ordinary
+   modifier until the key is released. A layer switch lets an armed modifier go.
 
 **Configuration:**
 ```ron

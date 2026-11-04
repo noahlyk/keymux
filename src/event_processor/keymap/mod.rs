@@ -153,15 +153,33 @@ impl KeymapProcessor {
         ProcessResult::from_events(self.settle_tap_dances(Instant::now()))
     }
 
-    /// When a timeout next needs checking with no key to prompt it: a tap-dance or a steno
-    /// stroke that resolves by itself. `None` while nothing is waiting on one.
+    /// Let go of any one-shot modifier that has waited past its timeout with no key to use it.
+    pub fn check_osm_timeouts(&mut self) -> ProcessResult {
+        let released = self.remap.osm.expire(Instant::now());
+        ProcessResult::from_events(
+            released
+                .into_iter()
+                .map(|modifier| (modifier, false))
+                .collect(),
+        )
+    }
+
+    /// When a timeout next needs checking with no key to prompt it: a tap-dance, a one-shot
+    /// modifier or a steno stroke that resolves by itself. `None` while nothing is waiting on
+    /// one.
     #[must_use]
     pub fn next_deadline(&self) -> Option<Instant> {
         let steno = self
             .steno_engines
             .values()
             .filter_map(StenoEngine::next_deadline);
-        self.remap.dt.next_deadline().into_iter().chain(steno).min()
+        self.remap
+            .dt
+            .next_deadline()
+            .into_iter()
+            .chain(self.remap.osm.next_deadline())
+            .chain(steno)
+            .min()
     }
 
     #[must_use]

@@ -59,15 +59,11 @@ pub enum EmitResult {
 
 impl EmitResult {
     pub fn to_process_result(self) -> ProcessResult {
-        match self {
-            Self::EmitKey(kc, pressed) => ProcessResult::EmitKey(kc, pressed),
-            Self::EmitKeys(events) => ProcessResult::from_events(events),
-            Self::TapKey(kc) => ProcessResult::MultipleEvents(vec![(kc, true), (kc, false)]),
-            Self::None => ProcessResult::None,
-        }
+        ProcessResult::from_events(self.into_events())
     }
 
     /// The key events in this result, in order.
+    #[must_use]
     pub fn into_events(self) -> Vec<(KeyCode, bool)> {
         match self {
             Self::EmitKey(key, pressed) => vec![(key, pressed)],
@@ -134,10 +130,12 @@ pub fn handle_action_release(
         HeldAction::DtManaged(pressed) => {
             dt::release_dt(pressed, keycode, &mut ctx).to_process_result()
         }
-        HeldAction::OsmManaged => {
-            let _ = osm::handle_osm_release(ctx.osm_processor, keycode, ctx.at);
-            ProcessResult::None
-        }
+        HeldAction::OsmManaged => ctx
+            .osm_processor
+            .on_release(keycode, ctx.at)
+            .map_or(ProcessResult::None, |modifier| {
+                ProcessResult::EmitKey(modifier, false)
+            }),
         // Steno releases are intercepted by KeymapProcessor before reaching here
         HeldAction::StenoManaged(_) | HeldAction::SwallowedBySteno => ProcessResult::None,
         HeldAction::MultiManaged(children) => {
@@ -269,7 +267,7 @@ use cmd::emit_cmd;
 pub use dt::{emit_dt, unemit_dt, DtProcessor};
 use layer::{emit_layer, unemit_layer};
 pub use mt::{emit_mt, unemit_mt, MtAction, MtProcessor, MtResolution, RollingStats};
-pub use osm::{emit_osm, handle_osm_release, unemit_osm, OsmProcessor};
+pub use osm::{consumes_one_shot, emit_osm, unemit_osm, OsmProcessor};
 pub use socd::{emit_socd, SocdProcessor};
 
 /// Events are judged by when the keyboard reported them. A press and release 50ms apart that
