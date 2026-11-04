@@ -1,6 +1,6 @@
 # Maintainer: noahlyk <noahlykins@gmail.com>
 pkgname=keymux
-pkgver=1.16.0+46.g78910f1
+pkgver=1.16.0+61.g15327c5
 pkgrel=1
 pkgdesc="Keyboard middleware for gaming with low-level input interception"
 arch=('x86_64' 'aarch64')
@@ -11,6 +11,7 @@ makedepends=('rust' 'cargo')
 optdepends=('systemd: for systemd service files (or use OpenRC/runit scripts)'
             'openrc: for OpenRC init scripts'
             'runit: for runit service directories'
+            'rust-wasm: compile steno plugins (rustc with the wasm32-unknown-unknown target)'
             'niri: automatic game mode detection in Niri compositor'
             'hyprland: automatic game mode detection in Hyprland compositor'
             'sway: automatic game mode detection in Sway compositor'

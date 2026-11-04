@@ -11,6 +11,7 @@ makedepends=()
 optdepends=('systemd: for systemd service files (or use OpenRC/runit scripts)'
             'openrc: for OpenRC init scripts'
             'runit: for runit service directories'
+            'rust-wasm: compile steno plugins (rustc with the wasm32-unknown-unknown target)'
             'niri: automatic game mode detection in Niri compositor'
             'hyprland: automatic game mode detection in Hyprland compositor'
             'sway: automatic game mode detection in Sway compositor'
