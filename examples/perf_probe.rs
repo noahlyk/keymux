@@ -21,7 +21,10 @@ fn main() {
     let time = |what: &str, f: &mut dyn FnMut() -> usize| {
         let t = Instant::now();
         let n = f();
-        println!("{what:34} {:8.1} ms  ({n})", t.elapsed().as_secs_f64() * 1e3);
+        println!(
+            "{what:34} {:8.1} ms  ({n})",
+            t.elapsed().as_secs_f64() * 1e3
+        );
     };
     let mut dict = Dictionary::default();
     time("load_cached", &mut || {
@@ -30,13 +33,27 @@ fn main() {
     });
     time("len (entries)", &mut || dict.len());
     let kphraoet = layout.parse_strokes("KPHRAOET").unwrap();
-    time("lookup exact", &mut || usize::from(dict.lookup(&kphraoet).is_some()));
-    time("strokes_for(complete)", &mut || dict.strokes_for("complete").len());
-    time("strokes_for(compromise)", &mut || dict.strokes_for("compromise").len());
-    time("completions(com, 24)", &mut || dict.completions("com", 24).len());
-    time("completions(comp, 24)", &mut || dict.completions("comp", 24).len());
-    time("nearby_strokes(1 stroke)", &mut || nearby_strokes(&dict, &kphraoet, 8).len());
+    time("lookup exact", &mut || {
+        usize::from(dict.lookup(&kphraoet).is_some())
+    });
+    time("strokes_for(complete)", &mut || {
+        dict.strokes_for("complete").len()
+    });
+    time("strokes_for(compromise)", &mut || {
+        dict.strokes_for("compromise").len()
+    });
+    time("completions(com, 24)", &mut || {
+        dict.completions("com", 24).len()
+    });
+    time("completions(comp, 24)", &mut || {
+        dict.completions("comp", 24).len()
+    });
+    time("nearby_strokes(1 stroke)", &mut || {
+        nearby_strokes(&dict, &kphraoet, 8).len()
+    });
     let two = layout.parse_strokes("KOPL/PRO").unwrap();
-    time("nearby_strokes(2 strokes)", &mut || nearby_strokes(&dict, &two, 8).len());
+    time("nearby_strokes(2 strokes)", &mut || {
+        nearby_strokes(&dict, &two, 8).len()
+    });
     time("iter().count()", &mut || dict.iter().count());
 }

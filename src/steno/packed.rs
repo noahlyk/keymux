@@ -27,7 +27,7 @@ struct Texts {
 }
 
 impl Texts {
-    fn len(&self) -> usize {
+    const fn len(&self) -> usize {
         self.ends.len()
     }
 
@@ -74,7 +74,7 @@ impl Group {
         self.len as usize
     }
 
-    fn count(&self) -> usize {
+    const fn count(&self) -> usize {
         self.raw.len()
     }
 
@@ -120,7 +120,7 @@ impl Packed {
         self.groups.iter().map(Group::count).sum()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.groups.is_empty()
     }
 
@@ -233,13 +233,12 @@ impl Builder {
         if strokes.is_empty() {
             return;
         }
-        let raw = match self.ids.get(translation) {
-            Some(&raw) => raw,
-            None => {
-                let raw = self.raws.push(translation);
-                self.ids.insert(translation.to_string(), raw);
-                raw
-            }
+        let raw = if let Some(&raw) = self.ids.get(translation) {
+            raw
+        } else {
+            let raw = self.raws.push(translation);
+            self.ids.insert(translation.to_string(), raw);
+            raw
         };
         self.rows.push(Row {
             at: u32::try_from(self.strokes.len()).expect("fewer than 4 billion strokes"),
@@ -367,7 +366,12 @@ mod tests {
 
     #[test]
     fn an_outline_is_found_by_its_strokes_and_length() {
-        let packed = packed(&[(&[5], "cat"), (&[5, 9], "catty"), (&[9], "dog"), (&[1, 2, 3], "x")]);
+        let packed = packed(&[
+            (&[5], "cat"),
+            (&[5, 9], "catty"),
+            (&[9], "dog"),
+            (&[1, 2, 3], "x"),
+        ]);
         assert_eq!(packed.get(&[5]), Some("cat"));
         assert_eq!(packed.get(&[5, 9]), Some("catty"));
         assert_eq!(packed.get(&[9]), Some("dog"));
@@ -388,7 +392,12 @@ mod tests {
 
     #[test]
     fn a_text_finds_every_outline_that_types_it() {
-        let packed = packed(&[(&[5], "cat"), (&[6, 6], "cat"), (&[9], "{deleted}"), (&[1], "dog")]);
+        let packed = packed(&[
+            (&[5], "cat"),
+            (&[6, 6], "cat"),
+            (&[9], "{deleted}"),
+            (&[1], "dog"),
+        ]);
         let mut found: Vec<&[u32]> = packed.strokes_typing("cat").collect();
         found.sort();
         assert_eq!(found, [&[5][..], &[6, 6][..]]);
@@ -399,7 +408,12 @@ mod tests {
 
     #[test]
     fn the_texts_with_a_prefix_are_one_alphabetical_run() {
-        let packed = packed(&[(&[1], "comb"), (&[2], "come"), (&[3], "cat"), (&[4], "comet")]);
+        let packed = packed(&[
+            (&[1], "comb"),
+            (&[2], "come"),
+            (&[3], "cat"),
+            (&[4], "comet"),
+        ]);
         let found: Vec<&str> = packed.typed_starting_with("com").collect();
         assert_eq!(found, ["comb", "come", "comet"]);
     }

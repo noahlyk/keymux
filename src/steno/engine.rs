@@ -6,7 +6,7 @@ use super::dict::Dictionary;
 use super::journal::{MachineId, SharedHistory};
 use super::layout::{preset, Layout};
 use super::live;
-use super::lookup::{Lookup, LookupKey};
+use super::lookup::{Lookup, LookupKey, LookupSearch};
 use super::overlay::OverlayHub;
 use super::plugin::Chain;
 use super::setup::default_dictionaries;
@@ -82,6 +82,9 @@ pub struct StenoEngine {
     hub: &'static OverlayHub,
     /// The lookup that is open right now. While it is, keys are QWERTY input to it.
     lookup: Option<Lookup>,
+    /// Finds the open lookup's rows off this thread; tests, which look at the result at once,
+    /// have none and find them here
+    lookup_search: Option<LookupSearch>,
     /// A stroke wrote `{plover:toggle}` or `{plover:suspend}`: the layer should be left
     leave_requested: bool,
     fresh_on_enter: bool,
@@ -167,6 +170,7 @@ impl StenoEngine {
             disabled_in_game_mode,
             hub: OverlayHub::global(),
             lookup: None,
+            lookup_search: (!cfg!(test)).then(|| LookupSearch::new(OverlayHub::global())),
             leave_requested: false,
             fresh_on_enter: config.fresh_on_enter,
             label: label.to_string(),
@@ -218,6 +222,9 @@ impl StenoEngine {
     /// Close the lookup, if one is open.
     pub fn close_lookup(&mut self) {
         if self.lookup.take().is_some() {
+            if let Some(search) = &self.lookup_search {
+                search.cancel();
+            }
             self.hub.set_lookup(None);
         }
     }
@@ -231,9 +238,14 @@ impl StenoEngine {
 
     /// Show what the lookup has found so far on the overlay.
     fn publish_lookup(&self) {
-        if let Some(lookup) = &self.lookup {
-            self.hub
-                .set_lookup(Some(lookup.view(&self.translator.fresh())));
+        let Some(lookup) = &self.lookup else {
+            return;
+        };
+        match &self.lookup_search {
+            Some(search) => search.search(lookup, self.translator.fresh()),
+            None => self
+                .hub
+                .set_lookup(Some(lookup.view(&self.translator.fresh()))),
         }
     }
 
@@ -602,6 +614,7 @@ impl StenoEngine {
             disabled_in_game_mode: true,
             hub: OverlayHub::global(),
             lookup: None,
+            lookup_search: None,
             leave_requested: false,
             fresh_on_enter: false,
             label: String::new(),

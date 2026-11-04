@@ -191,9 +191,14 @@ impl Parts {
         let key = stamp.key().filter(|_| !racy);
         // A file that looks as it did when its copy was made is not read: this is a start of
         // keymux, and a theory's files can be hundreds of megabytes
-        if let (Some(key), false, true) = (&key, self.by_path.contains_key(path), !is_plugin_file(path)) {
+        if let (Some(key), false, true) =
+            (&key, self.by_path.contains_key(path), !is_plugin_file(path))
+        {
             if let Some((dict, digest)) = read_cache_by_stamp(&copy, path, key, layout) {
-                debug!("steno dictionary {} restored without reading it", path.display());
+                debug!(
+                    "steno dictionary {} restored without reading it",
+                    path.display()
+                );
                 self.by_path.insert(
                     path.to_path_buf(),
                     Part {

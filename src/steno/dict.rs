@@ -131,9 +131,9 @@ impl Table {
             .filter(move |strokes| strokes.len() == len)
             .map(Vec::as_slice)
             .chain(
-                self.packed
-                    .of_len(len)
-                    .filter(|strokes| self.entries.is_empty() || !self.entries.contains_key(*strokes)),
+                self.packed.of_len(len).filter(|strokes| {
+                    self.entries.is_empty() || !self.entries.contains_key(*strokes)
+                }),
             )
     }
 
@@ -209,7 +209,13 @@ pub struct MergeStats {
 /// Read bytes as text the way Plover reads a dictionary: UTF-8, or failing that Latin-1.
 fn decode_text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
     std::str::from_utf8(bytes).map_or_else(
-        |_| bytes.iter().map(|&b| char::from(b)).collect::<String>().into(),
+        |_| {
+            bytes
+                .iter()
+                .map(|&b| char::from(b))
+                .collect::<String>()
+                .into()
+        },
         std::borrow::Cow::Borrowed,
     )
 }
@@ -437,9 +443,7 @@ impl Dictionary {
 
     /// Whether any table has an entry (a deletion counts) for the outline.
     fn has_entry(&self, strokes: &[u32]) -> bool {
-        self.tables
-            .iter()
-            .any(|table| table.has(strokes))
+        self.tables.iter().any(|table| table.has(strokes))
     }
 
     /// Add one entry by its outline bits directly, bypassing stroke-notation parsing - for a
@@ -552,7 +556,6 @@ impl Dictionary {
         found
     }
 
-
     /// Like `load`, but each file is restored from its own binary copy in `cache_dir` while its
     /// contents are what they were when the copy was made, and parsed (and the copy renewed)
     /// only otherwise: see [`Parts`].
@@ -589,9 +592,11 @@ impl Dictionary {
         wanted: &'a (impl Fn(&str) -> bool + 'a),
     ) -> impl Iterator<Item = (&'a [u32], &'a str)> + 'a {
         self.tables.iter().enumerate().flat_map(move |(i, table)| {
-            table.iter_where(wanted).filter(move |&(strokes, translation)| {
-                !is_deleted(translation) && !self.hidden_before(i, strokes)
-            })
+            table
+                .iter_where(wanted)
+                .filter(move |&(strokes, translation)| {
+                    !is_deleted(translation) && !self.hidden_before(i, strokes)
+                })
         })
     }
 

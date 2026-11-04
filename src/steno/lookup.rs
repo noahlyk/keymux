@@ -9,13 +9,15 @@
 
 use super::commands::proper_outlines_in;
 use super::layout::{parse_stroke, render_strokes};
-use super::overlay::{LookupMode, LookupRow, LookupView};
+use super::overlay::{LookupMode, LookupRow, LookupView, OverlayHub};
 use super::reverse::{self, Query};
 use super::shortest::shortest_outline_labeled;
 use super::translate::Translator;
 use super::typing::TypingLayout;
 use crate::keycode::KeyCode;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 
 /// Rows the overlay is sent; it shows as many as fit.
 const MAX_ROWS: usize = 12;
@@ -140,22 +142,37 @@ impl Lookup {
     /// steno lookup` share.
     #[must_use]
     pub fn view(&self, base: &Translator) -> LookupView {
+        self.view_unless(base, &|| false)
+            .unwrap_or_else(|| self.blank())
+    }
+
+    /// What the overlay shows before the search has found anything: the query, no rows.
+    fn blank(&self) -> LookupView {
+        LookupView {
+            query: self.query.clone(),
+            rows: Vec::new(),
+            hint: 0,
+            mode: LookupMode::Word,
+        }
+    }
+
+    /// Like [`Self::view`], giving up (`None`) as soon as `cancelled` says so: it is asked
+    /// between the steps of the search, so a search for text that has since changed stops early.
+    fn view_unless(&self, base: &Translator, cancelled: &dyn Fn() -> bool) -> Option<LookupView> {
         let query = self.query.trim();
         if query.is_empty() {
-            return LookupView {
-                query: self.query.clone(),
-                rows: Vec::new(),
-                hint: 0,
-                mode: LookupMode::Word,
-            };
+            return Some(self.blank());
         }
         let (rows, mode) = match reverse::classify(query) {
             Query::Stroke(strokes) => (stroke_rows(base, &strokes), LookupMode::Stroke),
             Query::Text(text) if text.contains(char::is_whitespace) => {
                 (vec![phrase_row(base, &text)], LookupMode::Phrase)
             }
-            Query::Text(text) => (word_rows(base, &text), LookupMode::Word),
+            Query::Text(text) => (word_rows(base, &text, cancelled)?, LookupMode::Word),
         };
+        if cancelled() {
+            return None;
+        }
         let hint = rows.first().map_or(0, |row: &LookupRow| {
             row.outline
                 .split('/')
@@ -163,12 +180,101 @@ impl Lookup {
                 .and_then(parse_stroke)
                 .unwrap_or(0)
         });
-        LookupView {
+        Some(LookupView {
             query: self.query.clone(),
             rows,
             hint,
             mode,
+        })
+    }
+}
+
+/// One search to run: what was typed, over the dictionary as it was.
+struct Job {
+    generation: u64,
+    lookup: Lookup,
+    base: Translator,
+}
+
+/// Runs lookups on a thread of their own, so typing into one never waits for a search.
+///
+/// Every key press supersedes the search before it: [`Self::search`] bumps the generation, which
+/// the search running now sees at its next step and gives up; the query shows at once with no
+/// rows, and the new search starts as soon as the worker is free, skipping any it was behind on.
+/// A result is published only if it is still the newest, checked under the same lock as the
+/// blank view, so an old answer never lands over a newer query.
+#[derive(Debug)]
+pub struct LookupSearch {
+    jobs: mpsc::Sender<Job>,
+    newest: Arc<AtomicU64>,
+    /// Held to publish: the generation is checked and the view shown without another key press
+    /// slipping between
+    publishing: Arc<Mutex<()>>,
+    hub: &'static OverlayHub,
+}
+
+impl LookupSearch {
+    #[must_use]
+    pub fn new(hub: &'static OverlayHub) -> Self {
+        let (jobs, queue) = mpsc::channel::<Job>();
+        let newest = Arc::new(AtomicU64::new(0));
+        let publishing = Arc::new(Mutex::new(()));
+        let (seen, gate) = (Arc::clone(&newest), Arc::clone(&publishing));
+        std::thread::Builder::new()
+            .name("steno-lookup".into())
+            .spawn(move || {
+                while let Ok(mut job) = queue.recv() {
+                    // Only the newest is worth running
+                    while let Ok(newer) = queue.try_recv() {
+                        job = newer;
+                    }
+                    let cancelled = || seen.load(Ordering::Acquire) != job.generation;
+                    let Some(view) = job.lookup.view_unless(&job.base, &cancelled) else {
+                        continue;
+                    };
+                    let _gate = gate
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if !cancelled() {
+                        hub.set_lookup(Some(view));
+                    }
+                }
+            })
+            .expect("a thread for lookups");
+        Self {
+            jobs,
+            newest,
+            publishing,
+            hub,
         }
+    }
+
+    /// Show `lookup`'s query now and find its rows without holding anything up.
+    pub fn search(&self, lookup: &Lookup, base: Translator) {
+        let gate = self
+            .publishing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let generation = self.newest.fetch_add(1, Ordering::AcqRel) + 1;
+        self.hub.set_lookup(Some(lookup.blank()));
+        drop(gate);
+        let query = Lookup {
+            query: lookup.query.clone(),
+        };
+        let _ = self.jobs.send(Job {
+            generation,
+            lookup: query,
+            base,
+        });
+    }
+
+    /// The lookup closed: whatever is being found is no longer wanted.
+    pub fn cancel(&self) {
+        let _gate = self
+            .publishing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.newest.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -215,7 +321,11 @@ fn phrase_row(base: &Translator, phrase: &str) -> LookupRow {
 /// The existing single-word view: the word's own outlines first, then words that start with it,
 /// each with its best outline — falling back to fingerspelling, marked in quotes, when the exact
 /// query has no dictionary entry at all.
-fn word_rows(base: &Translator, query: &str) -> Vec<LookupRow> {
+fn word_rows(
+    base: &Translator,
+    query: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Option<Vec<LookupRow>> {
     let mut rows = Vec::new();
     let exact = proper_outlines_in(base, query);
     if exact.is_empty() {
@@ -239,8 +349,11 @@ fn word_rows(base: &Translator, query: &str) -> Vec<LookupRow> {
     }
     if query.chars().count() >= MIN_PREFIX {
         // Ask for extra: a word with no outline that types it properly is skipped
+        if cancelled() {
+            return None;
+        }
         for word in base.dictionary().completions(query, MAX_ROWS * 2) {
-            if rows.len() >= MAX_ROWS {
+            if rows.len() >= MAX_ROWS || cancelled() {
                 break;
             }
             if let Some(outline) = proper_outlines_in(base, word).first() {
@@ -252,7 +365,7 @@ fn word_rows(base: &Translator, query: &str) -> Vec<LookupRow> {
         }
     }
     rows.truncate(MAX_ROWS);
-    rows
+    Some(rows)
 }
 
 #[cfg(test)]
@@ -288,6 +401,50 @@ mod tests {
         lookup
     }
 
+    /// The lookup shown on a hub, once it holds rows or `wait` is up.
+    fn shown(hub: &OverlayHub, wait: std::time::Duration) -> Option<LookupView> {
+        let until = std::time::Instant::now() + wait;
+        loop {
+            if let Some(view) = hub.snapshot().lookup.filter(|view| !view.rows.is_empty()) {
+                return Some(view);
+            }
+            if std::time::Instant::now() > until {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn typing_on_shows_the_query_at_once_and_only_the_newest_answer_lands() {
+        let hub: &'static OverlayHub = Box::leak(Box::default());
+        let search = LookupSearch::new(hub);
+        // A burst of keys: each supersedes the one before
+        let mut lookup = Lookup::default();
+        for c in "candy".chars() {
+            lookup.apply(LookupKey::Char(c));
+            search.search(&lookup, translator());
+            // The query is on show before any search has had to finish
+            assert_eq!(hub.snapshot().lookup.unwrap().query, lookup.query);
+        }
+        let view = shown(hub, std::time::Duration::from_secs(5)).expect("an answer");
+        assert_eq!(view.query, "candy");
+        assert_eq!(view.rows[0].outline, "KAPBD");
+        // Nothing older arrives afterwards
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(hub.snapshot().lookup.unwrap().query, "candy");
+    }
+
+    #[test]
+    fn a_search_cancelled_by_closing_never_shows() {
+        let hub: &'static OverlayHub = Box::leak(Box::default());
+        let search = LookupSearch::new(hub);
+        search.search(&typed("candy"), translator());
+        search.cancel();
+        hub.set_lookup(None);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(hub.snapshot().lookup.is_none());
+    }
     #[test]
     fn an_exact_word_lists_its_outlines_fewest_strokes_first_and_lights_the_best() {
         let view = typed("candy").view(&translator());
