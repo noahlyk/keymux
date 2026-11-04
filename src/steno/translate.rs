@@ -354,10 +354,11 @@ impl Translator {
         (!self.dict.is_empty()).then(|| self.dict.dictionary())
     }
 
-    /// How many entries the dictionary has.
+    /// Whether the dictionary has at least `count` entries. Cheap enough for every key press,
+    /// where counting them all is not.
     #[must_use]
-    pub fn entry_count(&self) -> usize {
-        self.dict.len()
+    pub fn has_entries(&self, count: usize) -> bool {
+        self.dict.has_at_least(count)
     }
 
     /// Whether the last stroke matched nothing: it was typed as its keys.

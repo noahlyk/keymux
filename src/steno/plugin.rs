@@ -466,6 +466,11 @@ impl Chain {
     pub fn is_empty(&self) -> bool {
         self.dict.is_empty()
     }
+
+    #[must_use]
+    pub fn has_at_least(&self, count: usize) -> bool {
+        self.dict.has_at_least(count)
+    }
 }
 
 #[cfg(test)]

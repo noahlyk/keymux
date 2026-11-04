@@ -70,6 +70,9 @@ pub struct StenoEngine {
     updates: Option<Receiver<Arc<Chain>>>,
     /// No dictionary has arrived yet, so strokes wait in `backlog`
     loading: bool,
+    /// The dictionary that arrived is too small to be a real one. Worked out once when it
+    /// arrives, since the key path asks on every press.
+    too_small: bool,
     /// Strokes finished before the dictionaries arrived. Translated once they do.
     backlog: Vec<u32>,
     /// Where each stroke is recorded. `None` when the home directory is unknown.
@@ -158,6 +161,7 @@ impl StenoEngine {
             translator,
             updates: Some(updates),
             loading: true,
+            too_small: false,
             backlog: Vec::new(),
             tape: home.map(|home| tape::Tape::new(tape::default_path(home))),
             disabled_in_game_mode,
@@ -243,8 +247,16 @@ impl StenoEngine {
     /// folder is only the starter entries or a few of your own. Still loading counts as set
     /// up, so the hint doesn't fire during startup.
     #[must_use]
-    pub fn needs_setup(&self) -> bool {
-        !self.loading && self.translator.entry_count() < super::setup::MIN_REAL_DICTIONARY
+    pub const fn needs_setup(&self) -> bool {
+        !self.loading && self.too_small
+    }
+
+    /// Translate with `dict` from here on.
+    fn use_dictionary(&mut self, dict: Arc<Chain>) {
+        self.translator.set_shared(dict);
+        self.too_small = !self
+            .translator
+            .has_entries(super::setup::MIN_REAL_DICTIONARY);
     }
 
     /// Whether this physical key is a stroke key on this layer.
@@ -426,7 +438,7 @@ impl StenoEngine {
         } else {
             self.updates = Some(updates);
         }
-        self.translator.set_shared(newest?);
+        self.use_dictionary(newest?);
         // A dictionary that replaces a working one leaves nothing waiting
         if !std::mem::replace(&mut self.loading, false) {
             return None;
@@ -546,7 +558,7 @@ impl StenoEngine {
     pub fn wait_until_loaded(&mut self) {
         if self.loading {
             if let Some(Ok(dict)) = self.updates.as_ref().map(Receiver::recv) {
-                self.translator.set_shared(dict);
+                self.use_dictionary(dict);
             }
             self.loading = false;
         }
@@ -572,6 +584,7 @@ impl StenoEngine {
         overrides: &HashMap<String, crate::config::KeyAction>,
     ) -> Self {
         use super::layout::build_key_map;
+        let too_small = !dict.has_at_least(super::setup::MIN_REAL_DICTIONARY);
         Self {
             keys: build_key_map(&preset("qwerty").unwrap(), overrides).unwrap(),
             held_keys: HashSet::new(),
@@ -583,6 +596,7 @@ impl StenoEngine {
             translator: Translator::new(dict),
             updates: None,
             loading: false,
+            too_small,
             backlog: Vec::new(),
             tape: None,
             disabled_in_game_mode: true,

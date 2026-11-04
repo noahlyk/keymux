@@ -371,28 +371,33 @@ impl Dictionary {
         })
     }
 
-    /// How many outlines have an entry (deletions included).
+    /// Every outline with an entry (deletions included), each once.
+    fn outlines(&self) -> impl Iterator<Item = &Vec<u32>> {
+        self.tables.iter().enumerate().flat_map(move |(i, table)| {
+            table.entries.keys().filter(move |strokes| {
+                !self.tables[..i]
+                    .iter()
+                    .any(|earlier| earlier.entries.contains_key(*strokes))
+            })
+        })
+    }
+
+    /// How many outlines have an entry (deletions included). With several tables this looks
+    /// up every outline in the tables before it, so it costs milliseconds on a full theory;
+    /// [`Self::has_at_least`] is the cheap question.
     #[must_use]
     pub fn len(&self) -> usize {
         match self.tables.as_slice() {
             [] => 0,
             [only] => only.entries.len(),
-            tables => tables
-                .iter()
-                .enumerate()
-                .map(|(i, table)| {
-                    table
-                        .entries
-                        .keys()
-                        .filter(|strokes| {
-                            !tables[..i]
-                                .iter()
-                                .any(|earlier| earlier.entries.contains_key(*strokes))
-                        })
-                        .count()
-                })
-                .sum(),
+            _ => self.outlines().count(),
         }
+    }
+
+    /// Whether at least `count` outlines have an entry, looking no further than that.
+    #[must_use]
+    pub fn has_at_least(&self, count: usize) -> bool {
+        count == 0 || self.outlines().nth(count - 1).is_some()
     }
 
     #[must_use]
@@ -576,6 +581,22 @@ mod tests {
     fn latin_1_files_are_read_like_plover_reads_them() {
         assert_eq!(decode_text("caf\u{e9}".as_bytes()), "caf\u{e9}");
         assert_eq!(decode_text(&[b'c', b'a', b'f', 0xe9]), "caf\u{e9}");
+    }
+
+    #[test]
+    fn has_at_least_counts_an_outline_in_two_tables_once() {
+        let mut high = Dictionary::default();
+        high.merge_json(r#"{"KAT": "cat", "TKOG": "dog"}"#, &Layout::plover())
+            .unwrap();
+        let mut low = Dictionary::default();
+        low.merge_json(r#"{"KAT": "kitten", "PWEURD": "bird"}"#, &Layout::plover())
+            .unwrap();
+        let dict = Dictionary::layered([&high, &low]);
+        assert_eq!(dict.len(), 3);
+        assert!(dict.has_at_least(0));
+        assert!(dict.has_at_least(3));
+        assert!(!dict.has_at_least(4));
+        assert!(!Dictionary::default().has_at_least(1));
     }
 
     #[test]
