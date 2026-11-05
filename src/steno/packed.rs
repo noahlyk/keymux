@@ -11,23 +11,223 @@
 //! - **Indexed by the text they type**, sorted, so a reverse lookup is a binary search and the
 //!   words starting with a prefix are one range.
 //!
-//! The arrays are what the cache file holds, so restoring one is copying bytes, not rebuilding
-//! a map.
+//! The arrays are what the cache file holds, laid out as they are in memory, so a file is
+//! restored by mapping it: nothing is read or decoded until a lookup touches the page it is on.
 
 use super::formatter::plain_text;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
+// The cache file is read in place, so the arrays are little-endian words on disk as in memory.
+#[cfg(not(target_endian = "little"))]
+compile_error!("the dictionary cache is mapped from disk as little-endian words");
+
+/// A read-only memory map of a cache file, shared by the arrays that live in it.
+pub struct Map(memmap2::Mmap);
+
+impl std::fmt::Debug for Map {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Map({} bytes)", self.0.len())
+    }
+}
+
+impl Map {
+    /// Map `file`. The cache is only ever replaced by renaming a new file over it, never edited
+    /// in place past its stamp slot, which nothing reads from the map.
+    pub fn new(file: &std::fs::File) -> std::io::Result<std::sync::Arc<Self>> {
+        // SAFETY: a mapped file that is truncated by someone else would fault on access; the
+        // cache folder is keymux's own and its files are replaced by rename, not rewritten.
+        let map = unsafe { memmap2::Mmap::map(file)? };
+        Ok(std::sync::Arc::new(Self(map)))
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// An array of `u32`s: built in memory, or read in place from a cache file's map.
+#[derive(Clone)]
+enum Words {
+    Owned(Vec<u32>),
+    Mapped {
+        map: std::sync::Arc<Map>,
+        /// Byte offset in the map: a multiple of 4, checked when opened
+        start: usize,
+        len: usize,
+    },
+}
+
+impl Default for Words {
+    fn default() -> Self {
+        Self::Owned(Vec::new())
+    }
+}
+
+impl std::fmt::Debug for Words {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Words({})", self.len())
+    }
+}
+
+impl From<Vec<u32>> for Words {
+    fn from(words: Vec<u32>) -> Self {
+        Self::Owned(words)
+    }
+}
+
+impl std::ops::Deref for Words {
+    type Target = [u32];
+
+    fn deref(&self) -> &[u32] {
+        match self {
+            Self::Owned(words) => words,
+            #[allow(
+                clippy::cast_ptr_alignment,
+                reason = "`open_words` checked the offset is a multiple of 4, in a page-aligned map"
+            )]
+            Self::Mapped { map, start, len } => {
+                // SAFETY: `open` checked that the words lie inside the map and start on a
+                // 4-byte boundary (a map starts on a page), and the map is alive as long as
+                // this holds it. Any bit pattern is a valid `u32`.
+                unsafe {
+                    std::slice::from_raw_parts(map.bytes().as_ptr().add(*start).cast::<u32>(), *len)
+                }
+            }
+        }
+    }
+}
+
+impl Words {
+    /// The vector, for a table being built.
+    fn owned(&mut self) -> &mut Vec<u32> {
+        match self {
+            Self::Owned(words) => words,
+            Self::Mapped { .. } => unreachable!("only a table being built is added to"),
+        }
+    }
+}
+
+/// A string: built in memory, or read in place from a cache file's map.
+#[derive(Clone)]
+enum Chars {
+    Owned(String),
+    Mapped {
+        map: std::sync::Arc<Map>,
+        start: usize,
+        len: usize,
+    },
+}
+
+impl std::fmt::Debug for Chars {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Chars({})", self.len())
+    }
+}
+
+impl Default for Chars {
+    fn default() -> Self {
+        Self::Owned(String::new())
+    }
+}
+
+impl std::ops::Deref for Chars {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        match self {
+            Self::Owned(text) => text,
+            Self::Mapped { map, start, len } => {
+                // SAFETY: `open` checked that these bytes lie inside the map and are UTF-8
+                unsafe { std::str::from_utf8_unchecked(&map.bytes()[*start..*start + *len]) }
+            }
+        }
+    }
+}
+
+/// Where a run of a table's data is in the body of a cache file, from its start, in elements
+/// (words, or bytes for text).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct Section {
+    at: u64,
+    len: u64,
+}
+
+/// Where each array of a [`Packed`] is in a cache file's body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Layout {
+    /// For each group: its stroke count, its outlines, its translation numbers
+    groups: Vec<(u32, Section, Section)>,
+    bases: Section,
+    raws_blob: Section,
+    raws_ends: Section,
+    typed_blob: Section,
+    typed_ends: Section,
+    typed_entry_ends: Section,
+    typed_entries: Section,
+}
+
+/// Appends arrays to a cache file's body, each starting on an 8-byte boundary.
+fn put(body: &mut Vec<u8>, bytes: impl IntoIterator<Item = u8>, len: usize) -> Section {
+    while !body.len().is_multiple_of(8) {
+        body.push(0);
+    }
+    let at = body.len() as u64;
+    body.extend(bytes);
+    Section {
+        at,
+        len: len as u64,
+    }
+}
+
+fn put_words(body: &mut Vec<u8>, words: &[u32]) -> Section {
+    while !body.len().is_multiple_of(8) {
+        body.push(0);
+    }
+    let at = body.len() as u64;
+    body.reserve(words.len() * 4);
+    for word in words {
+        body.extend_from_slice(&word.to_le_bytes());
+    }
+    Section {
+        at,
+        len: words.len() as u64,
+    }
+}
+
+fn open_words(map: &std::sync::Arc<Map>, body: usize, section: Section) -> Option<Words> {
+    let start = body.checked_add(usize::try_from(section.at).ok()?)?;
+    let len = usize::try_from(section.len).ok()?;
+    let end = start.checked_add(len.checked_mul(4)?)?;
+    (start % 4 == 0 && end <= map.bytes().len()).then(|| Words::Mapped {
+        map: std::sync::Arc::clone(map),
+        start,
+        len,
+    })
+}
+
+fn open_chars(map: &std::sync::Arc<Map>, body: usize, section: Section) -> Option<Chars> {
+    let start = body.checked_add(usize::try_from(section.at).ok()?)?;
+    let len = usize::try_from(section.len).ok()?;
+    let end = start.checked_add(len)?;
+    std::str::from_utf8(map.bytes().get(start..end)?).ok()?;
+    Some(Chars::Mapped {
+        map: std::sync::Arc::clone(map),
+        start,
+        len,
+    })
+}
+
 /// Strings kept end to end in one buffer.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone)]
 struct Texts {
-    blob: String,
+    blob: Chars,
     /// Where each string ends in `blob`
-    ends: Vec<u32>,
+    ends: Words,
 }
 
 impl Texts {
-    const fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.ends.len()
     }
 
@@ -39,10 +239,12 @@ impl Texts {
     }
 
     fn push(&mut self, text: &str) -> u32 {
-        self.blob.push_str(text);
-        self.ends
-            .push(u32::try_from(self.blob.len()).expect("a dictionary file under 4 GB of text"));
-        u32::try_from(self.ends.len() - 1).expect("fewer than 4 billion texts")
+        let (Chars::Owned(blob), Words::Owned(ends)) = (&mut self.blob, &mut self.ends) else {
+            unreachable!("only a table being built is added to");
+        };
+        blob.push_str(text);
+        ends.push(u32::try_from(blob.len()).expect("a dictionary file under 4 GB of text"));
+        u32::try_from(ends.len() - 1).expect("fewer than 4 billion texts")
     }
 
     /// The index of the first string not less than `text`: they must have been pushed sorted.
@@ -61,12 +263,12 @@ impl Texts {
 }
 
 /// The entries of one stroke count: entry `i` is `strokes[i * len..(i + 1) * len]`.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone)]
 struct Group {
     len: u32,
-    strokes: Vec<u32>,
+    strokes: Words,
     /// Which of the translations each entry has
-    raw: Vec<u32>,
+    raw: Words,
 }
 
 impl Group {
@@ -74,7 +276,7 @@ impl Group {
         self.len as usize
     }
 
-    const fn count(&self) -> usize {
+    fn count(&self) -> usize {
         self.raw.len()
     }
 
@@ -98,23 +300,82 @@ impl Group {
 }
 
 /// A file's entries, packed: see the module documentation.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone)]
 pub struct Packed {
     /// By stroke count, ascending
     groups: Vec<Group>,
     /// The entry number each group starts at, to number every entry of the file with one `u32`
-    bases: Vec<u32>,
+    bases: Words,
     /// Each distinct translation as written
     raws: Texts,
     /// Each distinct text a translation types, sorted
     typed: Texts,
     /// For each of `typed`, where its entries end in `typed_entries`
-    typed_ends: Vec<u32>,
+    typed_ends: Words,
     /// Entry numbers grouped by the text they type
-    typed_entries: Vec<u32>,
+    typed_entries: Words,
 }
 
 impl Packed {
+    /// Append the arrays to a cache file's `body`, and say where they went.
+    pub fn save(&self, body: &mut Vec<u8>) -> Layout {
+        let texts = |body: &mut Vec<u8>, texts: &Texts| {
+            let blob = put(body, texts.blob.bytes(), texts.blob.len());
+            (blob, put_words(body, &texts.ends))
+        };
+        let groups = self
+            .groups
+            .iter()
+            .map(|group| {
+                (
+                    group.len,
+                    put_words(body, &group.strokes),
+                    put_words(body, &group.raw),
+                )
+            })
+            .collect();
+        let bases = put_words(body, &self.bases);
+        let (raws_blob, raws_ends) = texts(body, &self.raws);
+        let (typed_blob, typed_ends) = texts(body, &self.typed);
+        Layout {
+            groups,
+            bases,
+            raws_blob,
+            raws_ends,
+            typed_blob,
+            typed_ends,
+            typed_entry_ends: put_words(body, &self.typed_ends),
+            typed_entries: put_words(body, &self.typed_entries),
+        }
+    }
+
+    /// The table `layout` describes, read in place from `map` where the body starts at `body`.
+    /// `None` if the layout does not fit the file.
+    pub fn open(layout: &Layout, map: &std::sync::Arc<Map>, body: usize) -> Option<Self> {
+        let texts = |blob, ends| {
+            Some(Texts {
+                blob: open_chars(map, body, blob)?,
+                ends: open_words(map, body, ends)?,
+            })
+        };
+        let mut groups = Vec::with_capacity(layout.groups.len());
+        for &(len, strokes, raw) in &layout.groups {
+            groups.push(Group {
+                len,
+                strokes: open_words(map, body, strokes)?,
+                raw: open_words(map, body, raw)?,
+            });
+        }
+        Some(Self {
+            groups,
+            bases: open_words(map, body, layout.bases)?,
+            raws: texts(layout.raws_blob, layout.raws_ends)?,
+            typed: texts(layout.typed_blob, layout.typed_ends)?,
+            typed_ends: open_words(map, body, layout.typed_entry_ends)?,
+            typed_entries: open_words(map, body, layout.typed_entries)?,
+        })
+    }
+
     /// How many entries.
     pub fn len(&self) -> usize {
         self.groups.iter().map(Group::count).sum()
@@ -151,7 +412,7 @@ impl Packed {
             group
                 .strokes
                 .chunks_exact(group.width().max(1))
-                .zip(&group.raw)
+                .zip(group.raw.iter())
                 .map(|(strokes, &raw)| (strokes, raw as usize))
         })
     }
@@ -266,7 +527,7 @@ impl Builder {
             if let Some(before) = last.filter(|before| outline(before) == outline(&row)) {
                 debug_assert_eq!(before.len, row.len);
                 let group = groups.last_mut().expect("a group for the entry before");
-                *group.raw.last_mut().expect("that entry") = row.raw;
+                *group.raw.owned().last_mut().expect("that entry") = row.raw;
                 continue;
             }
             if groups.last().is_none_or(|group| group.len != row.len) {
@@ -276,8 +537,8 @@ impl Builder {
                 });
             }
             let group = groups.last_mut().expect("just pushed");
-            group.strokes.extend_from_slice(outline(&row));
-            group.raw.push(row.raw);
+            group.strokes.owned().extend_from_slice(outline(&row));
+            group.raw.owned().push(row.raw);
             last = Some(row);
         }
         let mut bases = Vec::with_capacity(groups.len());
@@ -289,11 +550,11 @@ impl Builder {
         let (typed, typed_ends, typed_entries) = typed_index(&raws, &groups, &bases, is_deleted);
         Packed {
             groups,
-            bases,
+            bases: bases.into(),
             raws,
             typed,
-            typed_ends,
-            typed_entries,
+            typed_ends: typed_ends.into(),
+            typed_entries: typed_entries.into(),
         }
     }
 }
@@ -324,7 +585,7 @@ fn typed_index(
     // Entries counted into each text, then placed: a counting sort
     let mut ends = vec![0_u32; typed.len()];
     for group in groups {
-        for &raw in &group.raw {
+        for &raw in group.raw.iter() {
             if let Some(slot) = ends.get_mut(typed_id_of_raw[raw as usize] as usize) {
                 *slot += 1;
             }
@@ -429,9 +690,17 @@ mod tests {
     #[test]
     fn a_packed_table_survives_the_cache_round_trip() {
         let packed = packed(&[(&[5], "cat"), (&[5, 9], "catty")]);
-        let bytes = bincode::serialize(&packed).unwrap();
-        let back: Packed = bincode::deserialize(&bytes).unwrap();
+        let mut body = Vec::new();
+        let layout = packed.save(&mut body);
+        let path = std::env::temp_dir().join(format!("keymux-packed-{}", std::process::id()));
+        std::fs::write(&path, &body).unwrap();
+        let map = Map::new(&std::fs::File::open(&path).unwrap()).unwrap();
+        let back = Packed::open(&layout, &map, 0).unwrap();
+        let _ = std::fs::remove_file(&path);
         assert_eq!(back.get(&[5, 9]), Some("catty"));
         assert_eq!(back.strokes_typing("cat").count(), 1);
+        assert_eq!(back.len(), 2);
+        // A layout that points outside the file is refused, not trusted
+        assert!(Packed::open(&layout, &map, body.len()).is_none());
     }
 }

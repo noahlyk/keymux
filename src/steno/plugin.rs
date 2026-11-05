@@ -462,6 +462,13 @@ impl Chain {
         self.dict.len()
     }
 
+    /// How many entries the files hold, an outline in two files counted twice: for a log line,
+    /// since it does not read the entries, which [`Self::len`] does.
+    #[must_use]
+    pub fn stored(&self) -> usize {
+        self.dict.stored()
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.dict.is_empty()

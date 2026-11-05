@@ -12,7 +12,7 @@
 use super::formatter::plain_text;
 use super::layout::Layout;
 use super::orthography::{Orthography, WORDLIST_FILE};
-use super::packed::{Builder, Packed};
+use super::packed::{Builder, Layout as PackedLayout, Map, Packed};
 use super::parts::Parts;
 use anyhow::{Context, Result};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -24,7 +24,7 @@ use std::sync::{Arc, OnceLock};
 use tracing::warn;
 
 /// Bumped when the cached layout changes, so older cache files are ignored.
-const CACHE_LAYOUT: u32 = 6;
+const CACHE_LAYOUT: u32 = 7;
 
 /// The value that deletes an entry of a dictionary after this one.
 pub const DELETED: &str = "{plover:deleted}";
@@ -40,7 +40,9 @@ const fn is_deleted(translation: &str) -> bool {
 /// kept loose beside them and win over them; a file is read in one go, so only it has packed ones.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct Table {
-    /// The file's entries, deletions included
+    /// The file's entries, deletions included. Not serialized with the rest: the cache file
+    /// holds them as raw arrays, mapped when it is read.
+    #[serde(skip)]
     packed: Packed,
     /// Entries added one by one, and their translations as written, deletions included
     entries: FxHashMap<Vec<u32>, String>,
@@ -76,6 +78,10 @@ impl Table {
             }
         }
         self.entries.insert(strokes, text);
+    }
+
+    fn stored(&self) -> usize {
+        self.packed.len() + self.entries.len()
     }
 
     /// How many outlines, a loose one that replaces a packed one counted once.
@@ -170,19 +176,23 @@ impl Default for Dictionary {
 /// The file a cache was built from: its path, and the sha256 of its contents when it was read.
 pub type Source = (String, String);
 
-/// What a cache file holds. Written borrowed, read owned.
+/// What a cache file starts with after its stamp slot, ahead of the raw arrays: written borrowed,
+/// read owned.
 #[derive(Deserialize)]
 struct CacheIn {
     version: String,
     sources: Vec<Source>,
-    dict: Table,
+    /// Everything about the table but its packed entries
+    table: Table,
+    arrays: PackedLayout,
 }
 
 #[derive(Serialize)]
 struct CacheOut<'a> {
     version: &'a str,
     sources: &'a [Source],
-    dict: &'a Table,
+    table: &'a Table,
+    arrays: &'a PackedLayout,
 }
 
 /// Changes whenever the cache layout, the parser, or the steno [`Layout`] the files are parsed
@@ -651,6 +661,13 @@ impl Dictionary {
         })
     }
 
+    /// How many entries the tables hold, an outline in two of them counted twice. Reads none of
+    /// them, where [`Self::len`] looks up each in the tables before it.
+    #[must_use]
+    pub fn stored(&self) -> usize {
+        self.tables.iter().map(|table| table.stored()).sum()
+    }
+
     /// How many outlines have an entry (deletions included). With several tables this looks
     /// up every outline in the tables before it, so it costs milliseconds on a full theory;
     /// [`Self::has_at_least`] is the cheap question.
@@ -691,15 +708,42 @@ pub fn cache_name(path: &Path) -> String {
 pub(super) type StampKey = [u8; 20];
 
 /// Bytes at the start of a cache file for its source's [`StampKey`]: a flag (1 if one is set),
-/// then the key. Fixed in size so a key can be written without rewriting the dictionary behind it.
-const STAMP_SLOT: usize = 21;
+/// then the key, padded to 24. Fixed in size so a key can be written without rewriting the
+/// dictionary behind it.
+const STAMP_SLOT: usize = 24;
+
+/// A cache file is the stamp slot, the length of the header, the header, and after that (on an
+/// 8-byte boundary) the arrays of the packed entries, as they are in memory.
+const LENGTH_BYTES: usize = 8;
+
+/// A cache file opened: its header, and the table with its entries read in place from the map.
+fn open_cache(file: &Path, layout: &Layout) -> Option<(CacheIn, Table, std::sync::Arc<Map>)> {
+    let map = Map::new(&fs::File::open(file).ok()?).ok()?;
+    let bytes = map.bytes();
+    let length = usize::try_from(u64::from_le_bytes(
+        bytes
+            .get(STAMP_SLOT..STAMP_SLOT + LENGTH_BYTES)?
+            .try_into()
+            .ok()?,
+    ))
+    .ok()?;
+    let header_at = STAMP_SLOT + LENGTH_BYTES;
+    let header = bytes.get(header_at..header_at.checked_add(length)?)?;
+    let mut cache: CacheIn = bincode::deserialize(header).ok()?;
+    if cache.version != cache_version(layout) {
+        return None;
+    }
+    let body = (header_at + length).next_multiple_of(8);
+    let mut table = std::mem::take(&mut cache.table);
+    table.packed = Packed::open(&cache.arrays, &map, body)?;
+    Some((cache, table, map))
+}
 
 /// The cached dictionary, if it was built from files with these exact contents.
 pub(super) fn read_cache(file: &Path, sources: &[Source], layout: &Layout) -> Option<Dictionary> {
-    let bytes = fs::read(file).ok()?;
-    let cache: CacheIn = bincode::deserialize(bytes.get(STAMP_SLOT..)?).ok()?;
-    (cache.version == cache_version(layout) && cache.sources == sources).then(|| Dictionary {
-        tables: vec![Arc::new(cache.dict)],
+    let (cache, table, _) = open_cache(file, layout)?;
+    (cache.sources == sources).then(|| Dictionary {
+        tables: vec![Arc::new(table)],
     })
 }
 
@@ -711,22 +755,20 @@ pub(super) fn read_cache_by_stamp(
     stamp: &StampKey,
     layout: &Layout,
 ) -> Option<(Dictionary, String)> {
-    let bytes = fs::read(file).ok()?;
-    let slot = bytes.get(..STAMP_SLOT)?;
-    if slot[0] != 1 || slot[1..] != stamp[..] {
+    let (cache, table, map) = open_cache(file, layout)?;
+    let slot = map.bytes().get(..STAMP_SLOT)?;
+    if slot[0] != 1 || slot[1..=stamp.len()] != stamp[..] {
         return None;
     }
-    let cache: CacheIn = bincode::deserialize(&bytes[STAMP_SLOT..]).ok()?;
     let [(path, digest)] = cache.sources.as_slice() else {
         return None;
     };
-    (cache.version == cache_version(layout) && *path == source.display().to_string()).then(|| {
-        let digest = digest.clone();
+    (*path == source.display().to_string()).then(|| {
         (
             Dictionary {
-                tables: vec![Arc::new(cache.dict)],
+                tables: vec![Arc::new(table)],
             },
-            digest,
+            digest.clone(),
         )
     })
 }
@@ -738,7 +780,7 @@ pub(super) fn set_cache_stamp(file: &Path, stamp: Option<&StampKey>) {
     let mut slot = [0_u8; STAMP_SLOT];
     if let Some(stamp) = stamp {
         slot[0] = 1;
-        slot[1..].copy_from_slice(stamp);
+        slot[1..=stamp.len()].copy_from_slice(stamp);
     }
     let written = fs::OpenOptions::new()
         .write(true)
@@ -763,21 +805,26 @@ pub(super) fn write_cache(
         return;
     };
     let version = cache_version(layout);
+    let mut body = Vec::new();
+    let arrays = table.packed.save(&mut body);
+    let header = match bincode::serialize(&CacheOut {
+        version: &version,
+        sources,
+        table,
+        arrays: &arrays,
+    }) {
+        Ok(header) => header,
+        Err(e) => return warn!("steno cache not saved: {e}"),
+    };
     let mut bytes = vec![0_u8; STAMP_SLOT];
     if let Some(stamp) = stamp {
         bytes[0] = 1;
-        bytes[1..].copy_from_slice(stamp);
+        bytes[1..=stamp.len()].copy_from_slice(stamp);
     }
-    if let Err(e) = bincode::serialize_into(
-        &mut bytes,
-        &CacheOut {
-            version: &version,
-            sources,
-            dict: table,
-        },
-    ) {
-        return warn!("steno cache not saved: {e}");
-    }
+    bytes.extend_from_slice(&(header.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&header);
+    bytes.resize(bytes.len().next_multiple_of(8), 0);
+    bytes.extend_from_slice(&body);
     let tmp: PathBuf = file.with_extension("bin.part");
     let saved = file
         .parent()

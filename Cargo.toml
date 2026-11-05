@@ -34,6 +34,7 @@ notify = "6.1"
 crossbeam-channel = "0.5"
 crossterm = "0.28"
 sha2 = "0.10"
+memmap2 = "0.9"
 wasmtime = { version = "50", default-features = false, features = ["runtime", "cranelift"] }
 
 # `keymux overlay`: on-screen steno keyboard and tape (Wayland layer-shell)

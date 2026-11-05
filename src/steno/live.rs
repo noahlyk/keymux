@@ -235,7 +235,7 @@ fn refresh(key: &Key) {
         info!(
             "steno dictionaries {}: {} entries from {} files in {:?}",
             if first_time { "loaded" } else { "reloaded" },
-            dict.len(),
+            dict.stored(),
             files.len(),
             started.elapsed()
         );

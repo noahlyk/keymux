@@ -1117,6 +1117,7 @@ dependencies = [
  "evdev",
  "fancy-regex",
  "libc",
+ "memmap2",
  "notify",
  "regex",
  "ron",
