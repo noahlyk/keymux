@@ -66,6 +66,9 @@ const KEY_ASPECT: f32 = 1.75;
 const NUMBER_BAR: f32 = 0.5;
 /// Gap between keys relative to a key's width
 const GAP: f32 = 0.16;
+/// Gap between the two keys of a column that go together (`T` over `K`), relative to the gap
+/// between everything else: half of it, so the pair reads as one piece.
+const PAIR_GAP: f32 = 0.5;
 /// Thumb key height relative to a key's width
 const THUMB_ASPECT: f32 = 1.35;
 /// Extra space above the thumb row relative to a key's width
@@ -89,6 +92,9 @@ pub struct Keyboard {
     /// so each gets its own badge in a row above everything else, rather than the panel
     /// guessing at a layout it has no way to know is right for a given keyboard.
     pub extra: Vec<Rect>,
+    /// For each of `extra`, the slot it shares and the half of it it took, or `None` for a badge.
+    /// The drawing code squares the corners where the two halves meet.
+    pub splits: Vec<Option<(usize, Half)>>,
     /// Width and height of the whole keyboard
     pub size: (f32, f32),
 }
@@ -144,7 +150,8 @@ impl Keyboard {
             y
         };
         let top = number_y + unit * NUMBER_BAR + gap;
-        let bottom = top + key_h + gap;
+        let pair_gap = gap * PAIR_GAP;
+        let bottom = top + key_h + pair_gap;
         let thumb = bottom + key_h + gap + unit * THUMB_DROP;
         let mut keys: [Rect; 23] = std::array::from_fn(|slot| {
             let (column, row, rows) = PLACES[slot];
@@ -166,7 +173,7 @@ impl Keyboard {
                 y: row_y,
                 w: unit,
                 // A tall key covers both finger rows and the gap between them
-                h: height.mul_add(rows, gap * (rows - 1.0)),
+                h: height.mul_add(rows, pair_gap * (rows - 1.0)),
             }
         });
         let mut badge_slots = 0usize;
@@ -182,7 +189,7 @@ impl Keyboard {
                         let OverlayPlacement::SplitKey { half, .. } = placement(i) else {
                             unreachable!("resolved_slot only returns Some for SplitKey")
                         };
-                        half_of(keys[idx], *half, gap)
+                        half_of(keys[idx], *half, pair_gap)
                     },
                 )
             })
@@ -195,13 +202,22 @@ impl Keyboard {
                 let OverlayPlacement::SplitKey { half, .. } = placement(i) else {
                     unreachable!("resolved_slot only returns Some for SplitKey")
                 };
-                keys[idx] = half_of(keys[idx], half.opposite(), gap);
+                keys[idx] = half_of(keys[idx], half.opposite(), pair_gap);
             }
         }
+        let splits = (0..extra_keys.len())
+            .map(|i| {
+                let OverlayPlacement::SplitKey { half, .. } = placement(i) else {
+                    return None;
+                };
+                resolved_slot(i).map(|idx| (idx, *half))
+            })
+            .collect();
         let height = thumb + thumb_h - y;
         Self {
             keys,
             extra,
+            splits,
             size: (width, height),
         }
     }
@@ -255,8 +271,8 @@ const fn badge_rect(
     }
 }
 
-/// Half of `rect`, split along its height, with `gap` left between the two halves — the same
-/// gap that already separates every other row, so a split key's halves don't touch where
+/// Half of `rect`, split along its height, with `gap` left between the two halves — the gap
+/// between the two keys of a column, so each half is as tall as a finger key and lines up with its row, so a split key's halves don't touch where
 /// nothing else on the panel does.
 fn half_of(rect: Rect, half: Half, gap: f32) -> Rect {
     let h = (rect.h - gap) / 2.0;
@@ -378,7 +394,7 @@ mod tests {
         // instance — the reference for what S-'s own full height would otherwise be.
         let star = keyboard.keys[9];
         let unit = 250.0 / GAP.mul_add(COLUMNS - 1.0, COLUMNS);
-        let gap = unit * GAP;
+        let gap = unit * GAP * PAIR_GAP;
         let half_height = (star.h - gap) / 2.0;
         assert!((badge.x - s.x).abs() < 0.01, "same column as S-");
         assert!((badge.w - s.w).abs() < 0.01, "same width as S-");
@@ -427,10 +443,10 @@ mod tests {
         let top_rect = Keyboard::new(0.0, 0.0, 250.0, &layout, &top).extra[0];
         let bottom_rect = Keyboard::new(0.0, 0.0, 250.0, &layout, &bottom).extra[0];
         let unit = 250.0 / GAP.mul_add(COLUMNS - 1.0, COLUMNS);
-        let gap = unit * GAP;
+        let gap = unit * GAP * PAIR_GAP;
         assert!(
             (bottom_rect.y - (top_rect.bottom() + gap)).abs() < 0.01,
-            "a full gap between the halves, same as any other row: {top_rect:?} {bottom_rect:?}"
+            "the column gap between the halves, like T over K: {top_rect:?} {bottom_rect:?}"
         );
         assert!(!overlaps(&top_rect, &bottom_rect));
     }

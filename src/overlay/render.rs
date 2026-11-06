@@ -13,7 +13,7 @@
 
 use super::geometry::{KeyGroup, Keyboard, Rect};
 use super::glyphs::{self, GlyphCache};
-use crate::config::OverlayConfig;
+use crate::config::{Half, OverlayConfig};
 use crate::steno::layout::Layout;
 use crate::steno::overlay::{LookupMode, LookupView, OverlaySnapshot, TapeEntry, TAPE_CAPACITY};
 use anyhow::Result;
@@ -28,9 +28,11 @@ const PAD_Y: f32 = 14.0;
 const SECTION_GAP: f32 = 20.0;
 /// Outline of an unlit key, logical px
 const OUTLINE: f32 = 1.0;
-/// Radius of a pad's top corners relative to its width. The bottom is fully round, except on
-/// the top-row finger keys (see [`has_square_bottom`]), which are the same as the top.
-const PAD_TOP_ROUND: f32 = 0.2;
+/// Radius of a pad's softened corners relative to its width: a small one, so a key reads as a
+/// pad and not as a pill. The round ends (the bottom of a bottom-row key, a thumb or a tall key)
+/// are not this; they are half the width. A corner that faces another key of the same column
+/// is not rounded at all (see [`has_square_bottom`] and [`has_square_top`]).
+const PAD_TOP_ROUND: f32 = 0.1;
 /// Share of the width inside the padding given to the steno letters; the words get the rest.
 /// The letters are sized to fill this, so a bigger share means bigger steno letters.
 const PAPER_SHARE: f32 = 0.68;
@@ -44,7 +46,7 @@ const WORDS_RATIO: f32 = 1.06;
 /// Line pitch relative to the words' own height
 const LINE_SPACING: f32 = 1.12;
 /// A key's label is this share of the key's width
-const LABEL_RATIO: f32 = 0.56;
+const LABEL_RATIO: f32 = 0.72;
 /// Text size the column widths are measured at; they scale linearly from here
 const PROBE_PX: f32 = 32.0;
 /// The oldest tape lines, at the top of the screen, fade out: this many of them, the topmost
@@ -60,8 +62,8 @@ pub(crate) struct Theme {
     pub outline: [u8; 4],
     pub label: [u8; 4],
     pub label_lit: [u8; 4],
-    /// Lit-key colours by part of the keyboard: left hand green, thumb vowels yellow, right
-    /// hand red, and `*` and `#` light blue
+    /// Lit-key colours by part of the keyboard: left hand amber, thumb vowels blue, right hand
+    /// purple, and `*`, `#` and the join key green (Lapwing Lab's palette)
     pub left: [u8; 4],
     pub vowel: [u8; 4],
     pub right: [u8; 4],
@@ -77,14 +79,14 @@ impl Default for Theme {
     fn default() -> Self {
         Self {
             panel: [10, 12, 16],
-            key: [14, 18, 26, 38],
-            outline: [214, 224, 238, 80],
+            key: [16, 20, 30, 46],
+            outline: [190, 204, 235, 90],
             label: [226, 232, 242, 245],
             label_lit: [8, 12, 16, 255],
-            left: [45, 212, 170, 255],
-            vowel: [232, 226, 150, 255],
-            right: [244, 118, 124, 255],
-            misc: [136, 196, 255, 255],
+            left: [232, 162, 74, 255],
+            vowel: [91, 155, 213, 255],
+            right: [160, 122, 216, 255],
+            misc: [111, 174, 126, 255],
             strokes: [192, 201, 216, 255],
             words: [248, 250, 253, 255],
             unmatched: [255, 120, 120, 255],
@@ -249,28 +251,56 @@ impl Renderer {
             0
         };
 
-        // Steno pads: a squarish top with slightly softened corners, and a fully round
-        // bottom, except on the top-row finger keys, whose bottom matches their top. The `#`
-        // bar is a plain pill. Radii are clamped to fit by `rounded_rect`.
+        // Steno pads: a squarish top with slightly softened corners and a fully round bottom.
+        // Where two keys of a column go together (`T` over `K`) the corners that face each other
+        // are square, so the pair reads as one piece with a seam: a top-row finger key has a
+        // square bottom, a bottom-row one a square top. The `#` bar is a rounded rectangle with
+        // the same soft corners as the pads. Radii are clamped to fit by `rounded_rect`.
+        // A key split in two (`S-` with the join key on its top half) squares the corners where
+        // the halves meet, like the two keys of any other column.
         let key_shapes = keyboard.as_ref().map_or_else(Vec::new, |k| {
+            let soft = k.keys[0].w * PAD_TOP_ROUND;
+            let taken = |slot: usize| {
+                k.splits
+                    .iter()
+                    .flatten()
+                    .find(|(idx, _)| *idx == slot)
+                    .map(|(_, half)| *half)
+            };
             k.keys
                 .iter()
                 .enumerate()
                 .filter_map(|(slot, r)| {
                     if slot == number_slot {
-                        rounded_rect(*r, f32::MAX, f32::MAX)
-                    } else if has_square_bottom(slot) {
-                        rounded_rect(*r, r.w * PAD_TOP_ROUND, r.w * PAD_TOP_ROUND)
-                    } else {
-                        rounded_rect(*r, r.w * PAD_TOP_ROUND, f32::MAX)
+                        return rounded_rect(*r, soft, soft);
                     }
+                    // The extra key took one half, so this slot is the other one
+                    let square_top = has_square_top(slot) || taken(slot) == Some(Half::Top);
+                    let square_bottom = has_square_bottom(slot) || taken(slot) == Some(Half::Bottom);
+                    rounded_rect(
+                        *r,
+                        if square_top { 0.0 } else { soft },
+                        if square_bottom { 0.0 } else { f32::MAX },
+                    )
                 })
                 .collect()
         });
         let extra_shapes = keyboard.as_ref().map_or_else(Vec::new, |k| {
+            let soft = k.keys[0].w * PAD_TOP_ROUND;
             k.extra
                 .iter()
-                .filter_map(|r| rounded_rect(*r, r.w * PAD_TOP_ROUND, r.w * PAD_TOP_ROUND))
+                .zip(&k.splits)
+                .filter_map(|(r, split)| match split {
+                    // The top half of a key: soft on top, square where it meets the bottom half
+                    Some((_, Half::Top)) => rounded_rect(*r, soft, 0.0),
+                    // The bottom half keeps its slot's round end
+                    Some((slot, Half::Bottom)) => rounded_rect(
+                        *r,
+                        0.0,
+                        if has_square_bottom(*slot) { 0.0 } else { f32::MAX },
+                    ),
+                    None => rounded_rect(*r, soft, soft),
+                })
                 .collect()
         });
         let panel = (config.background > 0.0)
@@ -858,10 +888,16 @@ fn stroke(pixmap: &mut PixmapMut, path: &Path, color: [u8; 4], style: &Stroke) {
     pixmap.stroke_path(path, &paint(color), style, Transform::identity(), None);
 }
 
-/// Whether a key's bottom is softened like its top instead of fully round: the top-row finger
-/// keys, `TPH` and `FPLTD`.
+/// Whether a key's bottom is square instead of a round end: the top-row finger keys, `TPH` and
+/// `FPLTD`, which sit on the bottom-row key of their column.
 const fn has_square_bottom(slot: usize) -> bool {
     matches!(slot, 1 | 3 | 5 | 12 | 14 | 16 | 18 | 20)
+}
+
+/// Whether a key's top is square instead of softened: the bottom-row finger keys, `KWR` and
+/// `RBGSZ`, which sit under the top-row key of their column.
+const fn has_square_top(slot: usize) -> bool {
+    matches!(slot, 2 | 4 | 6 | 13 | 15 | 17 | 19 | 21)
 }
 
 /// A rectangle whose top corners have radius `top_radius` and bottom corners `bottom_radius`
@@ -1375,7 +1411,7 @@ mod tests {
             .pixel((t.x + 2.0) as u32, (t.y + t.h / 2.0) as u32)
             .unwrap()
             .demultiply();
-        assert_eq!([pixel.red(), pixel.green(), pixel.blue()], [45, 212, 170]);
+        assert_eq!([pixel.red(), pixel.green(), pixel.blue()], [232, 162, 74]);
     }
 
     #[test]
@@ -1843,7 +1879,7 @@ mod tests {
         // spot is part of the pad; the bottom is fully round, so it is empty
         let top_corner = alpha_at(2.0, t.y + 2.0);
         let bottom_corner = alpha_at(2.0, t.bottom() - 3.0);
-        assert!(top_corner > 0, "top corner is only slightly rounded");
+        assert!(top_corner > 0, "top corner faces the key above, so it is square");
         assert_eq!(bottom_corner, 0, "bottom is a round end");
         assert!(alpha_at(2.0, t.y + t.h / 2.0) > 0, "body of the pad");
     }
@@ -1859,14 +1895,75 @@ mod tests {
             let k = keys[slot];
             pixmap.pixel((k.x + 2.0) as u32, y as u32).unwrap().alpha()
         };
-        // T P H and F P L T D: the bottom corner is part of the pad, as the top corner is
+        // T P H and F P L T D: the bottom corner faces the key below, so it is square
         for slot in [1, 3, 5, 12, 14, 16, 18, 20] {
-            assert!(alpha_at(slot, keys[slot].bottom() - 3.0) > 0, "slot {slot}");
+            assert!(alpha_at(slot, keys[slot].bottom() - 1.0) > 0, "slot {slot}");
         }
         // The rest keep their round ends: K W R, -R -B -G -S -Z, and the tall S and *
         for slot in [0, 2, 4, 6, 9, 13, 15, 17, 19, 21] {
             assert_eq!(alpha_at(slot, keys[slot].bottom() - 3.0), 0, "slot {slot}");
         }
+    }
+
+    #[test]
+    fn corners_that_face_another_key_of_the_column_are_square() {
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let (w, h) = renderer.size();
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        renderer.draw(&OverlaySnapshot::default(), &mut pixmap.as_mut());
+        let keys = renderer.keyboard.as_ref().unwrap().keys;
+        let alpha_at = |slot: usize, y: f32| {
+            let k = keys[slot];
+            pixmap.pixel((k.x + 1.0) as u32, y as u32).unwrap().alpha()
+        };
+        // K W R and -R -B -G -S -Z: the top corner is square, right up to the pad's own edge
+        for slot in [2, 4, 6, 13, 15, 17, 19, 21] {
+            assert!(alpha_at(slot, keys[slot].y + 1.0) > 0, "top of slot {slot}");
+        }
+        // The top of T, S and the star is still softened, so the corner pixel is mostly empty
+        for slot in [0, 1, 9] {
+            assert!(alpha_at(slot, keys[slot].y) < 128, "top of slot {slot}");
+        }
+    }
+
+    #[test]
+    fn a_split_key_squares_the_corners_where_its_two_halves_meet() {
+        use crate::config::OverlayPlacement;
+        let mut config = OverlayConfig::default();
+        config.overlay_overrides.insert(
+            "+".to_string(),
+            OverlayPlacement::SplitKey {
+                slot: "S-".to_string(),
+                half: Half::Top,
+            },
+        );
+        let mut renderer =
+            Renderer::with_layout(&config, 1, 900, test_layout_with_join()).unwrap();
+        let (w, h) = renderer.size();
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        renderer.draw(&OverlaySnapshot::default(), &mut pixmap.as_mut());
+        let kb = renderer.keyboard.as_ref().unwrap();
+        let (join, s) = (kb.extra[0], kb.keys[0]);
+        let alpha_at = |x: f32, y: f32| pixmap.pixel(x as u32, y as u32).unwrap().alpha();
+        // The join key's bottom and S-'s top face each other, so both are square there
+        assert!(alpha_at(join.x + 1.0, join.bottom() - 1.0) > 0, "join bottom");
+        assert!(alpha_at(s.x + 1.0, s.y + 1.0) > 0, "S- top");
+        // ...while the join key's top and S-'s bottom keep their own shapes
+        assert!(alpha_at(join.x + 1.0, join.y) < 128, "join top is softened");
+        assert_eq!(alpha_at(s.x + 1.0, s.bottom() - 3.0), 0, "S- bottom is a round end");
+    }
+
+    #[test]
+    fn the_number_bar_is_a_rounded_rectangle_not_a_pill() {
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let (w, h) = renderer.size();
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        renderer.draw(&OverlaySnapshot::default(), &mut pixmap.as_mut());
+        let bar = renderer.keyboard.as_ref().unwrap().keys[22];
+        let alpha_at = |dx: f32, y: f32| pixmap.pixel((bar.x + dx) as u32, y as u32).unwrap().alpha();
+        // A pill would have no pad at the left edge a few pixels in from the top and bottom
+        assert!(alpha_at(1.0, bar.y + bar.h / 2.0) > 0, "middle of the end");
+        assert!(alpha_at(3.0, bar.y + 3.0) > 0, "the corner is only softened");
     }
 
     #[test]
@@ -2002,8 +2099,8 @@ mod tests {
             pixel.alpha()
         );
         assert!(
-            pixel.green() > pixel.red(),
-            "accent colour, not the unlit key"
+            pixel.red() > pixel.blue(),
+            "the left hand's amber accent, not the unlit key"
         );
 
         // Closing the lookup brings the tape back exactly as it was
