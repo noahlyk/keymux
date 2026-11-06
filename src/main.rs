@@ -170,13 +170,13 @@ fn main() -> Result<()> {
                     )?;
                 }
                 cli::StenoAction::Lookup { query } => {
-                    keymux::steno::commands::lookup(config_dir, query);
+                    keymux::steno::commands::lookup(&config_path, config_dir, query);
                 }
                 cli::StenoAction::Stroke { stroke } => {
-                    keymux::steno::commands::show_stroke(config_dir, stroke)?;
+                    keymux::steno::commands::show_stroke(&config_path, config_dir, stroke)?;
                 }
                 cli::StenoAction::Add { stroke, text } => {
-                    keymux::steno::commands::add(config_dir, stroke, text)?;
+                    keymux::steno::commands::add(&config_path, config_dir, stroke, text)?;
                 }
                 cli::StenoAction::Tape { follow, lines } => {
                     let (uid, _) = keymux::get_actual_user_uid();

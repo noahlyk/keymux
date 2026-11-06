@@ -292,8 +292,10 @@ keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches 
   (`reverse::classify_with`), the rows (`Layout::render_strokes`, so `ED/+-D`, not `ED/-D`), and
   the `hint`/`strokes` bits. The join key is a stroke bit after the number key, so the overlay,
   which has its own copy of the layout, lights it on the stroke that carries it (`+-D`), on the
-  top half of `S-` when placed there by `overlay_overrides`. Only the CLI `keymux steno lookup`
-  still uses the plain layout (`Layout::plover()`; `reverse::classify`/`display` are that default).
+  top half of `S-` when placed there by `overlay_overrides`. The CLI (`keymux steno lookup`,
+  `stroke`, `keys`, `add`) builds the same layout from the config's steno layer
+  (`commands::configured_stroke_layout`); only with no config or no `extra_keys` is it the plain
+  `Layout::plover()` (`reverse::classify`/`display` are that default).
 - **Closing.** Esc/Enter, or leaving the steno layer (the hub clears it on a layer change, and
   the engine on re-entry), so a lookup can never be left eating keys.
 - **Needs the overlay.** The query and results are only drawn there, so without

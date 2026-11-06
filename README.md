@@ -692,8 +692,9 @@ already has it as `PHRUP` and `PHR*UP`, and you can add your own to any dictiona
   lookup: `ED/+-D` is shown with its `+`, the join key's badge (the top half of `S-`) lights on the
   `+-D` stroke, and typing `ED/+-D` or just `+-D` (in capitals, no lowercase) resolves it forward.
   The lookup reads and writes notation in the steno layer's own layout (its `extra_keys`).
-  `keymux steno lookup` on the command line reads the plain 23-key layout only, so it cannot
-  take a `+` yet.
+  The command line does the same: `keymux steno lookup`, `stroke`, `keys` and `add` read your
+  config's steno layer `extra_keys` too, so `keymux steno lookup "ED/+-D"` parses and prints the
+  `+` exactly as the daemon does (with no config or no `extra_keys`, the plain 23 keys).
 - Backspace edits the query, Shift capitalizes (lookups are case-sensitive), and **Esc or
   Enter** closes it, including a key you remapped to either. You're straight back in steno,
   mid-sentence.

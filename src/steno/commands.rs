@@ -3,7 +3,7 @@
 use super::dict::Dictionary;
 use super::formatter::{leaves_attached, plain_text};
 use super::layout::{
-    build_key_map, extra_keys, parse_stroke, preset, render_stroke, without_extra_keys, Layout,
+    build_key_map, extra_keys, parse_stroke, preset, without_extra_keys, Layout,
 };
 use super::numbers::number_text;
 use super::plugin::Chain;
@@ -22,28 +22,38 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::Duration;
 
-/// Every dictionary a layer would use with the default config.
+/// The stroke layout the real config's steno layer builds: the standard 23 keys plus that
+/// layer's own `extra_keys` (`config.ron`'s `StenoConfig`), exactly as the daemon builds it
+/// ([`Layout::plover_with`]). Falls back to [`Layout::plover`] with no readable config, no
+/// steno layer, or `extra_keys` that don't build a layout (`keymux check` reports those).
 ///
-/// Always [`Layout::plover`]: these CLI tools read a bare directory, not a real config, so a
-/// theory's own `extra_keys` (`config.ron`'s `StenoConfig`) aren't known here. A dictionary
-/// entry using one won't parse through this path - only the daemon, which does have the real
-/// config, resolves those.
+/// Every command that parses or prints stroke notation goes through this, so an outline with
+/// an extra key (`ED/+-D`) reads and prints the same here as in the daemon.
 #[must_use]
-fn load_dictionary(config_dir: &Path) -> Dictionary {
+fn configured_stroke_layout(config_path: &Path) -> Layout {
+    configured_steno(config_path)
+        .and_then(|(_, _, extra)| Layout::plover_with(&extra).ok())
+        .unwrap_or_else(Layout::plover)
+}
+
+/// Every dictionary a layer would use with the default config, parsed in `layout` (see
+/// [`configured_stroke_layout`]).
+#[must_use]
+fn load_dictionary(config_dir: &Path, layout: &Layout) -> Dictionary {
     let cache = cache_dir(config_dir);
     let files = expand(&default_dictionaries(config_dir), &cache);
-    Dictionary::load_cached(&files, &cache, &Layout::plover())
+    Dictionary::load_cached(&files, &cache, layout)
 }
 
 /// The same files as [`load_dictionary`], with any `.rs` plugin among them kept in the chain
 /// instead of skipped: for a forward lookup (stroke to text), where a plugin can answer.
 ///
-/// [`Layout::plover`] only - see [`load_dictionary`].
+/// Parsed in `layout`, like [`load_dictionary`].
 #[must_use]
-fn load_chain(config_dir: &Path) -> Chain {
+fn load_chain(config_dir: &Path, layout: &Layout) -> Chain {
     let cache = cache_dir(config_dir);
     let files = expand(&default_dictionaries(config_dir), &cache);
-    Chain::load_cached(&files, &cache, &Layout::plover())
+    Chain::load_cached(&files, &cache, layout)
 }
 
 /// The one lookup, forward or backward.
@@ -53,19 +63,22 @@ fn load_chain(config_dir: &Path) -> Chain {
 /// text to find the stroke(s) for, a single word or a whole phrase, falling back to
 /// fingerspelling (marked in quotes) for a word with no entry. See [`super::reverse`] for the
 /// engine both this and the live overlay lookup share.
-pub fn lookup(config_dir: &Path, query: &str) {
-    match super::reverse::classify(query) {
-        super::reverse::Query::Stroke(strokes) => print_forward(config_dir, &strokes),
-        super::reverse::Query::Text(phrase) => print_reverse(config_dir, &phrase),
+pub fn lookup(config_path: &Path, config_dir: &Path, query: &str) {
+    let layout = configured_stroke_layout(config_path);
+    match super::reverse::classify_with(&layout, query) {
+        super::reverse::Query::Stroke(strokes) => {
+            print_forward(config_dir, &layout, &strokes);
+        }
+        super::reverse::Query::Text(phrase) => print_reverse(config_dir, &layout, &phrase),
     }
 }
 
-fn print_forward(config_dir: &Path, strokes: &[u32]) {
-    let dict = load_chain(config_dir);
+fn print_forward(config_dir: &Path, layout: &Layout, strokes: &[u32]) {
+    let dict = load_chain(config_dir, layout);
     if let Some(translation) = dict.lookup(strokes) {
         println!(
             "{}  ->  {:?}",
-            format_strokes(strokes),
+            format_strokes(layout, strokes),
             plain_text(&translation).unwrap_or(translation)
         );
     } else if let Some(digits) = strokes
@@ -75,26 +88,26 @@ fn print_forward(config_dir: &Path, strokes: &[u32]) {
     {
         println!(
             "{}  ->  {digits:?} (number stroke)",
-            format_strokes(strokes)
+            format_strokes(layout, strokes)
         );
     } else {
-        println!("{} has no translation", format_strokes(strokes));
+        println!("{} has no translation", format_strokes(layout, strokes));
     }
 }
 
-fn print_reverse(config_dir: &Path, phrase: &str) {
+fn print_reverse(config_dir: &Path, layout: &Layout, phrase: &str) {
     if phrase.is_empty() {
         println!("Nothing to look up");
         return;
     }
-    let dict = load_dictionary(config_dir);
+    let dict = load_dictionary(config_dir, layout);
     let base = Translator::new(dict.clone());
     let segments = super::reverse::reverse_phrase(&base, &dict, phrase);
     if segments.iter().all(Option::is_none) {
         println!("No stroke for \"{phrase}\"");
         return;
     }
-    let (words, strokes) = super::reverse::display(&segments);
+    let (words, strokes) = super::reverse::display_with(layout, &segments);
     println!("{words}  ->  {strokes}");
     if segments
         .iter()
@@ -108,9 +121,10 @@ fn print_reverse(config_dir: &Path, phrase: &str) {
 ///
 /// Kept as an explicit alias of what `lookup` does automatically for all-caps input, since
 /// `keymux steno stroke` is its own documented, scriptable command.
-pub fn show_stroke(config_dir: &Path, text: &str) -> Result<()> {
-    let strokes = parse_strokes(text)?;
-    print_forward(config_dir, &strokes);
+pub fn show_stroke(config_path: &Path, config_dir: &Path, text: &str) -> Result<()> {
+    let layout = configured_stroke_layout(config_path);
+    let strokes = parse_strokes(&layout, text)?;
+    print_forward(config_dir, &layout, &strokes);
     Ok(())
 }
 
@@ -133,16 +147,21 @@ pub fn keys(
         .as_ref()
         .map_or_else(HashMap::new, |(_, o)| o.clone());
     let keys_by_bit = configured_keys_by_bit(preset_name, &overrides)?;
-    let dict = load_dictionary(config_dir);
+    let layout = configured_stroke_layout(config_path);
+    let dict = load_dictionary(config_dir, &layout);
     match text {
-        Some(text) => print_table(&chord_rows(dict, &keys_by_bit, text, fast), show_keys),
-        None => keys_session(dict, &keys_by_bit, show_keys, fast)?,
+        Some(text) => print_table(
+            &chord_rows(&layout, dict, &keys_by_bit, text, fast),
+            show_keys,
+        ),
+        None => keys_session(&layout, dict, &keys_by_bit, show_keys, fast)?,
     }
     Ok(())
 }
 
 /// The interactive `steno keys`: a prompt that shows the table for each line typed.
 fn keys_session(
+    layout: &Layout,
     dict: Dictionary,
     keys_by_bit: &HashMap<u32, KeyCode>,
     show_keys: bool,
@@ -166,7 +185,7 @@ fn keys_session(
             break;
         }
         print_table(
-            &chord_rows(dict.clone(), keys_by_bit, text, fast),
+            &chord_rows(layout, dict.clone(), keys_by_bit, text, fast),
             show_keys,
         );
         println!();
@@ -273,6 +292,13 @@ pub fn layout(config_path: &Path) -> Result<()> {
 /// found. `None` with no config, or no steno layer in it — callers fall back to the built-in
 /// default instead of failing.
 fn configured_layout(config_path: &Path) -> Option<(String, HashMap<String, KeyAction>)> {
+    configured_steno(config_path).map(|(layout, overrides, _)| (layout, overrides))
+}
+
+/// [`configured_layout`] plus that same layer's `extra_keys`.
+fn configured_steno(
+    config_path: &Path,
+) -> Option<(String, HashMap<String, KeyAction>, Vec<char>)> {
     let config = crate::config::Config::load_or_hint(config_path).ok()?;
     let mut steno_layers: Vec<(&crate::config::Layer, &crate::config::StenoConfig)> = config
         .layers
@@ -287,7 +313,11 @@ fn configured_layout(config_path: &Path) -> Option<(String, HashMap<String, KeyA
         .iter()
         .find(|(layer, _)| layer.0 == "steno")
         .or_else(|| steno_layers.first())?;
-    Some((chosen.layout.clone(), chosen.layout_overrides.clone()))
+    Some((
+        chosen.layout.clone(),
+        chosen.layout_overrides.clone(),
+        chosen.extra_keys.clone(),
+    ))
 }
 
 /// The physical key for each stroke key on `preset_name`, with `overrides` applied, keyed by
@@ -328,13 +358,14 @@ const SEARCH_BUDGET: usize = 20_000;
 /// when no outline types it.
 #[must_use]
 fn chord_rows(
+    layout: &Layout,
     dict: Dictionary,
     keys_by_bit: &HashMap<u32, KeyCode>,
     text: &str,
     fast: bool,
 ) -> Vec<ChordRow> {
     if !fast {
-        return all_outline_rows(&dict, keys_by_bit, text);
+        return all_outline_rows(layout, &dict, keys_by_bit, text);
     }
     let spans = word_spans(text);
     let words: Vec<&str> = spans
@@ -407,7 +438,7 @@ fn chord_rows(
         };
         rows.push(ChordRow {
             word: (*word).to_string(),
-            outline: format_strokes(&strokes),
+            outline: format_strokes(layout, &strokes),
             keys: keys_text(&strokes, keys_by_bit),
         });
     }
@@ -417,6 +448,7 @@ fn chord_rows(
 /// Every outline of each word, fewest strokes first. A word with no entry gets its shortest
 /// outline, or "no stroke". Only the first row of a word carries the word.
 fn all_outline_rows(
+    layout: &Layout,
     dict: &Dictionary,
     keys_by_bit: &HashMap<u32, KeyCode>,
     text: &str,
@@ -449,7 +481,7 @@ fn all_outline_rows(
                 } else {
                     String::new()
                 },
-                outline: format_strokes(strokes),
+                outline: format_strokes(layout, strokes),
                 keys: keys_text(strokes, keys_by_bit),
             });
         }
@@ -731,9 +763,10 @@ fn print_table(rows: &[ChordRow], show_keys: bool) {
 }
 
 /// Add or replace a translation in your own dictionary, which comes before every other one.
-pub fn add(config_dir: &Path, stroke: &str, text: &str) -> Result<()> {
-    let strokes = parse_strokes(stroke)?;
-    let key = format_strokes(&strokes);
+pub fn add(config_path: &Path, config_dir: &Path, stroke: &str, text: &str) -> Result<()> {
+    let layout = configured_stroke_layout(config_path);
+    let strokes = parse_strokes(&layout, stroke)?;
+    let key = format_strokes(&layout, &strokes);
 
     prepare_dir(config_dir);
     let dir = steno_dir(config_dir);
@@ -827,34 +860,31 @@ pub fn tail_tape(home: &Path, lines: usize, follow: bool) -> Result<()> {
 }
 
 /// Parse `KPA/TKAOEU` into its stroke bitmasks.
-fn parse_strokes(text: &str) -> Result<Vec<u32>> {
+fn parse_strokes(layout: &Layout, text: &str) -> Result<Vec<u32>> {
     text.split('/')
-        .map(|part| parse_stroke(part).with_context(|| format!("\"{part}\" is not a steno stroke")))
+        .map(|part| layout.parse_stroke(part).with_context(|| format!("\"{part}\" is not a steno stroke")))
         .collect()
 }
 
-fn format_strokes(strokes: &[u32]) -> String {
-    strokes
-        .iter()
-        .map(|&stroke| render_stroke(stroke))
-        .collect::<Vec<_>>()
-        .join("/")
+fn format_strokes(layout: &Layout, strokes: &[u32]) -> String {
+    layout.render_strokes(strokes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::KeyAction;
+    use crate::steno::layout::render_stroke;
 
     #[test]
     fn strokes_round_trip_through_their_text() {
-        let strokes = parse_strokes("KPA/TKAOEU").unwrap();
-        assert_eq!(format_strokes(&strokes), "KPA/TKAOEU");
+        let strokes = parse_strokes(&Layout::plover(), "KPA/TKAOEU").unwrap();
+        assert_eq!(format_strokes(&Layout::plover(), &strokes), "KPA/TKAOEU");
     }
 
     #[test]
     fn invalid_strokes_are_rejected() {
-        assert!(parse_strokes("not a stroke").is_err());
+        assert!(parse_strokes(&Layout::plover(), "not a stroke").is_err());
     }
 
     fn qwerty_keys_by_bit() -> HashMap<u32, KeyCode> {
@@ -960,7 +990,7 @@ mod tests {
 
     #[test]
     fn one_stroke_word_shows_its_outline_and_keys() {
-        let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "the", false);
+        let rows = chord_rows(&Layout::plover(), sample_dict(), &qwerty_keys_by_bit(), "the", false);
         assert_eq!(
             rows,
             vec![ChordRow {
@@ -980,7 +1010,7 @@ mod tests {
             &Layout::plover(),
         )
         .unwrap();
-        let rows = chord_rows(dict, &qwerty_keys_by_bit(), "out with", true);
+        let rows = chord_rows(&Layout::plover(), dict, &qwerty_keys_by_bit(), "out with", true);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].outline, "A");
         assert_eq!(rows[1].outline, "W");
@@ -994,14 +1024,14 @@ mod tests {
             &Layout::plover(),
         )
         .unwrap();
-        let rows = chord_rows(dict, &qwerty_keys_by_bit(), "out zzyzx with", true);
+        let rows = chord_rows(&Layout::plover(), dict, &qwerty_keys_by_bit(), "out zzyzx with", true);
         let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
         assert_eq!(outlines, ["A", "no stroke", "W"]);
     }
 
     #[test]
     fn quick_breaks_down_into_its_sounds() {
-        let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "quick", false);
+        let rows = chord_rows(&Layout::plover(), sample_dict(), &qwerty_keys_by_bit(), "quick", false);
         assert_eq!(rows[0].outline, "KWEUG");
         // The default preset has no combined keys, so -E and -U each press their own key
         assert_eq!(rows[0].keys, "SDNML");
@@ -1044,7 +1074,7 @@ mod tests {
     #[test]
     fn fast_shows_only_the_fewest_strokes() {
         // The one-stroke form beats the two-stroke "jump" + "ed" form
-        let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "jumped", true);
+        let rows = chord_rows(&Layout::plover(), sample_dict(), &qwerty_keys_by_bit(), "jumped", true);
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].outline,
@@ -1054,7 +1084,7 @@ mod tests {
 
     #[test]
     fn by_default_every_outline_of_a_word_is_listed() {
-        let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "jumped", false);
+        let rows = chord_rows(&Layout::plover(), sample_dict(), &qwerty_keys_by_bit(), "jumped", false);
         let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
         assert_eq!(
             outlines,
@@ -1077,7 +1107,7 @@ mod tests {
             &Layout::plover(),
         )
         .unwrap();
-        let rows = chord_rows(dict, &qwerty_keys_by_bit(), "be", false);
+        let rows = chord_rows(&Layout::plover(), dict, &qwerty_keys_by_bit(), "be", false);
         let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
         assert_eq!(outlines, ["-B"]);
     }
@@ -1091,7 +1121,7 @@ mod tests {
             &Layout::plover(),
         )
         .unwrap();
-        let rows = chord_rows(dict, &qwerty_keys_by_bit(), "under", false);
+        let rows = chord_rows(&Layout::plover(), dict, &qwerty_keys_by_bit(), "under", false);
         let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
         assert_eq!(outlines, ["UPBD"]);
     }
@@ -1106,7 +1136,7 @@ mod tests {
             &Layout::plover(),
         )
         .unwrap();
-        let rows = chord_rows(dict, &qwerty_keys_by_bit(), "under your skin", false);
+        let rows = chord_rows(&Layout::plover(), dict, &qwerty_keys_by_bit(), "under your skin", false);
         let outlines: Vec<&str> = rows.iter().map(|row| row.outline.as_str()).collect();
         assert!(!outlines.contains(&"UPB/TKER"));
         assert_eq!(outlines.iter().filter(|&&o| o == "UPBD").count(), 1);
@@ -1130,7 +1160,7 @@ mod tests {
 
     #[test]
     fn unknown_word_gets_a_no_stroke_row() {
-        let rows = chord_rows(sample_dict(), &qwerty_keys_by_bit(), "zzyzx", false);
+        let rows = chord_rows(&Layout::plover(), sample_dict(), &qwerty_keys_by_bit(), "zzyzx", false);
         assert_eq!(rows[0].outline, "no stroke");
         assert!(rows[0].keys.is_empty());
     }
@@ -1140,7 +1170,7 @@ mod tests {
         let mut dict = Dictionary::default();
         dict.merge_json(r#"{"-T": "the", "TPH": "{&n}", "SRA": "{&v}", "EU": "{&i}", "PL": "{&m}", "SREUPL": "vim"}"#, &Layout::plover())
             .unwrap();
-        let rows = chord_rows(dict, &qwerty_keys_by_bit(), "nvim vim", false);
+        let rows = chord_rows(&Layout::plover(), dict, &qwerty_keys_by_bit(), "nvim vim", false);
         assert_eq!(rows[0].word, "nvim");
         assert_eq!(rows[0].outline, "TPH/SRA/EU/P-L");
         assert_eq!(rows[1].outline, "SREUPL");
@@ -1151,7 +1181,7 @@ mod tests {
         let mut dict = Dictionary::default();
         dict.merge_json(r#"{"TPH": "{&n}"}"#, &Layout::plover())
             .unwrap();
-        let rows = chord_rows(dict, &qwerty_keys_by_bit(), "n1", false);
+        let rows = chord_rows(&Layout::plover(), dict, &qwerty_keys_by_bit(), "n1", false);
         assert_eq!(rows[0].outline, "no stroke");
     }
 
@@ -1160,7 +1190,7 @@ mod tests {
         let mut dict = sample_dict();
         dict.merge_json(r#"{"TPHOU": "now", "KW-B": ","}"#, &Layout::plover())
             .unwrap();
-        let rows = chord_rows(dict, &qwerty_keys_by_bit(), "now, the", false);
+        let rows = chord_rows(&Layout::plover(), dict, &qwerty_keys_by_bit(), "now, the", false);
         let words: Vec<&str> = rows.iter().map(|row| row.word.as_str()).collect();
         assert_eq!(words, ["now", ",", "the"]);
         assert_eq!(
@@ -1226,7 +1256,7 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         std::fs::write(steno.join("01-dict.json"), r#"{"KAT": "cat"}"#).unwrap();
         std::fs::write(steno.join("02-doubler.rs"), DOUBLER_PLUGIN).unwrap();
 
-        let chain = load_chain(&config_dir);
+        let chain = load_chain(&config_dir, &Layout::plover());
         assert_eq!(
             chain.lookup(&[Layout::plover().parse_stroke("KAT").unwrap()]),
             Some("cat".to_string()),
@@ -1239,5 +1269,61 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         );
 
         std::fs::remove_dir_all(&config_dir).ok();
+    }
+
+    const EXTRA_KEY_CONFIG: &str = r#"(
+        layers: { "steno": (kind: Steno((extra_keys: ['+']))) },
+    )"#;
+
+    #[test]
+    fn the_cli_layout_carries_the_steno_layers_own_extra_keys() {
+        let path = config_file("cli_extra_keys", EXTRA_KEY_CONFIG);
+        let layout = configured_stroke_layout(&path);
+        let strokes = parse_strokes(&layout, "ED/+-D").unwrap();
+        assert_eq!(strokes.len(), 2);
+        assert_eq!(format_strokes(&layout, &strokes), "ED/+-D");
+        // The same text is not a stroke in the plain layout
+        assert!(parse_strokes(&Layout::plover(), "ED/+-D").is_err());
+    }
+
+    #[test]
+    fn the_cli_layout_is_the_plain_23_keys_without_extra_keys_or_a_steno_layer() {
+        let none = std::env::temp_dir().join("keymux-commands-test-no-such-config.ron");
+        let _ = std::fs::remove_file(&none);
+        let plain = config_file("cli_plain", r#"(layers: { "steno": (kind: Steno(())) })"#);
+        for path in [none, plain] {
+            let layout = configured_stroke_layout(&path);
+            assert!(layout.extra_keys().is_empty());
+            let strokes = parse_strokes(&layout, "KPA/TKAOEU").unwrap();
+            assert_eq!(format_strokes(&layout, &strokes), "KPA/TKAOEU");
+        }
+    }
+
+    #[test]
+    fn an_outline_with_an_extra_key_loads_looks_up_and_prints_in_the_cli_path() {
+        let path = config_file("cli_extra_lookup", EXTRA_KEY_CONFIG);
+        let config_dir = path.parent().unwrap().to_path_buf();
+        let steno = config_dir.join("steno");
+        std::fs::create_dir_all(&steno).unwrap();
+        std::fs::write(steno.join("01-dict.json"), r#"{"-T": "the", "ED/+-D": "edited"}"#).unwrap();
+        let layout = configured_stroke_layout(&path);
+
+        // Forward: the chain parses the entry and finds it by the same notation
+        let strokes = match crate::steno::reverse::classify_with(&layout, "ED/+-D") {
+            crate::steno::reverse::Query::Stroke(strokes) => strokes,
+            crate::steno::reverse::Query::Text(text) => panic!("not read as a stroke: {text}"),
+        };
+        let chain = load_chain(&config_dir, &layout);
+        assert_eq!(chain.lookup(&strokes), Some("edited".to_string()));
+
+        // Backward: the dictionary finds the word, and the outline prints with its +
+        let dict = load_dictionary(&config_dir, &layout);
+        let rows = chord_rows(&layout, dict, &HashMap::new(), "edited", false);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outline, "ED/+-D");
+
+        // Through a plain layout the entry is unreadable, as before
+        let plain = load_dictionary(&config_dir, &Layout::plover());
+        assert!(plain.strokes_for("edited").is_empty());
     }
 }
