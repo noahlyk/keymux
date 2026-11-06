@@ -113,6 +113,36 @@ struct Column {
     width: f32,
 }
 
+/// One key of a tape stroke, as drawn: its letter, its colour, and the pair it belongs to (keys one
+/// finger plays together share a number and are underlined as one).
+struct RunKey {
+    ch: char,
+    color: [u8; 4],
+    pair: Option<u8>,
+}
+
+/// The pair number of an extra key sitting on a standard key whose own pair is unknown
+const PAIR_SPLIT: u8 = 100;
+
+/// The pair a standard slot belongs to: `T K`, `P W`, `H R`, `A O`, `E U`, then the right hand's
+/// `F R`, `P B`, `L G`, `T S`, `D Z`. `S` takes the pair of an extra key split over it (the join key).
+const fn pair_of(slot: usize) -> Option<u8> {
+    match slot {
+        0 => Some(PAIR_SPLIT),
+        1 | 2 => Some(0),
+        3 | 4 => Some(1),
+        5 | 6 => Some(2),
+        7 | 8 => Some(3),
+        10 | 11 => Some(4),
+        12 | 13 => Some(5),
+        14 | 15 => Some(6),
+        16 | 17 => Some(7),
+        18 | 19 => Some(8),
+        20 | 21 => Some(9),
+        _ => None,
+    }
+}
+
 pub struct Renderer {
     config: OverlayConfig,
     /// Which keys exist and what they're called. [`Layout::plover`] for now - threading a real
@@ -120,6 +150,8 @@ pub struct Renderer {
     layout: Layout,
     theme: Theme,
     scale: f32,
+    /// The steno letters' pixel size
+    stroke_px: f32,
     /// Buffer size in physical pixels
     size: (u32, u32),
     /// Only when `background` is above zero
@@ -133,10 +165,6 @@ pub struct Renderer {
     tape_bottom: f32,
     line_height: f32,
     tape_lines: usize,
-    /// One per [`Layout::extra_keys`] entry, same order, drawn before the standard columns below —
-    /// a stroke's extra keys read first on the tape, the same way they get their own badge
-    /// row above the keyboard rather than a guessed spot among the 23 standard keys.
-    extra_columns: Vec<Column>,
     /// One per tape slot in [`Layout::paper_order`] order
     columns: Vec<Column>,
     /// Left edge of the steno letters, and where the words start, physical px
@@ -224,11 +252,8 @@ impl Renderer {
         let words = GlyphCache::new(bold, words_px);
 
         let mut x = 0.0;
-        let mut extra_columns = Vec::with_capacity(extra_labels.len());
         for &ch in &extra_labels {
-            let width = strokes.get(ch).advance * (1.0 + SLOT_GAP);
-            extra_columns.push(Column { x, width });
-            x += width;
+            x = strokes.get(ch).advance.mul_add(1.0 + SLOT_GAP, x);
         }
         let mut columns = Vec::with_capacity(paper_order.len());
         for &slot in &paper_order {
@@ -323,6 +348,7 @@ impl Renderer {
             layout,
             theme: Theme::default(),
             scale,
+            stroke_px,
             size: (width as u32, height as u32),
             panel,
             keyboard,
@@ -331,7 +357,6 @@ impl Renderer {
             tape_bottom,
             line_height,
             tape_lines,
-            extra_columns,
             columns,
             paper_left: pad_x,
             words_left,
@@ -749,6 +774,82 @@ impl Renderer {
         }
     }
 
+    /// The keys of a tape stroke as a run to read, not a grid: extra keys first, then the standard
+    /// keys in stroke order, each in its part of the keyboard's colour, with a `-` only where the
+    /// right hand could not otherwise be told from the left. Keys one finger plays together carry
+    /// the same pair number so they can be underlined as one.
+    fn tape_run(&self, entry: &TapeEntry) -> Vec<RunKey> {
+        let mut run = Vec::new();
+        let splits = self.keyboard.as_ref().map(|k| &k.splits);
+        for index in 0..self.layout.extra_keys().len() {
+            if entry.stroke & Keyboard::extra_bit(&self.layout, index) == 0 {
+                continue;
+            }
+            // An extra key sharing a slot with a standard key (the join key over `S-`) is that
+            // slot's pair
+            let pair = splits
+                .and_then(|s| s.get(index).copied().flatten())
+                .map(|(slot, _)| pair_of(slot).unwrap_or(PAIR_SPLIT));
+            run.push(RunKey {
+                ch: Keyboard::extra_label(&self.layout, index),
+                color: self.theme.accent(KeyGroup::Misc),
+                pair,
+            });
+        }
+        let number_slot = self.layout.number_slot();
+        let present: Vec<usize> = (0..number_slot)
+            .filter(|slot| entry.stroke & (1 << slot) != 0)
+            .collect();
+        let dash = self.tape_needs_dash(&present);
+        let mut dashed = false;
+        for slot in std::iter::once(number_slot).chain(0..number_slot) {
+            if entry.stroke & (1 << slot) == 0 {
+                continue;
+            }
+            if dash && !dashed && (12..number_slot).contains(&slot) {
+                run.push(RunKey {
+                    ch: '-',
+                    color: self.theme.strokes,
+                    pair: None,
+                });
+                dashed = true;
+            }
+            run.push(RunKey {
+                ch: Keyboard::label(&self.layout, slot),
+                color: self.theme.accent(Keyboard::group(slot)),
+                pair: pair_of(slot),
+            });
+        }
+        run
+    }
+
+    /// Whether the stroke needs a `-`: no vowel or star, some right-hand key, and the bare letters
+    /// in steno order would read as other keys (`-T` is a left `T`, `-PB` a left `P` then `B`;
+    /// `-D` and `-F` are only ever right-hand keys).
+    fn tape_needs_dash(&self, present: &[usize]) -> bool {
+        let number_slot = self.layout.number_slot();
+        if present.iter().any(|slot| (7..=11).contains(slot)) {
+            return false;
+        }
+        if !present.iter().any(|slot| (12..number_slot).contains(slot)) {
+            return false;
+        }
+        let mut next = 0;
+        for &slot in present {
+            let letter = Keyboard::label(&self.layout, slot);
+            let Some(read) = (next..number_slot)
+                .find(|&candidate| Keyboard::label(&self.layout, candidate) == letter)
+            else {
+                return true;
+            };
+            if read != slot {
+                return true;
+            }
+            next = read + 1;
+        }
+        false
+    }
+
     fn draw_tape_line(
         &mut self,
         pixmap: &mut PixmapMut,
@@ -756,41 +857,55 @@ impl Renderer {
         baseline: f32,
         fade: f32,
     ) {
-        // Every slot has its own column, as wide as its letter, so strokes line up from line
-        // to line and nothing overlaps. Extra keys (the join key among them) read first,
-        // ahead of the 23 standard slots.
-        for (index, column) in self.extra_columns.iter().enumerate() {
-            if entry.stroke & Keyboard::extra_bit(&self.layout, index) == 0 {
-                continue;
+        // The stroke is a run of coloured letters, set flush against the words it spelt so the
+        // eye goes straight from one to the other; a long run is squeezed to fit the paper
+        // instead of spilling off the left edge. (The paper's own width is unchanged: the
+        // lookup lays its strokes out in it too.)
+        let run = self.tape_run(entry);
+        if !run.is_empty() {
+            let gap = 1.0 + SLOT_GAP;
+            let advances: Vec<f32> = run
+                .iter()
+                .map(|key| self.strokes.get(key.ch).advance * gap)
+                .collect();
+            let total: f32 = advances.iter().sum();
+            let right = self.stroke_px.mul_add(-0.6, self.words_left);
+            let squeeze = ((right - self.paper_left) / total).min(1.0);
+            let mut x = total.mul_add(-squeeze, right);
+            let thickness = (self.stroke_px * 0.09).max(self.scale).round();
+            let underline_y = baseline + (self.stroke_px * 0.12).round();
+            let mut span_start: Option<(f32, u8)> = None;
+            for (i, key) in run.iter().enumerate() {
+                let advance = advances[i] * squeeze;
+                let glyph_advance = self.strokes.get(key.ch).advance;
+                draw_char(
+                    pixmap,
+                    &mut self.strokes,
+                    key.ch,
+                    x + glyph_advance.mul_add(-squeeze, advance) / 2.0,
+                    baseline,
+                    fade_color(key.color, fade),
+                    self.scale,
+                );
+                // Two neighbours with the same pair number are one finger's pair: one line under both
+                let next_same = run.get(i + 1).and_then(|n| n.pair) == key.pair && key.pair.is_some();
+                match (key.pair, span_start) {
+                    (Some(pair), None) if next_same => span_start = Some((x, pair)),
+                    (Some(_), Some((from, _))) if !next_same => {
+                        if let Some(rect) = tiny_skia::Rect::from_xywh(
+                            from,
+                            underline_y,
+                            x + advance - from,
+                            thickness,
+                        ) {
+                            fill(pixmap, &PathBuilder::from_rect(rect), fade_color(key.color, fade));
+                        }
+                        span_start = None;
+                    }
+                    _ => {}
+                }
+                x += advance;
             }
-            let letter = Keyboard::extra_label(&self.layout, index);
-            let advance = self.strokes.get(letter).advance;
-            draw_char(
-                pixmap,
-                &mut self.strokes,
-                letter,
-                self.paper_left + column.x + (column.width - advance) / 2.0,
-                baseline,
-                fade_color(self.theme.strokes, fade),
-                self.scale,
-            );
-        }
-        for (index, &slot) in self.layout.paper_order().iter().enumerate() {
-            if entry.stroke & (1 << slot) == 0 {
-                continue;
-            }
-            let letter = Keyboard::label(&self.layout, slot);
-            let column = self.columns[index];
-            let advance = self.strokes.get(letter).advance;
-            draw_char(
-                pixmap,
-                &mut self.strokes,
-                letter,
-                self.paper_left + column.x + (column.width - advance) / 2.0,
-                baseline,
-                fade_color(self.theme.strokes, fade),
-                self.scale,
-            );
         }
 
         let color = if entry.unmatched {
@@ -1620,29 +1735,7 @@ mod tests {
     }
 
     #[test]
-    fn an_extra_key_has_its_own_tape_column_ahead_of_the_standard_slots() {
-        let layout = test_layout_with_join();
-        let renderer =
-            Renderer::with_layout(&OverlayConfig::default(), 1, 900, layout.clone()).unwrap();
-        assert_eq!(renderer.extra_columns.len(), layout.extra_keys().len());
-        let last_extra = renderer.extra_columns[renderer.extra_columns.len() - 1];
-        // Extra columns come first, so the standard slots start right where they end
-        assert!((last_extra.x + last_extra.width - renderer.columns[0].x).abs() < 0.01);
-        let mut strokes = GlyphCache::new(
-            glyphs::load_font(None, glyphs::BOLD).unwrap(),
-            renderer.strokes.pixel_size(),
-        );
-        for (i, column) in renderer.extra_columns.iter().enumerate() {
-            let letter = Keyboard::extra_label(&layout, i);
-            assert!(
-                strokes.get(letter).advance <= column.width,
-                "{letter:?} is wider than its column"
-            );
-        }
-    }
-
-    #[test]
-    fn an_extra_key_on_a_stroke_is_drawn_on_its_own_tape_column() {
+    fn an_extra_key_on_a_stroke_is_drawn_ahead_of_the_standard_keys() {
         let layout = test_layout_with_join();
         let mut renderer =
             Renderer::with_layout(&OverlayConfig::default(), 1, 900, layout.clone()).unwrap();
@@ -1659,11 +1752,11 @@ mod tests {
         let baseline = 100.0;
         renderer.draw_tape_line(&mut pixmap.as_mut(), &entry, baseline, 1.0);
 
-        // Scan the extra key's whole column for any ink at all: the exact glyph shape of `^`
-        // isn't worth pinning down pixel-by-pixel, but something must be drawn there.
-        let column = renderer.extra_columns[0];
-        let x0 = (renderer.paper_left + column.x).max(0.0) as u32;
-        let x1 = ((renderer.paper_left + column.x + column.width).ceil() as u32).min(w);
+        // The stroke is a run set flush against the words: scan the paper for any ink at all. The
+        // exact glyph shape of `^` isn't worth pinning down pixel-by-pixel, but something must be
+        // drawn there.
+        let x0 = renderer.paper_left.max(0.0) as u32;
+        let x1 = (renderer.words_left.ceil() as u32).min(w);
         let y0 = (baseline - renderer.strokes.pixel_size()).max(0.0) as u32;
         let y1 = (baseline as u32 + 2).min(h);
         let lit = (y0..y1)
@@ -1672,7 +1765,7 @@ mod tests {
             .any(|p| p.alpha() > 0);
         assert!(
             lit,
-            "the extra key's letter should be drawn somewhere in its tape column"
+            "the extra key's letter should be drawn on the paper"
         );
     }
 
@@ -1687,14 +1780,14 @@ mod tests {
         // Geometry of the tape's newest (bottom-most) line, copied out so sampling doesn't
         // need to borrow `renderer` across the mutable `draw` calls below.
         let paper_left = renderer.paper_left;
-        let column = renderer.columns[0];
+        let words_left = renderer.words_left;
         let pixel_size = renderer.strokes.pixel_size();
         let baseline_in_line =
             (renderer.line_height - renderer.words.line_height()) / 2.0 + renderer.words.ascent();
         let baseline = (renderer.tape_bottom - renderer.line_height) + baseline_in_line;
         let sample = |pixmap: &Pixmap| {
-            let x0 = (paper_left + column.x).max(0.0) as u32;
-            let x1 = ((paper_left + column.x + column.width).ceil() as u32).min(w);
+            let x0 = paper_left.max(0.0) as u32;
+            let x1 = (words_left.ceil() as u32).min(w);
             let y0 = (baseline - pixel_size).max(0.0) as u32;
             let y1 = (baseline as u32 + 2).min(h);
             (y0..y1)
@@ -1724,6 +1817,101 @@ mod tests {
             "a key held mid-stroke should draw on the tape's newest line"
         );
     }
+
+    /// The ink colours of a drawn tape line: how many opaque-ish pixels sit near each colour.
+    fn tape_ink(stroke_keys: &[usize], fade: f32) -> [usize; 4] {
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let (w, h) = renderer.size();
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        let entry = TapeEntry {
+            seq: 1,
+            stroke: stroke_keys.iter().fold(0, |bits, slot| bits | (1 << slot)),
+            text: "\"x\"".into(),
+            unmatched: false,
+            repeats: 0,
+        };
+        renderer.draw_tape_line(&mut pixmap.as_mut(), &entry, 100.0, fade);
+        let theme = renderer.theme;
+        let near = |p: tiny_skia::PremultipliedColorU8, c: [u8; 4]| {
+            let p = p.demultiply();
+            p.alpha() > 200
+                && p.red().abs_diff(c[0]) < 40
+                && p.green().abs_diff(c[1]) < 40
+                && p.blue().abs_diff(c[2]) < 40
+        };
+        let mut counts = [0; 4];
+        for py in 0..h {
+            for px in 0..w {
+                let Some(p) = pixmap.pixel(px, py) else { continue };
+                for (i, c) in [theme.left, theme.vowel, theme.right, theme.misc]
+                    .into_iter()
+                    .enumerate()
+                {
+                    if near(p, c) {
+                        counts[i] += 1;
+                    }
+                }
+            }
+        }
+        counts
+    }
+
+    #[test]
+    fn tape_letters_are_coloured_by_hand() {
+        // K- (left), A- (vowel), -T (right), and `*` (misc)
+        let [left, vowel, right, misc] = tape_ink(&[2, 7, 18], 1.0);
+        assert!(left > 10, "the left-hand letter should be amber");
+        assert!(vowel > 10, "the vowel should be blue");
+        assert!(right > 10, "the right-hand letter should be purple");
+        assert!(misc < 4, "no star on this stroke, so next to no green");
+        let [_, _, _, star] = tape_ink(&[9], 1.0);
+        assert!(star > 0, "the star should be green");
+    }
+
+    #[test]
+    fn a_tape_dash_appears_only_where_steno_order_needs_it() {
+        let renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        // -T alone, -S alone, -PB: a bare letter would be read as the left hand
+        assert!(renderer.tape_needs_dash(&[18]));
+        assert!(renderer.tape_needs_dash(&[19]));
+        assert!(renderer.tape_needs_dash(&[14, 15]));
+        // -D, -F, -G are only ever the right hand; KPWR-BG's letters fall in steno order
+        assert!(!renderer.tape_needs_dash(&[20]));
+        assert!(!renderer.tape_needs_dash(&[12]));
+        assert!(!renderer.tape_needs_dash(&[2, 3, 4, 6, 15, 17]));
+        // a vowel or the star separates the hands, and no right hand needs no dash
+        assert!(!renderer.tape_needs_dash(&[1, 7, 18]));
+        assert!(!renderer.tape_needs_dash(&[9, 18]));
+        assert!(!renderer.tape_needs_dash(&[1, 2]));
+    }
+
+    #[test]
+    fn keys_one_finger_plays_are_underlined_on_the_tape() {
+        // Ink below the baseline is only ever an underline (these letters have no descenders)
+        let below = |keys: &[usize]| {
+            let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+            let (w, h) = renderer.size();
+            let mut pixmap = Pixmap::new(w, h).unwrap();
+            let entry = TapeEntry {
+                seq: 1,
+                stroke: keys.iter().fold(0, |bits, slot| bits | (1 << slot)),
+                text: "\"x\"".into(),
+                unmatched: false,
+                repeats: 0,
+            };
+            let baseline = 100.0;
+            renderer.draw_tape_line(&mut pixmap.as_mut(), &entry, baseline, 1.0);
+            let from = baseline as u32 + 2;
+            (from..from + 6)
+                .flat_map(|py| (0..renderer.words_left as u32).map(move |px| (px, py)))
+                .filter_map(|(px, py)| pixmap.pixel(px, py))
+                .filter(|p| p.alpha() > 0)
+                .count()
+        };
+        assert!(below(&[1, 2]) > 0, "T over K go together: underlined");
+        assert!(below(&[1, 3]) == 0, "T and P are different fingers: no underline");
+    }
+
 
     #[test]
     fn each_part_of_the_keyboard_lights_in_its_own_colour() {
