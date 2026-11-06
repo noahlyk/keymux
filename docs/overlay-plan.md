@@ -296,6 +296,15 @@ keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches 
   `stroke`, `keys`, `add`) builds the same layout from the config's steno layer
   (`commands::configured_stroke_layout`); only with no config or no `extra_keys` is it the plain
   `Layout::plover()` (`reverse::classify`/`display` are that default).
+- **Key groups are data.** Which keys one finger plays together (underlined as one on the tape and
+  lookup) is `Layout::key_group(slot)`: an optional group id per key, any number of keys per id.
+  `Layout::plover()` declares today's pairs (`T K`, `P W`, `H R`, `A O`, `E U`, `F R`, `P B`,
+  `L G`, `T S`, `D Z`, and `S` alone) as that data; the config's `key_groups` (key name to id)
+  overrides it per key through `Layout::set_key_group`, applied in `Renderer::with_layout`. An
+  extra key sitting on a `SplitKey` slot inherits that slot's group unless `key_groups` names it.
+  `extra_colors` (extra key's character to `Left`/`Vowel`/`Right`/`Misc`) sets its colour group,
+  `Misc` by default. Nothing in `render.rs` names a particular key or theory. The CLI builds its layout from the
+  config too (`commands::configured_stroke_layout`), so it carries the same group data.
 - **Closing.** Esc/Enter, or leaving the steno layer (the hub clears it on a layer change, and
   the engine on re-entry), so a lookup can never be left eating keys.
 - **Needs the overlay.** The query and results are only drawn there, so without

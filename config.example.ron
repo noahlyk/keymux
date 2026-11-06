@@ -506,6 +506,12 @@
     //     tape_lines: None,   // None shows 8 lines, the oldest fading; Some(20) shows more
     //     font: None,         // None = bundled Atkinson Hyperlegible
     //     layers: [],         // empty = every steno layer
+    //     // Keys one finger plays together, underlined as one on the tape: a number per key
+    //     // name, any number of keys per number. Entries replace that key's group; the
+    //     // defaults are the pairs T K, P W, H R, A O, E U, F R, P B, L G, T S, D Z. An extra
+    //     // key drawn over a standard key (SplitKey) joins that key's group unless named here.
+    //     key_groups: {},     // { "S-": 20, "T-": 20, "K-": 20 } makes S T K a trio
+    //     extra_colors: {},   // an extra key's colour by character: Left, Vowel, Right, Misc (default)
     // ),
     // ============================================================================
 

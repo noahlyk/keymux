@@ -14,7 +14,7 @@
 use super::anim;
 use super::geometry::{KeyGroup, Keyboard, Rect};
 use super::glyphs::{self, GlyphCache};
-use crate::config::{Half, OverlayConfig};
+use crate::config::{Half, KeyColor, OverlayConfig};
 use crate::steno::layout::Layout;
 use crate::steno::overlay::{
     LookupMode, LookupRow, LookupView, OverlaySnapshot, TapeEntry, TAPE_CAPACITY,
@@ -144,7 +144,7 @@ impl Theme {
 struct RunKey {
     ch: char,
     color: [u8; 4],
-    pair: Option<u8>,
+    pair: Option<u32>,
 }
 
 /// One stroke as drawn: its keys in order
@@ -152,27 +152,10 @@ type Run = Vec<RunKey>;
 /// One word's outline: its strokes, divided by a thin rule when drawn
 type Unit = Vec<Run>;
 
-/// The pair number of an extra key sitting on a standard key whose own pair is unknown
-const PAIR_SPLIT: u8 = 100;
-
-/// The pair a standard slot belongs to: `T K`, `P W`, `H R`, `A O`, `E U`, then the right hand's
-/// `F R`, `P B`, `L G`, `T S`, `D Z`. `S` takes the pair of an extra key split over it (the join key).
-const fn pair_of(slot: usize) -> Option<u8> {
-    match slot {
-        0 => Some(PAIR_SPLIT),
-        1 | 2 => Some(0),
-        3 | 4 => Some(1),
-        5 | 6 => Some(2),
-        7 | 8 => Some(3),
-        10 | 11 => Some(4),
-        12 | 13 => Some(5),
-        14 | 15 => Some(6),
-        16 | 17 => Some(7),
-        18 | 19 => Some(8),
-        20 | 21 => Some(9),
-        _ => None,
-    }
-}
+/// The group number given to an extra key drawn over a standard key that has no group of its
+/// own, offset by that key's slot so each such key is a group of its own. The layout's own group
+/// ids are the theory's data, so this is kept clear of anything a sane config would use.
+const SPLIT_GROUP_BASE: u32 = 1_000_000;
 
 pub struct Renderer {
     config: OverlayConfig,
@@ -260,8 +243,15 @@ impl Renderer {
         config: &OverlayConfig,
         scale: u32,
         height: u32,
-        layout: Layout,
+        mut layout: Layout,
     ) -> Result<Self> {
+        // The config's group overrides apply over the layout's own; a bad name is dropped
+        // (`keymux check` warns about it) rather than refusing to draw
+        for (name, group) in &config.key_groups {
+            if let Err(problem) = layout.set_key_group(name, *group) {
+                tracing::warn!("overlay key_groups: {problem}");
+            }
+        }
         let scale = scale.max(1) as f32;
         let bold = glyphs::load_font(config.font.as_deref(), glyphs::BOLD)?;
 
@@ -758,8 +748,8 @@ impl Renderer {
 
         // Keys beyond the standard 23 (currently just the join key): no physical slot of
         // their own, so each gets its own badge, lit the same way a key is.
-        let accent = self.theme.accent(KeyGroup::Misc);
         for (i, shape) in self.extra_shapes.iter().enumerate() {
+            let accent = self.theme.accent(self.extra_group(i));
             let bit = Keyboard::extra_bit(&self.layout, i);
             let label_color = if snapshot.held & bit != 0 {
                 fill(pixmap, shape, accent);
@@ -857,6 +847,17 @@ impl Renderer {
         }
     }
 
+    /// The colour group of the `index`th extra key: what `extra_colors` says, `Misc` otherwise.
+    fn extra_group(&self, index: usize) -> KeyGroup {
+        let name = Keyboard::extra_label(&self.layout, index).to_string();
+        match self.config.extra_colors.get(&name) {
+            None | Some(KeyColor::Misc) => KeyGroup::Misc,
+            Some(KeyColor::Left) => KeyGroup::LeftHand,
+            Some(KeyColor::Vowel) => KeyGroup::Vowel,
+            Some(KeyColor::Right) => KeyGroup::RightHand,
+        }
+    }
+
     /// The keys of a stroke as a run to read, not a grid: extra keys first, then the standard
     /// keys in stroke order, each in its part of the keyboard's colour, with a `-` only where the
     /// right hand could not otherwise be told from the left. Keys one finger plays together carry
@@ -869,14 +870,23 @@ impl Renderer {
             if stroke & Keyboard::extra_bit(&self.layout, index) == 0 {
                 continue;
             }
-            // An extra key sharing a slot with a standard key (the join key over `S-`) is that
-            // slot's pair
-            let pair = splits
-                .and_then(|s| s.get(index).copied().flatten())
-                .map(|(slot, _)| pair_of(slot).unwrap_or(PAIR_SPLIT));
+            // An extra key's own group if the config gave it one; otherwise, one sharing a slot
+            // with a standard key (the join key over `S-`) is in that slot's group
+            let pair = self
+                .layout
+                .key_group(self.layout.extra_start() + index)
+                .or_else(|| {
+                    splits
+                        .and_then(|s| s.get(index).copied().flatten())
+                        .map(|(slot, _)| {
+                            self.layout
+                                .key_group(slot)
+                                .unwrap_or(SPLIT_GROUP_BASE + slot as u32)
+                        })
+                });
             run.push(RunKey {
                 ch: Keyboard::extra_label(&self.layout, index),
-                color: self.theme.accent(KeyGroup::Misc),
+                color: self.theme.accent(self.extra_group(index)),
                 pair,
             });
         }
@@ -901,7 +911,7 @@ impl Renderer {
             run.push(RunKey {
                 ch: Keyboard::label(&self.layout, slot),
                 color: self.theme.accent(Keyboard::group(slot)),
-                pair: pair_of(slot),
+                pair: self.layout.key_group(slot),
             });
         }
         run
@@ -3474,5 +3484,92 @@ mod tests {
         assert_eq!(display_text("\"the\""), "the");
         assert_eq!(display_text("-3 \"the\""), "-3 the");
         assert_eq!(display_text("KC_A KC_B"), "KC_A KC_B");
+    }
+
+    /// The group number of each key in `stroke`'s run, with `-` and ungrouped keys as `None`
+    fn groups_of(renderer: &Renderer, stroke: &str) -> Vec<(char, Option<u32>)> {
+        let bits = renderer.layout.parse_stroke(stroke).unwrap();
+        renderer
+            .stroke_run(bits)
+            .iter()
+            .map(|k| (k.ch, k.pair))
+            .collect()
+    }
+
+    #[test]
+    fn the_default_layout_groups_keys_in_todays_pairs() {
+        let renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let g = groups_of(&renderer, "TKPWAO*EUFRDZ");
+        let group = |ch: char, n: usize| g.iter().filter(|(c, _)| *c == ch).nth(n).unwrap().1;
+        assert_eq!(group('T', 0), group('K', 0));
+        assert_eq!(group('P', 0), group('W', 0));
+        assert_eq!(group('A', 0), group('O', 0));
+        assert_eq!(group('F', 0), group('R', 0));
+        assert_eq!(group('D', 0), group('Z', 0));
+        assert_ne!(group('T', 0), group('P', 0));
+        assert_eq!(group('*', 0), None);
+    }
+
+    #[test]
+    fn config_can_group_keys_as_a_trio() {
+        let mut config = OverlayConfig::default();
+        for name in ["S-", "T-", "K-"] {
+            config.key_groups.insert(name.into(), 50);
+        }
+        let renderer = Renderer::with_layout(&config, 1, 900, Layout::plover()).unwrap();
+        let g = groups_of(&renderer, "STKPW");
+        let groups: Vec<_> = g.iter().map(|(_, p)| *p).collect();
+        assert_eq!(&groups[..3], &[Some(50), Some(50), Some(50)]);
+        // `P W` is untouched
+        assert_eq!(groups[3], groups[4]);
+        assert_ne!(groups[3], Some(50));
+        // A key name that does not exist is ignored, not fatal
+        config.key_groups.insert("nonsense".into(), 1);
+        assert!(Renderer::with_layout(&config, 1, 900, Layout::plover()).is_ok());
+    }
+
+    #[test]
+    fn an_extra_key_inherits_its_slots_group_unless_config_overrides_it() {
+        use crate::config::OverlayPlacement;
+        let mut config = OverlayConfig::default();
+        config.overlay_overrides.insert(
+            "+".into(),
+            OverlayPlacement::SplitKey {
+                slot: "T-".into(),
+                half: Half::Top,
+            },
+        );
+        let renderer =
+            Renderer::with_layout(&config, 1, 900, test_layout_with_join()).unwrap();
+        let g = groups_of(&renderer, "+TK");
+        assert_eq!(g[0].1, g[1].1);
+        assert_eq!(g[1].1, g[2].1);
+        assert!(g[0].1.is_some());
+
+        config.key_groups.insert("join".into(), 77);
+        let renderer =
+            Renderer::with_layout(&config, 1, 900, test_layout_with_join()).unwrap();
+        let g = groups_of(&renderer, "+TK");
+        assert_eq!(g[0].1, Some(77));
+        assert_ne!(g[0].1, g[1].1);
+    }
+
+    #[test]
+    fn an_extra_keys_colour_group_comes_from_config_and_defaults_to_misc() {
+        let layout = || test_layout_with_join();
+        let plain = Renderer::with_layout(&OverlayConfig::default(), 1, 900, layout()).unwrap();
+        let bits = plain.layout.parse_stroke("+K").unwrap();
+        assert_eq!(plain.stroke_run(bits)[0].color, plain.theme.accent(KeyGroup::Misc));
+
+        for (color, group) in [
+            (KeyColor::Left, KeyGroup::LeftHand),
+            (KeyColor::Vowel, KeyGroup::Vowel),
+            (KeyColor::Right, KeyGroup::RightHand),
+        ] {
+            let mut config = OverlayConfig::default();
+            config.extra_colors.insert("+".into(), color);
+            let renderer = Renderer::with_layout(&config, 1, 900, layout()).unwrap();
+            assert_eq!(renderer.stroke_run(bits)[0].color, renderer.theme.accent(group));
+        }
     }
 }

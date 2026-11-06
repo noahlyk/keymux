@@ -711,6 +711,15 @@ pub struct Config {
     pub overlay: OverlayConfig,
 }
 
+/// Which part of the keyboard's colours an extra key is drawn in on the overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeyColor {
+    Left,
+    Vowel,
+    Right,
+    Misc,
+}
+
 /// Which half of a split key an extra key's badge takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Half {
@@ -781,6 +790,15 @@ pub struct OverlayConfig {
     /// `{ "+": SplitKey(slot: "S-", half: Top) }`. An extra key left out draws as the default
     /// badge.
     pub overlay_overrides: HashMap<String, OverlayPlacement>,
+    /// Which keys one finger plays together, so the tape underlines them as one: a group number
+    /// per key name (`"T-"`, `"-D"`, an extra key's own character), any number of keys per
+    /// number - a pair, a trio, more. Each entry replaces that key's group in the default layout
+    /// (see the README for the default pairs). An extra key drawn over a standard key
+    /// (`SplitKey`) is in that key's group unless it has an entry here.
+    pub key_groups: HashMap<String, u32>,
+    /// The colour group an extra key is drawn in, keyed by its character: `Left`, `Vowel`,
+    /// `Right` or `Misc`. An extra key left out is `Misc`.
+    pub extra_colors: HashMap<String, KeyColor>,
 }
 
 impl Default for OverlayConfig {
@@ -798,6 +816,8 @@ impl Default for OverlayConfig {
             tape_lines: None,
             extra_keys: Vec::new(),
             overlay_overrides: HashMap::new(),
+            key_groups: HashMap::new(),
+            extra_colors: HashMap::new(),
             font: None,
             layers: Vec::new(),
         }
@@ -1584,6 +1604,21 @@ impl Config {
                     .map(|problem| format!("overlay: {problem}")),
             ),
             Ok(layout) => {
+                let mut probe = layout.clone();
+                for (name, group) in &overlay.key_groups {
+                    if let Err(problem) = probe.set_key_group(name, *group) {
+                        check.warnings.push(format!("overlay: {problem}, so it does nothing"));
+                    }
+                }
+                for key in overlay.extra_colors.keys() {
+                    let mut chars = key.chars();
+                    let extra = matches!((chars.next(), chars.next()), (Some(ch), None) if overlay.extra_keys.contains(&ch));
+                    if !extra {
+                        check.warnings.push(format!(
+                            "overlay: extra_colors entry \"{key}\" names no extra key, so it does nothing"
+                        ));
+                    }
+                }
                 for (key, placement) in &overlay.overlay_overrides {
                     let mut chars = key.chars();
                     let extra = matches!((chars.next(), chars.next()), (Some(ch), None) if overlay.extra_keys.contains(&ch));

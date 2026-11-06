@@ -758,8 +758,18 @@ overlay: (
     tape_lines: None,    // None shows 8 lines, the oldest fading; Some(20) shows more, up to the screen height
     font: None,          // path to a .ttf/.otf; None uses the bundled Atkinson Hyperlegible
     layers: [],          // steno layers that show it; empty means all of them
+    // Which keys one finger plays together; the tape underlines each lit group as one. Number
+    // per key name, any number of keys per number (a pair, a trio, more). Each entry replaces
+    // that key's group; keys left out keep the default pairs T K, P W, H R, A O, E U on the
+    // left and F R, P B, L G, T S, D Z on the right (S, * and # are alone).
+    key_groups: {},      // { "S-": 20, "T-": 20, "K-": 20 } makes S T K a trio
+    // The colour of an extra key, by its character: Left, Vowel, Right or Misc (the default)
+    extra_colors: {},    // { "+": Right }
 ),
 ```
+
+An extra key drawn over a standard key (`overlay_overrides`, `SplitKey`) is in that key's group
+unless `key_groups` names it; run `keymux check` to see entries that name no key.
 
 Every field is optional, and edits to the config file apply without restarting the overlay.
 In niri, style it with `layer-rule { match namespace="^keymux-steno$" }`.

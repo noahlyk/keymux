@@ -4,7 +4,7 @@ pub mod validator;
 
 pub use config::{
     Check, Config, DictionaryRoots, EnableDisable, EnabledKeyboardEntry, EnabledKeyboards,
-    GameMode, Half, KeyAction, Layer, LayerConfig, LayerKind, MtConfig, OverlayConfig,
+    GameMode, Half, KeyAction, KeyColor, Layer, LayerConfig, LayerKind, MtConfig, OverlayConfig,
     OverlayPlacement, Report, StenoConfig, DEFAULT_LAYER_PRIORITY,
 };
 pub use config_manager::ConfigManager;

@@ -68,6 +68,13 @@ pub struct Layout {
     /// stroke order, so digits read in whatever order the theory's own number-bearing keys do.
     number_keys: Vec<(usize, char)>,
     extra: Vec<KeySpec>,
+    /// The finger group of each standard slot (including the number key), in slot order: slots
+    /// sharing an id are played by one finger and drawn as one (underlined together on the
+    /// overlay's tape). A group may be any size: a pair, a trio, more. `None` is no group.
+    groups: Vec<Option<u32>>,
+    /// An explicit group for each extra key, in `extra` order. `None` leaves it to the slot it
+    /// is drawn over, if any (the overlay decides that; the layout cannot know where it is drawn).
+    extra_groups: Vec<Option<u32>>,
 }
 
 impl Layout {
@@ -115,6 +122,36 @@ impl Layout {
                 (18, '9'),
             ],
             extra: Vec::new(),
+            // `S` alone in group 10 (so an extra key drawn over it joins it), then the pairs
+            // `T K`, `P W`, `H R`, `A O`; `*` none; `E U`, then the right hand's `F R`, `P B`,
+            // `L G`, `T S`, `D Z`; `#` none.
+            groups: [
+                Some(10),
+                Some(0),
+                Some(0),
+                Some(1),
+                Some(1),
+                Some(2),
+                Some(2),
+                Some(3),
+                Some(3),
+                None,
+                Some(4),
+                Some(4),
+                Some(5),
+                Some(5),
+                Some(6),
+                Some(6),
+                Some(7),
+                Some(7),
+                Some(8),
+                Some(8),
+                Some(9),
+                Some(9),
+                None,
+            ]
+            .to_vec(),
+            extra_groups: Vec::new(),
         }
     }
 
@@ -215,6 +252,8 @@ impl Layout {
             right,
             number,
             number_keys: resolved_number_keys,
+            groups: vec![None; flat_len],
+            extra_groups: vec![None; extra.len()],
             extra,
         })
     }
@@ -355,7 +394,35 @@ impl Layout {
             return Err(errors);
         }
         self.extra.push(key);
+        self.extra_groups.push(None);
         Ok(self)
+    }
+
+    /// The finger group of a stroke slot (standard or extra), or `None` when it has none. Keys
+    /// sharing a group are played by one finger and drawn as one. An extra key only has one if
+    /// [`Self::set_key_group`] gave it one.
+    #[must_use]
+    pub fn key_group(&self, slot: usize) -> Option<u32> {
+        slot.checked_sub(self.extra_start()).map_or_else(
+            || self.groups.get(slot).copied().flatten(),
+            |i| self.extra_groups.get(i).copied().flatten(),
+        )
+    }
+
+    /// Put the key called `name` (`"T-"`, `"-D"`, an extra key's own name) in finger group
+    /// `group`, replacing whatever group it had. Any number of keys may share one id.
+    ///
+    /// # Errors
+    /// When no key has that name.
+    pub fn set_key_group(&mut self, name: &str, group: u32) -> Result<(), String> {
+        let slot = self
+            .slot_by_name(name)
+            .ok_or_else(|| format!("key group names an unknown steno key \"{name}\""))?;
+        match slot.checked_sub(self.extra_start()) {
+            None => self.groups[slot] = Some(group),
+            Some(i) => self.extra_groups[i] = Some(group),
+        }
+        Ok(())
     }
 
     /// Look up a stroke slot by its config name (`"S-"`, `"*"`, `"-E"`, an extra key's own
@@ -823,6 +890,7 @@ mod tests {
     fn with_join() -> Layout {
         let mut layout = Layout::plover();
         layout.extra.push(KeySpec::new('+', "join"));
+        layout.extra_groups.push(None);
         layout
     }
 
@@ -1287,5 +1355,33 @@ mod tests {
         assert_eq!(layout.render_stroke(bits), "XY*IZW");
         // The custom number key still substitutes correctly
         assert_eq!(layout.parse_stroke("1"), layout.parse_stroke("#X"));
+    }
+
+    #[test]
+    fn plover_declares_todays_finger_pairs_as_data_and_groups_can_be_reassigned() {
+        let mut layout = Layout::plover();
+        let group = |l: &Layout, name: &str| l.key_group(l.slot_by_name(name).unwrap());
+        assert_eq!(group(&layout, "T-"), group(&layout, "K-"));
+        assert_eq!(group(&layout, "-D"), group(&layout, "-Z"));
+        assert_ne!(group(&layout, "T-"), group(&layout, "P-"));
+        assert_eq!(group(&layout, "*"), None);
+        assert_eq!(group(&layout, "#"), None);
+
+        // A trio: three keys, one id
+        for name in ["T-", "K-", "P-"] {
+            layout.set_key_group(name, 42).unwrap();
+        }
+        assert_eq!(group(&layout, "P-"), Some(42));
+        assert_eq!(group(&layout, "K-"), Some(42));
+        assert!(layout.set_key_group("nope", 1).is_err());
+    }
+
+    #[test]
+    fn an_extra_key_has_no_group_until_one_is_given() {
+        let mut layout = with_join();
+        let slot = layout.extra_start();
+        assert_eq!(layout.key_group(slot), None);
+        layout.set_key_group("join", 9).unwrap();
+        assert_eq!(layout.key_group(slot), Some(9));
     }
 }
