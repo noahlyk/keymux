@@ -157,13 +157,23 @@ sized to its letter, and the letter is centred in it. Steno lines still align.
     reaches about seven pixels. Computed once per glyph and cached with it. A one-pixel solid ring
     (the previous design) made the text look like cut-out letters, "ransom note"; a dark plate
     (rejected before that) is a background. Dark text on a lit key gets no shadow.
-  - The text is slightly transparent: `text_opacity` (default 0.85) scales the strokes, the words
+  - The text is slightly transparent: `text_opacity` (default 0.65; 0.85 read as too opaque, 0.5 is too faint over white and over a code window; 0.65 is the lowest that stays legible over white, grey, black, a busy photo and a mock code window, the shadow carrying legibility) scales the strokes, the words
     and the unmatched colour, so the window behind shows through a little. Over a white window the
     light text is soft; that is accepted, there is no light mode.
   - Lines are compact: the line pitch is 0.86 of the words' text size (28 px before, 24 px now at
     width 340, line gap 0 in effect, only room for the underline), the letters are about 9%
-    smaller (`REFERENCE_KEYS` 11.5), and only 8 tape lines show by default (`tape_lines`; a bigger
-    number shows more up to the screen), the oldest four fading out toward the top.
+    smaller (`REFERENCE_KEYS` 11.5), and the tape now runs all the way up the screen by default
+    (`tape_lines: None` = as many lines as fit; `Some(n)` caps it). The surface was already the
+    full output height (anchored top, bottom and right, size height 0, exclusive zone -1, empty
+    input region), so no surface change was needed; `TAPE_CAPACITY` went from 160 to 400 entries
+    so a tall screen at small text can fill. The overlay is symmetric: the tape's top edge sits
+    `margin_y` (14 logical px by default) below the top of the surface, the same margin the keyboard has below
+    it. A full-height tape spreads the leftover (under one line) over its lines, a fraction of a
+    pixel each, so the top edge is exactly the margin; a capped tape keeps the natural pitch. The
+    fade is only the end of the tape: every line is full strength except the last
+    `tape_fade_lines` (default 5) at the top, which fall in even steps to `tape_fade` (default 0.15)
+    at the topmost line (a wrapped entry takes its bottom line's strength). A tape that does not
+    fill the area does not fade. At 1080 px high 39 lines fit, at 1440 px 55, at 2160 px 88 (width 340, scale 1, `margin_y` 14; the counts did not change from the 14 px reserve before, the top edge is now exactly the margin and the line pitch a fraction of a pixel wider).
   - A lit key glows in its own colour: its outline stroked five times, widest and faintest first,
     reaching 6 px past the key (alpha .05 to .24 per layer, half strength for a key in the stroke
     but let go), painted for all lit keys before any key so a glow never covers a neighbour.
@@ -220,13 +230,16 @@ overlay: (
     enabled: true,
     output: None,          // Some("DP-1") to pin a monitor; None = compositor's choice
     margin: 0,             // gap from the right screen edge, logical px
+    margin_y: 14,          // gap below the keyboard and above the tape (the same at both ends), logical px
     width: 340,            // as tall as the screen; text and keys are sized from this
     text_scale: 1.0,       // multiplies the text size on top of what width gives
     background: 0.0,       // dark panel behind it all; 0.0 is fully transparent
-    text_opacity: 0.85,    // how opaque the tape's text is; lower lets the window show through
+    text_opacity: 0.65,    // how opaque the tape's text is; lower lets the window show through
     keyboard: true,
     tape: true,
     tape_lines: None,      // Some(20) caps it; None fills the screen height
+    tape_fade: 0.15,       // the oldest line's strength
+    tape_fade_lines: 5,    // how many lines at the top fade; every other line is full strength
     font: None,            // path to a .ttf/.otf; None = embedded Atkinson Hyperlegible
     layers: [],            // steno layers that show it; empty = every steno layer
 ),
@@ -267,9 +280,9 @@ keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches 
   close. Esc and Enter win over the layer's own remaps (a steno layer usually remaps Esc);
   other remapped keys, such as one that leaves steno, still work and leave the lookup behind.
   Shift is tracked in `process_key` itself, because its release is swallowed.
-- **Results.** Exact outlines for the word first (fewest strokes first, up to 4, only ones that
+- **Results.** Exact outlines for the word first (fewest strokes first, all of them, only ones that
   type it "properly" in a sentence), then words that start with the query, shortest first, each
-  with its best outline (up to 12 rows; completions only from 2 characters). Built in the daemon
+  with its best outline (no cap but the tape area: up to `TAPE_CAPACITY`, 400 rows, collected best first, and the overlay draws as many as fit, filling the whole tape area down from the top margin, so nothing it could show is dropped; completions only from 2 characters; the next key press cancels a search between rows). This replaced a cap of 12 rows and 4 outlines for the exact word. Built in the daemon
   and sent in the snapshot as `LookupView { query, rows, hint, strokes }`, so the overlay needs no
   dictionary. `strokes` is every stroke of the best outline (empty for a phrase, whose outline is
   a group per word); `hint` is its first.
@@ -315,7 +328,7 @@ keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches 
 - Clicks falling through the overlay: the empty input region is set, and niri reports
   keyboard interactivity none, but a real click hasn't been tried.
 - It covers the whole right edge, including the top-right corner of a bar (DMS's bar items
-  there, such as a power button). With no background only the faded top tape lines overlap
+  there, such as a power button). With no background only the faint top tape lines overlap
   it, and clicks pass through, but they are drawn over it. `margin` or `tape_lines` moves it.
 - Fullscreen windows: `Layer::Overlay` sits above them. Maybe hide in game mode
   (the hub already knows `disabled_in_game_mode` layers aren't capturing).

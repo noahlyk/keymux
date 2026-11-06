@@ -9,7 +9,7 @@
 
 use super::commands::proper_outlines_in;
 use super::layout::Layout;
-use super::overlay::{LookupMode, LookupRow, LookupView, OverlayHub};
+use super::overlay::{LookupMode, LookupRow, LookupView, OverlayHub, TAPE_CAPACITY};
 use super::reverse::{self, Query};
 use super::shortest::shortest_outline_labeled;
 use super::translate::Translator;
@@ -19,10 +19,10 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
-/// Rows the overlay is sent; it shows as many as fit.
-const MAX_ROWS: usize = 12;
-/// Outlines shown for the word that was typed exactly, since it may have several.
-const MAX_OUTLINES: usize = 4;
+/// Most rows a lookup collects: as many as the tape area could ever hold lines (the tape is
+/// never longer than [`TAPE_CAPACITY`]), best first, so the overlay can fill all of it and no row
+/// that could be shown is dropped here. It was 12, with 4 outlines for the exact word.
+const MAX_ROWS: usize = TAPE_CAPACITY;
 /// Words that merely start with the query are only suggested from this length on: a scan
 /// of the whole dictionary per key press isn't worth it for a single letter.
 const MIN_PREFIX: usize = 2;
@@ -375,7 +375,7 @@ fn word_rows(
             });
         }
     } else {
-        for outline in exact.iter().take(MAX_OUTLINES) {
+        for outline in exact.iter().take(MAX_ROWS) {
             rows.push(LookupRow {
                 text: query.to_string(),
                 outline: layout.render_strokes(outline),
@@ -388,8 +388,12 @@ fn word_rows(
             return None;
         }
         for word in base.dictionary().completions(query, MAX_ROWS * 2) {
-            if rows.len() >= MAX_ROWS || cancelled() {
+            if rows.len() >= MAX_ROWS {
                 break;
+            }
+            // Cancelled between words, so a key press never waits on the rest of the list
+            if cancelled() {
+                return None;
             }
             if let Some(outline) = proper_outlines_in(base, word).first() {
                 rows.push(LookupRow {
@@ -480,6 +484,31 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(hub.snapshot().lookup.is_none());
     }
+    #[test]
+    fn a_lookup_keeps_every_result_up_to_what_the_tape_area_can_hold() {
+        use std::fmt::Write as _;
+        // 150 words starting with "ca", and 20 outlines for one word: both past the old caps
+        // (12 rows, 4 outlines)
+        let layout = Layout::plover();
+        let mut json = String::from("{");
+        for i in 0..150u32 {
+            let outline = crate::steno::layout::render_strokes(&[1 + i]);
+            write!(json, "{outline:?}:\"ca{i:03}\",").unwrap();
+        }
+        for i in 0..20u32 {
+            let outline = crate::steno::layout::render_strokes(&[0x1000 + i]);
+            write!(json, "{outline:?}:\"many\",").unwrap();
+        }
+        json.push_str("\"-T\":\"the\"}");
+        let mut dict = Dictionary::default();
+        dict.merge_json(&json, &layout).unwrap();
+        let base = Translator::new(dict);
+        let rows = typed("ca").view(&base).rows;
+        assert_eq!(rows.len(), 150, "every completion is a row");
+        let rows = typed("many").view(&base).rows;
+        assert_eq!(rows.len(), 20, "every outline of the word is a row");
+    }
+
     /// A dictionary and lookup in a layout with the `+` join key, as the lyk theory has it.
     fn joined() -> (Layout, Translator) {
         let layout = Layout::plover_with(&['+']).unwrap();

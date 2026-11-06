@@ -732,7 +732,7 @@ yellow for the vowels, red for the right hand, light blue for `*` and `#`. Keys 
 of but that are still part of the stroke are dimmer. Each finished stroke lands on the tape
 with what it typed: the steno letters as one coloured run (a colour per hand, keys one finger
 plays together underlined, a `-` only where steno order needs it), and the word in larger
-white text. A stroke you hold down to repeat stays on one line with a count (`x12`) instead of filling the tape, in `keymux steno tape` too. The tape shows 8 lines by default (`tape_lines`), the oldest four fading out, set tight (about one text height per line). There is no
+white text. A stroke you hold down to repeat stays on one line with a count (`x12`) instead of filling the tape, in `keymux steno tape` too. The tape runs up the screen by default (`tape_lines` caps it), set tight (about one text height per line), and stops as far below the top of the screen as the keyboard diagram is above the bottom (`margin_y`, 14 px, one setting for both), so the whole overlay has the same margin at both ends. Every line is at full strength except the last five at the top, which fade out to a faint oldest line (`tape_fade` is that line's strength, `tape_fade_lines` how many lines fade). There is no
 background by default, only the keys and text. The text is slightly transparent (`text_opacity`) on a soft dark shadow, and lit keys glow in their colour; over a white window the light text is soft by design. Set `background` for a
 panel if your wallpaper is very busy. A stroke with many keys is set in smaller letters so every
 key fits. The overlay never takes clicks or focus. It costs next to nothing: it only redraws when a key or the tape changes.
@@ -749,13 +749,16 @@ overlay: (
     enabled: true,
     output: None,        // Some("DP-1") to pin a monitor; None lets the compositor pick
     margin: 0,           // gap from the right edge, in pixels
+    margin_y: 14,        // gap below the keyboard and above the tape, in pixels: the same at both ends
     width: 340,          // as tall as the screen; text and keys are sized from this
     text_scale: 1.0,     // 1.2 makes the text a fifth bigger, on top of what width gives
-    text_opacity: 0.85,  // how opaque the tape's text is, 0.0 to 1.0; lower is quieter
+    text_opacity: 0.65,    // how opaque the tape's text is, 0.0 to 1.0; lower is quieter
     background: 0.0,     // opacity of a dark panel behind it all; 0.0 is fully transparent
     keyboard: true,
     tape: true,
-    tape_lines: None,    // None shows 8 lines, the oldest fading; Some(20) shows more, up to the screen height
+    tape_lines: None,    // None fills the screen height; Some(20) caps the tape at 20 lines
+    tape_fade: 0.15,     // strength of the oldest line at the top; 1.0 = no fade
+    tape_fade_lines: 5,  // how many lines at the top fade out; 0 = no fade, every other line is full strength
     font: None,          // path to a .ttf/.otf; None uses the bundled Atkinson Hyperlegible
     layers: [],          // steno layers that show it; empty means all of them
     // Which keys one finger plays together; the tape underlines each lit group as one. Number

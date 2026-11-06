@@ -25,8 +25,6 @@ use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, PixmapMut, Stroke, Tr
 
 /// Space between the content and the left/right edge of the overlay, logical px
 const PAD_X: f32 = 10.0;
-/// Space above the tape and below the keyboard, logical px
-const PAD_Y: f32 = 14.0;
 /// Space between the tape and the keyboard, logical px
 const SECTION_GAP: f32 = 20.0;
 /// Outline of an unlit key, logical px
@@ -71,11 +69,6 @@ const RULE_THICKNESS: f32 = 0.07;
 /// Space between the outlines of two words of a phrase on one line, relative to the stroke
 /// letters' size: wider than a rule's, so words read as separate and strokes as one word's
 const GROUP_SPACE: f32 = 1.1;
-/// The oldest tape lines, at the top of the screen, fade out: this many of them, the topmost
-/// faintest. Every other line is at full strength.
-const FADE_LINES: usize = 4;
-/// How many tape lines are shown when the config does not say: few, so the overlay stays quiet
-const DEFAULT_TAPE_LINES: usize = 8;
 
 /// Colours. With no background, everything has to read over any wallpaper: text is bright with
 /// a dark halo, and unlit keys are a faint dark glass pad with a light outline.
@@ -260,7 +253,7 @@ impl Renderer {
 
         let width = (config.width as f32 * scale).ceil();
         let height = (height.max(1) as f32 * scale).ceil();
-        let (pad_x, pad_y) = (PAD_X * scale, PAD_Y * scale);
+        let (pad_x, pad_y) = (PAD_X * scale, config.margin_y as f32 * scale);
         let inner = 2.0f32.mul_add(-pad_x, width);
         let text_scale = config.text_scale.clamp(0.5, 3.0);
 
@@ -327,16 +320,27 @@ impl Renderer {
         let words_left = paper_right + stroke_px * 0.6;
         let words_right = width - pad_x;
 
-        let line_height = (words_px * LINE_SPACING).ceil();
+        let natural_line = (words_px * LINE_SPACING).ceil();
         let tape_bottom = keyboard.as_ref().map_or(height - pad_y, |k| {
             SECTION_GAP.mul_add(-scale, k.keys[number_slot].y)
         });
-        let fits = ((tape_bottom - pad_y) / line_height).floor().max(0.0) as usize;
+        // The tape's top edge sits `pad_y` below the top of the surface, the same margin the
+        // keyboard has below it, so the whole overlay is symmetric: nothing runs to the screen edge.
+        let room = (tape_bottom - pad_y).max(0.0);
+        let fits = (room / natural_line).floor() as usize;
         let tape_lines = if config.tape {
-            fits.min(config.tape_lines.unwrap_or(DEFAULT_TAPE_LINES))
+            fits.min(config.tape_lines.unwrap_or(usize::MAX))
                 .min(TAPE_CAPACITY)
         } else {
             0
+        };
+        // A tape that fills the height spreads the leftover (under one line) over its lines, a
+        // fraction of a pixel each, so its top edge is exactly the margin and not up to a line
+        // below it. Glyphs snap to whole pixel rows when drawn, so the text stays crisp.
+        let line_height = if tape_lines > 0 && tape_lines == fits {
+            room / fits as f32
+        } else {
+            natural_line
         };
 
         // Steno pads: a squarish top with slightly softened corners and a fully round bottom.
@@ -815,16 +819,19 @@ impl Renderer {
 
         let mut row_top = (used as f32).mul_add(-self.line_height, self.tape_bottom);
         // `planned` is newest first; reversed, this walks oldest (top of the drawn block) to
-        // newest (bottom). The fade is about nearness to the *panel's* top edge, not the top
-        // of whatever little is currently drawn - with only a line or two, the whole block
-        // sits well clear of the top with blank space above it, and none of it should fade
-        // just because it happens to be the first entry in a short list. `lines_above` is
-        // this entry's distance from the top of the drawn block; adding the blank space still
-        // above that block (`budget - used`) turns it into distance from the panel's actual
-        // top edge, which only shrinks toward `FADE_LINES` once the tape is nearly full.
+        // newest (bottom). The fade is by distance up from the newest line, over the tape's
+        // whole length (`budget` lines), so it is one smooth ramp: a short tape sits at the
+        // bottom and barely fades at all, a full one reaches the floor only at its very top.
+        // An entry that wraps takes the strength of its bottom line.
         let mut lines_above = 0usize;
         for (entry, text_lines) in planned.iter().rev() {
-            let fade = line_fade(budget - used + lines_above);
+            let from_bottom = used - lines_above - text_lines;
+            let fade = line_fade(
+                from_bottom,
+                budget,
+                self.config.tape_fade,
+                self.config.tape_fade_lines,
+            );
             self.draw_tape_line(pixmap, entry, row_top + baseline_in_line, fade);
             row_top = (*text_lines as f32).mul_add(self.line_height, row_top);
             lines_above += text_lines;
@@ -1310,15 +1317,21 @@ fn tail_that_fits<'a>(glyphs: &mut GlyphCache, text: &'a str, max: f32) -> &'a s
     }
 }
 
-/// How strong a tape line is, by how far it is from the top of the tape (`0` is the topmost).
-/// Only the top few lines fade; every other line is at full strength, so the tape stays easy
-/// to read all the way up.
-fn line_fade(row_from_top: usize) -> f32 {
-    if row_from_top >= FADE_LINES {
-        1.0
-    } else {
-        (row_from_top + 1) as f32 / (FADE_LINES + 1) as f32
+/// How strong a tape line is, by how many lines it is above the newest one (`0` is the newest)
+/// on a tape of `lines` lines: full strength everywhere except the last `fading` lines at the
+/// top, which fall in a straight line to `floor` at the topmost. The line just below those is
+/// still full strength, so the fade is only a soft end to the tape and nothing else changes.
+/// `floor` is clamped to 0..=1; 1.0, or `fading` of 0, turns the fade off.
+fn line_fade(from_bottom: usize, lines: usize, floor: f32, fading: usize) -> f32 {
+    let fading = fading.min(lines.saturating_sub(1));
+    if fading == 0 {
+        return 1.0;
     }
+    let floor = floor.clamp(0.0, 1.0);
+    // lines above the last full-strength one; `fading` of them is the top line
+    let past = (from_bottom + 1 + fading).saturating_sub(lines);
+    let t = (past as f32 / fading as f32).min(1.0);
+    (1.0 - floor).mul_add(-t, 1.0)
 }
 
 /// The tape file writes translations as Rust string literals (`"the"`, or `-3 "the"` when a
@@ -1928,9 +1941,11 @@ mod tests {
             "keyboard is below the tape"
         );
 
-        // Left alone, the tape is a short one
+        // Left alone, the tape fills the screen: the same as asking for far more than fits
         let default = Renderer::new(&OverlayConfig::default(), 1, 1900).unwrap();
-        assert_eq!(default.tape_lines(), DEFAULT_TAPE_LINES);
+        assert_eq!(default.tape_lines(), tall.tape_lines());
+        let top = (default.tape_lines() as f32).mul_add(-default.line_height, default.tape_bottom);
+        assert!((top - 14.0).abs() < 0.01, "the tape starts at the margin: {top}");
         // `tape_lines` caps it; zero is allowed
         let capped = OverlayConfig {
             tape_lines: Some(5),
@@ -1945,18 +1960,78 @@ mod tests {
     }
 
     #[test]
-    fn only_the_top_few_lines_fade_and_every_other_line_is_full_strength() {
-        // Rows 0.. are counted from the top of the tape
-        let faded: Vec<f32> = (0..FADE_LINES).map(line_fade).collect();
-        assert!(faded.windows(2).all(|pair| pair[0] < pair[1]), "{faded:?}");
-        assert!(faded[0] > 0.0 && faded[FADE_LINES - 1] < 1.0, "{faded:?}");
-        for row in FADE_LINES..200 {
-            assert_eq!(line_fade(row), 1.0, "row {row}");
+    fn the_fade_is_only_the_last_few_lines_at_the_top() {
+        for lines in [6, 8, 40, 400] {
+            let ramp: Vec<f32> = (0..lines).map(|row| line_fade(row, lines, 0.2, 5)).collect();
+            // everything but the last five lines is exactly full strength
+            assert!(ramp[..lines - 5].iter().all(|&f| f == 1.0), "{lines}: {ramp:?}");
+            // the last five fall in even steps to the floor at the very top
+            assert!(ramp[lines - 5..].iter().all(|&f| f < 1.0), "{lines}: {ramp:?}");
+            assert!((ramp[lines - 1] - 0.2).abs() < 1e-6, "{lines}: top is the floor");
+            let tail = &ramp[lines - 6..];
+            assert!(tail.windows(2).all(|pair| pair[0] > pair[1]), "monotonic: {tail:?}");
+            let steps: Vec<f32> = tail.windows(2).map(|p| p[0] - p[1]).collect();
+            assert!(steps.iter().all(|s| (s - 0.16).abs() < 1e-5), "even steps: {steps:?}");
         }
+        // the number of fading lines is the knob
+        let ramp: Vec<f32> = (0..20).map(|row| line_fade(row, 20, 0.0, 3)).collect();
+        assert_eq!(ramp.iter().filter(|&&f| f < 1.0).count(), 3);
+        // past the top stays at the floor; a floor of 1 or no fading lines turns it off;
+        // out-of-range floors are clamped; a tape too short for the fade is never faded away whole
+        assert!((line_fade(99, 8, 0.25, 5) - 0.25).abs() < 1e-6);
+        assert!((0..8).all(|row| line_fade(row, 8, 1.0, 5) == 1.0));
+        assert!((0..8).all(|row| line_fade(row, 8, 0.0, 0) == 1.0));
+        assert!((line_fade(7, 8, -3.0, 5)).abs() < 1e-6);
+        assert_eq!(line_fade(7, 8, 9.0, 5), 1.0);
+        assert_eq!(line_fade(0, 1, 0.0, 5), 1.0);
+        assert_eq!(line_fade(0, 0, 0.0, 5), 1.0);
+        assert_eq!(line_fade(0, 3, 0.0, 5), 1.0, "the newest line never fades");
     }
 
-    /// Brightest pixel in `row_top..row_top+line_height`, a few columns into the words
-    /// column - a stand-in for "how strong is whatever's drawn on this tape row".
+    #[test]
+    fn the_tape_margin_above_is_the_margin_below_the_keyboard() {
+        for height in [1080, 1440, 2160] {
+            for scale in [1, 2] {
+                let r = Renderer::new(&OverlayConfig::default(), scale, height).unwrap();
+                let (_, h) = r.size();
+                let keys = r.keyboard.as_ref().unwrap();
+                let below = h as f32 - keys.keys.iter().map(Rect::bottom).fold(0.0, f32::max);
+                let top = (r.tape_lines() as f32).mul_add(-r.line_height, r.tape_bottom);
+                assert!(
+                    (top - below).abs() < 0.01,
+                    "{height}@{scale}: {top} above the tape, {below} below the keyboard"
+                );
+            }
+        }
+        // the margin is one setting for both ends
+        for margin_y in [0, 30, 60] {
+            let config = OverlayConfig { margin_y, ..OverlayConfig::default() };
+            let r = Renderer::new(&config, 1, 1080).unwrap();
+            let keys = r.keyboard.as_ref().unwrap();
+            let below = 1080.0 - keys.keys.iter().map(Rect::bottom).fold(0.0, f32::max);
+            let top = (r.tape_lines() as f32).mul_add(-r.line_height, r.tape_bottom);
+            assert!((below - margin_y as f32).abs() < 0.01 && (top - below).abs() < 0.01);
+        }
+        // capped: the tape is not stretched and still never rises above the margin
+        let capped = OverlayConfig { tape_lines: Some(5), ..OverlayConfig::default() };
+        let r = Renderer::new(&capped, 1, 1080).unwrap();
+        assert!((5.0f32).mul_add(-r.line_height, r.tape_bottom) > 14.0);
+    }
+
+    #[test]
+    fn lines_fitting_the_screen_follow_its_height() {
+        let fits = |h| Renderer::new(&OverlayConfig::default(), 1, h).unwrap().tape_lines();
+        let (a, b, c) = (fits(1080), fits(1440), fits(2160));
+        assert!(a > 30, "1080 shows {a} lines");
+        assert!(a < b && b < c, "{a} {b} {c}");
+        // 360 more pixels of height add about 360 / line pitch lines
+        let line = Renderer::new(&OverlayConfig::default(), 1, 1080).unwrap().line_height;
+        assert!(((b - a) as f32 - 360.0 / line).abs() <= 1.0);
+        // never more than the entries the overlay is sent
+        let huge = OverlayConfig { text_scale: 0.3, ..OverlayConfig::default() };
+        assert!(Renderer::new(&huge, 1, 4000).unwrap().tape_lines() <= TAPE_CAPACITY);
+    }
+
     fn row_alpha(pixmap: &Pixmap, renderer: &Renderer, h: u32, row_top: f32) -> u8 {
         let words_x = renderer.words_left as u32;
         let y0 = row_top.max(0.0) as u32;
@@ -1970,12 +2045,10 @@ mod tests {
     }
 
     #[test]
-    fn the_tape_actually_fades_the_oldest_lines_at_the_top_not_the_newest_at_the_bottom() {
-        // `line_fade` alone (above) can't catch a caller passing it the wrong row index; this
-        // draws real tape lines and checks which end of the screen actually comes out dim.
-        // Fills the tape right up to its own budget - the fade only applies once the tape is
-        // nearly full (see the test below for the opposite, mostly-empty case).
-        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+    fn the_tape_actually_fades_toward_the_top_not_the_bottom() {
+        // `line_fade` alone can't catch a caller passing it the wrong row; this draws a full
+        // tape and checks which end of the screen comes out dim, and that it is gradual.
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 1080).unwrap();
         let (w, h) = renderer.size();
         let lines = renderer.tape_lines();
         let mut snapshot = OverlaySnapshot {
@@ -1991,35 +2064,34 @@ mod tests {
         let mut pixmap = Pixmap::new(w, h).unwrap();
         renderer.draw(&snapshot, &mut pixmap.as_mut());
 
-        let top_row = (lines as f32).mul_add(-renderer.line_height, renderer.tape_bottom);
-        let bottom_row = renderer.tape_bottom - renderer.line_height; // newest, last seq
-        let (top, bottom) = (
-            row_alpha(&pixmap, &renderer, h, top_row),
-            row_alpha(&pixmap, &renderer, h, bottom_row),
-        );
+        let first_top = (lines as f32).mul_add(-renderer.line_height, renderer.tape_bottom);
+        let alphas: Vec<u8> = (0..lines)
+            .map(|row| {
+                let top = (row as f32).mul_add(renderer.line_height, first_top);
+                row_alpha(&pixmap, &renderer, h, top)
+            })
+            .collect();
+        // row 0 is the oldest, at the top
+        assert!(alphas[0] < alphas[lines - 1], "{alphas:?}");
+        assert!(alphas[0] > 20, "the oldest line is faint but still there: {alphas:?}");
+        // Only the last five lines fade, getting dimmer going up; every other line is the same
+        // full strength as the newest
+        let full = alphas[lines - 1];
+        assert!(full >= 150, "the newest is strong: {alphas:?}");
         assert!(
-            top < bottom,
-            "a full tape's oldest line (top, alpha {top}) should be dimmer than its newest (bottom, alpha {bottom})"
+            alphas[5..].iter().all(|&a| a.abs_diff(full) <= 4),
+            "below the fade every line is at full strength: {alphas:?}"
         );
+        assert!(alphas[..5].iter().all(|&a| a < full - 8), "the last five fade: {alphas:?}");
+        assert!(alphas[..5].windows(2).all(|p| p[0] < p[1]), "dimmer going up: {alphas:?}");
     }
 
     #[test]
-    fn a_tape_nowhere_near_full_does_not_fade_its_one_line_just_for_being_first() {
-        // The bug this guards: fading used to be judged by position in the *drawn* list, so a
-        // single line - simultaneously the first and only entry - was always "row 0" and
-        // always faded, even though on screen it sits snug against the keyboard with most of
-        // the tape's height empty above it. Fading is for lines about to scroll off the top of
-        // a *full* tape, not for the first line or two of an otherwise-empty one.
-        let tall = OverlayConfig {
-            tape_lines: Some(99),
-            ..OverlayConfig::default()
-        };
-        let mut renderer = Renderer::new(&tall, 1, 900).unwrap();
+    fn a_tape_nowhere_near_full_does_not_fade_its_one_line() {
+        // A single line sits snug against the keyboard with the tape's height empty above it:
+        // it is the newest line, so it is full strength, however tall the tape could be.
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
         let (w, h) = renderer.size();
-        assert!(
-            renderer.tape_lines() > FADE_LINES * 4,
-            "test assumes a tall tape relative to FADE_LINES"
-        );
         let mut snapshot = OverlaySnapshot {
             layer: Some("steno".into()),
             ..OverlaySnapshot::default()
@@ -2029,9 +2101,9 @@ mod tests {
         renderer.draw(&snapshot, &mut pixmap.as_mut());
 
         let only_row = renderer.tape_bottom - renderer.line_height;
-        // Full strength is the text opacity (0.85) plus the shadow under it, well over 230
+        // Full strength is the text opacity plus the shadow under it
         assert!(
-            row_alpha(&pixmap, &renderer, h, only_row) >= 230,
+            row_alpha(&pixmap, &renderer, h, only_row) >= 150,
             "the tape's one and only line should be at full strength, not faded"
         );
     }
@@ -2618,8 +2690,21 @@ mod tests {
             ("PWEUG", "\"big\""),
             ("TKPWAEUPL", "\"game\""),
         ];
+        // `OVERLAY_PREVIEW_HEIGHT` renders a taller surface (1080, 1440): the tape fills it
+        let surface_height = std::env::var("OVERLAY_PREVIEW_HEIGHT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(900);
         for back_name in ["white", "black", "grey", "photo", "code"] {
-            let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+            // `OVERLAY_PREVIEW_OPACITY` tries another `text_opacity` than the default
+            let mut config = OverlayConfig::default();
+            if let Some(opacity) = std::env::var("OVERLAY_PREVIEW_OPACITY")
+                .ok()
+                .and_then(|v| v.parse().ok())
+            {
+                config.text_opacity = opacity;
+            }
+            let mut renderer = Renderer::new(&config, 1, surface_height).unwrap();
             let (w, h) = renderer.size();
             let mut snapshot = OverlaySnapshot {
                 layer: Some("steno".into()),
@@ -2634,7 +2719,7 @@ mod tests {
             let write = |name: &str, pixmap: &Pixmap| {
                 let mut out = format!("P6 {w} {h} 255\n").into_bytes();
                 for (i, px) in pixmap.data().as_chunks::<4>().0.iter().enumerate() {
-                    let back = preview_backdrop(back_name, (i as u32 % w, i as u32 / w));
+                    let back = preview_backdrop(back_name, (i as u32 % w, i as u32 / w), h);
                     for (c, b) in px[..3].iter().zip(back) {
                         out.push(c + (b * (255 - u32::from(px[3])) / 255) as u8);
                     }
@@ -2645,11 +2730,15 @@ mod tests {
             renderer.draw(&snapshot, &mut pixmap.as_mut());
             write("tape", &pixmap);
             // and the lookup, which takes the tape's place
+            // more results than the area holds: the best-ranked fill it
             let mut view = lookup_view();
-            view.rows.push(crate::steno::overlay::LookupRow {
-                text: "candidate".into(),
-                outline: "KAPBD / TAET".into(),
-            });
+            for i in 0..400 {
+                let (outline, text) = words[i % words.len()];
+                view.rows.push(crate::steno::overlay::LookupRow {
+                    text: format!("cand{}", text.trim_matches('"')),
+                    outline: outline.into(),
+                });
+            }
             snapshot.lookup = Some(view);
             let mut pixmap = Pixmap::new(w, h).unwrap();
             renderer.draw(&snapshot, &mut pixmap.as_mut());
@@ -2660,7 +2749,7 @@ mod tests {
     /// A backdrop pixel for the previews: flat colours, a noisy photo-like gradient, or a mock
     /// window of dark code over light text bands.
     #[allow(clippy::suboptimal_flops)]
-    fn preview_backdrop(name: &str, (x, y): (u32, u32)) -> [u32; 3] {
+    fn preview_backdrop(name: &str, (x, y): (u32, u32), height: u32) -> [u32; 3] {
         let hash = |a: u32, b: u32| {
             let mut v = a.wrapping_mul(374_761_393) ^ b.wrapping_mul(668_265_263);
             v = (v ^ (v >> 13)).wrapping_mul(1_274_126_177);
@@ -2671,7 +2760,7 @@ mod tests {
             "black" => [0, 0, 0],
             "grey" => [150, 150, 155],
             "photo" => {
-                let (fx, fy) = (x as f32 / 340.0, y as f32 / 900.0);
+                let (fx, fy) = (x as f32 / 340.0, y as f32 / height as f32);
                 let base = [
                     90.0 + 140.0 * (fx * 6.0 + fy * 9.0).sin().abs(),
                     120.0 + 100.0 * (fy * 7.0 - fx * 3.0).cos(),
@@ -3090,6 +3179,50 @@ mod tests {
         let mut after = Pixmap::new(w, h).unwrap();
         renderer.draw(&with_lookup, &mut after.as_mut());
         assert_eq!(tape_pixels.data(), after.data());
+    }
+
+    #[test]
+    fn a_long_result_list_fills_the_whole_tape_area_up_to_the_top_margin() {
+        use crate::steno::overlay::LookupRow;
+        for height in [1080, 1440] {
+            let mut renderer = Renderer::new(&OverlayConfig::default(), 1, height).unwrap();
+            let (w, h) = renderer.size();
+            let snapshot = OverlaySnapshot {
+                layer: Some("steno".into()),
+                lookup: Some(LookupView {
+                    query: "ca".into(),
+                    rows: (0..400)
+                        .map(|i| LookupRow {
+                            text: format!("cand{i}"),
+                            outline: "KAPBD".into(),
+                        })
+                        .collect(),
+                    hint: 0,
+                    strokes: Vec::new(),
+                    mode: LookupMode::Word,
+                }),
+                ..OverlaySnapshot::default()
+            };
+            let mut pixmap = Pixmap::new(w, h).unwrap();
+            renderer.draw(&snapshot, &mut pixmap.as_mut());
+            // Every line of the tape area but the query's own holds a result, the topmost one
+            // starting at the margin; there is no ink above that margin
+            let lit = |y0: u32, y1: u32| {
+                (y0..y1).any(|y| (0..w).any(|x| pixmap.pixel(x, y).unwrap().alpha() > 0))
+            };
+            let top = (renderer.tape_lines() as f32)
+                .mul_add(-renderer.line_height, renderer.tape_bottom);
+            assert!((top - 14.0).abs() < 0.01);
+            for line in 0..renderer.tape_lines() {
+                let y = (line as f32).mul_add(renderer.line_height, top);
+                assert!(
+                    lit(y as u32, (y + renderer.line_height) as u32),
+                    "{height}: line {line} of {} holds a result",
+                    renderer.tape_lines()
+                );
+            }
+            assert!(!lit(0, (top - 6.0) as u32), "{height}: ink above the top margin");
+        }
     }
 
     #[test]

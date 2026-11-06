@@ -759,6 +759,11 @@ pub struct OverlayConfig {
     pub output: Option<String>,
     /// Gap between the overlay and the right screen edge, in logical pixels
     pub margin: u32,
+    /// Space between the bottom of the keyboard diagram and the bottom of the screen, and the
+    /// same space between the top of the tape and the top of the screen, in logical pixels:
+    /// the overlay is symmetric, and a bigger value gives both ends more room (and the tape
+    /// fewer lines).
+    pub margin_y: u32,
     /// Overlay width in logical pixels. It is as tall as the screen. The text and the keys
     /// are sized from this, so a wider overlay has bigger text.
     pub width: u32,
@@ -773,10 +778,15 @@ pub struct OverlayConfig {
     pub background: f32,
     pub keyboard: bool,
     pub tape: bool,
-    /// Most tape strokes to show, newest at the bottom, the oldest fading out. `None` is 8, a
-    /// short tape that stays out of the way; a bigger number shows more, as far as the screen
-    /// height allows.
+    /// Most tape lines to show, newest at the bottom. `None` shows as many as fit the screen
+    /// height, the tape running all the way up it; `Some(20)` caps it.
     pub tape_lines: Option<usize>,
+    /// How strong the oldest (topmost) tape line is, 0.0 to 1.0. Only the last `tape_fade_lines`
+    /// lines at the top fade, in a straight line down to this; every line below them is at full
+    /// strength. 1.0 turns the fade off.
+    pub tape_fade: f32,
+    /// How many lines at the top of the tape fade out (see `tape_fade`). 0 turns the fade off.
+    pub tape_fade_lines: usize,
     /// A .ttf/.otf to use instead of the embedded Atkinson Hyperlegible
     pub font: Option<String>,
     /// Steno layers that show the overlay. Empty means every steno layer.
@@ -807,13 +817,16 @@ impl Default for OverlayConfig {
             enabled: true,
             output: None,
             margin: 0,
+            margin_y: 14,
             width: 340,
             text_scale: 1.0,
-            text_opacity: 0.85,
+            text_opacity: 0.65,
             background: 0.0,
             keyboard: true,
             tape: true,
             tape_lines: None,
+            tape_fade: 0.15,
+            tape_fade_lines: 5,
             extra_keys: Vec::new(),
             overlay_overrides: HashMap::new(),
             key_groups: HashMap::new(),

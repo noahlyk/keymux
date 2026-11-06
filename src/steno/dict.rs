@@ -560,10 +560,19 @@ impl Dictionary {
             .collect();
         let mut found: Vec<&str> = candidates.into_iter().collect();
         found.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
-        // A word whose every outline was deleted or replaced by a later dictionary is not a word
-        found.retain(|text| !self.strokes_for(text).is_empty());
-        found.truncate(limit);
-        found
+        // A word whose every outline was deleted or replaced by a later dictionary is not a word.
+        // Checked in order and only until `limit` are found: a short prefix over a huge
+        // dictionary has far more candidates than anyone asks for.
+        let mut kept = Vec::with_capacity(limit.min(found.len()));
+        for text in found {
+            if kept.len() >= limit {
+                break;
+            }
+            if !self.strokes_for(text).is_empty() {
+                kept.push(text);
+            }
+        }
+        kept
     }
 
     /// Like `load`, but each file is restored from its own binary copy in `cache_dir` while its
