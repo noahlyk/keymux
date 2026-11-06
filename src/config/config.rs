@@ -756,12 +756,17 @@ pub struct OverlayConfig {
     /// Multiplies the text size on top of what `width` gives: 1.2 is a fifth bigger. Bigger
     /// text means fewer tape lines fit and the words get less room.
     pub text_scale: f32,
+    /// How opaque the tape's and the lookup's text is, 0.0 to 1.0. Below 1.0 the text lets the
+    /// window behind it show through a little, which is quieter; its soft shadow keeps it legible.
+    pub text_opacity: f32,
     /// Opacity of a dark panel behind everything, 0.0 to 1.0. Zero is fully transparent:
     /// just the keys and the tape.
     pub background: f32,
     pub keyboard: bool,
     pub tape: bool,
-    /// Most tape strokes to show, newest at the bottom. `None` fills the screen height.
+    /// Most tape strokes to show, newest at the bottom, the oldest fading out. `None` is 8, a
+    /// short tape that stays out of the way; a bigger number shows more, as far as the screen
+    /// height allows.
     pub tape_lines: Option<usize>,
     /// A .ttf/.otf to use instead of the embedded Atkinson Hyperlegible
     pub font: Option<String>,
@@ -786,6 +791,7 @@ impl Default for OverlayConfig {
             margin: 0,
             width: 340,
             text_scale: 1.0,
+            text_opacity: 0.85,
             background: 0.0,
             keyboard: true,
             tape: true,

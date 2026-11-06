@@ -16,7 +16,9 @@ use super::geometry::{KeyGroup, Keyboard, Rect};
 use super::glyphs::{self, GlyphCache};
 use crate::config::{Half, OverlayConfig};
 use crate::steno::layout::Layout;
-use crate::steno::overlay::{LookupMode, LookupView, OverlaySnapshot, TapeEntry, TAPE_CAPACITY};
+use crate::steno::overlay::{
+    LookupMode, LookupRow, LookupView, OverlaySnapshot, TapeEntry, TAPE_CAPACITY,
+};
 use anyhow::Result;
 use std::borrow::Cow;
 use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, PixmapMut, Stroke, Transform};
@@ -28,31 +30,52 @@ const PAD_Y: f32 = 14.0;
 /// Space between the tape and the keyboard, logical px
 const SECTION_GAP: f32 = 20.0;
 /// Outline of an unlit key, logical px
-const OUTLINE: f32 = 1.0;
+const OUTLINE: f32 = 1.5;
 /// Radius of a pad's softened corners relative to its width: a small one, so a key reads as a
 /// pad and not as a pill. The round ends (the bottom of a bottom-row key, a thumb or a tall key)
 /// are not this; they are half the width. A corner that faces another key of the same column
 /// is not rounded at all (see [`has_square_bottom`] and [`has_square_top`]).
 const PAD_TOP_ROUND: f32 = 0.1;
-/// Share of the width inside the padding given to the steno letters; the words get the rest.
-/// The letters are sized to fill this, so a bigger share means bigger steno letters.
-const PAPER_SHARE: f32 = 0.68;
+/// Share of the width inside the padding given to the steno strokes; the words get the rest.
+const PAPER_SHARE: f32 = 0.46;
+/// How many keys a stroke can have and still be set at full size inside [`PAPER_SHARE`]. The
+/// letters are sized from this, not from the 23 keys a tape grid would need: ten and a half covers nearly any
+/// stroke people write in practice, so the letters read well above a grid's. A longer stroke is
+/// set in the next smaller size of [`STROKE_TIERS`], and the smallest fits every key there is.
+const REFERENCE_KEYS: f32 = 11.5;
+/// The sizes a stroke is set in, as shares of the full size: a stroke is set in the largest one
+/// it fits the paper in. The last one fits a stroke of every key (and an extra key) with no
+/// overlap, so letters are never drawn on top of each other.
+const STROKE_TIERS: [f32; 4] = [1.0, 0.8, 0.62, 0.42];
 /// Space after each steno letter's own width, as a share of the letter: the letter spacing of
-/// the tape's steno letters, and nothing else (the words on the right are set normally). Small
-/// so strokes read as tight as text; each column is as wide as its own letter, so `W` gets
-/// more room than `T` and nothing ever overlaps.
+/// the strokes, and nothing else (the words are set normally). Small so strokes read as tight as
+/// text.
 const SLOT_GAP: f32 = 0.04;
 /// The words are what you read, so they are at least as big as the strokes
-const WORDS_RATIO: f32 = 1.06;
-/// Line pitch relative to the words' own height
-const LINE_SPACING: f32 = 1.12;
+const WORDS_RATIO: f32 = 1.04;
+/// Line pitch relative to the words' own height: tight, but the pair underline under a stroke
+/// still has room above the next line
+const LINE_SPACING: f32 = 0.86;
 /// A key's label is this share of the key's width
 const LABEL_RATIO: f32 = 0.72;
-/// Text size the column widths are measured at; they scale linearly from here
+/// Text size the stroke letters are measured at to size them from the paper; they scale linearly
 const PROBE_PX: f32 = 32.0;
+/// How far a word's outline may be squeezed (after the smallest of [`STROKE_TIERS`]) and still be kept on one
+/// line: past this its strokes wrap onto further lines instead (see `wrap_strokes`)
+const MIN_SQUEEZE: f32 = 0.75;
+/// Space on each side of the thin rule that divides the strokes of one outline, relative to the
+/// stroke letters' size
+const RULE_SPACE: f32 = 0.3;
+/// Thickness of that rule, relative to the stroke letters' size (never under one pixel)
+const RULE_THICKNESS: f32 = 0.07;
+/// Space between the outlines of two words of a phrase on one line, relative to the stroke
+/// letters' size: wider than a rule's, so words read as separate and strokes as one word's
+const GROUP_SPACE: f32 = 1.1;
 /// The oldest tape lines, at the top of the screen, fade out: this many of them, the topmost
 /// faintest. Every other line is at full strength.
-const FADE_LINES: usize = 3;
+const FADE_LINES: usize = 4;
+/// How many tape lines are shown when the config does not say: few, so the overlay stays quiet
+const DEFAULT_TAPE_LINES: usize = 8;
 
 /// Colours. With no background, everything has to read over any wallpaper: text is bright with
 /// a dark halo, and unlit keys are a faint dark glass pad with a light outline.
@@ -81,7 +104,7 @@ impl Default for Theme {
         Self {
             panel: [10, 12, 16],
             key: [16, 20, 30, 46],
-            outline: [190, 204, 235, 90],
+            outline: [140, 154, 190, 105],
             label: [226, 232, 242, 245],
             label_lit: [8, 12, 16, 255],
             left: [232, 162, 74, 255],
@@ -96,6 +119,15 @@ impl Default for Theme {
 }
 
 impl Theme {
+    /// The tape's text at `opacity` (zero to one) of its full strength.
+    fn with_text_opacity(mut self, opacity: f32) -> Self {
+        let opacity = opacity.clamp(0.0, 1.0);
+        for color in [&mut self.strokes, &mut self.words, &mut self.unmatched] {
+            color[3] = (f32::from(color[3]) * opacity).round() as u8;
+        }
+        self
+    }
+
     /// The colour a lit key in `group` is drawn in.
     const fn accent(&self, group: KeyGroup) -> [u8; 4] {
         match group {
@@ -107,13 +139,6 @@ impl Theme {
     }
 }
 
-/// Where one steno letter sits on a tape line, relative to the left edge of the letters.
-#[derive(Debug, Clone, Copy)]
-struct Column {
-    x: f32,
-    width: f32,
-}
-
 /// One key of a tape stroke, as drawn: its letter, its colour, and the pair it belongs to (keys one
 /// finger plays together share a number and are underlined as one).
 struct RunKey {
@@ -121,6 +146,11 @@ struct RunKey {
     color: [u8; 4],
     pair: Option<u8>,
 }
+
+/// One stroke as drawn: its keys in order
+type Run = Vec<RunKey>;
+/// One word's outline: its strokes, divided by a thin rule when drawn
+type Unit = Vec<Run>;
 
 /// The pair number of an extra key sitting on a standard key whose own pair is unknown
 const PAIR_SPLIT: u8 = 100;
@@ -168,16 +198,31 @@ pub struct Renderer {
     tape_lines: usize,
     /// Which stroke of an animated lookup is lit right now (see [`anim`]); 0 for everything else
     step: usize,
-    /// One per tape slot in [`Layout::paper_order`] order
-    columns: Vec<Column>,
-    /// Left edge of the steno letters, and where the words start, physical px
+    /// The paper the steno strokes are set in: its left edge, and the right edge they end at, flush
+    /// against the words, which start at `words_left` (physical px)
     paper_left: f32,
+    paper_right: f32,
     words_left: f32,
     /// The right edge words are clipped at
     words_right: f32,
     labels: GlyphCache,
     strokes: GlyphCache,
+    /// The strokes' letters at each of [`STROKE_TIERS`], largest first
+    stroke_tiers: Vec<GlyphCache>,
     words: GlyphCache,
+}
+
+/// A lookup row laid out: its outline in lines of units (empty when the outline is not steno and
+/// is drawn as plain text instead), its words wrapped, and how many lines it takes
+struct RowPlan {
+    outline: Vec<Vec<Unit>>,
+    /// The outline as plain wrapped text, only when it did not parse as steno
+    plain: Vec<String>,
+    text: Vec<String>,
+    /// Whether the outline and the words are paired word for word (a phrase), so both have the
+    /// same lines and neither is centred against the other
+    paired: bool,
+    lines: usize,
 }
 
 impl Renderer {
@@ -250,15 +295,15 @@ impl Renderer {
         let label_px = glyphs::crisp_size(&bold, key_width * LABEL_RATIO * text_scale, 'H');
         let labels = GlyphCache::new(bold.clone(), label_px);
 
-        // Size the steno letters so that every column — any extra keys first, then all 23
-        // standard slots — each as wide as its own letter plus `SLOT_GAP`, fill `PAPER_SHARE`
-        // of the width. Column widths scale linearly with the size, so measure once at a
-        // probe size.
+        // Size the steno letters so that `REFERENCE_KEYS` of them, each as wide as its own letter
+        // plus `SLOT_GAP`, fill `PAPER_SHARE` of the width: a typical stroke fills the paper and
+        // a longer one is set smaller (see `STROKE_TIERS`). Widths scale linearly with the
+        // size, so measure the average letter once at a probe size.
         let mut probe = GlyphCache::new(bold.clone(), PROBE_PX);
         let extra_labels: Vec<char> = (0..layout.extra_keys().len())
             .map(|i| Keyboard::extra_label(&layout, i))
             .collect();
-        let probe_total: f32 = extra_labels
+        let letters: Vec<char> = extra_labels
             .iter()
             .copied()
             .chain(
@@ -266,37 +311,39 @@ impl Renderer {
                     .iter()
                     .map(|&slot| Keyboard::label(&layout, slot)),
             )
-            .map(|ch| probe.get(ch).advance * (1.0 + SLOT_GAP))
-            .sum();
+            .collect();
+        let probe_average: f32 = letters
+            .iter()
+            .map(|&ch| probe.get(ch).advance * (1.0 + SLOT_GAP))
+            .sum::<f32>()
+            / letters.len().max(1) as f32;
+        let paper_width = PAPER_SHARE * inner;
         let stroke_px = glyphs::crisp_size(
             &bold,
-            PROBE_PX * (PAPER_SHARE * inner) / probe_total * text_scale,
+            PROBE_PX * paper_width / (REFERENCE_KEYS * probe_average) * text_scale,
             'H',
         );
-        let mut strokes = GlyphCache::new(bold.clone(), stroke_px);
+        let strokes = GlyphCache::new(bold.clone(), stroke_px);
+        let stroke_tiers = STROKE_TIERS
+            .iter()
+            .map(|ratio| {
+                GlyphCache::new(bold.clone(), glyphs::crisp_size(&bold, stroke_px * ratio, 'H'))
+            })
+            .collect();
         let words_px = glyphs::crisp_size(&bold, stroke_px * WORDS_RATIO, 'x');
         let words = GlyphCache::new(bold, words_px);
 
-        let mut x = 0.0;
-        for &ch in &extra_labels {
-            x = strokes.get(ch).advance.mul_add(1.0 + SLOT_GAP, x);
-        }
-        let mut columns = Vec::with_capacity(paper_order.len());
-        for &slot in &paper_order {
-            let width = strokes.get(Keyboard::label(&layout, slot)).advance * (1.0 + SLOT_GAP);
-            columns.push(Column { x, width });
-            x += width;
-        }
-        let words_left = pad_x + x + stroke_px * 0.6;
+        let paper_right = pad_x + paper_width;
+        let words_left = paper_right + stroke_px * 0.6;
         let words_right = width - pad_x;
 
-        let line_height = (words.line_height() * LINE_SPACING).ceil();
+        let line_height = (words_px * LINE_SPACING).ceil();
         let tape_bottom = keyboard.as_ref().map_or(height - pad_y, |k| {
             SECTION_GAP.mul_add(-scale, k.keys[number_slot].y)
         });
         let fits = ((tape_bottom - pad_y) / line_height).floor().max(0.0) as usize;
         let tape_lines = if config.tape {
-            fits.min(config.tape_lines.unwrap_or(usize::MAX))
+            fits.min(config.tape_lines.unwrap_or(DEFAULT_TAPE_LINES))
                 .min(TAPE_CAPACITY)
         } else {
             0
@@ -372,7 +419,7 @@ impl Renderer {
         Ok(Self {
             config: config.clone(),
             layout,
-            theme: Theme::default(),
+            theme: Theme::default().with_text_opacity(config.text_opacity),
             scale,
             stroke_px,
             size: (width as u32, height as u32),
@@ -384,12 +431,13 @@ impl Renderer {
             line_height,
             tape_lines,
             step: 0,
-            columns,
             paper_left: pad_x,
+            paper_right,
             words_left,
             words_right,
             labels,
             strokes,
+            stroke_tiers,
             words,
         })
     }
@@ -437,11 +485,7 @@ impl Renderer {
         // results above it get the extra spacing, so the query doesn't drift away from the
         // keys it's drawn in front of.
         let query_baseline = bottom - line_height + baseline_in_line;
-        let paper_right = {
-            let last = self.columns[self.columns.len() - 1];
-            self.paper_left + last.x + last.width
-        };
-
+        let paper_right = self.paper_right;
         // The query row: a label where the strokes go, the word with a caret where words go.
         // The label says what the query is actually doing instead of always the same generic
         // word: raw steno notation resolving forward, a whole phrase translating into one
@@ -464,18 +508,42 @@ impl Renderer {
             self.scale,
         );
         let room = 4.0f32.mul_add(-self.scale, self.words_right - self.words_left);
-        let shown = tail_that_fits(&mut self.words, &view.query, room);
-        draw_text_clipped(
-            pixmap,
-            &mut self.words,
-            shown,
-            self.words_left,
-            query_baseline,
-            self.words_right,
-            self.theme.words,
-            self.scale,
-        );
-        let caret_x = 2.0f32.mul_add(self.scale, self.words_left + self.words.measure(shown));
+        // Raw steno being typed is an outline like any other, so it is drawn as one while it
+        // parses; a half-typed one that does not yet is plain text
+        let typed = (view.mode == LookupMode::Stroke)
+            .then(|| self.outline_units(view.query.trim()))
+            .flatten()
+            .filter(|units| units.iter().flatten().any(|run| !run.is_empty()));
+        let query_end = if let Some(units) = typed {
+            let line = [units.into_iter().flatten().collect::<Unit>()];
+            let tier = self.fit_tier(&line, room);
+            let width = self.line_width(&line, tier).min(room);
+            self.draw_line(
+                pixmap,
+                &line,
+                self.words_left + width,
+                room,
+                query_baseline,
+                1.0,
+                0,
+                None,
+            );
+            self.words_left + width
+        } else {
+            let shown = tail_that_fits(&mut self.words, &view.query, room);
+            draw_text_clipped(
+                pixmap,
+                &mut self.words,
+                shown,
+                self.words_left,
+                query_baseline,
+                self.words_right,
+                self.theme.words,
+                self.scale,
+            );
+            self.words_left + self.words.measure(shown)
+        };
+        let caret_x = 2.0f32.mul_add(self.scale, query_end);
         let caret_height = self.words.ascent() * 0.95;
         if let Some(caret) = rounded_rect(
             Rect {
@@ -510,45 +578,23 @@ impl Renderer {
             );
             return;
         }
-        // How many lines each row's own text needs - the wider of its outline and its word,
-        // since both share the row - stopping once the panel's line budget is used up rather
-        // than ever truncating a long outline or a long phrase with an ellipsis. A row that
-        // would only partly fit is left off entirely, so the ones shown always get full text.
+        // How many lines each row needs - the wider of its outline and its word, since both
+        // share the row - stopping once the panel's line budget is used up rather than ever
+        // truncating a long outline or a long phrase with an ellipsis. A row that would only
+        // partly fit is left off entirely, so the ones shown always get full text.
+        let (outline_max, words_max) = (
+            paper_right - self.paper_left,
+            self.words_right - self.words_left,
+        );
         let mut shown_rows = Vec::with_capacity(view.rows.len());
         let mut used = 0usize;
         for row in &view.rows {
-            let row_lines = if let Some((words, strokes)) = word_groups(&row.text, &row.outline) {
-                wrap_paired(
-                    &mut self.strokes,
-                    &mut self.words,
-                    &strokes,
-                    &words,
-                    paper_right - self.paper_left,
-                    self.words_right - self.words_left,
-                )
-                .0
-                .len()
-            } else {
-                let outline_lines = wrap_text(
-                    &mut self.strokes,
-                    &row.outline,
-                    paper_right - self.paper_left,
-                )
-                .len();
-                let text_lines = wrap_text(
-                    &mut self.words,
-                    &row.text,
-                    self.words_right - self.words_left,
-                )
-                .len();
-                outline_lines.max(text_lines)
-            }
-            .max(1);
-            if used + row_lines > room_for {
+            let plan = self.plan_row(row, outline_max, words_max);
+            if used + plan.lines > room_for {
                 break;
             }
-            shown_rows.push((row, row_lines));
-            used += row_lines;
+            used += plan.lines;
+            shown_rows.push((row, plan));
         }
         // A single short result is pushed up with some breathing room above the query instead
         // of sitting squeezed right against it, so it still makes use of the tape's height - but
@@ -569,8 +615,8 @@ impl Renderer {
         let playing = Self::lookup_strokes(view).len() > 1;
         let step = self.step;
         let mut block_top = bottom - line_height; // the query's own block, already placed
-        for (row, row_lines) in shown_rows {
-            let row_height = row_lines as f32 * line_height;
+        for (row, plan) in shown_rows {
+            let row_height = plan.lines as f32 * line_height;
             let row_bottom = block_top - gap_each;
             let row_top = row_bottom - row_height;
             block_top = row_top;
@@ -578,102 +624,58 @@ impl Renderer {
             let strength = if row.text == view.query.trim() {
                 1.0
             } else {
-                0.8
+                0.88
             };
-            let outline_color = fade_color(self.theme.strokes, strength);
             let text_color = fade_color(self.theme.words, strength);
-            if let Some((words, strokes)) = word_groups(&row.text, &row.outline) {
-                // A phrase: wrap both columns together, word by word, so a line always shows
-                // the same words in both - see `wrap_paired`. The two always come out with the
-                // same number of lines, so neither needs centring against the other.
-                let (outline_lines, text_lines) = wrap_paired(
-                    &mut self.strokes,
-                    &mut self.words,
-                    &strokes,
-                    &words,
-                    paper_right - self.paper_left,
-                    self.words_right - self.words_left,
-                );
-                draw_lines(
-                    pixmap,
-                    &mut self.strokes,
-                    &outline_lines,
-                    self.paper_left,
-                    row_top + baseline_in_line,
-                    line_height,
-                    outline_color,
-                    self.scale,
-                );
-                draw_lines(
-                    pixmap,
-                    &mut self.words,
-                    &text_lines,
-                    self.words_left,
-                    row_top + baseline_in_line,
-                    line_height,
-                    text_color,
-                    self.scale,
-                );
-                continue;
-            }
-            // A single word (or a raw-steno row): the two columns wrap independently, since
-            // there's no word-for-word correspondence to keep in step. A word usually needs
-            // more lines to wrap than its outline does, so the shorter column is centred within
-            // the row's full height rather than pinned to its top - otherwise it reads as
-            // orphaned above a tall gap instead of belonging to the row.
-            let outline_lines = wrap_text(
-                &mut self.strokes,
-                &row.outline,
-                paper_right - self.paper_left,
-            )
-            .len();
-            let text_lines = wrap_text(
-                &mut self.words,
-                &row.text,
-                self.words_right - self.words_left,
-            )
-            .len();
-            let center = |col_lines: usize| {
-                ((row_lines - col_lines) as f32 / 2.0).mul_add(line_height, row_top)
-                    + baseline_in_line
+            // A phrase's two columns have the same lines; otherwise the shorter one is centred
+            // within the row's height rather than pinned to its top, so it does not read as
+            // orphaned above a tall gap
+            let top = |col_lines: usize| {
+                if plan.paired {
+                    row_top + baseline_in_line
+                } else {
+                    ((plan.lines - col_lines) as f32 / 2.0).mul_add(line_height, row_top)
+                        + baseline_in_line
+                }
             };
-            if playing && view.rows.first().is_some_and(|best| std::ptr::eq(row, best)) {
-                let lines = wrap_text(
-                    &mut self.strokes,
-                    &row.outline,
-                    (paper_right - self.paper_left).max(0.0),
-                );
-                draw_lines_stepped(
+            let lit = (playing && view.rows.first().is_some_and(|best| std::ptr::eq(row, best)))
+                .then(|| step % Self::lookup_strokes(view).len());
+            if plan.outline.is_empty() {
+                // Not steno: drawn as plain text
+                draw_lines(
                     pixmap,
                     &mut self.strokes,
-                    &lines,
+                    &plan.plain,
                     self.paper_left,
-                    center(outline_lines),
+                    top(plan.plain.len()),
                     line_height,
-                    outline_color,
+                    fade_color(self.theme.strokes, strength),
                     self.scale,
-                    step % Self::lookup_strokes(view).len(),
                 );
             } else {
-                draw_text_wrapped(
-                    pixmap,
-                    &mut self.strokes,
-                    &row.outline,
-                    self.paper_left,
-                    center(outline_lines),
-                    paper_right,
-                    line_height,
-                    outline_color,
-                    self.scale,
-                );
+                // The strokes, coloured and underlined like the tape's, flush against the words
+                let mut first = 0usize;
+                let start = top(plan.outline.len());
+                for (n, line) in plan.outline.iter().enumerate() {
+                    self.draw_line(
+                        pixmap,
+                        line,
+                        paper_right,
+                        outline_max,
+                        line_height.mul_add(n as f32, start),
+                        strength,
+                        first,
+                        lit,
+                    );
+                    first += line.iter().map(Vec::len).sum::<usize>();
+                }
             }
-            draw_text_wrapped(
+            draw_lines(
                 pixmap,
                 &mut self.words,
-                &row.text,
+                &plan.text,
                 self.words_left,
-                center(text_lines),
-                self.words_right,
+                top(plan.text.len()),
                 line_height,
                 text_color,
                 self.scale,
@@ -699,6 +701,29 @@ impl Renderer {
                 strokes[self.step % strokes.len()]
             }
         });
+        // A lit key glows: a soft halo of its own colour, painted for every lit key before any
+        // key is drawn, so no glow ever lies over a neighbouring key
+        let lit_strength = |bit: u32| {
+            if snapshot.held & bit != 0 {
+                Some(1.0)
+            } else if (snapshot.chord | hint) & bit != 0 {
+                Some(GLOW_DIM)
+            } else {
+                None
+            }
+        };
+        for (slot, shape) in self.key_shapes.iter().enumerate() {
+            if let Some(strength) = lit_strength(1u32 << slot) {
+                let accent = self.theme.accent(Keyboard::group(slot));
+                glow(pixmap, shape, accent, strength, self.scale);
+            }
+        }
+        for (i, shape) in self.extra_shapes.iter().enumerate() {
+            if let Some(strength) = lit_strength(Keyboard::extra_bit(&self.layout, i)) {
+                let accent = self.theme.accent(self.extra_group(i));
+                glow(pixmap, shape, accent, strength, self.scale);
+            }
+        }
         for (slot, shape) in self.key_shapes.iter().enumerate() {
             let bit = 1u32 << slot;
             let accent = self.theme.accent(Keyboard::group(slot));
@@ -832,15 +857,16 @@ impl Renderer {
         }
     }
 
-    /// The keys of a tape stroke as a run to read, not a grid: extra keys first, then the standard
+    /// The keys of a stroke as a run to read, not a grid: extra keys first, then the standard
     /// keys in stroke order, each in its part of the keyboard's colour, with a `-` only where the
     /// right hand could not otherwise be told from the left. Keys one finger plays together carry
-    /// the same pair number so they can be underlined as one.
-    fn tape_run(&self, entry: &TapeEntry) -> Vec<RunKey> {
+    /// the same pair number so they can be underlined as one. This is how every stroke is drawn
+    /// anywhere in the overlay: the tape and the lookup alike.
+    fn stroke_run(&self, stroke: u32) -> Run {
         let mut run = Vec::new();
         let splits = self.keyboard.as_ref().map(|k| &k.splits);
         for index in 0..self.layout.extra_keys().len() {
-            if entry.stroke & Keyboard::extra_bit(&self.layout, index) == 0 {
+            if stroke & Keyboard::extra_bit(&self.layout, index) == 0 {
                 continue;
             }
             // An extra key sharing a slot with a standard key (the join key over `S-`) is that
@@ -856,12 +882,12 @@ impl Renderer {
         }
         let number_slot = self.layout.number_slot();
         let present: Vec<usize> = (0..number_slot)
-            .filter(|slot| entry.stroke & (1 << slot) != 0)
+            .filter(|slot| stroke & (1 << slot) != 0)
             .collect();
         let dash = self.tape_needs_dash(&present);
         let mut dashed = false;
         for slot in std::iter::once(number_slot).chain(0..number_slot) {
-            if entry.stroke & (1 << slot) == 0 {
+            if stroke & (1 << slot) == 0 {
                 continue;
             }
             if dash && !dashed && (12..number_slot).contains(&slot) {
@@ -879,6 +905,320 @@ impl Renderer {
             });
         }
         run
+    }
+
+    /// An outline written as text (`KAPBD/EUD`, or a phrase's `EU / WAUPBT / TO`) as units of
+    /// strokes: one unit per word, split on the spaced slashes, its strokes on the bare ones.
+    /// `None` when it is not steno at all (a raw row), which is then drawn as plain text.
+    fn outline_units(&self, outline: &str) -> Option<Vec<Unit>> {
+        outline
+            .split(" / ")
+            .map(|group| {
+                self.layout
+                    .parse_strokes_trimmed(group)
+                    .map(|strokes| strokes.iter().map(|&s| self.stroke_run(s)).collect())
+            })
+            .collect()
+    }
+
+    /// The glyphs strokes are drawn with at size `tier` of [`STROKE_TIERS`] (0 is full size)
+    fn stroke_glyphs(&mut self, tier: usize) -> &mut GlyphCache {
+        &mut self.stroke_tiers[tier]
+    }
+
+    /// The largest size of letters `line` fits `max` wide in; the smallest fits a stroke of every key
+    fn fit_tier(&mut self, line: &[Unit], max: f32) -> usize {
+        let last = self.last_tier();
+        (0..=last)
+            .find(|&t| self.line_width(line, t) <= max)
+            .unwrap_or(last)
+    }
+
+    /// The smallest size of the strokes' letters
+    const fn last_tier(&self) -> usize {
+        self.stroke_tiers.len() - 1
+    }
+
+    /// How wide a stroke is, in physical px
+    fn run_width(&mut self, run: &[RunKey], tier: usize) -> f32 {
+        let glyphs = self.stroke_glyphs(tier);
+        run.iter()
+            .map(|key| glyphs.get(key.ch).advance * (1.0 + SLOT_GAP))
+            .sum()
+    }
+
+    /// Space on each side of the rule between two strokes of a word, and the rule's thickness
+    fn rule_space(&self) -> f32 {
+        (self.stroke_px * RULE_SPACE).round()
+    }
+
+    fn rule_thickness(&self) -> f32 {
+        (self.stroke_px * RULE_THICKNESS).max(self.scale).round()
+    }
+
+    fn group_space(&self) -> f32 {
+        (self.stroke_px * GROUP_SPACE).round()
+    }
+
+    /// How wide one word's outline is: its strokes with a rule between each pair
+    fn unit_width(&mut self, unit: &[Run], tier: usize) -> f32 {
+        let between = 2.0f32.mul_add(self.rule_space(), self.rule_thickness());
+        let mut width = unit.len().saturating_sub(1) as f32 * between;
+        for run in unit {
+            width += self.run_width(run, tier);
+        }
+        width
+    }
+
+    /// How wide a line of outlines is: its words' outlines with a wider gap between words
+    fn line_width(&mut self, line: &[Unit], tier: usize) -> f32 {
+        let mut width = line.len().saturating_sub(1) as f32 * self.group_space();
+        for unit in line {
+            width += self.unit_width(unit, tier);
+        }
+        width
+    }
+
+    /// Draw one stroke with its left edge at `x` and return how far it advanced: coloured
+    /// letters, and one line under each pair of keys one finger plays together.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_run(
+        &mut self,
+        pixmap: &mut PixmapMut,
+        run: &[RunKey],
+        x: f32,
+        baseline: f32,
+        fade: f32,
+        squeeze: f32,
+        tier: usize,
+    ) -> f32 {
+        let gap = 1.0 + SLOT_GAP;
+        let px = self.stroke_tiers[tier].pixel_size();
+        let scale = self.scale;
+        let thickness = (px * 0.09).max(scale).round();
+        let underline_y = baseline + (px * 0.12).round();
+        let mut at = x;
+        let mut span_start: Option<f32> = None;
+        for (i, key) in run.iter().enumerate() {
+            let glyph_advance = self.stroke_glyphs(tier).get(key.ch).advance;
+            let advance = glyph_advance * gap * squeeze;
+            draw_char(
+                pixmap,
+                self.stroke_glyphs(tier),
+                key.ch,
+                at + glyph_advance.mul_add(-squeeze, advance) / 2.0,
+                baseline,
+                fade_color(key.color, fade),
+                scale,
+            );
+            // Two neighbours with the same pair number are one finger's pair: one line under both
+            let next_same = run.get(i + 1).and_then(|n| n.pair) == key.pair && key.pair.is_some();
+            match (key.pair, span_start) {
+                (Some(_), None) if next_same => span_start = Some(at),
+                (Some(_), Some(from)) if !next_same => {
+                    if let Some(rect) =
+                        tiny_skia::Rect::from_xywh(from, underline_y, at + advance - from, thickness)
+                    {
+                        fill(pixmap, &PathBuilder::from_rect(rect), fade_color(key.color, fade));
+                    }
+                    span_start = None;
+                }
+                _ => {}
+            }
+            at += advance;
+        }
+        at - x
+    }
+
+    /// Draw a line of outlines with its right edge at `right`, fitting `max` wide: in the largest
+    /// size of letters it fits in, and only then squeezed. `first` is the number of
+    /// strokes of the row drawn on earlier lines and `current` the one stroke lit while an outline
+    /// is playing (the rest dimmed to [`anim::DIM`]); `None` lights them all.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_line(
+        &mut self,
+        pixmap: &mut PixmapMut,
+        line: &[Unit],
+        right: f32,
+        max: f32,
+        baseline: f32,
+        fade: f32,
+        first: usize,
+        current: Option<usize>,
+    ) {
+        let tier = self.fit_tier(line, max);
+        let natural = self.line_width(line, tier);
+        // Whatever it takes: a stroke never runs past its paper into the words (only an outline
+        // of several long strokes is squeezed at all, and `wrap_strokes` breaks those first)
+        let squeeze = if natural > max && natural > 0.0 {
+            max / natural
+        } else {
+            1.0
+        };
+        let (space, thickness) = (self.rule_space() * squeeze, self.rule_thickness());
+        let group = self.group_space() * squeeze;
+        let rule_height = (self.stroke_px * 0.7).round();
+        let mut x = natural.mul_add(-squeeze, right);
+        let mut index = first;
+        let lit = |i: usize| current.is_none_or(|c| c == i);
+        for (u, unit) in line.iter().enumerate() {
+            if u > 0 {
+                x += group;
+            }
+            for (k, run) in unit.iter().enumerate() {
+                let strength = if lit(index) {
+                    fade
+                } else {
+                    fade * anim::DIM
+                };
+                if k > 0 {
+                    // the thin rule between two strokes of one word
+                    x += space;
+                    let rule_fade = if lit(index) || lit(index - 1) {
+                        fade
+                    } else {
+                        fade * anim::DIM
+                    };
+                    if let Some(rect) = tiny_skia::Rect::from_xywh(
+                        x,
+                        baseline - rule_height,
+                        thickness,
+                        rule_height,
+                    ) {
+                        fill(
+                            pixmap,
+                            &PathBuilder::from_rect(rect),
+                            fade_color(self.theme.strokes, rule_fade * 0.55),
+                        );
+                    }
+                    x += thickness + space;
+                }
+                x += self.draw_run(pixmap, run, x, baseline, strength, squeeze, tier);
+                index += 1;
+            }
+        }
+    }
+
+    /// Lay out one lookup row: its outline as lines of units and its words wrapped, paired word
+    /// for word for a phrase. An outline that is not steno falls back to plain wrapped text.
+    fn plan_row(&mut self, row: &LookupRow, outline_max: f32, words_max: f32) -> RowPlan {
+        let paired = word_groups(&row.text, &row.outline);
+        let Some(units) = self.outline_units(&row.outline) else {
+            let plain = wrap_text(&mut self.strokes, &row.outline, outline_max);
+            let text = wrap_text(&mut self.words, &row.text, words_max);
+            let lines = plain.len().max(text.len()).max(1);
+            return RowPlan {
+                outline: Vec::new(),
+                plain,
+                text,
+                paired: false,
+                lines,
+            };
+        };
+        if let Some((words, _)) = paired.filter(|(w, _)| w.len() == units.len()) {
+            let (outline, text) = self.wrap_phrase(units, &words, outline_max, words_max);
+            let lines = outline.len().max(1);
+            return RowPlan {
+                outline,
+                plain: Vec::new(),
+                text,
+                paired: true,
+                lines,
+            };
+        }
+        // One word (or a raw row's strokes): its strokes wrap on their own; the words wrap on theirs
+        let strokes: Vec<Run> = units.into_iter().flatten().collect();
+        let outline = self.wrap_strokes(strokes, outline_max);
+        let text = wrap_text(&mut self.words, &row.text, words_max);
+        let lines = outline.len().max(text.len()).max(1);
+        RowPlan {
+            outline,
+            plain: Vec::new(),
+            text,
+            paired: false,
+            lines,
+        }
+    }
+
+    /// Break one word's strokes over lines of at most `max`: a stroke is never split. A line is
+    /// packed as far as the smaller letters and the least squeeze can make it fit (that is what
+    /// [`Self::draw_line`] will draw it with), so `KAPBD/EUD` stays on one line and only an
+    /// outline that really cannot fit breaks.
+    fn wrap_strokes(&mut self, strokes: Vec<Run>, max: f32) -> Vec<Vec<Unit>> {
+        let max = max / MIN_SQUEEZE;
+        let between = 2.0f32.mul_add(self.rule_space(), self.rule_thickness());
+        let mut lines: Vec<Vec<Unit>> = Vec::new();
+        let mut line: Unit = Vec::new();
+        let mut width = 0.0f32;
+        for run in strokes {
+            let last = self.last_tier();
+            let w = self.run_width(&run, last);
+            if !line.is_empty() && width + between + w > max {
+                lines.push(vec![std::mem::take(&mut line)]);
+                width = 0.0;
+            }
+            width += if line.is_empty() { w } else { between + w };
+            line.push(run);
+        }
+        if !line.is_empty() || lines.is_empty() {
+            lines.push(vec![line]);
+        }
+        lines
+    }
+
+    /// Break a phrase's words and their outlines over shared lines, word by word: a word only
+    /// moves to a new line together with its own outline when either would overflow, so both
+    /// columns always show the same words on the same line (see [`wrap_paired`], the text-only
+    /// version of this).
+    fn wrap_phrase(
+        &mut self,
+        units: Vec<Unit>,
+        words: &[&str],
+        outline_max: f32,
+        words_max: f32,
+    ) -> (Vec<Vec<Unit>>, Vec<String>) {
+        let sep_words = self.words.measure(" ");
+        let group = self.group_space();
+        let mut outline_lines: Vec<Vec<Unit>> = Vec::new();
+        let mut text_lines: Vec<String> = Vec::new();
+        let mut outline_line: Vec<Unit> = Vec::new();
+        let mut text_line = String::new();
+        let (mut outline_width, mut text_width) = (0.0f32, 0.0f32);
+        for (unit, &word) in units.into_iter().zip(words) {
+            let unit_width = self.unit_width(&unit, 0);
+            let word_width = self.words.measure(word);
+            let next_outline = if outline_line.is_empty() {
+                unit_width
+            } else {
+                outline_width + group + unit_width
+            };
+            let next_text = if text_line.is_empty() {
+                word_width
+            } else {
+                text_width + sep_words + word_width
+            };
+            if !outline_line.is_empty() && (next_outline > outline_max || next_text > words_max) {
+                outline_lines.push(std::mem::take(&mut outline_line));
+                text_lines.push(std::mem::take(&mut text_line));
+                outline_width = unit_width;
+                text_width = word_width;
+                outline_line.push(unit);
+                text_line.push_str(word);
+                continue;
+            }
+            if !text_line.is_empty() {
+                text_line.push(' ');
+            }
+            text_line.push_str(word);
+            outline_line.push(unit);
+            outline_width = next_outline;
+            text_width = next_text;
+        }
+        if !outline_line.is_empty() || outline_lines.is_empty() {
+            outline_lines.push(outline_line);
+            text_lines.push(text_line);
+        }
+        (outline_lines, text_lines)
     }
 
     /// Whether the stroke needs a `-`: no vowel or star, some right-hand key, and the bare letters
@@ -916,54 +1256,12 @@ impl Renderer {
         fade: f32,
     ) {
         // The stroke is a run of coloured letters, set flush against the words it spelt so the
-        // eye goes straight from one to the other; a long run is squeezed to fit the paper
-        // instead of spilling off the left edge. (The paper's own width is unchanged: the
-        // lookup lays its strokes out in it too.)
-        let run = self.tape_run(entry);
+        // eye goes straight from one to the other; a long stroke is set smaller and then
+        // fitted to the paper (the same drawing the lookup uses for its outlines).
+        let run = self.stroke_run(entry.stroke);
         if !run.is_empty() {
-            let gap = 1.0 + SLOT_GAP;
-            let advances: Vec<f32> = run
-                .iter()
-                .map(|key| self.strokes.get(key.ch).advance * gap)
-                .collect();
-            let total: f32 = advances.iter().sum();
-            let right = self.stroke_px.mul_add(-0.6, self.words_left);
-            let squeeze = ((right - self.paper_left) / total).min(1.0);
-            let mut x = total.mul_add(-squeeze, right);
-            let thickness = (self.stroke_px * 0.09).max(self.scale).round();
-            let underline_y = baseline + (self.stroke_px * 0.12).round();
-            let mut span_start: Option<(f32, u8)> = None;
-            for (i, key) in run.iter().enumerate() {
-                let advance = advances[i] * squeeze;
-                let glyph_advance = self.strokes.get(key.ch).advance;
-                draw_char(
-                    pixmap,
-                    &mut self.strokes,
-                    key.ch,
-                    x + glyph_advance.mul_add(-squeeze, advance) / 2.0,
-                    baseline,
-                    fade_color(key.color, fade),
-                    self.scale,
-                );
-                // Two neighbours with the same pair number are one finger's pair: one line under both
-                let next_same = run.get(i + 1).and_then(|n| n.pair) == key.pair && key.pair.is_some();
-                match (key.pair, span_start) {
-                    (Some(pair), None) if next_same => span_start = Some((x, pair)),
-                    (Some(_), Some((from, _))) if !next_same => {
-                        if let Some(rect) = tiny_skia::Rect::from_xywh(
-                            from,
-                            underline_y,
-                            x + advance - from,
-                            thickness,
-                        ) {
-                            fill(pixmap, &PathBuilder::from_rect(rect), fade_color(key.color, fade));
-                        }
-                        span_start = None;
-                    }
-                    _ => {}
-                }
-                x += advance;
-            }
+            let (right, max) = (self.paper_right, self.paper_right - self.paper_left);
+            self.draw_line(pixmap, &[vec![run]], right, max, baseline, fade, 0, None);
         }
 
         let color = if entry.unmatched {
@@ -1056,6 +1354,35 @@ fn fill(pixmap: &mut PixmapMut, path: &Path, color: [u8; 4]) {
         None,
     );
 }
+
+/// The glow of a lit key: the key's own outline stroked several times, each wider and fainter
+/// than the one before, which stacks up to a soft falloff reaching about [`GLOW_REACH`] logical
+/// pixels out from the key. `strength` scales it (a key already let go glows less).
+fn glow(pixmap: &mut PixmapMut, path: &Path, accent: [u8; 4], strength: f32, scale: f32) {
+    for (reach, alpha) in GLOW_LAYERS {
+        let style = Stroke {
+            width: reach * 2.0 * scale,
+            line_join: tiny_skia::LineJoin::Round,
+            ..Stroke::default()
+        };
+        let a = (alpha * strength).clamp(0.0, 1.0);
+        stroke(pixmap, path, with_alpha(accent, (a * 255.0) as u8), &style);
+    }
+}
+
+/// How far a lit key's glow reaches past its edge, logical px
+const GLOW_REACH: f32 = 6.0;
+/// The layers of the glow, outermost first: how far each reaches past the key's edge (logical
+/// px) and its alpha
+const GLOW_LAYERS: [(f32, f32); 5] = [
+    (GLOW_REACH, 0.05),
+    (GLOW_REACH * 0.75, 0.08),
+    (GLOW_REACH * 0.5, 0.12),
+    (GLOW_REACH * 0.3, 0.17),
+    (GLOW_REACH * 0.15, 0.24),
+];
+/// How much of the full glow a key shows that is in the stroke but no longer held
+const GLOW_DIM: f32 = 0.5;
 
 fn stroke(pixmap: &mut PixmapMut, path: &Path, color: [u8; 4], style: &Stroke) {
     pixmap.stroke_path(path, &paint(color), style, Transform::identity(), None);
@@ -1227,38 +1554,6 @@ fn draw_lines(
     }
 }
 
-/// Like [`draw_lines`] for an outline (`ED/+-D`) whose strokes take turns: the characters of
-/// stroke `current` are drawn at full strength and every other stroke, with the `/`s between them,
-/// dimmed (see [`anim::stroke_alpha`]), instead of bracketing the current one. `lines` are the
-/// outline wrapped, so the stroke count carries across them.
-#[allow(clippy::too_many_arguments)]
-fn draw_lines_stepped(
-    pixmap: &mut PixmapMut,
-    glyphs: &mut GlyphCache,
-    lines: &[String],
-    x: f32,
-    baseline: f32,
-    pitch: f32,
-    color: [u8; 4],
-    scale: f32,
-    current: usize,
-) {
-    let dim = [color[0], color[1], color[2], anim::stroke_alpha(color[3], false)];
-    let mut stroke = 0usize;
-    for (i, line) in lines.iter().enumerate() {
-        let mut cx = x.round();
-        let line_baseline = pitch.mul_add(i as f32, baseline);
-        for c in line.chars() {
-            let shade = if c != '/' && stroke == current { color } else { dim };
-            draw_char(pixmap, glyphs, c, cx, line_baseline, shade, scale);
-            cx += glyphs.get(c).advance.round();
-            if c == '/' {
-                stroke += 1;
-            }
-        }
-    }
-}
-
 /// Recover a phrase row's per-word correspondence between its outline and its text, if there is
 /// one. [`crate::steno::reverse::display`] joins one stroke-group per word with `" / "`
 /// (spaced), while a multi-stroke word's own strokes join with a bare `"/"` (no spaces) - so
@@ -1272,69 +1567,8 @@ fn word_groups<'a>(text: &'a str, outline: &'a str) -> Option<(Vec<&'a str>, Vec
     (words.len() > 1 && words.len() == strokes.len()).then_some((words, strokes))
 }
 
-/// Wrap a phrase's words and outline-groups onto shared lines, word by word: a word only moves
-/// to a new line together with its own outline when either column would otherwise overflow, so
-/// the two columns always show the same words on the same line. Wrapping each column on its own
-/// width (plain [`wrap_text`]) breaks each wherever THAT column's text runs out of room, with no
-/// regard for where the other broke - outlines are short, so a lot more of them fit on a line
-/// than the words they spell, and the two columns end up showing different words on "line 1".
-fn wrap_paired(
-    strokes_glyphs: &mut GlyphCache,
-    words_glyphs: &mut GlyphCache,
-    strokes: &[&str],
-    words: &[&str],
-    outline_max: f32,
-    words_max: f32,
-) -> (Vec<String>, Vec<String>) {
-    let sep_outline = strokes_glyphs.measure(" / ");
-    let sep_words = words_glyphs.measure(" ");
-    let mut outline_lines = Vec::new();
-    let mut text_lines = Vec::new();
-    let mut outline_line = String::new();
-    let mut text_line = String::new();
-    let (mut outline_width, mut text_width) = (0.0f32, 0.0f32);
-    for (&stroke, &word) in strokes.iter().zip(words) {
-        let stroke_width = strokes_glyphs.measure(stroke);
-        let word_width = words_glyphs.measure(word);
-        let next_outline_width = if outline_line.is_empty() {
-            stroke_width
-        } else {
-            outline_width + sep_outline + stroke_width
-        };
-        let next_text_width = if text_line.is_empty() {
-            word_width
-        } else {
-            text_width + sep_words + word_width
-        };
-        if !outline_line.is_empty()
-            && (next_outline_width > outline_max || next_text_width > words_max)
-        {
-            outline_lines.push(std::mem::take(&mut outline_line));
-            text_lines.push(std::mem::take(&mut text_line));
-            outline_line.push_str(stroke);
-            text_line.push_str(word);
-            outline_width = stroke_width;
-            text_width = word_width;
-            continue;
-        }
-        if !outline_line.is_empty() {
-            outline_line.push_str(" / ");
-            text_line.push(' ');
-        }
-        outline_line.push_str(stroke);
-        text_line.push_str(word);
-        outline_width = next_outline_width;
-        text_width = next_text_width;
-    }
-    if !outline_line.is_empty() || outline_lines.is_empty() {
-        outline_lines.push(outline_line);
-        text_lines.push(text_line);
-    }
-    (outline_lines, text_lines)
-}
-
 /// Draw one character, with its pen at `x` (rounded to a whole pixel, so it is sharp), with a
-/// soft shadow on light text so it reads over any wallpaper.
+/// dark outline on light text so it reads over any wallpaper, a white window included.
 fn draw_char(
     pixmap: &mut PixmapMut,
     glyphs: &mut GlyphCache,
@@ -1346,15 +1580,15 @@ fn draw_char(
 ) {
     let (glyph, pen) = glyphs.place(c, x.round());
     let (x0, y0) = (pen + glyph.left, baseline.round() as i32 + glyph.top);
-    // Light text gets a soft shadow: the glyph blurred, drawn once underneath. That reads as a
-    // gentle edge on light and busy backgrounds; copies of the glyph stamped at whole-pixel
-    // offsets looked blocky. Dark text, which is only ever on a lit key, gets none: the key is
-    // its own background, and a shadow there would only make it softer.
+    // Light text gets an outline: the glyph grown a pixel and softened, drawn once underneath. A
+    // faint shadow alone vanishes over a white window; a solid ring does not, and over a dark
+    // window it is invisible. Dark text, which is only ever on a lit key, gets none: the key is
+    // its own background, and an outline there would only make it softer.
     let light = u32::from(color[0]) + u32::from(color[1]) + u32::from(color[2]) > 330;
     if light && !glyph.halo.is_empty() {
         let pad = glyphs::HALO_PAD as i32;
-        let drop = scale.round().max(1.0) as i32 / 2;
-        let shadow = [0, 0, 0, (u16::from(color[3]) * SHADOW_ALPHA / 255) as u8];
+        let drop = scale.round().max(1.0) as i32;
+        let shadow = [SHADOW_TINT[0], SHADOW_TINT[1], SHADOW_TINT[2], (u16::from(color[3]) * SHADOW_ALPHA / 255) as u8];
         blend_mask(
             pixmap,
             &glyph.halo,
@@ -1375,9 +1609,11 @@ fn draw_char(
     );
 }
 
-/// How dark the soft shadow under light text is, out of 255. The blurred mask already fades
-/// out, so this is the strength right next to the letter.
-const SHADOW_ALPHA: u16 = 200;
+/// How dark the outline under light text is, out of 255, right next to the letter: nearly opaque,
+/// so the letter keeps its edge over white. The mask already fades out from there.
+const SHADOW_ALPHA: u16 = 175;
+/// The shadow's colour: a very dark blue-grey, softer than pure black
+const SHADOW_TINT: [u8; 3] = [4, 8, 20];
 
 /// Composite a coverage mask `size` pixels big onto the pixmap at `(x0, y0)` (source-over,
 /// premultiplied RGBA).
@@ -1475,10 +1711,10 @@ mod tests {
     fn word_groups_pairs_up_a_phrase_but_not_a_single_word_or_raw_steno() {
         // A phrase: one stroke-group per word, lining up 1:1.
         assert_eq!(
-            word_groups("I want to go", "EU / WAUNT / TO / TKPWOE"),
+            word_groups("I want to go", "EU / WAUPBT / TO / TKPWOE"),
             Some((
                 vec!["I", "want", "to", "go"],
-                vec!["EU", "WAUNT", "TO", "TKPWOE"]
+                vec!["EU", "WAUPBT", "TO", "TKPWOE"]
             ))
         );
         // A single word has nothing to sync against another word, even with a multi-stroke
@@ -1486,66 +1722,48 @@ mod tests {
         assert_eq!(word_groups("candy", "KAPBD/TKEU"), None);
         // Raw steno resolving forward: the text is the resulting phrase, not one word per
         // stroke, so splitting it on spaces doesn't mean the same thing as the outline's groups.
-        assert_eq!(word_groups("\u{2192} \"I want\"", "EU/WAUNT"), None);
+        assert_eq!(word_groups("\u{2192} \"I want\"", "EU/WAUPBT"), None);
     }
 
     #[test]
-    fn wrap_paired_breaks_both_columns_on_the_same_words() {
-        // The user's reported case: a phrase long enough to wrap, where the outline column
-        // (short stroke groups) could fit far more per line than the word column (real English
-        // words) - independently wrapping each on its own width put a different number of
-        // words on "line 1" of each column. Pairing them must always agree on the split.
-        let font = glyphs::load_font(None, glyphs::BOLD).unwrap();
-        let mut strokes_glyphs = GlyphCache::new(font.clone(), 16.0);
-        let mut words_glyphs = GlyphCache::new(font, 16.0);
-
+    fn wrap_phrase_breaks_both_columns_on_the_same_words() {
+        // A phrase long enough to wrap, where the outline column (short stroke groups) could fit
+        // far more per line than the word column (real English words): independently wrapping
+        // each on its own width put a different number of words on "line 1" of each column.
+        // Pairing them must always agree on the split.
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
         let words = [
             "I", "want", "to", "go", "to", "the", "store", "and", "buy", "cookies",
         ];
-        let strokes = [
-            "EU",
-            "WAUNT",
-            "TO",
-            "TKPWOE",
-            "TO",
-            "-T",
-            "STOR",
-            "APBD",
-            "PWEU",
-            "KAOBG/KEUS",
-        ];
+        let outline = "EU / WAUPBT / TO / TKPWOE / TO / -T / STOR / APBD / PWEU / KAOBG/KEUS";
+        let units = renderer.outline_units(outline).unwrap();
+        assert_eq!(units.len(), words.len());
 
         // Wide enough for every outline on one line; only wide enough for about 4 words.
-        let outline_max = strokes_glyphs.measure(&strokes.join(" / "));
+        let outline_max = renderer.line_width(&units, 0) + 1.0;
         let words_max = 3.0f32.mul_add(
-            words_glyphs.measure(" "),
-            4.0 * words_glyphs.measure("store"),
+            renderer.words.measure(" "),
+            4.0 * renderer.words.measure("store"),
         );
-
-        let (outline_lines, text_lines) = wrap_paired(
-            &mut strokes_glyphs,
-            &mut words_glyphs,
-            &strokes,
-            &words,
-            outline_max,
-            words_max,
-        );
+        let (outline_lines, text_lines) =
+            renderer.wrap_phrase(units, &words, outline_max, words_max);
 
         assert_eq!(
             outline_lines.len(),
             text_lines.len(),
-            "paired columns must always break into the same number of lines: {outline_lines:?} vs {text_lines:?}"
+            "paired columns must always break into the same number of lines: {text_lines:?}"
         );
+        assert!(text_lines.len() > 1, "the words should have wrapped");
         for (outline_line, text_line) in outline_lines.iter().zip(&text_lines) {
             assert_eq!(
-                outline_line.split(" / ").count(),
+                outline_line.len(),
                 text_line.split(' ').count(),
-                "line {text_line:?} has a different number of words than its outline {outline_line:?}"
+                "line {text_line:?} has a different number of words than its outline"
             );
         }
         // Every word (and every outline) still shows up exactly once, in order.
         assert_eq!(text_lines.join(" "), words.join(" "));
-        assert_eq!(outline_lines.join(" / "), strokes.join(" / "));
+        assert_eq!(outline_lines.iter().map(Vec::len).sum::<usize>(), words.len());
     }
 
     #[test]
@@ -1665,8 +1883,8 @@ mod tests {
         let (w, h) = renderer.size();
         let mut pixmap = Pixmap::new(w, h).unwrap();
         renderer.draw(&OverlaySnapshot::default(), &mut pixmap.as_mut());
-        // The top-right corner, far from any content, is fully transparent
-        assert_eq!(pixmap.pixel(w - 1, 0).unwrap().alpha(), 0);
+        // The bottom-right corner, below the keyboard and far from any content, is fully transparent
+        assert_eq!(pixmap.pixel(w - 1, h - 1).unwrap().alpha(), 0);
 
         let config = OverlayConfig {
             background: 0.5,
@@ -1674,13 +1892,17 @@ mod tests {
         };
         let mut renderer = Renderer::new(&config, 1, 900).unwrap();
         renderer.draw(&OverlaySnapshot::default(), &mut pixmap.as_mut());
-        let alpha = pixmap.pixel(w - 1, 0).unwrap().alpha();
+        let alpha = pixmap.pixel(w - 1, h - 1).unwrap().alpha();
         assert!((126..=129).contains(&alpha), "{alpha}");
     }
 
     #[test]
     fn the_tape_runs_the_screen_height_above_the_keyboard() {
         let config = OverlayConfig::default();
+        let config = OverlayConfig {
+            tape_lines: Some(99),
+            ..config
+        };
         let short = Renderer::new(&config, 1, 600).unwrap();
         let tall = Renderer::new(&config, 1, 1900).unwrap();
         assert!(tall.tape_lines() > short.tape_lines() * 2);
@@ -1696,6 +1918,9 @@ mod tests {
             "keyboard is below the tape"
         );
 
+        // Left alone, the tape is a short one
+        let default = Renderer::new(&OverlayConfig::default(), 1, 1900).unwrap();
+        assert_eq!(default.tape_lines(), DEFAULT_TAPE_LINES);
         // `tape_lines` caps it; zero is allowed
         let capped = OverlayConfig {
             tape_lines: Some(5),
@@ -1775,7 +2000,11 @@ mod tests {
         // always faded, even though on screen it sits snug against the keyboard with most of
         // the tape's height empty above it. Fading is for lines about to scroll off the top of
         // a *full* tape, not for the first line or two of an otherwise-empty one.
-        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let tall = OverlayConfig {
+            tape_lines: Some(99),
+            ..OverlayConfig::default()
+        };
+        let mut renderer = Renderer::new(&tall, 1, 900).unwrap();
         let (w, h) = renderer.size();
         assert!(
             renderer.tape_lines() > FADE_LINES * 4,
@@ -1790,38 +2019,151 @@ mod tests {
         renderer.draw(&snapshot, &mut pixmap.as_mut());
 
         let only_row = renderer.tape_bottom - renderer.line_height;
-        assert_eq!(
-            row_alpha(&pixmap, &renderer, h, only_row),
-            255,
+        // Full strength is the text opacity (0.85) plus the shadow under it, well over 230
+        assert!(
+            row_alpha(&pixmap, &renderer, h, only_row) >= 230,
             "the tape's one and only line should be at full strength, not faded"
         );
     }
 
     #[test]
     fn steno_letters_never_overlap_their_neighbours() {
-        let renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
-        let mut strokes = GlyphCache::new(
-            glyphs::load_font(None, glyphs::BOLD).unwrap(),
-            renderer.strokes.pixel_size(),
-        );
-        let paper_order = renderer.layout.paper_order();
-        for (pair, columns) in paper_order.windows(2).zip(renderer.columns.windows(2)) {
-            // Each column starts where the previous one ends
-            assert!((columns[0].x + columns[0].width - columns[1].x).abs() < 0.01);
-            // And the letter fits inside its own column
-            let letter = Keyboard::label(&renderer.layout, pair[0]);
-            assert!(
-                strokes.get(letter).advance <= columns[0].width,
-                "{letter:?} is wider than its column"
-            );
-        }
-        // W needs more room than T: the columns are not a uniform grid
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        // A stroke is as wide as its letters each advance plus the small letter gap, so a
+        // letter never runs into the next one, and a wide letter gets more room than a narrow one
+        let kat = renderer.stroke_run(crate::steno::layout::parse_stroke("KAT").unwrap());
+        let letters: Vec<char> = kat.iter().map(|key| key.ch).collect();
+        let expected: f32 = letters
+            .iter()
+            .map(|&c| renderer.strokes.get(c).advance * (1.0 + SLOT_GAP))
+            .sum();
+        assert!((renderer.run_width(&kat, 0) - expected).abs() < 0.01);
         let (t, w) = (
             Keyboard::label(&renderer.layout, 1),
             Keyboard::label(&renderer.layout, 4),
         );
         assert_eq!((t, w), ('T', 'W'));
-        assert!(renderer.columns[5].width > renderer.columns[2].width);
+        assert!(renderer.strokes.get(w).advance > renderer.strokes.get(t).advance);
+    }
+
+    #[test]
+    fn the_text_is_big_enough_to_read_and_the_words_are_the_biggest_thing() {
+        let renderer = Renderer::new(&OverlayConfig::default(), 1, 1080).unwrap();
+        let (strokes, words, label) = (
+            renderer.strokes.pixel_size(),
+            renderer.words.pixel_size(),
+            renderer.labels.pixel_size(),
+        );
+        // The default panel is 340 px wide: readable, not huge. The strokes are about the size of
+        // the keys' own labels, and the words at least as big
+        assert!((20.0..=30.0).contains(&strokes), "strokes are {strokes} px");
+        assert!(strokes >= label, "strokes ({strokes}) are smaller than key labels ({label})");
+        assert!(words >= strokes, "the words must be the biggest text");
+        assert!(words <= 32.0, "words are {words} px, too big");
+        // Lines are compact: a line is about as tall as the words' text size, with no gap
+        // between one entry and the next beyond the underline's room
+        assert!(renderer.line_height >= words * 0.8);
+        assert!(renderer.line_height <= words * 1.05, "{}", renderer.line_height);
+        // A typical eight-key stroke takes well over half the paper, and the words get the larger share
+        let mut renderer = renderer;
+        let eight = renderer.stroke_run(crate::steno::layout::parse_stroke("STKPWHRA").unwrap());
+        let width = renderer.run_width(&eight, 0);
+        let paper = renderer.paper_right - renderer.paper_left;
+        assert!(width <= paper * 1.15, "eight keys ({width}) overflow the paper ({paper})");
+        assert!(width >= paper * 0.5, "eight keys ({width}) leave the paper empty ({paper})");
+        assert!(
+            renderer.words_right - renderer.words_left > paper,
+            "the words get more room than the strokes"
+        );
+    }
+
+    #[test]
+    fn a_stroke_too_long_for_the_paper_is_set_smaller_and_still_fits() {
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let (w, h) = renderer.size();
+        let long = renderer.stroke_run(
+            crate::steno::layout::parse_stroke("STKPWHRAOEUFRPBLGTSDZ").unwrap(),
+        );
+        let paper = renderer.paper_right - renderer.paper_left;
+        let last = renderer.last_tier();
+        let full = renderer.run_width(&long, 0);
+        let smallest = renderer.run_width(&long, last);
+        assert!(full > paper, "this stroke should not fit at full size");
+        assert!(smallest < full, "the smaller letters are narrower");
+        assert!(
+            smallest <= paper,
+            "a stroke of every key fits the paper in the smallest letters, with no overlap: {smallest} > {paper}"
+        );
+        assert!(
+            renderer.stroke_tiers[last].pixel_size() < renderer.strokes.pixel_size(),
+            "the last tier is smaller than full size"
+        );
+        // The tiers step down: the first one that fits is the one used
+        let again = renderer
+            .stroke_run(crate::steno::layout::parse_stroke("STKPWHRAOEUFRPBLGTSDZ").unwrap());
+        assert_eq!(renderer.fit_tier(&[vec![again]], paper), last);
+        let short = renderer.stroke_run(crate::steno::layout::parse_stroke("KAT").unwrap());
+        assert_eq!(renderer.fit_tier(&[vec![short]], paper), 0);
+        // Drawn, it stays inside the paper (nothing inked left of it)
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        let line = [vec![long]];
+        let baseline = renderer.tape_bottom - renderer.line_height;
+        let (right, max) = (renderer.paper_right, paper);
+        renderer.draw_line(&mut pixmap.as_mut(), &line, right, max, baseline, 1.0, 0, None);
+        let left_of_paper = (0..h)
+            .flat_map(|y| (0..renderer.paper_left as u32 - 1).map(move |x| (x, y)))
+            .filter_map(|(x, y)| pixmap.pixel(x, y))
+            .any(|p| p.alpha() > 0);
+        assert!(!left_of_paper, "a long stroke spilled off the left of the paper");
+    }
+
+    #[test]
+    fn a_lookup_outline_has_the_tapes_colours_and_underlines() {
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let view = playing("KAPBD");
+        let pixmap = drawn(&mut renderer, &view);
+        let paper = (renderer.paper_left as u32, renderer.paper_right as u32);
+        let above = (renderer.tape_bottom - renderer.line_height) as u32;
+        let pixels: Vec<_> = (0..above)
+            .flat_map(|y| (paper.0..paper.1).map(move |x| (x, y)))
+            .filter_map(|(x, y)| pixmap.pixel(x, y))
+            .filter(|p| p.alpha() > 220)
+            .collect();
+        // K is a left-hand key (amber), A a vowel (blue), P B D the right hand (purple)
+        let amber = pixels.iter().any(|p| p.red() > 180 && p.green() > 110 && p.blue() < 120);
+        let blue = pixels.iter().any(|p| p.blue() > 180 && p.red() < 140);
+        let purple = pixels.iter().any(|p| p.blue() > 180 && p.red() > 130 && p.green() < 150);
+        assert!(amber && blue && purple, "amber {amber}, blue {blue}, purple {purple}");
+    }
+
+    #[test]
+    fn a_lookup_reads_an_outline_with_the_join_key_as_strokes() {
+        let renderer =
+            Renderer::with_layout(&OverlayConfig::default(), 1, 900, test_layout_with_join())
+                .unwrap();
+        // `ED/+-D`: one word of two strokes, the second led by the join key in the misc colour
+        let units = renderer.outline_units("ED/+-D").unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].len(), 2);
+        assert_eq!(units[0][1][0].ch, '+');
+        assert_eq!(units[0][1][0].color, renderer.theme.accent(KeyGroup::Misc));
+        // A phrase is one unit per word; text that is not steno is not drawn as strokes
+        assert_eq!(renderer.outline_units("KAT / TKOG").unwrap().len(), 2);
+        assert!(renderer.outline_units("what does this type?").is_none());
+    }
+
+    #[test]
+    fn a_wrapped_outline_never_splits_a_stroke() {
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let units = renderer.outline_units("KAPBD/TKAEUT/STKPWHR/PHAPB").unwrap();
+        let strokes: Vec<Run> = units.into_iter().flatten().collect();
+        // wrapping packs a line as far as the smallest letters allow, so measure in those
+        let last = renderer.last_tier();
+        let one = renderer.run_width(&strokes[0], last);
+        // Room for about two strokes: they wrap onto further lines, none cut, all in order
+        let lines = renderer.wrap_strokes(strokes, one * 2.5);
+        assert!(lines.len() > 1, "four strokes should not fit two to a line");
+        assert_eq!(lines.iter().flatten().map(Vec::len).sum::<usize>(), 4);
     }
 
     #[test]
@@ -1953,7 +2295,12 @@ mod tests {
         assert!(left > 10, "the left-hand letter should be amber");
         assert!(vowel > 10, "the vowel should be blue");
         assert!(right > 10, "the right-hand letter should be purple");
-        assert!(misc < 4, "no star on this stroke, so next to no green");
+        // (bigger letters have more anti-aliased edge pixels that land near any colour, so the
+        // green is judged against the real colours rather than against a fixed few pixels)
+        assert!(
+            misc * 8 < left.min(vowel).min(right),
+            "no star on this stroke, so next to no green: {misc} against {left}/{vowel}/{right}"
+        );
         let [_, _, _, star] = tape_ink(&[9], 1.0);
         assert!(star > 0, "the star should be green");
     }
@@ -1995,7 +2342,8 @@ mod tests {
             (from..from + 6)
                 .flat_map(|py| (0..renderer.words_left as u32).map(move |px| (px, py)))
                 .filter_map(|(px, py)| pixmap.pixel(px, py))
-                .filter(|p| p.alpha() > 0)
+                // the letters' dark shadow reaches below the baseline too; only ink is bright
+                .filter(|p| u32::from(p.red()) + u32::from(p.green()) + u32::from(p.blue()) > 120)
                 .count()
         };
         assert!(below(&[1, 2]) > 0, "T over K go together: underlined");
@@ -2044,34 +2392,9 @@ mod tests {
     }
 
     #[test]
-    fn tight_steno_letters_are_not_smaller_and_the_words_are_untouched() {
+    fn the_words_are_not_letter_spaced() {
         let renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
-        // Each column is its letter's width plus only a small gap...
-        let mut strokes = GlyphCache::new(
-            glyphs::load_font(None, glyphs::BOLD).unwrap(),
-            renderer.strokes.pixel_size(),
-        );
-        for (&slot, column) in renderer.layout.paper_order().iter().zip(&renderer.columns) {
-            let advance = strokes.get(Keyboard::label(&renderer.layout, slot)).advance;
-            let gap = column.width - advance;
-            assert!(gap > 0.0, "{slot}: columns must not touch");
-            assert!(gap < advance * 0.1, "{slot}: gap {gap} is not tight");
-        }
-        // ...and the letters are big enough to read, with the paper filling about its share of
-        // the width (a little under or over, since the size snaps to whole pixel rows)
-        assert!(
-            renderer.strokes.pixel_size() >= 14.0,
-            "steno letters are {} px, too small",
-            renderer.strokes.pixel_size()
-        );
-        let paper: f32 = renderer.columns.iter().map(|column| column.width).sum();
-        let inner = 2.0f32.mul_add(-PAD_X, renderer.size().0 as f32);
-        assert!(
-            (paper / (PAPER_SHARE * inner) - 1.0).abs() < 0.1,
-            "paper is {paper}, wanted about {}",
-            PAPER_SHARE * inner
-        );
-        // The words are not letter-spaced: they advance by each glyph's own advance
+        // The words advance by each glyph's own advance, with no letter gap added
         let mut words = GlyphCache::new(
             glyphs::load_font(None, glyphs::BOLD).unwrap(),
             renderer.words.pixel_size(),
@@ -2127,11 +2450,15 @@ mod tests {
 
     #[test]
     fn text_scale_scales_the_text_and_keeps_the_width() {
-        let normal = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let tall = OverlayConfig {
+            tape_lines: Some(99),
+            ..OverlayConfig::default()
+        };
+        let normal = Renderer::new(&tall, 1, 900).unwrap();
         let big = Renderer::new(
             &OverlayConfig {
                 text_scale: 1.25,
-                ..OverlayConfig::default()
+                ..tall
             },
             1,
             900,
@@ -2262,6 +2589,100 @@ mod tests {
 
     /// Writes a sample frame as a PPM over a backdrop, to look at the design:
     /// `OVERLAY_PREVIEW=/tmp/overlay.ppm cargo test preview -- --ignored`
+    /// Writes the tape and the lookup over white, black and mid-grey to `$OVERLAY_PREVIEW_DIR`:
+    /// `OVERLAY_PREVIEW_DIR=/tmp/p cargo test --release preview_backdrops -- --ignored`
+    #[test]
+    #[ignore = "writes images for eyeballing"]
+    fn preview_backdrops() {
+        use crate::steno::layout::parse_stroke;
+        let dir = std::env::var("OVERLAY_PREVIEW_DIR").expect("set OVERLAY_PREVIEW_DIR");
+        std::fs::create_dir_all(&dir).unwrap();
+        let words = [
+            ("TH", "\"this\""),
+            ("S", "\"is\""),
+            ("TEFT", "\"test\""),
+            ("-T", "\"the\""),
+            ("STEPB", "\"steno\""),
+            ("STKPWHR", ""),
+            ("STKPWHRAOEUFRPBLGTSDZ", "\"everything\""),
+            ("PWEUG", "\"big\""),
+            ("TKPWAEUPL", "\"game\""),
+        ];
+        for back_name in ["white", "black", "grey", "photo", "code"] {
+            let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+            let (w, h) = renderer.size();
+            let mut snapshot = OverlaySnapshot {
+                layer: Some("steno".into()),
+                chord: parse_stroke("STKA*EUFPLT").unwrap(),
+                held: parse_stroke("TKA*UPL").unwrap(),
+                ..OverlaySnapshot::default()
+            };
+            for i in 0..renderer.tape_lines() {
+                let (stroke, text) = words[i % words.len()];
+                snapshot.tape.push_back(tape_entry(i as u64 + 1, stroke, text));
+            }
+            let write = |name: &str, pixmap: &Pixmap| {
+                let mut out = format!("P6 {w} {h} 255\n").into_bytes();
+                for (i, px) in pixmap.data().as_chunks::<4>().0.iter().enumerate() {
+                    let back = preview_backdrop(back_name, (i as u32 % w, i as u32 / w));
+                    for (c, b) in px[..3].iter().zip(back) {
+                        out.push(c + (b * (255 - u32::from(px[3])) / 255) as u8);
+                    }
+                }
+                std::fs::write(format!("{dir}/{back_name}-{name}.ppm"), out).unwrap();
+            };
+            let mut pixmap = Pixmap::new(w, h).unwrap();
+            renderer.draw(&snapshot, &mut pixmap.as_mut());
+            write("tape", &pixmap);
+            // and the lookup, which takes the tape's place
+            let mut view = lookup_view();
+            view.rows.push(crate::steno::overlay::LookupRow {
+                text: "candidate".into(),
+                outline: "KAPBD / TAET".into(),
+            });
+            snapshot.lookup = Some(view);
+            let mut pixmap = Pixmap::new(w, h).unwrap();
+            renderer.draw(&snapshot, &mut pixmap.as_mut());
+            write("lookup", &pixmap);
+        }
+    }
+
+    /// A backdrop pixel for the previews: flat colours, a noisy photo-like gradient, or a mock
+    /// window of dark code over light text bands.
+    #[allow(clippy::suboptimal_flops)]
+    fn preview_backdrop(name: &str, (x, y): (u32, u32)) -> [u32; 3] {
+        let hash = |a: u32, b: u32| {
+            let mut v = a.wrapping_mul(374_761_393) ^ b.wrapping_mul(668_265_263);
+            v = (v ^ (v >> 13)).wrapping_mul(1_274_126_177);
+            (v ^ (v >> 16)) % 256
+        };
+        match name {
+            "white" => [255, 255, 255],
+            "black" => [0, 0, 0],
+            "grey" => [150, 150, 155],
+            "photo" => {
+                let (fx, fy) = (x as f32 / 340.0, y as f32 / 900.0);
+                let base = [
+                    90.0 + 140.0 * (fx * 6.0 + fy * 9.0).sin().abs(),
+                    120.0 + 100.0 * (fy * 7.0 - fx * 3.0).cos(),
+                    70.0 + 150.0 * fx * (1.0 - fy) + 30.0 * (fy * 20.0).sin(),
+                ];
+                let noise = hash(x, y) as f32 - 128.0;
+                base.map(|c| (c + noise * 0.25).clamp(0.0, 255.0) as u32)
+            }
+            _ => {
+                let light = (y / 150) % 2 == 1;
+                let ink = hash(x / 7, y / 14) < 110 && y % 14 < 8;
+                match (light, ink) {
+                    (false, false) => [30, 34, 44],
+                    (false, true) => [210 - hash(y / 14, 1) / 2, 180, 120],
+                    (true, false) => [246, 246, 244],
+                    (true, true) => [40, 60, 110],
+                }
+            }
+        }
+    }
+
     #[test]
     #[ignore = "writes an image for eyeballing"]
     fn preview() {
@@ -2287,6 +2708,7 @@ mod tests {
             ("STEPB", "\"steno\""),
             ("OEFR", "\"over\""),
             ("STKPWHR", ""),
+            ("STKPWHRAOEUFRPBLGTSDZ", "\"everything\""),
             ("PWEUG", "\"big\""),
             ("TKPWAEUPL", "\"game\""),
             ("KWRAOU", "\"you\""),
@@ -2310,6 +2732,90 @@ mod tests {
             }
         }
         std::fs::write(path, out).unwrap();
+    }
+
+    /// Writes a tape and a lookup as they look with the lyk layout (the join key on top of `S-`),
+    /// at a width from `OVERLAY_WIDTH` (default 340): `OVERLAY_PREVIEW=/tmp/lyk cargo test
+    /// preview_lyk -- --ignored` writes `/tmp/lyk_tape.ppm` and `/tmp/lyk_lookup.ppm`.
+    #[test]
+    #[ignore = "writes an image for eyeballing"]
+    fn preview_lyk() {
+        use crate::config::OverlayPlacement;
+        let base = std::env::var("OVERLAY_PREVIEW").expect("set OVERLAY_PREVIEW");
+        let mut config = OverlayConfig::default();
+        if let Ok(width) = std::env::var("OVERLAY_WIDTH") {
+            config.width = width.parse().unwrap();
+        }
+        config.overlay_overrides.insert(
+            "+".to_string(),
+            OverlayPlacement::SplitKey {
+                slot: "S-".to_string(),
+                half: Half::Top,
+            },
+        );
+        let layout = test_layout_with_join();
+        let mut renderer = Renderer::with_layout(&config, 1, 1080, layout.clone()).unwrap();
+        let (w, h) = renderer.size();
+        let stroke = |text: &str| layout.parse_stroke(text).unwrap();
+        let mut snapshot = OverlaySnapshot {
+            layer: Some("steno".into()),
+            ..OverlaySnapshot::default()
+        };
+        let lines = [
+            ("ED", "\"end\""),
+            ("+-D", "\"ed\""),
+            ("TKOG", "\"dog\""),
+            ("+-Z", "\"s\""),
+            ("WAUBG", "\"walk\""),
+            ("+-G", "\"ing\""),
+            ("-T", "\"the\""),
+            ("TPAEUPBLG", "\"fangled\""),
+            ("+STKPWHRAOEUFRPBLGTSDZ", ""),
+            ("KAT", "\"cat\""),
+        ];
+        for (i, (strokes, text)) in lines.iter().enumerate() {
+            snapshot.tape.push_back(TapeEntry {
+                seq: i as u64 + 1,
+                stroke: stroke(strokes),
+                text: (*text).into(),
+                unmatched: text.is_empty(),
+                repeats: 0,
+            });
+        }
+        let write = |name: &str, renderer: &mut Renderer, snapshot: &OverlaySnapshot| {
+            let mut pixmap = Pixmap::new(w, h).unwrap();
+            renderer.draw(snapshot, &mut pixmap.as_mut());
+            let mut out = format!("P6 {w} {h} 255\n").into_bytes();
+            for (i, px) in pixmap.data().as_chunks::<4>().0.iter().enumerate() {
+                let (row, col) = (i as u32 / w, i as u32 % w);
+                let backdrop = [70 + row * 50 / h, 60 + col * 40 / w, 100 + row * 60 / h];
+                for (c, back) in px[..3].iter().zip(backdrop) {
+                    out.push(c + (back * (255 - u32::from(px[3])) / 255) as u8);
+                }
+            }
+            std::fs::write(format!("{base}_{name}.ppm"), out).unwrap();
+        };
+        write("tape", &mut renderer, &snapshot);
+
+        let row = |text: &str, outline: &str| crate::steno::overlay::LookupRow {
+            text: text.into(),
+            outline: outline.into(),
+        };
+        let best = layout.parse_strokes_trimmed("ED/+-D").unwrap();
+        snapshot.lookup = Some(LookupView {
+            query: "ended".into(),
+            rows: vec![
+                row("ended", "ED/+-D"),
+                row("ending", "ED/+-G"),
+                row("end", "ED"),
+                row("endo", "EPBD/O"),
+            ],
+            hint: best[0],
+            strokes: best,
+            mode: LookupMode::Word,
+        });
+        renderer.set_step(1);
+        write("lookup", &mut renderer, &snapshot);
     }
 
     fn lookup_view() -> LookupView {
@@ -2432,11 +2938,21 @@ mod tests {
     fn the_outline_text_dims_the_strokes_not_being_shown_instead_of_bracketing_one() {
         let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
         let view = playing("KAPBD/EUD");
-        let left = renderer.paper_left.round();
-        // the first stroke is "KAPBD" and the second "EUD", after the "/"
-        let first = (left, left + renderer.strokes.measure("KAPBD"));
-        let second_x = left + renderer.strokes.measure("KAPBD/");
-        let second = (second_x, second_x + renderer.strokes.measure("EUD"));
+        // the first stroke is "KAPBD" and the second "EUD", with a rule between them; the
+        // strokes end at the paper's right edge, flush against the words
+        let word = renderer.outline_units("KAPBD/EUD").unwrap().remove(0);
+        // set the way `draw_line` sets it: smaller letters if it does not fit the paper at full size
+        let paper = renderer.paper_right - renderer.paper_left;
+        let tier = renderer.fit_tier(std::slice::from_ref(&word), paper);
+        let (w1, w2) = (
+            renderer.run_width(&word[0], tier),
+            renderer.run_width(&word[1], tier),
+        );
+        let between = 2.0f32.mul_add(renderer.rule_space(), renderer.rule_thickness());
+        let left = renderer.paper_right - (w1 + between + w2);
+        let first = (left, left + w1);
+        let second_x = left + w1 + between;
+        let second = (second_x, second_x + w2);
 
         let at_zero = drawn(&mut renderer, &view);
         let (a, b) = (
@@ -2488,9 +3004,10 @@ mod tests {
         let row = (renderer.tape_bottom - renderer.line_height) as u32;
         let words_x = renderer.words_left as u32;
         let region = |pixmap: &Pixmap| -> Vec<u8> {
-            (words_x..words_x + 40)
+            (words_x..words_x + 80)
                 .flat_map(|x| {
-                    let p = pixmap.pixel(x, row + 6).unwrap();
+                    // mid-line, where the letters are (the bigger text starts further down)
+                    let p = pixmap.pixel(x, row + (renderer.line_height / 2.0) as u32).unwrap();
                     [p.red(), p.green(), p.blue(), p.alpha()]
                 })
                 .collect()
@@ -2626,7 +3143,12 @@ mod tests {
                 .flat_map(|y| (0..w).map(move |x| (x, y)))
                 .flat_map(|(x, y)| {
                     let p = pixmap.pixel(x, y).unwrap();
-                    [p.red(), p.green(), p.blue(), p.alpha()]
+                    // Only the ink counts: a result's soft dark shadow may reach into this row
+                    if u32::from(p.red()) + u32::from(p.green()) + u32::from(p.blue()) > 300 {
+                        [p.red(), p.green(), p.blue(), p.alpha()]
+                    } else {
+                        [0; 4]
+                    }
                 })
                 .collect()
         };
@@ -2702,7 +3224,7 @@ mod tests {
                 query: "i want to go to the store and buy cookies".into(),
                 rows: vec![LookupRow {
                     text: "I want to go to the store and buy cookies".into(),
-                    outline: "EU / WAUNT / TO / TKPWOE / TO / -T / STOR / APBD / PWEU / KAOBG/KEUS"
+                    outline: "EU / WAUPBT / TO / TKPWOE / TO / -T / STOR / APBD / PWEU / KAOBG/KEUS"
                         .into(),
                 }],
                 hint: 0,
@@ -2721,10 +3243,7 @@ mod tests {
                 .any(|p| p.alpha() > 0)
         };
         let paper_left = renderer.paper_left as u32;
-        let paper_right = {
-            let last = renderer.columns[renderer.columns.len() - 1];
-            (renderer.paper_left + last.x + last.width) as u32
-        };
+        let paper_right = renderer.paper_right as u32;
         let words_left = renderer.words_left as u32;
         let words_right = renderer.words_right as u32;
         let line_height = renderer.line_height;
@@ -2835,7 +3354,7 @@ mod tests {
                     LookupRow {
                         text: "I want to go to the store and buy cookies".into(),
                         outline:
-                            "EU / WAUNT / TO / TKPWOE / TO / -T / STOR / APBD / PWEU / KAOBG/KEUS"
+                            "EU / WAUPBT / TO / TKPWOE / TO / -T / STOR / APBD / PWEU / KAOBG/KEUS"
                                 .into(),
                     },
                     LookupRow {

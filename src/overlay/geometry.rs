@@ -67,8 +67,10 @@ const NUMBER_BAR: f32 = 0.5;
 /// Gap between keys relative to a key's width
 const GAP: f32 = 0.16;
 /// Gap between the two keys of a column that go together (`T` over `K`), relative to the gap
-/// between everything else: half of it, so the pair reads as one piece.
-const PAIR_GAP: f32 = 0.5;
+/// between everything else: seven tenths of it, so the pair still reads as one piece.
+const PAIR_GAP: f32 = 0.7;
+/// ...and never under this many pixels, however small the overlay is drawn
+const MIN_PAIR_GAP: f32 = 2.0;
 /// Thumb key height relative to a key's width
 const THUMB_ASPECT: f32 = 1.35;
 /// Extra space above the thumb row relative to a key's width
@@ -150,7 +152,7 @@ impl Keyboard {
             y
         };
         let top = number_y + unit * NUMBER_BAR + gap;
-        let pair_gap = gap * PAIR_GAP;
+        let pair_gap = (gap * PAIR_GAP).max(MIN_PAIR_GAP);
         let bottom = top + key_h + pair_gap;
         let thumb = bottom + key_h + gap + unit * THUMB_DROP;
         let mut keys: [Rect; 23] = std::array::from_fn(|slot| {
@@ -394,7 +396,7 @@ mod tests {
         // instance — the reference for what S-'s own full height would otherwise be.
         let star = keyboard.keys[9];
         let unit = 250.0 / GAP.mul_add(COLUMNS - 1.0, COLUMNS);
-        let gap = unit * GAP * PAIR_GAP;
+        let gap = (unit * GAP * PAIR_GAP).max(MIN_PAIR_GAP);
         let half_height = (star.h - gap) / 2.0;
         assert!((badge.x - s.x).abs() < 0.01, "same column as S-");
         assert!((badge.w - s.w).abs() < 0.01, "same width as S-");
@@ -443,7 +445,7 @@ mod tests {
         let top_rect = Keyboard::new(0.0, 0.0, 250.0, &layout, &top).extra[0];
         let bottom_rect = Keyboard::new(0.0, 0.0, 250.0, &layout, &bottom).extra[0];
         let unit = 250.0 / GAP.mul_add(COLUMNS - 1.0, COLUMNS);
-        let gap = unit * GAP * PAIR_GAP;
+        let gap = (unit * GAP * PAIR_GAP).max(MIN_PAIR_GAP);
         assert!(
             (bottom_rect.y - (top_rect.bottom() + gap)).abs() < 0.01,
             "the column gap between the halves, like T over K: {top_rect:?} {bottom_rect:?}"

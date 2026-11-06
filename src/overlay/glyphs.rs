@@ -33,14 +33,15 @@ pub struct Glyph {
     pub advance: f32,
     /// `width * height` coverage values, row by row
     pub mask: Box<[u8]>,
-    /// A blurred copy of the mask for a soft shadow: `HALO_PAD` pixels bigger on every side, so
-    /// `(width + 2 * HALO_PAD) * (height + 2 * HALO_PAD)` values. Empty for blank glyphs.
+    /// A thickened, softly edged copy of the mask, drawn dark under light text as its outline:
+    /// `HALO_PAD` pixels bigger on every side, so `(width + 2 * HALO_PAD) * (height + 2 * HALO_PAD)`
+    /// values. Empty for blank glyphs.
     pub halo: Box<[u8]>,
 }
 
-/// How far the soft shadow reaches past the glyph, in pixels. One pass of a 3-wide blur spreads
-/// coverage one pixel out: a tight shadow, so the letter itself stays crisp.
-pub const HALO_PAD: u32 = 1;
+/// How far the outline reaches past the glyph, in pixels: a one pixel solid ring (the mask grown
+/// by one) and one more pixel of soft edge. Tight, so the letter itself stays crisp.
+pub const HALO_PAD: u32 = 7;
 
 /// The pixel size nearest `px` at which the height of `reference` is a whole number of pixels.
 ///
@@ -184,58 +185,71 @@ fn rasterize(font: &FontArc, scale: PxScale, c: char, shift: f32) -> Glyph {
 }
 
 /// A soft shadow for a coverage mask: the mask padded by [`HALO_PAD`] on every side and blurred
-/// with a single pass of a 3 x 3 box, then strengthened so the glow stays dark right next to
-/// the letter. A hard shadow made of offset copies looks blocky; a blur reads as a gentle edge
-/// on any background. It reaches only one pixel, because a wide dark haze makes small text look
-/// fuzzy.
+/// twice with a Gaussian, once tight and once wide, the two layered. The tight one gives the
+/// letter's edge some separation from the window behind it; the wide one is a gentle haze that
+/// reads as depth. Neither is a ring or an outline, and the result is soft everywhere, so it
+/// never looks cut out. Drawn at a low alpha by the caller.
 fn blur(mask: &[u8], width: u32, height: u32) -> Box<[u8]> {
     let pad = HALO_PAD as usize;
     let (w, h) = (width as usize + 2 * pad, height as usize + 2 * pad);
-    let mut current = vec![0f32; w * h];
+    let mut placed = vec![0f32; w * h];
     for y in 0..height as usize {
         for x in 0..width as usize {
-            current[(y + pad) * w + x + pad] = f32::from(mask[y * width as usize + x]);
+            placed[(y + pad) * w + x + pad] = f32::from(mask[y * width as usize + x]) / 255.0;
         }
     }
-    let mut next = vec![0f32; w * h];
-    for _ in 0..1 {
-        // Horizontal then vertical: a 3 x 3 box is the two 3-wide averages one after the other
-        for y in 0..h {
-            for x in 0..w {
-                let at = |dx: isize| {
-                    let nx = x as isize + dx;
-                    if nx < 0 || nx >= w as isize {
-                        0.0
-                    } else {
-                        current[y * w + nx as usize]
-                    }
-                };
-                next[y * w + x] = (at(-1) + at(0) + at(1)) / 3.0;
-            }
-        }
-        for y in 0..h {
-            for x in 0..w {
-                let at = |dy: isize| {
-                    let ny = y as isize + dy;
-                    if ny < 0 || ny >= h as isize {
-                        0.0
-                    } else {
-                        next[ny as usize * w + x]
-                    }
-                };
-                current[y * w + x] = (at(-1) + at(0) + at(1)) / 3.0;
-            }
-        }
-    }
-    current
+    let tight = gaussian(&placed, w, h, TIGHT_SIGMA);
+    let wide = gaussian(&placed, w, h, WIDE_SIGMA);
+    tight
         .iter()
-        .map(|&v| (v * HALO_STRENGTH).min(255.0) as u8)
+        .zip(&wide)
+        .map(|(&t, &d)| (d.mul_add(WIDE_WEIGHT, t * TIGHT_WEIGHT).min(1.0) * 255.0) as u8)
         .collect()
 }
 
-/// How much the blurred mask is boosted. A plain blur is too faint to separate text from a busy
-/// background; this keeps it dark next to the glyph while still fading smoothly outward.
-const HALO_STRENGTH: f32 = 1.7;
+/// The tight and wide blur radii (standard deviations, pixels) of the shadow, and how much of
+/// each goes in. The weights add up to more than one so the shadow is dense at the stem and
+/// still fades out smoothly.
+const TIGHT_SIGMA: f32 = 0.9;
+const WIDE_SIGMA: f32 = 2.4;
+const TIGHT_WEIGHT: f32 = 0.9;
+const WIDE_WEIGHT: f32 = 0.9;
+
+/// A separable Gaussian blur of a `w` x `h` image of values from zero to one.
+fn gaussian(image: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
+    let radius = (sigma * 3.0).ceil() as isize;
+    let kernel: Vec<f32> = (-radius..=radius)
+        .map(|i| (-((i * i) as f32) / (2.0 * sigma * sigma)).exp())
+        .collect();
+    let total: f32 = kernel.iter().sum();
+    let mut across = vec![0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut sum = 0.0;
+            for (k, weight) in kernel.iter().enumerate() {
+                let nx = x as isize + k as isize - radius;
+                if nx >= 0 && (nx as usize) < w {
+                    sum += weight * image[y * w + nx as usize];
+                }
+            }
+            across[y * w + x] = sum / total;
+        }
+    }
+    let mut out = vec![0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut sum = 0.0;
+            for (k, weight) in kernel.iter().enumerate() {
+                let ny = y as isize + k as isize - radius;
+                if ny >= 0 && (ny as usize) < h {
+                    sum += weight * across[ny as usize * w + x];
+                }
+            }
+            out[y * w + x] = sum / total;
+        }
+    }
+    out
+}
 
 #[cfg(test)]
 mod tests {
@@ -256,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn the_halo_is_a_soft_blur_around_the_glyph() {
+    fn the_halo_is_a_soft_shadow_with_no_hard_edge() {
         let mut cache = GlyphCache::new(load_font(None, BOLD).unwrap(), 16.0);
         let glyph = cache.get('l');
         let pad = HALO_PAD as usize;
@@ -266,14 +280,13 @@ mod tests {
         );
         assert_eq!(glyph.halo.len(), w * h);
 
-        // Soft, not a hard copy: the ring of pixels just outside the glyph is partly covered...
-        let ring = glyph.halo[(h / 2) * w];
-        assert!(ring > 0 && ring < 255, "{ring}");
-        // ...strongest at the letter, fading outwards
-        let at_stem = glyph.halo[(h / 2) * w + w / 2];
-        assert!(at_stem > ring, "{at_stem} {ring}");
-        // It reaches only one pixel: a wide dark haze makes small text look fuzzy
-        assert_eq!(HALO_PAD, 1);
+        // Across the stem the shadow rises smoothly from nothing: no pixel jumps by more than a
+        // third of the range, so it reads as depth, not as an outline
+        let row: Vec<i32> = (0..w).map(|x| i32::from(glyph.halo[(h / 2) * w + x])).collect();
+        assert!(row[0] < 25, "{row:?}");
+        assert!(row.windows(2).all(|p| (p[1] - p[0]).abs() < 100), "{row:?}");
+        // It is dense at the stem and faint at the far edge of its reach
+        assert!(row[w / 2] > 180, "{row:?}");
         // A blank glyph has no halo to draw
         assert!(cache.get(' ').halo.is_empty());
     }

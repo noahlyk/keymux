@@ -148,12 +148,33 @@ sized to its letter, and the letter is centred in it. Steno lines still align.
 ### Look (from the mockups)
 
 - No background by default (`background: 0.0`): only the keys and the text are drawn, so
-  everything must read over any wallpaper. Light text gets a soft shadow: the glyph blurred
-  (one pass of a 3 × 3 box, so it reaches one pixel; computed once per glyph and cached with
-  it), drawn once underneath. Earlier versions stamped copies of the glyph at whole-pixel
-  offsets, which looked blocky ("Minecraft text"), and then used a wider blur, which made
-  small text look fuzzy. Dark text on a lit key gets no shadow (the key is its own
-  background, and a shadow would only soften it); a test covers this.
+  everything must read over any wallpaper, a white window included, with no backing and no
+  theme setting. The look is quiet, like a native HUD, and works without any plate, ring or
+  hard outline:
+  - Light text sits on a soft shadow, a very dark blue-grey ([4, 8, 20]) at 175/255 of the
+    text's own alpha, dropped one pixel: each glyph's mask blurred twice with a Gaussian (sigma
+    0.9 and sigma 2.4, weights 0.9 each, clamped), so a dense core hugs the stem and a gentle haze
+    reaches about seven pixels. Computed once per glyph and cached with it. A one-pixel solid ring
+    (the previous design) made the text look like cut-out letters, "ransom note"; a dark plate
+    (rejected before that) is a background. Dark text on a lit key gets no shadow.
+  - The text is slightly transparent: `text_opacity` (default 0.85) scales the strokes, the words
+    and the unmatched colour, so the window behind shows through a little. Over a white window the
+    light text is soft; that is accepted, there is no light mode.
+  - Lines are compact: the line pitch is 0.86 of the words' text size (28 px before, 24 px now at
+    width 340, line gap 0 in effect, only room for the underline), the letters are about 9%
+    smaller (`REFERENCE_KEYS` 11.5), and only 8 tape lines show by default (`tape_lines`; a bigger
+    number shows more up to the screen), the oldest four fading out toward the top.
+  - A lit key glows in its own colour: its outline stroked five times, widest and faintest first,
+    reaching 6 px past the key (alpha .05 to .24 per layer, half strength for a key in the stroke
+    but let go), painted for all lit keys before any key so a glow never covers a neighbour.
+  - Unlit keys' outline is 1.5 px and a dimmer blue-grey ([140, 154, 190, 105]), which does not
+    glare over mid-grey. The two keys of a column that go together are at least 2 px apart
+    (0.7 of the ordinary gap, never under 2 px).
+  Tried and rejected: the hard 1 px ring; a barely-there per-line gradient scrim (it greys a
+  white window into a smudge without helping the light text enough); reading the pixels behind
+  the overlay to adapt is not possible from a layer-shell client without a screen-capture
+  protocol, so it is not done. `preview_backdrops` writes the tape and the lookup over white,
+  black, grey, a noisy photo-like gradient and a mock code window for eyeballing.
 - Keys are steno pads, 1.75× as tall as wide: a squarish top with slightly softened corners
   (radius 0.2× the width) and a fully round bottom. `S-` and `*` are double height, `#` is a
   thin pill across the top, thumbs sit below. Unlit keys are a faint glass fill with a thin
@@ -170,15 +191,19 @@ sized to its letter, and the letter is centred in it. Steno lines still align.
   grid: each is as wide as its own letter plus a 4% gap (`SLOT_GAP`), so `W` gets more room
   than `T`, nothing overlaps, and neighbouring letters sit as tight as ordinary text. That
   spacing applies to the steno letters only; the words are set with normal spacing. The words
-  (what the stroke typed) are near-white and at least as big as the strokes (1.06×), since
-  that is what you read. Unmatched strokes show a red `?`.
-- Every tape line is full strength. Only the top three lines fade (25%, 50%, 75%), so the tape
+  (what the stroke typed) are near-white and at least as big as the strokes (1.04×), since
+  that is what you read. Unmatched strokes show a red `?`. Lines are set close (0.86× the
+  text size), so entries read as a list, not as separate blocks.
+- Every tape line is full strength. Only the top four lines fade (20%, 40%, 60%, 80%), so the tape
   stays easy to read all the way up.
-- All sizes come from `width`: the steno letters are sized so the 23 columns (each its
-  letter plus the 4% gap) fill 68% of the width inside the padding, which at the default
-  width of 340 makes them about 11 px tall (they were 9 px when they filled less and had
-  looser columns, and read as too small); key labels are 56% of a key's width. `text_scale`
-  multiplies the text on top. Widths of 400 and up were tried and read as too big.
+- All sizes come from `width`: the steno letters are sized so about eleven and a half keys (each
+  its letter plus the 4% gap) fill 46% of the width inside the padding, which at the default
+  width of 340 makes them about 25 px tall (a grid sized for all 23 keys made them too small;
+  sized for eight they were too big); key labels are 72% of a key's width. `text_scale`
+  multiplies the text on top. A stroke with more keys than that is set in the next smaller of
+  four sizes (`STROKE_TIERS`: full, 0.8, 0.62, 0.42), the largest it fits the paper in, so
+  every key fits however many sounds you type in one stroke and letters are never drawn on
+  top of each other; the smallest size fits all 23 keys plus an extra key.
 - **Sharpness.** The text is not hinted, so it is made sharp by construction:
   - Every size is snapped (`glyphs::crisp_size`) so the height of `H` (capitals) or `x`
     (lowercase words) is a whole number of pixels. Otherwise flat tops and bottoms (`E`, `T`,
@@ -198,6 +223,7 @@ overlay: (
     width: 340,            // as tall as the screen; text and keys are sized from this
     text_scale: 1.0,       // multiplies the text size on top of what width gives
     background: 0.0,       // dark panel behind it all; 0.0 is fully transparent
+    text_opacity: 0.85,    // how opaque the tape's text is; lower lets the window show through
     keyboard: true,
     tape: true,
     tape_lines: None,      // Some(20) caps it; None fills the screen height
