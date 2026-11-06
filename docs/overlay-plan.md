@@ -244,15 +244,22 @@ keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches 
 - **Results.** Exact outlines for the word first (fewest strokes first, up to 4, only ones that
   type it "properly" in a sentence), then words that start with the query, shortest first, each
   with its best outline (up to 12 rows; completions only from 2 characters). Built in the daemon
-  and sent in the snapshot as `LookupView { query, rows, hint }`, so the overlay needs no
-  dictionary.
+  and sent in the snapshot as `LookupView { query, rows, hint, strokes }`, so the overlay needs no
+  dictionary. `strokes` is every stroke of the best outline (empty for a phrase, whose outline is
+  a group per word); `hint` is its first.
 - **Cost.** Per key press: one hash lookup plus a scan of the distinct translations for the
   completions. `proper_outlines_in` works from the engine's translator, whose dictionary is
   shared through an `Arc`; the existing `proper_outlines` copied the whole dictionary per call,
   which is fine for a CLI command and not for every key press.
 - **Overlay.** The lookup replaces the tape, bottom-up like it: a `LOOKUP` label and the query
   with a caret sit just above the keyboard, the results above them with the best nearest, and
-  the first stroke of the best result is lit dimly on the keyboard. The "has anything changed"
+  the best result's outline is played on the keyboard, dimly lit like a stroke in progress. One
+  stroke stays lit. Several take turns (`anim.rs`: 900 ms each, looping, from when that outline
+  appeared; a new best outline starts over, typing more of the same one carries on), and the
+  outline's text keeps the stroke being shown at full strength and dims the rest to half instead of
+  bracketing it. The event loop sleeps until an event as before; only while a several-stroke
+  outline is on a showing panel does it also wake when the next stroke is due (`until_next_step`
+  is `None` otherwise), redrawing just when the stroke changed. The "has anything changed"
   check in `wayland.rs` includes the lookup, or typing wouldn't redraw.
 - **Closing.** Esc/Enter, or leaving the steno layer (the hub clears it on a layer change, and
   the engine on re-entry), so a lookup can never be left eating keys.

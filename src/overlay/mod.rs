@@ -6,6 +6,7 @@
 //! on. The panel takes no input and no focus. See `docs/overlay-plan.md`.
 
 mod activity;
+pub mod anim;
 mod client;
 mod demo;
 pub mod geometry;

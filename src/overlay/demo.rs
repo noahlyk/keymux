@@ -1,7 +1,7 @@
 //! `keymux overlay --demo`: feeds the overlay made-up strokes, so the drawing can be
 //! checked without the daemon, a steno layer, or a keyboard.
 
-use crate::steno::layout::parse_stroke;
+use crate::steno::layout::{parse_stroke, parse_strokes_trimmed};
 use crate::steno::overlay::{
     LookupMode, LookupRow, LookupView, OverlaySnapshot, TapeEntry, TAPE_CAPACITY,
 };
@@ -115,10 +115,15 @@ fn lookup(frames: &Sender<OverlaySnapshot>, snapshot: &mut OverlaySnapshot) -> b
             .first()
             .and_then(|row| parse_stroke(row.outline.split('/').next()?))
             .unwrap_or(0);
+        let strokes = rows
+            .first()
+            .and_then(|row| parse_strokes_trimmed(&row.outline))
+            .unwrap_or_default();
         let view = LookupView {
             query: query.into(),
             rows,
             hint,
+            strokes,
             mode: LookupMode::Word,
         };
         if !show(snapshot, Some(view)) {

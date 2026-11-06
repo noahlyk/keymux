@@ -11,6 +11,7 @@
 //! All text sizes are derived from the overlay's `width`, so one number scales the whole thing,
 //! and `text_scale` nudges the text alone.
 
+use super::anim;
 use super::geometry::{KeyGroup, Keyboard, Rect};
 use super::glyphs::{self, GlyphCache};
 use crate::config::{Half, OverlayConfig};
@@ -165,6 +166,8 @@ pub struct Renderer {
     tape_bottom: f32,
     line_height: f32,
     tape_lines: usize,
+    /// Which stroke of an animated lookup is lit right now (see [`anim`]); 0 for everything else
+    step: usize,
     /// One per tape slot in [`Layout::paper_order`] order
     columns: Vec<Column>,
     /// Left edge of the steno letters, and where the words start, physical px
@@ -178,6 +181,29 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    /// The strokes a lookup walks through on the keyboard: all of its best outline's, or just the
+    /// first (the `hint`) from a daemon that sent no more. Empty when there is nothing to light.
+    #[must_use]
+    pub fn lookup_strokes(view: &LookupView) -> Vec<u32> {
+        if !view.strokes.is_empty() {
+            view.strokes.clone()
+        } else if view.hint != 0 {
+            vec![view.hint]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Light stroke `step` of an animated lookup from now on (taken modulo how many there are).
+    pub const fn set_step(&mut self, step: usize) {
+        self.step = step;
+    }
+
+    #[must_use]
+    pub const fn step(&self) -> usize {
+        self.step
+    }
+
     /// Lay the overlay out for `config` on a surface `height` logical pixels tall, at an
     /// integer output `scale`. The tape takes all the height the keyboard leaves.
     pub fn new(config: &OverlayConfig, scale: u32, height: u32) -> Result<Self> {
@@ -357,6 +383,7 @@ impl Renderer {
             tape_bottom,
             line_height,
             tape_lines,
+            step: 0,
             columns,
             paper_left: pad_x,
             words_left,
@@ -537,6 +564,10 @@ impl Renderer {
             0.0
         };
 
+        // The best result's outline is played stroke by stroke on the keyboard; its text shows
+        // which one by keeping that stroke at full strength and dimming the rest
+        let playing = Self::lookup_strokes(view).len() > 1;
+        let step = self.step;
         let mut block_top = bottom - line_height; // the query's own block, already placed
         for (row, row_lines) in shown_rows {
             let row_height = row_lines as f32 * line_height;
@@ -606,17 +637,36 @@ impl Renderer {
                 ((row_lines - col_lines) as f32 / 2.0).mul_add(line_height, row_top)
                     + baseline_in_line
             };
-            draw_text_wrapped(
-                pixmap,
-                &mut self.strokes,
-                &row.outline,
-                self.paper_left,
-                center(outline_lines),
-                paper_right,
-                line_height,
-                outline_color,
-                self.scale,
-            );
+            if playing && view.rows.first().is_some_and(|best| std::ptr::eq(row, best)) {
+                let lines = wrap_text(
+                    &mut self.strokes,
+                    &row.outline,
+                    (paper_right - self.paper_left).max(0.0),
+                );
+                draw_lines_stepped(
+                    pixmap,
+                    &mut self.strokes,
+                    &lines,
+                    self.paper_left,
+                    center(outline_lines),
+                    line_height,
+                    outline_color,
+                    self.scale,
+                    step % Self::lookup_strokes(view).len(),
+                );
+            } else {
+                draw_text_wrapped(
+                    pixmap,
+                    &mut self.strokes,
+                    &row.outline,
+                    self.paper_left,
+                    center(outline_lines),
+                    paper_right,
+                    line_height,
+                    outline_color,
+                    self.scale,
+                );
+            }
             draw_text_wrapped(
                 pixmap,
                 &mut self.words,
@@ -639,8 +689,16 @@ impl Renderer {
             width: OUTLINE * self.scale,
             ..Stroke::default()
         };
-        // A lookup lights the first stroke of its best result, dimly, like a stroke in progress
-        let hint = snapshot.lookup.as_ref().map_or(0, |lookup| lookup.hint);
+        // A lookup lights a stroke of its best result, dimly, like a stroke in progress: the first
+        // for a single stroke, and for several the one whose turn it is (see `anim`)
+        let hint = snapshot.lookup.as_ref().map_or(0, |lookup| {
+            let strokes = Self::lookup_strokes(lookup);
+            if strokes.is_empty() {
+                0
+            } else {
+                strokes[self.step % strokes.len()]
+            }
+        });
         for (slot, shape) in self.key_shapes.iter().enumerate() {
             let bit = 1u32 << slot;
             let accent = self.theme.accent(Keyboard::group(slot));
@@ -1165,6 +1223,38 @@ fn draw_lines(
         for c in line.chars() {
             draw_char(pixmap, glyphs, c, cx, line_baseline, color, scale);
             cx += glyphs.get(c).advance.round();
+        }
+    }
+}
+
+/// Like [`draw_lines`] for an outline (`ED/+-D`) whose strokes take turns: the characters of
+/// stroke `current` are drawn at full strength and every other stroke, with the `/`s between them,
+/// dimmed (see [`anim::stroke_alpha`]), instead of bracketing the current one. `lines` are the
+/// outline wrapped, so the stroke count carries across them.
+#[allow(clippy::too_many_arguments)]
+fn draw_lines_stepped(
+    pixmap: &mut PixmapMut,
+    glyphs: &mut GlyphCache,
+    lines: &[String],
+    x: f32,
+    baseline: f32,
+    pitch: f32,
+    color: [u8; 4],
+    scale: f32,
+    current: usize,
+) {
+    let dim = [color[0], color[1], color[2], anim::stroke_alpha(color[3], false)];
+    let mut stroke = 0usize;
+    for (i, line) in lines.iter().enumerate() {
+        let mut cx = x.round();
+        let line_baseline = pitch.mul_add(i as f32, baseline);
+        for c in line.chars() {
+            let shade = if c != '/' && stroke == current { color } else { dim };
+            draw_char(pixmap, glyphs, c, cx, line_baseline, shade, scale);
+            cx += glyphs.get(c).advance.round();
+            if c == '/' {
+                stroke += 1;
+            }
         }
     }
 }
@@ -2237,8 +2327,139 @@ mod tests {
                 },
             ],
             hint: crate::steno::layout::parse_stroke("T").unwrap(),
+            strokes: Vec::new(),
             mode: LookupMode::Word,
         }
+    }
+
+    /// A lookup whose best outline is `outline` (strokes parsed from it), for the animation tests
+    fn playing(outline: &str) -> LookupView {
+        use crate::steno::overlay::LookupRow;
+        let strokes = crate::steno::layout::parse_strokes_trimmed(outline).unwrap();
+        LookupView {
+            query: "candy".into(),
+            rows: vec![LookupRow {
+                text: "candy".into(),
+                outline: outline.into(),
+            }],
+            hint: strokes[0],
+            strokes,
+            mode: LookupMode::Word,
+        }
+    }
+
+    fn drawn(renderer: &mut Renderer, view: &LookupView) -> Pixmap {
+        let (w, h) = renderer.size();
+        let snapshot = OverlaySnapshot {
+            layer: Some("steno".into()),
+            lookup: Some(view.clone()),
+            ..OverlaySnapshot::default()
+        };
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        renderer.draw(&snapshot, &mut pixmap.as_mut());
+        pixmap
+    }
+
+    /// Whether the key for `slot` is lit (a lit key is filled; an unlit one is nearly clear)
+    fn key_lit(renderer: &Renderer, pixmap: &Pixmap, slot: usize) -> bool {
+        let key = renderer.keyboard.as_ref().unwrap().keys[slot];
+        let pixel = pixmap
+            .pixel((key.x + 2.0) as u32, (key.y + key.h / 2.0) as u32)
+            .unwrap();
+        pixel.alpha() > 100
+    }
+
+    #[test]
+    fn a_multi_stroke_lookup_lights_each_stroke_of_its_outline_in_turn() {
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let view = playing("T/-D");
+        // T is the left-hand T- (slot 1); -D is slot 20
+        let (t, d) = (1, 20);
+        let first = drawn(&mut renderer, &view);
+        assert!(key_lit(&renderer, &first, t), "the first stroke lights first");
+        assert!(!key_lit(&renderer, &first, d), "and not the second yet");
+
+        renderer.set_step(1);
+        let second = drawn(&mut renderer, &view);
+        assert!(key_lit(&renderer, &second, d), "then the second");
+        assert!(!key_lit(&renderer, &second, t), "and the first goes dark");
+
+        // It loops: a step past the end is the first again
+        renderer.set_step(2);
+        let again = drawn(&mut renderer, &view);
+        assert_eq!(first.data(), again.data());
+    }
+
+    #[test]
+    fn a_single_stroke_lookup_is_static_whatever_the_step() {
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let view = playing("KAPBD");
+        let at_zero = drawn(&mut renderer, &view);
+        renderer.set_step(1);
+        let at_one = drawn(&mut renderer, &view);
+        renderer.set_step(7);
+        let at_seven = drawn(&mut renderer, &view);
+        assert_eq!(at_zero.data(), at_one.data());
+        assert_eq!(at_zero.data(), at_seven.data());
+        assert_eq!(Renderer::lookup_strokes(&view).len(), 1);
+    }
+
+    #[test]
+    fn a_daemon_that_sent_only_a_hint_still_lights_it() {
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let mut view = playing("T");
+        view.strokes.clear();
+        assert_eq!(Renderer::lookup_strokes(&view), [view.hint]);
+        let pixmap = drawn(&mut renderer, &view);
+        assert!(key_lit(&renderer, &pixmap, 1));
+        view.hint = 0;
+        assert!(Renderer::lookup_strokes(&view).is_empty());
+    }
+
+    /// The brightest ink drawn in the columns `x0..x1`, above the query row (so only the results).
+    /// Brightness, not alpha: a glyph's shadow is black, so it adds alpha but no light.
+    fn ink(renderer: &Renderer, pixmap: &Pixmap, x0: f32, x1: f32) -> u8 {
+        let above = (renderer.tape_bottom - renderer.line_height) as u32;
+        (0..above)
+            .flat_map(|y| (x0 as u32..x1 as u32).map(move |x| (x, y)))
+            .filter_map(|(x, y)| pixmap.pixel(x, y))
+            .map(|p| p.red().max(p.green()).max(p.blue()))
+            .max()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn the_outline_text_dims_the_strokes_not_being_shown_instead_of_bracketing_one() {
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let view = playing("KAPBD/EUD");
+        let left = renderer.paper_left.round();
+        // the first stroke is "KAPBD" and the second "EUD", after the "/"
+        let first = (left, left + renderer.strokes.measure("KAPBD"));
+        let second_x = left + renderer.strokes.measure("KAPBD/");
+        let second = (second_x, second_x + renderer.strokes.measure("EUD"));
+
+        let at_zero = drawn(&mut renderer, &view);
+        let (a, b) = (
+            ink(&renderer, &at_zero, first.0, first.1),
+            ink(&renderer, &at_zero, second.0, second.1),
+        );
+        assert!(a > 150, "the stroke being shown is full strength: {a}");
+        assert!(
+            u32::from(b) * 10 < u32::from(a) * 6,
+            "the other is dimmed to about half: {b} against {a}"
+        );
+
+        renderer.set_step(1);
+        let at_one = drawn(&mut renderer, &view);
+        let (a, b) = (
+            ink(&renderer, &at_one, first.0, first.1),
+            ink(&renderer, &at_one, second.0, second.1),
+        );
+        assert!(b > 150, "now the second is full strength: {b}");
+        assert!(
+            u32::from(a) * 10 < u32::from(b) * 6,
+            "and the first is dimmed: {a} against {b}"
+        );
     }
 
     #[test]
@@ -2324,6 +2545,7 @@ mod tests {
                     row("cane", "KAEUPB"),
                 ],
                 hint: 0,
+                strokes: Vec::new(),
                 mode: LookupMode::Word,
             }),
             ..OverlaySnapshot::default()
@@ -2373,6 +2595,7 @@ mod tests {
                 query: "cand".into(),
                 rows: vec![],
                 hint: 0,
+                strokes: Vec::new(),
                 mode: LookupMode::Word,
             }),
             ..OverlaySnapshot::default()
@@ -2385,6 +2608,7 @@ mod tests {
                     outline: "KAPBD".into(),
                 }],
                 hint: 0,
+                strokes: Vec::new(),
                 mode: LookupMode::Word,
             }),
             ..OverlaySnapshot::default()
@@ -2430,6 +2654,7 @@ mod tests {
                     outline: "KAPBD/TKEU/HRAOEUT/SRAOEUT/KAPBD/TKEU/HRAOEUT/SRAOEUT".into(),
                 }],
                 hint: 0,
+                strokes: Vec::new(),
                 mode: LookupMode::Word,
             }),
             ..OverlaySnapshot::default()
@@ -2481,6 +2706,7 @@ mod tests {
                         .into(),
                 }],
                 hint: 0,
+                strokes: Vec::new(),
                 mode: LookupMode::Phrase,
             }),
             ..OverlaySnapshot::default()
@@ -2565,6 +2791,7 @@ mod tests {
                     row("cane", "KAEUPB"),
                 ],
                 hint: crate::steno::layout::parse_stroke("KAPBD").unwrap(),
+                strokes: Vec::new(),
                 mode: LookupMode::Word,
             }),
             ..OverlaySnapshot::default()
@@ -2617,6 +2844,7 @@ mod tests {
                     },
                 ],
                 hint: crate::steno::layout::parse_stroke("KAPBD").unwrap(),
+                strokes: Vec::new(),
                 mode: LookupMode::Phrase,
             }),
             ..OverlaySnapshot::default()
@@ -2658,6 +2886,7 @@ mod tests {
                     row("\u{2192} \"can\"", "KAPB/TKEU"),
                 ],
                 hint: crate::steno::layout::parse_stroke("KAPBD").unwrap(),
+                strokes: Vec::new(),
                 mode: LookupMode::Stroke,
             }),
             ..OverlaySnapshot::default()

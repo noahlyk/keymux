@@ -9,7 +9,7 @@
 //!   most one frame callback is pending, so a burst of strokes draws once.
 
 use super::render::Renderer;
-use super::{activity, client, Source};
+use super::{activity, anim, client, Source};
 use crate::config::OverlayConfig;
 use crate::steno::layout::Layout;
 use crate::steno::overlay::OverlaySnapshot;
@@ -38,6 +38,7 @@ use smithay_client_toolkit::{
     },
     shm::{slot::SlotPool, Shm, ShmHandler},
 };
+use std::time::{Duration, Instant};
 use tiny_skia::PixmapMut;
 
 /// The layer-shell namespace, so compositor rules can target the overlay
@@ -141,6 +142,7 @@ pub fn run(config: OverlayConfig, source: Source, always: bool) -> Result<()> {
         frame_pending: false,
         dirty: false,
         latest: OverlaySnapshot::default(),
+        animation: None,
         exit: false,
         always,
         suppressed: false,
@@ -150,9 +152,19 @@ pub fn run(config: OverlayConfig, source: Source, always: bool) -> Result<()> {
         overlay.on_snapshot(OverlaySnapshot::default());
     }
     while !overlay.exit {
-        event_loop.dispatch(None, &mut overlay)?;
+        // Asleep until something happens, except while a lookup is playing a multi-stroke outline
+        // on the keyboard: then it also wakes when the next stroke is due
+        event_loop.dispatch(overlay.next_wake(), &mut overlay)?;
+        overlay.tick();
     }
     Ok(())
+}
+
+/// A multi-stroke lookup outline playing on the keyboard
+struct Animation {
+    outline: String,
+    strokes: usize,
+    started: Instant,
 }
 
 struct Overlay {
@@ -178,6 +190,10 @@ struct Overlay {
     /// `latest` hasn't been drawn yet
     dirty: bool,
     latest: OverlaySnapshot,
+    /// The best lookup result's outline while it is being played stroke by stroke on the keyboard
+    /// (it has more than one stroke), and when that started. `None` when nothing animates, which
+    /// is what lets the loop sleep.
+    animation: Option<Animation>,
     exit: bool,
     /// `--always`: show on every layer, not only steno ones
     always: bool,
@@ -233,6 +249,7 @@ impl Overlay {
             && self.latest.tape.back().map(|e| (e.seq, e.repeats))
                 == snapshot.tape.back().map(|e| (e.seq, e.repeats));
         self.latest = snapshot;
+        self.follow_lookup();
         let (action, suppressed) =
             next_action(visible, self.surface.is_some(), unchanged, self.suppressed);
         self.suppressed = suppressed;
@@ -244,6 +261,56 @@ impl Overlay {
                 self.draw();
             }
             Action::Idle => {}
+        }
+    }
+
+    /// Start, restart or stop the stroke-by-stroke animation to match the lookup on screen: a new
+    /// best outline starts again from its first stroke, the same one carries on, and one stroke
+    /// (or no lookup) stops it.
+    fn follow_lookup(&mut self) {
+        let playing = self.latest.lookup.as_ref().and_then(|view| {
+            let strokes = Renderer::lookup_strokes(view).len();
+            let row = view.rows.first()?;
+            (strokes > 1).then(|| (row.outline.clone(), strokes))
+        });
+        match (playing, &self.animation) {
+            (Some((outline, _)), Some(now)) if now.outline == outline => {}
+            (Some((outline, strokes)), _) => {
+                self.animation = Some(Animation {
+                    outline,
+                    strokes,
+                    started: Instant::now(),
+                });
+                self.renderer.set_step(0);
+            }
+            (None, _) => {
+                self.animation = None;
+                self.renderer.set_step(0);
+            }
+        }
+    }
+
+    /// How long the loop may sleep: `None` (until an event) unless an outline is playing on a
+    /// panel that is showing, then until its next stroke is due.
+    fn next_wake(&self) -> Option<Duration> {
+        let animation = self.animation.as_ref()?;
+        self.surface.as_ref()?;
+        anim::until_next_step(animation.strokes, animation.started.elapsed())
+    }
+
+    /// Light the stroke whose turn it is, redrawing only when that changed.
+    fn tick(&mut self) {
+        let Some(animation) = &self.animation else {
+            return;
+        };
+        if self.surface.is_none() {
+            return;
+        }
+        let step = anim::step_at(animation.strokes, animation.started.elapsed());
+        if step != self.renderer.step() {
+            self.renderer.set_step(step);
+            self.dirty = true;
+            self.draw();
         }
     }
 

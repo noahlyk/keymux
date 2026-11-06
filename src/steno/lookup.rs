@@ -8,7 +8,7 @@
 //! closes it.
 
 use super::commands::proper_outlines_in;
-use super::layout::{parse_stroke, render_strokes};
+use super::layout::{parse_stroke, parse_strokes_trimmed, render_strokes};
 use super::overlay::{LookupMode, LookupRow, LookupView, OverlayHub};
 use super::reverse::{self, Query};
 use super::shortest::shortest_outline_labeled;
@@ -152,6 +152,7 @@ impl Lookup {
             query: self.query.clone(),
             rows: Vec::new(),
             hint: 0,
+            strokes: Vec::new(),
             mode: LookupMode::Word,
         }
     }
@@ -180,10 +181,16 @@ impl Lookup {
                 .and_then(parse_stroke)
                 .unwrap_or(0)
         });
+        // A phrase's outline is one group per word, not one stroke sequence to play through
+        let strokes = match (mode, rows.first()) {
+            (LookupMode::Phrase, _) | (_, None) => Vec::new(),
+            (_, Some(row)) => parse_strokes_trimmed(&row.outline).unwrap_or_default(),
+        };
         Some(LookupView {
             query: self.query.clone(),
             rows,
             hint,
+            strokes,
             mode,
         })
     }
@@ -454,6 +461,29 @@ mod tests {
         assert!(view.rows.iter().all(|row| row.text == "candy"));
         // The keyboard lights the first stroke of the best outline
         assert_eq!(view.hint, Layout::plover().parse_stroke("KAPBD").unwrap());
+    }
+
+    #[test]
+    fn the_view_carries_every_stroke_of_the_best_outline_for_the_overlay_to_play() {
+        let layout = Layout::plover();
+        // One stroke: just that one
+        let one = typed("candy").view(&translator());
+        assert_eq!(one.strokes, [layout.parse_stroke("KAPBD").unwrap()]);
+        // Several: all of them in order, the first being the hint
+        let several = typed("KAPB/TKEU").view(&translator());
+        assert_eq!(several.rows[0].outline, "KAPB/TKEU");
+        assert_eq!(
+            several.strokes,
+            [
+                layout.parse_stroke("KAPB").unwrap(),
+                layout.parse_stroke("TKEU").unwrap()
+            ]
+        );
+        assert_eq!(several.hint, several.strokes[0]);
+        // Nothing found, nothing to play
+        assert!(typed("zzzz").view(&translator()).strokes.is_empty());
+        // A phrase's outline is a group per word, not a sequence to step through
+        assert!(typed("candy candy").view(&translator()).strokes.is_empty());
     }
 
     #[test]

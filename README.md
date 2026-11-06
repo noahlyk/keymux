@@ -683,8 +683,11 @@ already has it as `PHRUP` and `PHR*UP`, and you can add your own to any dictiona
   [overlay](#on-screen-overlay). Nothing you type reaches the application, so your document
   is untouched. (Letters follow `typing_layout`, `us` by default.)
 - The overlay lists the strokes that type the word, fewest strokes first, with words that
-  start with what you've typed after them. The first stroke of the best one is lit on the
-  overlay's keyboard.
+  start with what you've typed after them. The best one is played on the overlay's keyboard:
+  its first stroke is lit, and an outline of several strokes (`ED/+-D`) steps through them one
+  at a time (about a second each, looping), the stroke being shown at full strength in the
+  outline's text and the others dimmed. A one-stroke outline just stays lit. The overlay does no
+  work (no timer, no redraws) unless a several-stroke outline is showing.
 - Backspace edits the query, Shift capitalizes (lookups are case-sensitive), and **Esc or
   Enter** closes it, including a key you remapped to either. You're straight back in steno,
   mid-sentence.

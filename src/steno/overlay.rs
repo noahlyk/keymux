@@ -64,6 +64,11 @@ pub struct LookupView {
     pub rows: Vec<LookupRow>,
     /// Stroke bits to show on the keyboard: the first stroke of the best result
     pub hint: u32,
+    /// Every stroke of the best result's outline, in order, which the overlay steps through on the
+    /// keyboard one at a time. Empty when there is no result (and for a phrase, whose outline is
+    /// one group of strokes per word); `hint` is always its first.
+    #[serde(default)]
+    pub strokes: Vec<u32>,
     pub mode: LookupMode,
 }
 
