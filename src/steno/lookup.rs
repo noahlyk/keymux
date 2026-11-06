@@ -8,7 +8,7 @@
 //! closes it.
 
 use super::commands::proper_outlines_in;
-use super::layout::{parse_stroke, parse_strokes_trimmed, render_strokes};
+use super::layout::Layout;
 use super::overlay::{LookupMode, LookupRow, LookupView, OverlayHub};
 use super::reverse::{self, Query};
 use super::shortest::shortest_outline_labeled;
@@ -108,13 +108,30 @@ impl LookupInput {
     }
 }
 
-/// An open lookup: the text typed so far.
-#[derive(Debug, Default)]
+/// An open lookup: the text typed so far, and the layout its stroke notation is read and written
+/// in (so an extra key such as the `+` join key, in `ED/+-D`, parses, lights and prints).
+#[derive(Debug)]
 pub struct Lookup {
     query: String,
+    layout: Layout,
+}
+
+impl Default for Lookup {
+    fn default() -> Self {
+        Self::new(Layout::plover())
+    }
 }
 
 impl Lookup {
+    /// A lookup with nothing typed yet, in `layout`'s stroke notation.
+    #[must_use]
+    pub const fn new(layout: Layout) -> Self {
+        Self {
+            query: String::new(),
+            layout,
+        }
+    }
+
     /// Apply a key. Returns `false` when the lookup should close.
     pub fn apply(&mut self, key: LookupKey) -> bool {
         match key {
@@ -164,12 +181,19 @@ impl Lookup {
         if query.is_empty() {
             return Some(self.blank());
         }
-        let (rows, mode) = match reverse::classify(query) {
-            Query::Stroke(strokes) => (stroke_rows(base, &strokes), LookupMode::Stroke),
-            Query::Text(text) if text.contains(char::is_whitespace) => {
-                (vec![phrase_row(base, &text)], LookupMode::Phrase)
-            }
-            Query::Text(text) => (word_rows(base, &text, cancelled)?, LookupMode::Word),
+        let (rows, mode) = match reverse::classify_with(&self.layout, query) {
+            Query::Stroke(strokes) => (
+                stroke_rows(&self.layout, base, &strokes),
+                LookupMode::Stroke,
+            ),
+            Query::Text(text) if text.contains(char::is_whitespace) => (
+                vec![phrase_row(&self.layout, base, &text)],
+                LookupMode::Phrase,
+            ),
+            Query::Text(text) => (
+                word_rows(&self.layout, base, &text, cancelled)?,
+                LookupMode::Word,
+            ),
         };
         if cancelled() {
             return None;
@@ -178,13 +202,15 @@ impl Lookup {
             row.outline
                 .split('/')
                 .next()
-                .and_then(parse_stroke)
+                .and_then(|stroke| self.layout.parse_stroke(stroke))
                 .unwrap_or(0)
         });
         // A phrase's outline is one group per word, not one stroke sequence to play through
         let strokes = match (mode, rows.first()) {
             (LookupMode::Phrase, _) | (_, None) => Vec::new(),
-            (_, Some(row)) => parse_strokes_trimmed(&row.outline).unwrap_or_default(),
+            (_, Some(row)) => self.layout
+                .parse_strokes_trimmed(&row.outline)
+                .unwrap_or_default(),
         };
         Some(LookupView {
             query: self.query.clone(),
@@ -267,6 +293,7 @@ impl LookupSearch {
         drop(gate);
         let query = Lookup {
             query: lookup.query.clone(),
+            layout: lookup.layout.clone(),
         };
         let _ = self.jobs.send(Job {
             generation,
@@ -287,7 +314,7 @@ impl LookupSearch {
 
 /// What a stroke sequence types, as a single row: outline is the notation itself, text is the
 /// result in quotes (or a note that nothing matched).
-fn stroke_row(base: &Translator, strokes: &[u32]) -> LookupRow {
+fn stroke_row(layout: &Layout, base: &Translator, strokes: &[u32]) -> LookupRow {
     let mut probe = base.clone();
     for &bits in strokes {
         probe.stroke(bits);
@@ -299,26 +326,26 @@ fn stroke_row(base: &Translator, strokes: &[u32]) -> LookupRow {
         } else {
             format!("\u{2192} {text:?}")
         },
-        outline: render_strokes(strokes),
+        outline: layout.render_strokes(strokes),
     }
 }
 
 /// Every row the raw-steno view shows: what the typed chord actually resolves to, first, then
 /// the dictionary's other entries nearest to it - a chord a key or two off from a real entry
 /// still shows what it was probably reaching for, instead of leaving it at "(no translation)".
-fn stroke_rows(base: &Translator, strokes: &[u32]) -> Vec<LookupRow> {
-    let mut rows = vec![stroke_row(base, strokes)];
+fn stroke_rows(layout: &Layout, base: &Translator, strokes: &[u32]) -> Vec<LookupRow> {
+    let mut rows = vec![stroke_row(layout, base, strokes)];
     for outline in reverse::nearby_strokes(base.dictionary(), strokes, MAX_ROWS - 1) {
-        rows.push(stroke_row(base, &outline));
+        rows.push(stroke_row(layout, base, &outline));
     }
     rows
 }
 
 /// A whole phrase as a single row: the words (a fingerspelled one in quotes), and every stroke
 /// that types them in order.
-fn phrase_row(base: &Translator, phrase: &str) -> LookupRow {
+fn phrase_row(layout: &Layout, base: &Translator, phrase: &str) -> LookupRow {
     let segments = reverse::reverse_phrase(base, base.dictionary(), phrase);
-    let (words, strokes) = reverse::display(&segments);
+    let (words, strokes) = reverse::display_with(layout, &segments);
     LookupRow {
         text: words,
         outline: strokes,
@@ -329,6 +356,7 @@ fn phrase_row(base: &Translator, phrase: &str) -> LookupRow {
 /// each with its best outline — falling back to fingerspelling, marked in quotes, when the exact
 /// query has no dictionary entry at all.
 fn word_rows(
+    layout: &Layout,
     base: &Translator,
     query: &str,
     cancelled: &dyn Fn() -> bool,
@@ -343,14 +371,14 @@ fn word_rows(
                 } else {
                     query.to_string()
                 },
-                outline: render_strokes(&found.strokes),
+                outline: layout.render_strokes(&found.strokes),
             });
         }
     } else {
         for outline in exact.iter().take(MAX_OUTLINES) {
             rows.push(LookupRow {
                 text: query.to_string(),
-                outline: render_strokes(outline),
+                outline: layout.render_strokes(outline),
             });
         }
     }
@@ -366,7 +394,7 @@ fn word_rows(
             if let Some(outline) = proper_outlines_in(base, word).first() {
                 rows.push(LookupRow {
                     text: word.to_string(),
-                    outline: render_strokes(outline),
+                    outline: layout.render_strokes(outline),
                 });
             }
         }
@@ -452,6 +480,70 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(hub.snapshot().lookup.is_none());
     }
+    /// A dictionary and lookup in a layout with the `+` join key, as the lyk theory has it.
+    fn joined() -> (Layout, Translator) {
+        let layout = Layout::plover_with(&['+']).unwrap();
+        let mut dict = Dictionary::default();
+        dict.merge_json(
+            r#"{"ED": "end", "+-D": "{^ed}", "ED/+-D": "ended", "KAT": "cat"}"#,
+            &layout,
+        )
+        .unwrap();
+        (layout, Translator::new(dict))
+    }
+
+    fn typed_in(layout: &Layout, query: &str) -> Lookup {
+        let mut lookup = Lookup::new(layout.clone());
+        for c in query.chars() {
+            assert!(lookup.apply(LookupKey::Char(c)));
+        }
+        lookup
+    }
+
+    #[test]
+    fn a_word_whose_outline_has_the_join_key_prints_and_plays_it() {
+        let (layout, base) = joined();
+        let join = 1u32 << layout.extra_start();
+        let view = typed_in(&layout, "ended").view(&base);
+        assert_eq!(view.rows[0].outline, "ED/+-D");
+        assert_eq!(view.strokes.len(), 2, "both strokes are played");
+        assert_eq!(view.strokes[0] & join, 0, "ED has no join key");
+        assert_ne!(view.strokes[1] & join, 0, "+-D lights the join key");
+        assert_eq!(view.strokes[1], layout.parse_stroke("+-D").unwrap());
+        assert_eq!(view.hint, view.strokes[0]);
+    }
+
+    #[test]
+    fn a_suffix_that_is_one_join_stroke_lights_the_join_key() {
+        let (layout, base) = joined();
+        let join = 1u32 << layout.extra_start();
+        let view = typed_in(&layout, "+-D").view(&base);
+        assert_eq!(view.mode, LookupMode::Stroke);
+        assert_eq!(view.rows[0].outline, "+-D");
+        assert_eq!(view.strokes.len(), 1);
+        assert_ne!(view.hint & join, 0);
+    }
+
+    #[test]
+    fn join_key_notation_typed_into_the_lookup_resolves_forward() {
+        let (layout, base) = joined();
+        let view = typed_in(&layout, "ED/+-D").view(&base);
+        assert_eq!(view.mode, LookupMode::Stroke);
+        assert_eq!(view.rows[0].outline, "ED/+-D");
+        assert_eq!(view.rows[0].text, "\u{2192} \"ended\"");
+        assert_eq!(view.strokes.len(), 2);
+        // Without the key in the layout it is not notation at all: text, not a stroke
+        assert_eq!(typed("ED/+-D").view(&translator()).mode, LookupMode::Word);
+    }
+
+    #[test]
+    fn a_plain_outline_is_unchanged_by_a_layout_with_the_join_key() {
+        let (layout, base) = joined();
+        let view = typed_in(&layout, "cat").view(&base);
+        assert_eq!(view.rows[0].outline, "KAT");
+        assert_eq!(view.strokes, [layout.parse_stroke("KAT").unwrap()]);
+    }
+
     #[test]
     fn an_exact_word_lists_its_outlines_fewest_strokes_first_and_lights_the_best() {
         let view = typed("candy").view(&translator());

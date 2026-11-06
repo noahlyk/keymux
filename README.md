@@ -688,6 +688,12 @@ already has it as `PHRUP` and `PHR*UP`, and you can add your own to any dictiona
   at a time (about a second each, looping), the stroke being shown at full strength in the
   outline's text and the others dimmed. A one-stroke outline just stays lit. The overlay does no
   work (no timer, no redraws) unless a several-stroke outline is showing.
+- Outlines that use an extra key such as the `+` join key work everywhere in the
+  lookup: `ED/+-D` is shown with its `+`, the join key's badge (the top half of `S-`) lights on the
+  `+-D` stroke, and typing `ED/+-D` or just `+-D` (in capitals, no lowercase) resolves it forward.
+  The lookup reads and writes notation in the steno layer's own layout (its `extra_keys`).
+  `keymux steno lookup` on the command line reads the plain 23-key layout only, so it cannot
+  take a `+` yet.
 - Backspace edits the query, Shift capitalizes (lookups are case-sensitive), and **Esc or
   Enter** closes it, including a key you remapped to either. You're straight back in steno,
   mid-sentence.

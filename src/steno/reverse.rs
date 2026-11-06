@@ -9,7 +9,7 @@
 
 use super::commands::{exact_strokes, ranked_strokes, word_spans};
 use super::dict::Dictionary;
-use super::layout::{parse_strokes_trimmed, render_strokes};
+use super::layout::Layout;
 use super::shortest::shortest_outline_labeled;
 use super::translate::Translator;
 
@@ -28,11 +28,18 @@ pub enum Query {
 
 #[must_use]
 pub fn classify(input: &str) -> Query {
+    classify_with(&Layout::plover(), input)
+}
+
+/// [`classify`] reading stroke notation in `layout`, so a layout with extra keys (the `+` join
+/// key: `ED/+-D`) resolves outlines that use them.
+#[must_use]
+pub fn classify_with(layout: &Layout, input: &str) -> Query {
     let trimmed = input.trim();
     let looks_like_a_stroke =
         !trimmed.is_empty() && !trimmed.chars().any(|c| c.is_ascii_lowercase());
     if looks_like_a_stroke {
-        if let Some(strokes) = parse_strokes_trimmed(trimmed) {
+        if let Some(strokes) = layout.parse_strokes_trimmed(trimmed) {
             return Query::Stroke(strokes);
         }
     }
@@ -131,17 +138,23 @@ pub fn nearby_strokes(dict: &Dictionary, strokes: &[u32], limit: usize) -> Vec<V
 /// of the pair.
 #[must_use]
 pub fn display(segments: &[Option<Segment>]) -> (String, String) {
+    display_with(&Layout::plover(), segments)
+}
+
+/// [`display`] writing strokes in `layout`'s notation, extra keys included.
+#[must_use]
+pub fn display_with(layout: &Layout, segments: &[Option<Segment>]) -> (String, String) {
     let mut words_out = Vec::with_capacity(segments.len());
     let mut strokes_out = Vec::with_capacity(segments.len());
     for segment in segments {
         match segment {
             Some(segment) if segment.fingerspelled => {
                 words_out.push(format!("\"{}\"", segment.text));
-                strokes_out.push(render_strokes(&segment.strokes));
+                strokes_out.push(layout.render_strokes(&segment.strokes));
             }
             Some(segment) => {
                 words_out.push(segment.text.clone());
-                strokes_out.push(render_strokes(&segment.strokes));
+                strokes_out.push(layout.render_strokes(&segment.strokes));
             }
             None => {
                 words_out.push("?".to_string());

@@ -287,6 +287,13 @@ keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches 
   outline is on a showing panel does it also wake when the next stroke is due (`until_next_step`
   is `None` otherwise), redrawing just when the stroke changed. The "has anything changed"
   check in `wayland.rs` includes the lookup, or typing wouldn't redraw.
+- **Extra keys (the `+` join key).** A `Lookup` carries the engine's `Layout` (built from the steno
+  layer's `extra_keys`) and parses and prints every outline with it: the typed query
+  (`reverse::classify_with`), the rows (`Layout::render_strokes`, so `ED/+-D`, not `ED/-D`), and
+  the `hint`/`strokes` bits. The join key is a stroke bit after the number key, so the overlay,
+  which has its own copy of the layout, lights it on the stroke that carries it (`+-D`), on the
+  top half of `S-` when placed there by `overlay_overrides`. Only the CLI `keymux steno lookup`
+  still uses the plain layout (`Layout::plover()`; `reverse::classify`/`display` are that default).
 - **Closing.** Esc/Enter, or leaving the steno layer (the hub clears it on a layer change, and
   the engine on re-entry), so a lookup can never be left eating keys.
 - **Needs the overlay.** The query and results are only drawn there, so without

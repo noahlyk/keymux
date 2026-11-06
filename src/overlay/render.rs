@@ -2897,6 +2897,52 @@ mod tests {
     }
 
     #[test]
+    fn a_lookup_with_the_join_key_lights_it_on_the_continuation_stroke_only() {
+        use crate::steno::layout::Layout;
+        use crate::config::OverlayPlacement;
+        // The join key as the lyk theory has it: the top half of S-
+        let mut config = OverlayConfig::default();
+        config.overlay_overrides.insert(
+            "+".to_string(),
+            OverlayPlacement::SplitKey {
+                slot: "S-".to_string(),
+                half: Half::Top,
+            },
+        );
+        let layout = Layout::plover_with(&['+']).unwrap();
+        let mut renderer = Renderer::with_layout(&config, 1, 900, layout.clone()).unwrap();
+        let strokes = layout.parse_strokes_trimmed("ED/+-D").unwrap();
+        let view = LookupView {
+            query: "ended".into(),
+            rows: vec![crate::steno::overlay::LookupRow {
+                text: "ended".into(),
+                outline: "ED/+-D".into(),
+            }],
+            hint: strokes[0],
+            strokes,
+            mode: LookupMode::Word,
+        };
+        assert_eq!(Renderer::lookup_strokes(&view).len(), 2);
+        let join_lit = |renderer: &Renderer, pixmap: &Pixmap| {
+            let rect = renderer.keyboard.as_ref().unwrap().extra[0];
+            let pixel = pixmap
+                .pixel((rect.x + 2.0) as u32, (rect.y + rect.h / 2.0) as u32)
+                .unwrap();
+            pixel.alpha() > 100
+        };
+        let e = crate::steno::layout::slot_by_name("-E").unwrap();
+        let first = drawn(&mut renderer, &view);
+        assert!(key_lit(&renderer, &first, e), "ED starts with E");
+        assert!(!join_lit(&renderer, &first), "no join key on the first stroke");
+        renderer.set_step(1);
+        let second = drawn(&mut renderer, &view);
+        assert!(join_lit(&renderer, &second), "+-D lights the join key");
+        assert!(!key_lit(&renderer, &second, e), "and E goes dark");
+        renderer.set_step(2);
+        assert_eq!(first.data(), drawn(&mut renderer, &view).data(), "it loops");
+    }
+
+    #[test]
     fn a_single_stroke_lookup_is_static_whatever_the_step() {
         let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
         let view = playing("KAPBD");

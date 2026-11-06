@@ -85,6 +85,8 @@ pub struct StenoEngine {
     /// Finds the open lookup's rows off this thread; tests, which look at the result at once,
     /// have none and find them here
     lookup_search: Option<LookupSearch>,
+    /// The layout stroke notation is read and written in, extra keys included, for the lookup
+    layout: Layout,
     /// A stroke wrote `{plover:toggle}` or `{plover:suspend}`: the layer should be left
     leave_requested: bool,
     fresh_on_enter: bool,
@@ -136,7 +138,11 @@ impl StenoEngine {
                 .collect()
         };
         let machine = machine_id(&roots);
-        let updates = live::subscribe(roots, super::setup::cache_dir(config_dir), layout);
+        let updates = live::subscribe(
+            roots,
+            super::setup::cache_dir(config_dir),
+            layout.clone(),
+        );
 
         // Every layer and keyboard writes to the one history; this layer's dictionaries are its machine
         let mut translator =
@@ -171,6 +177,7 @@ impl StenoEngine {
             hub: OverlayHub::global(),
             lookup: None,
             lookup_search: (!cfg!(test)).then(|| LookupSearch::new(OverlayHub::global())),
+            layout,
             leave_requested: false,
             fresh_on_enter: config.fresh_on_enter,
             label: label.to_string(),
@@ -230,7 +237,7 @@ impl StenoEngine {
     }
 
     fn open_lookup(&mut self) {
-        self.lookup = Some(Lookup::default());
+        self.lookup = Some(Lookup::new(self.layout.clone()));
         // The stroke that opened it is done: nothing is lit while you type a word
         self.hub.set_keys(0, 0);
         self.publish_lookup();
@@ -615,6 +622,7 @@ impl StenoEngine {
             hub: OverlayHub::global(),
             lookup: None,
             lookup_search: None,
+            layout: Layout::plover(),
             leave_requested: false,
             fresh_on_enter: false,
             label: String::new(),
