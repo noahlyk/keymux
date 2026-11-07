@@ -1,4 +1,4 @@
-use crate::ipc::{send_request, IpcRequest, IpcResponse};
+use crate::ipc::{send_request, DaemonWatch, IpcRequest, IpcResponse};
 use crate::niri;
 use crate::window_manager::WindowManagerEvent::WindowFocusChanged;
 use anyhow::Result;
@@ -26,6 +26,8 @@ pub fn run_niri_daemon() -> Result<()> {
 
     let (niri_tx, niri_rx) = mpsc::channel();
     niri::start_niri_monitor_sync(niri_tx);
+
+    let mut daemon_watch = DaemonWatch::new();
 
     loop {
         match niri_rx.recv_timeout(Duration::from_millis(100)) {
@@ -59,6 +61,9 @@ pub fn run_niri_daemon() -> Result<()> {
                 break;
             }
         }
+
+        // Exits non-zero when the daemon is gone, so the init system restarts us with it
+        daemon_watch.check()?;
 
         thread::sleep(Duration::from_millis(50));
     }

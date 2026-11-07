@@ -3,9 +3,18 @@ Description=Keyboard Middleware i3 Window Watcher
 Documentation=https://github.com/noahlyk/keymux
 After=graphical-session.target
 Requires=graphical-session.target
+# A user unit cannot be bound to the system unit keymux.service (BindsTo=/PartOf=/Requires= do
+# not cross the user/system manager boundary), so this follows the daemon's socket instead:
+# the helper exits when the daemon goes away, and ExecStartPre holds the restart until the
+# daemon answers again. Daemon restart -> helper restarts; daemon stop -> helper goes back to
+# "activating" and does nothing; daemon start -> helper starts. The wait, not a crash loop,
+# paces the restarts, so the start limit is off.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+ExecStartPre=/usr/bin/keymux wait-daemon
+TimeoutStartSec=infinity
 ExecStart=/usr/bin/keymux i3-daemon
 Restart=on-failure
 RestartSec=5

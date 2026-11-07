@@ -65,13 +65,18 @@ fn layout_for(config: &OverlayConfig) -> Layout {
 }
 
 pub fn run(config: OverlayConfig, source: Source, always: bool) -> Result<()> {
-    let conn = Connection::connect_to_env().context("no Wayland session to draw on")?;
+    let conn = Connection::connect_to_env()
+        .map_err(|e| super::CannotDraw::error("no Wayland session to draw on", &e))?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
     let qh = event_queue.handle();
 
     let compositor = CompositorState::bind(&globals, &qh).context("wl_compositor missing")?;
-    let layer_shell = LayerShell::bind(&globals, &qh)
-        .context("this compositor has no layer-shell, which the overlay needs (GNOME?)")?;
+    let layer_shell = LayerShell::bind(&globals, &qh).map_err(|e| {
+        super::CannotDraw::error(
+            "this compositor has no layer-shell, which the overlay needs (GNOME?)",
+            &e,
+        )
+    })?;
     let shm = Shm::bind(&globals, &qh).context("wl_shm missing")?;
 
     // The real height arrives with the first configure; this is only until then

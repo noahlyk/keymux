@@ -930,6 +930,20 @@ systemctl --user daemon-reload
 systemctl --user enable --now keymux-niri.service
 ```
 
+**Helpers follow the daemon.** The shipped helper units (`systemd/keymux-*.service`) also
+carry `ExecStartPre=/usr/bin/keymux wait-daemon`, `TimeoutStartSec=infinity`,
+`Restart=on-failure` and `StartLimitIntervalSec=0`. The daemon is a system unit and the
+helpers are user units, so `BindsTo=`/`PartOf=` cannot cross the manager boundary; instead
+each helper exits non-zero when the daemon stops answering a Ping (`ipc::DaemonWatch`,
+`ipc::LossTracker`: one probe a second, three misses in a row, and only after the daemon
+was seen alive once), and `wait-daemon` holds its restart until the daemon is back. Exit
+rather than reconnect, so the init system can see the daemon is down and the daemon's
+per-helper state (the last focused window) is reported afresh on restart. The steno overlay
+(`overlay/client.rs`) does the same when its stream from the daemon ends, and exits 78
+(`overlay::EXIT_CANNOT_DRAW`) when it cannot draw at all, which its unit does not retry. The
+OpenRC scripts use `need keymux` and `supervise-daemon`; the runit `run` scripts exec
+`keymux wait-daemon -- <helper>`. See the README, "How the helpers follow the daemon".
+
 ## Migration Path
 
 ### Phase 1: Core Architecture

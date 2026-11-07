@@ -63,12 +63,32 @@ fn main() -> Result<()> {
             let mut daemon = Daemon::new(config.clone(), user.clone())?;
             daemon.run()?;
         }
+        Some(cli::Commands::WaitDaemon { timeout, then }) => {
+            let limit = (*timeout > 0).then(|| std::time::Duration::from_secs(*timeout));
+            if !keymux::ipc::wait_for_daemon(limit) {
+                std::process::exit(1);
+            }
+            if !then.is_empty() {
+                use std::os::unix::process::CommandExt;
+                // Only returns if the exec failed
+                let err = std::process::Command::new(std::env::current_exe()?)
+                    .args(then)
+                    .exec();
+                anyhow::bail!("could not start `keymux {}`: {err}", then.join(" "));
+            }
+        }
         Some(cli::Commands::NiriDaemon) => {
             keymux::niri::run_niri_daemon()?;
         }
         #[cfg(feature = "overlay")]
         Some(cli::Commands::Overlay { dump, demo, always }) => {
-            keymux::overlay::run(*dump, *demo, *always)?;
+            if let Err(e) = keymux::overlay::run(*dump, *demo, *always) {
+                if e.downcast_ref::<keymux::overlay::CannotDraw>().is_some() {
+                    eprintln!("Error: {e:#}");
+                    std::process::exit(keymux::overlay::EXIT_CANNOT_DRAW);
+                }
+                return Err(e);
+            }
         }
         #[cfg(not(feature = "overlay"))]
         Some(cli::Commands::Overlay { .. }) => {

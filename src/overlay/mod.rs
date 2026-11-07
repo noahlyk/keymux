@@ -27,6 +27,31 @@ pub enum Source {
     Demo,
 }
 
+/// Exit status of `keymux overlay` when this session cannot show it at all.
+///
+/// That is no Wayland, or no layer-shell as on GNOME. It is `EX_CONFIG`; the systemd unit
+/// lists it in `RestartPreventExitStatus` so that deliberate exit is not retried, while every
+/// other failure, including the daemon going away, is.
+pub const EXIT_CANNOT_DRAW: i32 = 78;
+
+/// The session cannot show the overlay; retrying will not help.
+#[derive(Debug)]
+pub struct CannotDraw(String);
+
+impl CannotDraw {
+    fn error(what: &str, cause: &dyn std::fmt::Display) -> anyhow::Error {
+        anyhow::Error::new(Self(format!("{what}: {cause}")))
+    }
+}
+
+impl std::fmt::Display for CannotDraw {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CannotDraw {}
+
 pub fn run(dump: bool, demo: bool, always: bool) -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
     if dump {

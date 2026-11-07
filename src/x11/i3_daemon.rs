@@ -1,4 +1,4 @@
-use crate::ipc::{send_request, IpcRequest, IpcResponse};
+use crate::ipc::{send_request, DaemonWatch, IpcRequest, IpcResponse};
 use crate::window_manager::WindowManagerEvent::WindowFocusChanged;
 use crate::x11;
 use anyhow::Result;
@@ -27,6 +27,8 @@ pub fn run_i3_daemon() -> Result<()> {
     let (i3_tx, i3_rx) = mpsc::channel();
     x11::start_i3_monitor_sync(i3_tx);
 
+    let mut daemon_watch = DaemonWatch::new();
+
     loop {
         match i3_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(WindowFocusChanged(window_info)) => {
@@ -53,6 +55,9 @@ pub fn run_i3_daemon() -> Result<()> {
                 break;
             }
         }
+
+        // Exits non-zero when the daemon is gone, so the init system restarts us with it
+        daemon_watch.check()?;
 
         thread::sleep(Duration::from_millis(50));
     }

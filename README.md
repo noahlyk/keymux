@@ -133,6 +133,35 @@ Hyprland, Sway; not GNOME). See [On-screen overlay](#on-screen-overlay).
 - Path: `/usr/lib/systemd/user/keymux-steno.service`
 - Enable: `systemctl --user enable --now keymux-steno.service`
 
+#### How the helpers follow the daemon
+
+The compositor watchers and the steno overlay are clients of the root daemon, and they
+follow it: restart the daemon and they restart, stop it and they stop doing anything, start
+it and they come up.
+
+| You do | systemd | OpenRC | runit |
+|---|---|---|---|
+| Restart the daemon | each helper notices within about 3 s, exits, and is started again once the daemon answers | the same, through `supervise-daemon`; `need keymux` also restarts them | the same, through `runsv` |
+| Stop the daemon | each helper exits, restarts, and waits in `ExecStartPre` (state `activating`, no keymux process) | `need keymux` stops them, so they are down | they sit in `keymux wait-daemon` (running, idle) |
+| Start the daemon | the waiting helpers start | `need keymux` starts them | the waiting helpers start |
+
+How it works: every helper exits non-zero when the daemon stops answering (a Ping once a
+second; three misses in a row), and the init system starts it again behind a wait step,
+`keymux wait-daemon`, that blocks until the daemon answers. systemd runs it as
+`ExecStartPre` with `TimeoutStartSec=infinity`; the OpenRC and runit scripts run
+`keymux wait-daemon -- <helper>`, which waits and then becomes the helper. A helper started
+by hand before the daemon keeps waiting for it instead of exiting.
+
+**Caveat (systemd):** the daemon is a *system* unit and the helpers are *user* units, which
+belong to a different manager, so `BindsTo=`, `PartOf=` and `Requires=` cannot link them.
+That is why the helpers follow the socket instead. The cost is that after `systemctl stop
+keymux` a helper shows as `activating (start-pre)`, not `inactive`. `StartLimitIntervalSec=0`
+is set on them because the wait step, not a crash loop, paces their restarts; if the daemon
+flaps, a start limit would otherwise leave them `failed` for good. The steno overlay is the
+exception to "every failure restarts": it exits with status 78 when the session cannot show
+it (no layer-shell, as on GNOME, or no Wayland), and `RestartPreventExitStatus=78` keeps
+that from being retried. OpenRC and runit have no steno service script.
+
 ## 📖 Configuration Guide
 
 ### Configuration File Location

@@ -131,6 +131,20 @@ pub enum Commands {
         user: Option<String>,
     },
 
+    /// Wait until the keymux daemon answers, then optionally run another keymux command in
+    /// this process: `keymux wait-daemon -- niri-daemon`. What the OpenRC and runit helper
+    /// services run (systemd runs it as ExecStartPre), so a helper never starts without a daemon.
+    #[command(hide = true)]
+    WaitDaemon {
+        /// Give up after this many seconds and exit 1 (0 waits forever)
+        #[arg(long, default_value_t = 0)]
+        timeout: u64,
+
+        /// The keymux command to replace this process with once the daemon answers
+        #[arg(last = true)]
+        then: Vec<String>,
+    },
+
     /// Run the niri window watcher daemon
     #[command(hide = true)]
     NiriDaemon,

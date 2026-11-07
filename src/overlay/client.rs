@@ -46,8 +46,12 @@ pub fn watch_config(updates: Sender<OverlayConfig>) {
 const RETRY_MIN: Duration = Duration::from_millis(250);
 const RETRY_MAX: Duration = Duration::from_secs(5);
 
-/// Subscribe on a background thread. Reconnects with backoff when the daemon restarts, and
-/// sends an empty snapshot meanwhile so the panel hides instead of freezing on stale keys.
+/// Subscribe on a background thread. Once the daemon that was feeding us goes away, hide the
+/// panel and exit non-zero: the init system restarts the overlay when the daemon is back (the
+/// unit waits for it first), so a daemon restart cycles the overlay and a daemon stop takes it
+/// down instead of leaving it idle. Exit rather than reconnect because that is the only way
+/// the init system can tell the daemon is down. Before the first connection (the overlay
+/// started by hand ahead of the daemon) it retries with backoff, as it always did.
 pub fn spawn(frames: Sender<OverlaySnapshot>) {
     std::thread::Builder::new()
         .name("overlay-client".into())
@@ -56,13 +60,16 @@ pub fn spawn(frames: Sender<OverlaySnapshot>) {
             loop {
                 match crate::ipc::subscribe_overlay() {
                     Ok(stream) => {
-                        retry = RETRY_MIN;
                         for frame in stream {
                             if frames.send(frame).is_err() {
                                 return; // the Wayland loop is gone
                             }
                         }
-                        tracing::warn!("daemon closed the overlay stream, reconnecting");
+                        tracing::warn!("daemon closed the overlay stream, exiting to be restarted with it");
+                        let _ = frames.send(OverlaySnapshot::default());
+                        // Let the Wayland loop draw the hidden panel before the process ends
+                        std::thread::sleep(Duration::from_millis(100));
+                        std::process::exit(1);
                     }
                     Err(e) => tracing::debug!("overlay: {e:#}"),
                 }

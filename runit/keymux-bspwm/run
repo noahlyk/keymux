@@ -1,2 +1,4 @@
 #!/bin/sh
-exec /usr/bin/keymux bspwm-daemon 2>&1
+# Wait for the keymux daemon, then become the watcher. The watcher exits when the daemon goes
+# away and runit starts it again, which waits once more: a daemon restart cycles the watcher.
+exec /usr/bin/keymux wait-daemon -- bspwm-daemon 2>&1

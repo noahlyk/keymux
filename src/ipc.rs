@@ -215,6 +215,130 @@ pub fn subscribe_overlay() -> Result<impl Iterator<Item = OverlaySnapshot>> {
     Ok(std::iter::from_fn(move || read_frame(&mut stream)))
 }
 
+/// How often a helper checks that the daemon is still there.
+const PROBE_INTERVAL: Duration = Duration::from_secs(1);
+/// Consecutive failed checks before a helper decides the daemon is gone. The daemon answers a
+/// Ping from its main loop, so a reload can make one check late; three in a row is a real loss.
+const LOSS_MISSES: u32 = 3;
+/// How long a single check waits for the Pong.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Is a keymux daemon answering on the socket at `path`? Connects and Pings, because the
+/// socket file outlives a killed daemon: a stale file connects to nothing.
+pub fn probe_socket(path: &Path) -> bool {
+    let Ok(mut stream) = UnixStream::connect(path) else {
+        return false;
+    };
+    if stream.set_read_timeout(Some(PROBE_TIMEOUT)).is_err()
+        || stream.set_write_timeout(Some(PROBE_TIMEOUT)).is_err()
+        || write_frame(&mut stream, &IpcRequest::Ping).is_err()
+    {
+        return false;
+    }
+    matches!(
+        read_frame::<IpcResponse>(&mut stream),
+        Some(IpcResponse::Pong)
+    )
+}
+
+/// Is the daemon answering on its socket right now?
+pub fn daemon_alive() -> bool {
+    probe_socket(&get_socket_path())
+}
+
+/// Poll `probe` every `interval` until it succeeds. `timeout` of `None` waits forever.
+/// Returns whether the probe succeeded. Sleeps between checks, never spins.
+pub fn wait_until(
+    mut probe: impl FnMut() -> bool,
+    interval: Duration,
+    timeout: Option<Duration>,
+) -> bool {
+    let started = std::time::Instant::now();
+    loop {
+        if probe() {
+            return true;
+        }
+        if timeout.is_some_and(|limit| started.elapsed() >= limit) {
+            return false;
+        }
+        std::thread::sleep(interval);
+    }
+}
+
+/// `keymux wait-daemon`: block until the daemon answers. What the init systems run before
+/// starting a helper, so the helper never runs without a daemon to talk to.
+pub fn wait_for_daemon(timeout: Option<Duration>) -> bool {
+    wait_until(daemon_alive, Duration::from_millis(500), timeout)
+}
+
+/// Decides when the daemon counts as lost. Only a daemon that was seen alive can be lost: a
+/// helper started by hand before the daemon keeps waiting, as it always did.
+#[derive(Debug, Default)]
+pub struct LossTracker {
+    seen_alive: bool,
+    misses: u32,
+}
+
+impl LossTracker {
+    /// Feed one check's result. `true` means the daemon is lost: stop and let the init
+    /// system start us again once the daemon is back.
+    pub const fn observe(&mut self, alive: bool) -> bool {
+        if alive {
+            self.seen_alive = true;
+            self.misses = 0;
+            false
+        } else {
+            self.misses += 1;
+            self.seen_alive && self.misses >= LOSS_MISSES
+        }
+    }
+}
+
+/// Daemon-loss check for a helper that is a daemon client (the window watchers).
+///
+/// Call [`check`] from the main loop as often as you like; it probes at most once a second and
+/// returns an error when the daemon is gone, which the helper returns from `main` so it exits
+/// non-zero. The init system restarts it when the daemon is back (see "Services" in the
+/// README).
+///
+/// Exit rather than reconnect: the daemon keeps per-helper state (the last focused window),
+/// so a fresh helper reports it again at start; and an exited helper is what makes
+/// "daemon stopped" visible to the init system instead of a helper idling disconnected.
+///
+/// [`check`]: DaemonWatch::check
+pub struct DaemonWatch {
+    tracker: LossTracker,
+    last: std::time::Instant,
+}
+
+impl Default for DaemonWatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DaemonWatch {
+    pub fn new() -> Self {
+        let mut watch = Self {
+            tracker: LossTracker::default(),
+            last: std::time::Instant::now(),
+        };
+        watch.tracker.observe(daemon_alive());
+        watch
+    }
+
+    pub fn check(&mut self) -> Result<()> {
+        if self.last.elapsed() < PROBE_INTERVAL {
+            return Ok(());
+        }
+        self.last = std::time::Instant::now();
+        if self.tracker.observe(daemon_alive()) {
+            anyhow::bail!("the keymux daemon went away, exiting so it can be restarted with it");
+        }
+        Ok(())
+    }
+}
+
 /// The next length-prefixed frame, or `None` when the stream ends or breaks.
 fn read_frame<T: serde::de::DeserializeOwned>(stream: &mut impl Read) -> Option<T> {
     let mut len = [0u8; 4];
@@ -278,5 +402,84 @@ mod tests {
             read_frame::<IpcRequest>(&mut b),
             Some(IpcRequest::SubscribeOverlay)
         ));
+    }
+
+    fn temp_socket(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("keymux-test-{}-{name}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    #[test]
+    fn probe_sees_a_live_daemon_and_not_a_stale_socket_file() {
+        let path = temp_socket("probe");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            assert!(matches!(
+                read_frame::<IpcRequest>(&mut conn),
+                Some(IpcRequest::Ping)
+            ));
+            write_frame(&mut conn, &IpcResponse::Pong).unwrap();
+            // The listener drops here, leaving the socket file behind like a killed daemon
+        });
+        assert!(probe_socket(&path));
+        server.join().unwrap();
+        assert!(path.exists(), "the file stays after the daemon is gone");
+        assert!(!probe_socket(&path), "a stale socket file is not a daemon");
+        std::fs::remove_file(&path).unwrap();
+        assert!(!probe_socket(&path), "no file is not a daemon");
+    }
+
+    #[test]
+    fn a_connection_that_never_answers_is_not_a_daemon() {
+        let path = temp_socket("silent");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let started = std::time::Instant::now();
+        assert!(!probe_socket(&path));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn loss_needs_a_daemon_seen_alive_and_several_misses_in_a_row() {
+        let mut never_seen = LossTracker::default();
+        assert!(
+            (0..10).all(|_| !never_seen.observe(false)),
+            "waits for a daemon that never came"
+        );
+
+        let mut tracker = LossTracker::default();
+        assert!(!tracker.observe(true));
+        assert!(!tracker.observe(false));
+        assert!(!tracker.observe(false));
+        assert!(!tracker.observe(true), "a recovery resets the count");
+        assert!(!tracker.observe(false));
+        assert!(!tracker.observe(false));
+        assert!(tracker.observe(false), "the third miss in a row is a loss");
+    }
+
+    #[test]
+    fn wait_until_returns_when_the_probe_succeeds_and_gives_up_at_the_timeout() {
+        let mut calls = 0;
+        assert!(wait_until(
+            || {
+                calls += 1;
+                calls == 3
+            },
+            Duration::from_millis(1),
+            None
+        ));
+        assert_eq!(calls, 3);
+
+        let started = std::time::Instant::now();
+        assert!(!wait_until(
+            || false,
+            Duration::from_millis(5),
+            Some(Duration::from_millis(30))
+        ));
+        assert!(started.elapsed() >= Duration::from_millis(30));
     }
 }

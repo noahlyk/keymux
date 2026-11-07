@@ -1,5 +1,5 @@
 use crate::hyprland;
-use crate::ipc::{send_request, IpcRequest, IpcResponse};
+use crate::ipc::{send_request, DaemonWatch, IpcRequest, IpcResponse};
 use crate::window_manager::WindowManagerEvent::WindowFocusChanged;
 use anyhow::Result;
 use std::sync::mpsc;
@@ -27,6 +27,8 @@ pub fn run_sway_daemon() -> Result<()> {
     let (sway_tx, sway_rx) = mpsc::channel();
     hyprland::start_sway_monitor_sync(sway_tx);
 
+    let mut daemon_watch = DaemonWatch::new();
+
     loop {
         match sway_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(WindowFocusChanged(window_info)) => {
@@ -53,6 +55,9 @@ pub fn run_sway_daemon() -> Result<()> {
                 break;
             }
         }
+
+        // Exits non-zero when the daemon is gone, so the init system restarts us with it
+        daemon_watch.check()?;
 
         thread::sleep(Duration::from_millis(50));
     }
