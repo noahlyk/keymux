@@ -497,7 +497,7 @@
     //     enabled: true,
     //     output: None,       // Some("DP-1") to pin a monitor
     //     margin: 0,          // gap from the right edge, in pixels
-    //     margin_y: 14,       // gap below the keyboard and above the tape, in pixels: the same at both ends
+    //     margin_y: 14,       // gap below the keyboard and above the tape's first line of ink, in pixels (at least 6): the same at both ends. Raise it if the diagram sits higher off the screen bottom than you want the tape to stop below the top
     //     width: 340,         // as tall as the screen; text and keys are sized from this
     //     text_scale: 1.0,    // 1.2 makes the text a fifth bigger
     //     text_opacity: 0.65,    // how opaque the tape's text is, 0.0 to 1.0

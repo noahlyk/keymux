@@ -760,7 +760,8 @@ pub struct OverlayConfig {
     /// Gap between the overlay and the right screen edge, in logical pixels
     pub margin: u32,
     /// Space between the bottom of the keyboard diagram and the bottom of the screen, and the
-    /// same space between the top of the tape and the top of the screen, in logical pixels:
+    /// same space between the top of the tape's first line of ink and the top of the screen, in
+    /// logical pixels, never under 6:
     /// the overlay is symmetric, and a bigger value gives both ends more room (and the tape
     /// fewer lines).
     pub margin_y: u32,

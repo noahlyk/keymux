@@ -27,6 +27,9 @@ use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, PixmapMut, Stroke, Tr
 const PAD_X: f32 = 10.0;
 /// Space between the tape and the keyboard, logical px
 const SECTION_GAP: f32 = 20.0;
+/// The least `margin_y` that is used, in logical pixels, so the keyboard never touches the
+/// screen edge and the tape never starts right at it.
+const MIN_MARGIN_Y: f32 = 6.0;
 /// Outline of an unlit key, logical px
 const OUTLINE: f32 = 1.5;
 /// Radius of a pad's softened corners relative to its width: a small one, so a key reads as a
@@ -253,7 +256,10 @@ impl Renderer {
 
         let width = (config.width as f32 * scale).ceil();
         let height = (height.max(1) as f32 * scale).ceil();
-        let (pad_x, pad_y) = (PAD_X * scale, config.margin_y as f32 * scale);
+        let (pad_x, pad_y) = (
+            PAD_X * scale,
+            (config.margin_y as f32).max(MIN_MARGIN_Y) * scale,
+        );
         let inner = 2.0f32.mul_add(-pad_x, width);
         let text_scale = config.text_scale.clamp(0.5, 3.0);
 
@@ -306,7 +312,7 @@ impl Renderer {
             PROBE_PX * paper_width / (REFERENCE_KEYS * probe_average) * text_scale,
             'H',
         );
-        let strokes = GlyphCache::new(bold.clone(), stroke_px);
+        let mut strokes = GlyphCache::new(bold.clone(), stroke_px);
         let stroke_tiers = STROKE_TIERS
             .iter()
             .map(|ratio| {
@@ -314,7 +320,7 @@ impl Renderer {
             })
             .collect();
         let words_px = glyphs::crisp_size(&bold, stroke_px * WORDS_RATIO, 'x');
-        let words = GlyphCache::new(bold, words_px);
+        let mut words = GlyphCache::new(bold, words_px);
 
         let paper_right = pad_x + paper_width;
         let words_left = paper_right + stroke_px * 0.6;
@@ -324,10 +330,16 @@ impl Renderer {
         let tape_bottom = keyboard.as_ref().map_or(height - pad_y, |k| {
             SECTION_GAP.mul_add(-scale, k.keys[number_slot].y)
         });
-        // The tape's top edge sits `pad_y` below the top of the surface, the same margin the
-        // keyboard has below it, so the whole overlay is symmetric: nothing runs to the screen edge.
-        let room = (tape_bottom - pad_y).max(0.0);
-        let fits = (room / natural_line).floor() as usize;
+        // The margin is measured to what is seen: the keyboard's bottom edge is `pad_y` above
+        // the bottom of the surface, so the tape's first line must put its topmost ink (a
+        // capital or a tall letter) `pad_y` below the top. The line box starts a little above
+        // that ink (the text is centred in it), so the lines are packed to land the ink there.
+        // With `n` lines of height `L`, the top ink is `tape_bottom - n*L + L/2 + k` (k is
+        // fixed by the fonts), so a tape that fills the height has `L = area / (n - 1/2)`.
+        let cap_top = strokes.get('H').top.min(words.get('d').top) as f32;
+        let k = words.ascent() + cap_top - words.line_height() / 2.0;
+        let area = (tape_bottom - pad_y + k).max(0.0);
+        let fits = (area / natural_line + 0.5).floor() as usize;
         let tape_lines = if config.tape {
             fits.min(config.tape_lines.unwrap_or(usize::MAX))
                 .min(TAPE_CAPACITY)
@@ -335,10 +347,10 @@ impl Renderer {
             0
         };
         // A tape that fills the height spreads the leftover (under one line) over its lines, a
-        // fraction of a pixel each, so its top edge is exactly the margin and not up to a line
-        // below it. Glyphs snap to whole pixel rows when drawn, so the text stays crisp.
+        // fraction of a pixel each, so its top ink is exactly the margin. Glyphs snap to whole
+        // pixel rows when drawn, so the text stays crisp.
         let line_height = if tape_lines > 0 && tape_lines == fits {
-            room / fits as f32
+            area / (fits as f32 - 0.5)
         } else {
             natural_line
         };
@@ -1945,7 +1957,7 @@ mod tests {
         let default = Renderer::new(&OverlayConfig::default(), 1, 1900).unwrap();
         assert_eq!(default.tape_lines(), tall.tape_lines());
         let top = (default.tape_lines() as f32).mul_add(-default.line_height, default.tape_bottom);
-        assert!((top - 14.0).abs() < 0.01, "the tape starts at the margin: {top}");
+        assert!((0.0..14.0).contains(&top), "the line grid starts just above the margin: {top}");
         // `tape_lines` caps it; zero is allowed
         let capped = OverlayConfig {
             tape_lines: Some(5),
@@ -1988,30 +2000,55 @@ mod tests {
         assert_eq!(line_fade(0, 3, 0.0, 5), 1.0, "the newest line never fades");
     }
 
+    /// Renders a full tape at full strength and returns `(ink above, gap below)` in physical
+    /// pixels: the rows of clear space above the first inked row of the tape and below the
+    /// lowest key outline.
+    fn tape_ink_margins(config: &OverlayConfig, scale: u32, height: u32) -> (u32, f32) {
+        let mut renderer = Renderer::new(config, scale, height).unwrap();
+        let (w, h) = renderer.size();
+        let mut snapshot = OverlaySnapshot { layer: Some("steno".into()), ..OverlaySnapshot::default() };
+        for i in 0..renderer.tape_lines() {
+            snapshot.tape.push_back(tape_entry(i as u64 + 1, "TEFT", "\"test\""));
+        }
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        renderer.draw(&snapshot, &mut pixmap.as_mut());
+        let first = (0..h)
+            .find(|&y| (0..w).any(|x| pixmap.pixel(x, y).unwrap().alpha() > 128))
+            .expect("the tape has ink");
+        let keys = renderer.keyboard.as_ref().unwrap();
+        let below = h as f32 - keys.keys.iter().map(Rect::bottom).fold(0.0, f32::max);
+        (first, below)
+    }
+
     #[test]
     fn the_tape_margin_above_is_the_margin_below_the_keyboard() {
+        // The first line's topmost ink starts as far below the top of the surface as the
+        // keyboard's lowest edge is above its bottom, within a pixel or two, at every
+        // margin, scale and height
+        let loose = |margin_y| OverlayConfig {
+            margin_y,
+            tape_fade: 1.0,
+            text_opacity: 1.0,
+            ..OverlayConfig::default()
+        };
         for height in [1080, 1440, 2160] {
             for scale in [1, 2] {
-                let r = Renderer::new(&OverlayConfig::default(), scale, height).unwrap();
-                let (_, h) = r.size();
-                let keys = r.keyboard.as_ref().unwrap();
-                let below = h as f32 - keys.keys.iter().map(Rect::bottom).fold(0.0, f32::max);
-                let top = (r.tape_lines() as f32).mul_add(-r.line_height, r.tape_bottom);
-                assert!(
-                    (top - below).abs() < 0.01,
-                    "{height}@{scale}: {top} above the tape, {below} below the keyboard"
-                );
+                for margin_y in [6, 14, 30, 60] {
+                    let (above, below) = tape_ink_margins(&loose(margin_y), scale, height);
+                    assert!(
+                        (below - (margin_y * scale) as f32).abs() < 0.01,
+                        "{height}@{scale}: the keyboard is {below} px above the bottom for margin {margin_y}"
+                    );
+                    assert!(
+                        (above as f32 - below).abs() <= 2.0,
+                        "{height}@{scale} margin {margin_y}: {above} px above the tape, {below} below the keyboard"
+                    );
+                }
             }
         }
-        // the margin is one setting for both ends
-        for margin_y in [0, 30, 60] {
-            let config = OverlayConfig { margin_y, ..OverlayConfig::default() };
-            let r = Renderer::new(&config, 1, 1080).unwrap();
-            let keys = r.keyboard.as_ref().unwrap();
-            let below = 1080.0 - keys.keys.iter().map(Rect::bottom).fold(0.0, f32::max);
-            let top = (r.tape_lines() as f32).mul_add(-r.line_height, r.tape_bottom);
-            assert!((below - margin_y as f32).abs() < 0.01 && (top - below).abs() < 0.01);
-        }
+        // a margin below the floor is raised to it, for both ends
+        let (above, below) = tape_ink_margins(&loose(0), 1, 1080);
+        assert!((below - MIN_MARGIN_Y).abs() < 0.01 && (above as f32 - below).abs() <= 2.0);
         // capped: the tape is not stretched and still never rises above the margin
         let capped = OverlayConfig { tape_lines: Some(5), ..OverlayConfig::default() };
         let r = Renderer::new(&capped, 1, 1080).unwrap();
@@ -3212,7 +3249,7 @@ mod tests {
             };
             let top = (renderer.tape_lines() as f32)
                 .mul_add(-renderer.line_height, renderer.tape_bottom);
-            assert!((top - 14.0).abs() < 0.01);
+            assert!((0.0..14.0).contains(&top));
             for line in 0..renderer.tape_lines() {
                 let y = (line as f32).mul_add(renderer.line_height, top);
                 assert!(
@@ -3221,7 +3258,7 @@ mod tests {
                     renderer.tape_lines()
                 );
             }
-            assert!(!lit(0, (top - 6.0) as u32), "{height}: ink above the top margin");
+            assert!(!lit(0, 10), "{height}: ink above the top margin");
         }
     }
 

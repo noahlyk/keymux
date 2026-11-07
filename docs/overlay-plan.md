@@ -166,14 +166,18 @@ sized to its letter, and the letter is centred in it. Steno lines still align.
     (`tape_lines: None` = as many lines as fit; `Some(n)` caps it). The surface was already the
     full output height (anchored top, bottom and right, size height 0, exclusive zone -1, empty
     input region), so no surface change was needed; `TAPE_CAPACITY` went from 160 to 400 entries
-    so a tall screen at small text can fill. The overlay is symmetric: the tape's top edge sits
-    `margin_y` (14 logical px by default) below the top of the surface, the same margin the keyboard has below
-    it. A full-height tape spreads the leftover (under one line) over its lines, a fraction of a
-    pixel each, so the top edge is exactly the margin; a capped tape keeps the natural pitch. The
+    so a tall screen at small text can fill. The overlay is symmetric, measured to the ink: the
+    keyboard's lowest edge is `margin_y` (14 logical px by default, never under 6) above the bottom of the surface, and the tape's first
+    line puts its topmost ink (capitals and tall letters, not the empty line box above them) the same `margin_y` below the top. `margin_y` is
+    the single source for both ends; the surface is the full output height (exclusive zone -1), so it is also the gap to the screen edges. If a
+    compositor or bar leaves a bigger gap below the diagram than 14 px, raise `margin_y` to match and the tape stops that far below the top.
+    A full-height tape spreads the leftover (under one line) over its lines, a fraction of a
+    pixel each, so the ink starts exactly at the margin; a capped tape keeps the natural pitch. Tests render the tape at 1080/1440/2160 px,
+    scales 1 and 2 and margins 6 to 60 and check the ink above the tape equals the gap below the keyboard within 2 px. The
     fade is only the end of the tape: every line is full strength except the last
     `tape_fade_lines` (default 5) at the top, which fall in even steps to `tape_fade` (default 0.15)
     at the topmost line (a wrapped entry takes its bottom line's strength). A tape that does not
-    fill the area does not fade. At 1080 px high 39 lines fit, at 1440 px 55, at 2160 px 88 (width 340, scale 1, `margin_y` 14; the counts did not change from the 14 px reserve before, the top edge is now exactly the margin and the line pitch a fraction of a pixel wider).
+    fill the area does not fade. At 1080 px high 39 lines fit, at 1440 px 55, at 2160 px 88 (width 340, scale 1, `margin_y` 14; the counts are the same as before the ink-exact margin; with `margin_y` 30 they are 37, 54 and 86).
   - A lit key glows in its own colour: its outline stroked five times, widest and faintest first,
     reaching 6 px past the key (alpha .05 to .24 per layer, half strength for a key in the stroke
     but let go), painted for all lit keys before any key so a glow never covers a neighbour.
@@ -230,7 +234,7 @@ overlay: (
     enabled: true,
     output: None,          // Some("DP-1") to pin a monitor; None = compositor's choice
     margin: 0,             // gap from the right screen edge, logical px
-    margin_y: 14,          // gap below the keyboard and above the tape (the same at both ends), logical px
+    margin_y: 14,          // gap below the keyboard diagram and above the tape's first line of ink (the same at both ends), logical px; at least 6
     width: 340,            // as tall as the screen; text and keys are sized from this
     text_scale: 1.0,       // multiplies the text size on top of what width gives
     background: 0.0,       // dark panel behind it all; 0.0 is fully transparent
