@@ -16,6 +16,8 @@ mod wayland;
 
 use crate::config::{Config, OverlayConfig};
 use crate::steno::layout::render_stroke;
+use crate::steno::overlay::OverlaySnapshot;
+pub use crate::steno::overlay_control::ViewState;
 use anyhow::Result;
 
 /// Where the overlay gets its frames from.
@@ -77,6 +79,31 @@ fn is_visible(config: &OverlayConfig, always: bool, layer: Option<&str>) -> bool
             }))
 }
 
+/// Apply the view commands (`{:overlay:hide}`, ...) a snapshot carries that were not seen yet.
+/// `seen` is the number of the last one applied; it only moves forward, so the placeholder
+/// snapshot between connections (number 0) changes nothing. Returns whether the view changed.
+fn take_controls(view: &mut ViewState, seen: &mut u64, snapshot: &OverlaySnapshot) -> bool {
+    let mut changed = false;
+    for (seq, command) in &snapshot.controls {
+        if *seq > *seen {
+            changed |= view.apply(*command);
+        }
+    }
+    *seen = (*seen).max(snapshot.control_seq);
+    changed
+}
+
+/// Whether the panel has anything to draw under `view`: not hidden whole, and either a part of it
+/// left showing or a lookup open (which shows even with the tape hidden). When it has nothing,
+/// the surface is released rather than drawn empty, the same as when the layer is left: that
+/// costs no memory or compositor work, and showing it again is a single commit.
+const fn has_content(config: &OverlayConfig, view: ViewState, snapshot: &OverlaySnapshot) -> bool {
+    !view.hidden
+        && ((config.keyboard && !view.keyboard_hidden)
+            || (config.tape && !view.tape_hidden)
+            || snapshot.lookup.is_some())
+}
+
 fn config_path() -> Option<std::path::PathBuf> {
     Config::default_path().ok()
 }
@@ -116,6 +143,7 @@ fn dump_frames() -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::Layer;
+    use crate::steno::overlay_control::{Part, Verb, ViewCommand};
 
     #[test]
     fn it_shows_only_on_steno_layers_unless_always_is_set() {
@@ -137,6 +165,94 @@ mod tests {
         assert!(!is_visible(&config, false, Some("practice")));
         // `--always` overrides the list as well
         assert!(is_visible(&config, true, Some("practice")));
+    }
+
+    fn command(part: Part, verb: Verb) -> ViewCommand {
+        ViewCommand { part, verb }
+    }
+
+    fn with_controls(entries: &[(u64, ViewCommand)]) -> OverlaySnapshot {
+        OverlaySnapshot {
+            control_seq: entries.last().map_or(0, |entry| entry.0),
+            controls: entries.iter().copied().collect(),
+            ..OverlaySnapshot::default()
+        }
+    }
+
+    #[test]
+    fn a_view_command_is_applied_once_however_often_its_frame_comes() {
+        let (mut view, mut seen) = (ViewState::default(), 0);
+        let toggle = command(Part::Overlay, Verb::Toggle);
+        let frame = with_controls(&[(1, toggle)]);
+        assert!(take_controls(&mut view, &mut seen, &frame));
+        assert!(view.hidden);
+        // The same frame again (a redraw, a reconnect) must not toggle it back
+        assert!(!take_controls(&mut view, &mut seen, &frame));
+        assert!(view.hidden);
+        let frame = with_controls(&[(1, toggle), (2, toggle)]);
+        assert!(take_controls(&mut view, &mut seen, &frame));
+        assert!(!view.hidden);
+    }
+
+    #[test]
+    fn a_new_overlay_starts_shown_whatever_was_toggled_before_it_connected() {
+        // The client strips the history from the first frame of a connection; the number stays
+        let mut first = with_controls(&[(1, command(Part::Overlay, Verb::Hide))]);
+        first.controls.clear();
+        let (mut view, mut seen) = (ViewState::default(), 0);
+        assert!(!take_controls(&mut view, &mut seen, &first));
+        assert_eq!((view, seen), (ViewState::default(), 1));
+        // The placeholder frame sent while the daemon is away does not rewind or change it
+        assert!(!take_controls(&mut view, &mut seen, &OverlaySnapshot::default()));
+        assert_eq!(seen, 1);
+    }
+
+    #[test]
+    fn hiding_every_part_releases_the_surface_but_an_open_lookup_still_shows() {
+        let config = OverlayConfig::default();
+        let shown = ViewState::default();
+        let snapshot = OverlaySnapshot::default();
+        assert!(has_content(&config, shown, &snapshot));
+        let no_tape = ViewState {
+            tape_hidden: true,
+            ..shown
+        };
+        assert!(has_content(&config, no_tape, &snapshot), "the keyboard stays");
+        let nothing = ViewState {
+            tape_hidden: true,
+            keyboard_hidden: true,
+            ..shown
+        };
+        assert!(!has_content(&config, nothing, &snapshot));
+        let looking = OverlaySnapshot {
+            lookup: Some(crate::steno::overlay::LookupView::default()),
+            ..snapshot
+        };
+        assert!(has_content(&config, nothing, &looking));
+        let hidden = ViewState {
+            hidden: true,
+            ..shown
+        };
+        assert!(!has_content(&config, hidden, &looking), "hide wins over a lookup");
+    }
+
+    #[test]
+    fn hiding_the_overlay_never_touches_the_configured_start() {
+        // The view is its own state: `is_visible` reads only the config, which a command cannot reach
+        let config = OverlayConfig::default();
+        let before = config.clone();
+        let mut view = ViewState::default();
+        view.apply(command(Part::Overlay, Verb::Hide));
+        assert!(is_visible(&config, false, Some("steno")));
+        assert_eq!(config, before);
+        // Disabled in config: a "show" cannot start it (no overlay process runs at all, and
+        // `is_visible` would still say no)
+        let off = OverlayConfig {
+            enabled: false,
+            ..OverlayConfig::default()
+        };
+        view.apply(command(Part::Overlay, Verb::Show));
+        assert!(!is_visible(&off, false, Some("steno")));
     }
 
     #[test]

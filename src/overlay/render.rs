@@ -12,6 +12,7 @@
 //! and `text_scale` nudges the text alone.
 
 use super::anim;
+use super::ViewState;
 use super::geometry::{KeyGroup, Keyboard, Rect};
 use super::glyphs::{self, GlyphCache};
 use crate::config::{Half, KeyColor, OverlayConfig};
@@ -462,6 +463,13 @@ impl Renderer {
 
     /// Draw everything. `pixmap` must be [`Self::size`].
     pub fn draw(&mut self, snapshot: &OverlaySnapshot, pixmap: &mut PixmapMut) {
+        self.draw_view(snapshot, ViewState::default(), pixmap);
+    }
+
+    /// Draw what `view` leaves showing (runtime `{:tape:hide}` and `{:keyboard:hide}`; the whole
+    /// panel hidden is the caller's business: it draws nothing at all). A hidden tape leaves its
+    /// place empty, and an open lookup still shows there, since it was asked for.
+    pub fn draw_view(&mut self, snapshot: &OverlaySnapshot, view: ViewState, pixmap: &mut PixmapMut) {
         pixmap.fill(Color::TRANSPARENT);
         if let Some(panel) = &self.panel {
             let [r, g, b] = self.theme.panel;
@@ -471,10 +479,10 @@ impl Renderer {
         // An open lookup takes the place of the tape
         match &snapshot.lookup {
             Some(lookup) if self.tape_lines > 0 => self.draw_lookup(lookup, pixmap),
-            None if self.tape_lines > 0 => self.draw_tape(snapshot, pixmap),
+            None if self.tape_lines > 0 && !view.tape_hidden => self.draw_tape(snapshot, pixmap),
             _ => {}
         }
-        if self.keyboard.is_some() {
+        if self.keyboard.is_some() && !view.keyboard_hidden {
             self.draw_keyboard(snapshot, pixmap);
         }
     }
@@ -3797,5 +3805,62 @@ mod tests {
             let renderer = Renderer::with_layout(&config, 1, 900, layout()).unwrap();
             assert_eq!(renderer.stroke_run(bits)[0].color, renderer.theme.accent(group));
         }
+    }
+
+    #[test]
+    fn hidden_parts_are_not_drawn_but_the_rest_is() {
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        let (w, h) = renderer.size();
+        let mut snapshot = OverlaySnapshot {
+            chord: 0b1,
+            held: 0b1,
+            ..OverlaySnapshot::default()
+        };
+        snapshot.tape.push_back(tape_entry(1, "KAT", "\"cat\""));
+        let draw = |renderer: &mut Renderer, snapshot: &OverlaySnapshot, view: ViewState| {
+            let mut pixels = Pixmap::new(w, h).unwrap();
+            renderer.draw_view(snapshot, view, &mut pixels.as_mut());
+            pixels
+        };
+        let no_tape = ViewState {
+            tape_hidden: true,
+            ..ViewState::default()
+        };
+        let no_keyboard = ViewState {
+            keyboard_hidden: true,
+            ..ViewState::default()
+        };
+        let nothing = ViewState {
+            tape_hidden: true,
+            keyboard_hidden: true,
+            ..ViewState::default()
+        };
+        let shown = draw(&mut renderer, &snapshot, ViewState::default());
+        assert_ne!(shown.data(), draw(&mut renderer, &snapshot, no_tape).data());
+        assert_ne!(shown.data(), draw(&mut renderer, &snapshot, no_keyboard).data());
+        // With the tape hidden it draws what a snapshot with no tape does
+        let mut bare = snapshot.clone();
+        bare.tape.clear();
+        bare.chord = 0;
+        let mut bare_with_keys = bare.clone();
+        bare_with_keys.held = snapshot.held;
+        assert_eq!(
+            draw(&mut renderer, &snapshot, no_tape).data(),
+            draw(&mut renderer, &bare_with_keys, no_tape).data()
+        );
+        // Both hidden and no lookup: a fully transparent canvas
+        assert!(draw(&mut renderer, &snapshot, nothing)
+            .data()
+            .iter()
+            .all(|byte| *byte == 0));
+        // An open lookup still draws with everything else hidden
+        let looking = OverlaySnapshot {
+            lookup: Some(lookup_view()),
+            ..snapshot
+        };
+        assert!(draw(&mut renderer, &looking, nothing)
+            .data()
+            .iter()
+            .any(|byte| *byte != 0));
     }
 }

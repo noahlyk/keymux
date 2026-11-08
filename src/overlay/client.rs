@@ -60,7 +60,12 @@ pub fn spawn(frames: Sender<OverlaySnapshot>) {
             loop {
                 match crate::ipc::subscribe_overlay() {
                     Ok(stream) => {
-                        for frame in stream {
+                        for (n, mut frame) in stream.enumerate() {
+                            // View commands from before this connection are history: a restarted
+                            // overlay starts as configured, not as an earlier one was left
+                            if n == 0 {
+                                frame.controls.clear();
+                            }
                             if frames.send(frame).is_err() {
                                 return; // the Wayland loop is gone
                             }

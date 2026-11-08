@@ -333,6 +333,38 @@ keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches 
 - **Needs the overlay.** The query and results are only drawn there, so without
   `keymux overlay` running you'd be typing blind. A terminal fallback is `keymux steno lookup` (or `keys`) with no query: the interactive lookup.
 
+## 7. Runtime controls from the dictionary [done, tested]
+
+`{:overlay:show|hide|toggle}`, `{:tape:show|hide|toggle|clear}`, `{:keyboard:show|hide|toggle}`,
+`{:lookup:open|close|toggle}`. User-facing table and compatibility note: README, steno layers.
+
+- **Parse and dispatch.** `steno/overlay_control.rs` parses them. `meta.rs` turns each into an
+  action with no text and the engine command `overlay_control:<name>:<param>` (a name of its own,
+  because `lookup` is also Plover's command), so they run once, never repeat when held
+  (`Translator::is_command` knows them), stay off the tape and keep the formatting state around
+  them. They are *transparent* strokes (`is_transparent_mapping` recognises them, so no history
+  entry and a join passes over them); only the engine keeps them off the tape, where other
+  transparent strokes are dimmed lines. `Engine::run_overlay_control` runs them.
+- **State is the overlay's, not the daemon's.** A show/hide/toggle is an event, not a value: the
+  hub puts it in `OverlaySnapshot::controls` as a numbered entry (the newest 8, `control_seq` the
+  newest number), and the overlay applies each number once (`take_controls`) to its own
+  `ViewState { hidden, tape_hidden, keyboard_hidden }`. A toggle resolves against the state of the
+  overlay that applies it. `client.rs` drops the history from the first frame of a connection, so
+  an overlay that starts (or restarts) begins as configured whatever was toggled before it.
+  Nothing is written to the config or to disk; the config watcher's reload rebuilds the renderer
+  but leaves `ViewState` alone, so a hide survives a reload. With no overlay running (or
+  `enabled: false`) the entries are queued in the hub and never read.
+- **Hidden means released.** `has_content` is false when the panel is hidden whole, or when the
+  tape and the keyboard are both hidden (or off in config) with no lookup open; then the layer
+  surface is destroyed exactly as when leaving the steno layer, which uses the least memory and
+  makes `show` one commit. A part hidden alone is skipped in `Renderer::draw_view`; an open lookup
+  draws in the tape's place even with the tape hidden. A show clears the click/window-switch
+  suppression.
+- **`{:tape:clear}`** empties the hub's tape (`OverlayHub::clear_tape`), not `steno tape`'s file.
+- **Shared spots with other work** (for a rebase): `meta.rs` (one match arm), `translate.rs`
+  (`is_command`, one `||`), `engine.rs` (`run_command` arm and `run_overlay_control`),
+  `render.rs` (`draw` now calls `draw_view`).
+
 ## Risks / open questions
 
 - Clicks falling through the overlay: the empty input region is set, and niri reports

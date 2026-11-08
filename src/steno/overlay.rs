@@ -5,6 +5,7 @@
 //! hub keeps only the latest state plus a generation counter, not a queue of events. A
 //! slow subscriber skips the states it missed, so it can never hold up typing.
 
+use super::overlay_control::ViewCommand;
 use crate::lock;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -90,7 +91,19 @@ pub struct OverlaySnapshot {
     pub tape: VecDeque<TapeEntry>,
     /// Set while a live lookup is open: shown instead of the tape
     pub lookup: Option<LookupView>,
+    /// Number of the newest view command (`{:overlay:hide}` and friends); 0 before any
+    #[serde(default)]
+    pub control_seq: u64,
+    /// The newest few view commands with their numbers, oldest first. A command is an event,
+    /// not state (a toggle has no value to publish), so it travels as a numbered entry the
+    /// overlay applies once. An overlay that connects takes `control_seq` as where it starts
+    /// and applies none of the older ones, so a restart goes back to the configured start.
+    #[serde(default)]
+    pub controls: VecDeque<(u64, ViewCommand)>,
 }
+
+/// View commands kept for a slow subscriber to catch up on.
+const CONTROLS_KEPT: usize = 8;
 
 #[derive(Debug, Default)]
 pub struct OverlayHub {
@@ -138,6 +151,29 @@ impl OverlayHub {
             let changed = state.chord != chord || state.held != held;
             state.chord = chord;
             state.held = held;
+            changed
+        });
+    }
+
+    /// A view command (`{:overlay:hide}`, ...) for the running overlays to apply. Changes no
+    /// state of the daemon's own; with no overlay subscribed it is simply never read.
+    pub fn control(&self, command: ViewCommand) {
+        self.update(|state| {
+            state.control_seq += 1;
+            if state.controls.len() == CONTROLS_KEPT {
+                state.controls.pop_front();
+            }
+            state.controls.push_back((state.control_seq, command));
+            true
+        });
+    }
+
+    /// `{:tape:clear}`: empty the overlay's tape. The tape file and the translation history are
+    /// not touched.
+    pub fn clear_tape(&self) {
+        self.update(|state| {
+            let changed = !state.tape.is_empty();
+            state.tape.clear();
             changed
         });
     }
@@ -264,6 +300,40 @@ mod tests {
         assert_eq!(state.generation, 2);
         assert_eq!(state.layer.as_deref(), Some("steno"));
         assert_eq!((state.chord, state.held), (0b11, 0b01));
+    }
+
+    #[test]
+    fn view_commands_are_numbered_events_and_only_the_newest_are_kept() {
+        use super::super::overlay_control::{Part, Verb};
+        let hub = OverlayHub::default();
+        let command = ViewCommand {
+            part: Part::Overlay,
+            verb: Verb::Toggle,
+        };
+        for _ in 0..CONTROLS_KEPT + 2 {
+            hub.control(command);
+        }
+        let state = hub.snapshot();
+        assert_eq!(state.control_seq, CONTROLS_KEPT as u64 + 2);
+        assert_eq!(state.controls.len(), CONTROLS_KEPT);
+        assert_eq!(state.controls.front().unwrap().0, 3);
+        assert_eq!(state.controls.back().unwrap().0, state.control_seq);
+        // Each one wakes the overlay, even though the toggle is the same again
+        assert_eq!(state.generation, CONTROLS_KEPT as u64 + 2);
+    }
+
+    #[test]
+    fn clearing_the_tape_empties_it_once() {
+        let hub = OverlayHub::default();
+        hub.push_stroke(1, String::new(), false);
+        hub.push_stroke(2, String::new(), false);
+        hub.clear_tape();
+        let cleared = hub.snapshot();
+        assert!(cleared.tape.is_empty());
+        hub.clear_tape();
+        assert_eq!(hub.snapshot().generation, cleared.generation, "nothing to clear");
+        hub.push_stroke(3, String::new(), false);
+        assert_eq!(hub.snapshot().tape.len(), 1);
     }
 
     #[test]

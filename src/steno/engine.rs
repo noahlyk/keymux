@@ -493,7 +493,10 @@ impl StenoEngine {
         // A stroke that only runs an engine command (suspend, ...) typed nothing, so it has no
         // place on the tape: the tape shows what was written, and a line for it would only be
         // one more thing to undo past. Plover's undo already skips such a stroke.
-        let command_only = !transparent && is_command_only(output.as_ref());
+        // The overlay controls are transparent strokes too (they leave the history and the join
+        // alone) but, like other command strokes, they stay off the tape.
+        let command_only =
+            (!transparent && is_command_only(output.as_ref())) || is_control_only(output.as_ref());
         let output = self.run_commands(output);
         if command_only {
             tracing::debug!("steno command stroke {stroke:#x} kept off the tape");
@@ -553,12 +556,32 @@ impl StenoEngine {
             "lookup" if self.lookup.is_none() => self.open_lookup(),
             "lookup" => {}
             "set_config" => self.set_config(args),
+            super::overlay_control::COMMAND => {
+                let (name, param) = args.split_once(':').unwrap_or((args, ""));
+                self.run_overlay_control(name, param);
+            }
             "add_translation" | "suggestions" | "configure" | "focus" | "quit" => {
                 tracing::info!(
                     "steno command `{name}` has no counterpart in keymux, so it does nothing"
                 );
             }
             other => warn!("unknown steno command `{other}`"),
+        }
+    }
+
+    /// `{:overlay:hide}`, `{:tape:clear}`, `{:lookup:toggle}`, ...: see [`super::overlay_control`].
+    /// Separate from [`Self::run_command`] so it merges apart from Plover's own commands.
+    fn run_overlay_control(&mut self, name: &str, param: &str) {
+        use super::overlay_control::{parse, Control, Verb};
+        match parse(name, param) {
+            Some(Control::View(command)) => self.hub.control(command),
+            Some(Control::ClearTape) => self.hub.clear_tape(),
+            Some(Control::Lookup(verb)) => match (verb, self.lookup.is_some()) {
+                (Verb::Show | Verb::Toggle, false) => self.open_lookup(),
+                (Verb::Hide | Verb::Toggle, true) => self.close_lookup(),
+                _ => {}
+            },
+            None => warn!("unknown overlay control `{name}:{param}`"),
         }
     }
 
@@ -602,6 +625,20 @@ fn is_command_only(output: Option<&StenoOutput>) -> bool {
     match output {
         Some(StenoOutput::Ops(ops)) => {
             !ops.is_empty() && ops.iter().all(|op| matches!(op, OutputOp::Command(_)))
+        }
+        _ => false,
+    }
+}
+
+/// Whether an output is nothing but overlay controls (`{:overlay:toggle}`, `{:tape:clear}`, ...).
+fn is_control_only(output: Option<&StenoOutput>) -> bool {
+    let prefix = format!("{}:", super::overlay_control::COMMAND);
+    match output {
+        Some(StenoOutput::Ops(ops)) => {
+            !ops.is_empty()
+                && ops
+                    .iter()
+                    .all(|op| matches!(op, OutputOp::Command(c) if c.starts_with(&prefix)))
         }
         _ => false,
     }
@@ -1251,5 +1288,97 @@ mod tests {
         }
         assert_eq!(engine.translator.text(), "");
         assert_eq!(hub.snapshot().tape.len(), 1, "only the lookup stroke itself");
+    }
+
+    /// Strike the stroke written `text`, all its keys down and up together.
+    fn strike(engine: &mut StenoEngine, text: &str) -> Option<StenoOutput> {
+        let bits = Layout::plover().parse_stroke(text).unwrap();
+        let now = Instant::now();
+        let keys: Vec<KeyCode> = (0..32)
+            .filter(|bit| bits & (1 << bit) != 0)
+            .map(|bit| key_for(engine, 1 << bit))
+            .collect();
+        for key in &keys {
+            engine.press(*key, now);
+        }
+        let mut out = None;
+        for key in &keys {
+            out = engine.release_at(*key, now).or(out);
+        }
+        out
+    }
+
+    const CONTROL_DICT: &str = r#"{"KAT": "{:overlay:toggle}", "TKOG": "cat", "-G": "{:tape:clear}",
+        "PWAT": "{:tape:sideways}", "-T": "{:lookup:open}", "-D": "{:lookup:toggle}"}"#;
+
+    #[test]
+    fn overlay_control_entries_type_nothing_and_publish_view_commands() {
+        use super::super::overlay_control::{Part, Verb, ViewCommand};
+        let (mut engine, hub) = engine_with_hub(CONTROL_DICT);
+        assert_eq!(strike(&mut engine, "KAT"), None, "nothing is typed");
+        let state = hub.snapshot();
+        assert_eq!(state.tape.len(), 0, "a control stroke stays off the tape");
+        assert_eq!(
+            state.controls.back().map(|entry| entry.1),
+            Some(ViewCommand {
+                part: Part::Overlay,
+                verb: Verb::Toggle
+            })
+        );
+        assert_eq!(state.control_seq, 1);
+        strike(&mut engine, "KAT");
+        assert_eq!(hub.snapshot().control_seq, 2, "striking it again runs it again");
+    }
+
+    #[test]
+    fn a_control_stroke_never_repeats_when_held() {
+        let (mut engine, hub) = engine_with_hub(CONTROL_DICT);
+        let keys = kat_keys(&engine);
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        tap(&mut engine, keys, t0, t0 + ms(50));
+        for key in keys {
+            engine.press(key, t0 + ms(150));
+        }
+        assert_eq!(engine.tick(t0 + ms(600)), None);
+        assert!(engine.repeating.is_none() && engine.arming.is_none());
+        assert_eq!(hub.snapshot().control_seq, 1);
+    }
+
+    #[test]
+    fn clearing_the_tape_empties_the_overlays_tape_and_is_not_a_view_command() {
+        let (mut engine, hub) = engine_with_hub(CONTROL_DICT);
+        strike(&mut engine, "TKOG");
+        assert_eq!(hub.snapshot().tape.len(), 1);
+        assert_eq!(strike(&mut engine, "-G"), None);
+        let state = hub.snapshot();
+        assert!(state.tape.is_empty());
+        assert_eq!(state.control_seq, 0);
+    }
+
+    #[test]
+    fn the_lookup_control_opens_closes_and_toggles_it() {
+        let (mut engine, _hub) = engine_with_hub(CONTROL_DICT);
+        assert_eq!(strike(&mut engine, "-T"), None);
+        assert!(engine.lookup_active());
+        // Opening it again leaves it open
+        engine.run_overlay_control("lookup", "open");
+        assert!(engine.lookup_active());
+        engine.run_overlay_control("lookup", "toggle");
+        assert!(!engine.lookup_active());
+        engine.run_overlay_control("lookup", "toggle");
+        assert!(engine.lookup_active());
+        engine.run_overlay_control("lookup", "close");
+        engine.run_overlay_control("lookup", "close");
+        assert!(!engine.lookup_active());
+    }
+
+    #[test]
+    fn a_bad_control_does_nothing() {
+        let (mut engine, hub) = engine_with_hub(CONTROL_DICT);
+        assert_eq!(strike(&mut engine, "PWAT"), None);
+        engine.run_overlay_control("tape", "sideways");
+        engine.run_overlay_control("overlay", "");
+        assert_eq!(hub.snapshot().control_seq, 0);
     }
 }

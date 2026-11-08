@@ -9,7 +9,7 @@
 //!   most one frame callback is pending, so a burst of strokes draws once.
 
 use super::render::Renderer;
-use super::{activity, anim, client, Source};
+use super::{activity, anim, client, Source, ViewState};
 use crate::config::OverlayConfig;
 use crate::steno::layout::Layout;
 use crate::steno::overlay::OverlaySnapshot;
@@ -151,6 +151,8 @@ pub fn run(config: OverlayConfig, source: Source, always: bool) -> Result<()> {
         exit: false,
         always,
         suppressed: false,
+        view: ViewState::default(),
+        controls_seen: 0,
     };
     // With `--always` it shows right away, without waiting for the daemon's first frame
     if always {
@@ -206,6 +208,11 @@ struct Overlay {
     /// even if the steno layer is still on, until a genuine change (a stroke, a layer
     /// change) proves you're back to steno-typing. See [`Self::on_activity_interrupted`].
     suppressed: bool,
+    /// What `{:overlay:hide}`, `{:tape:hide}` and friends have done since this overlay started.
+    /// Runtime only: never saved, not part of the config, and a config reload leaves it alone.
+    view: ViewState,
+    /// Number of the last view command applied (see [`super::take_controls`])
+    controls_seen: u64,
 }
 
 /// What a snapshot should do to the surface.
@@ -245,9 +252,19 @@ const fn next_action(
 
 impl Overlay {
     fn on_snapshot(&mut self, snapshot: OverlaySnapshot) {
-        let visible = super::is_visible(&self.config, self.always, snapshot.layer.as_deref());
+        let before = self.controls_seen;
+        let view_changed = super::take_controls(&mut self.view, &mut self.controls_seen, &snapshot);
+        let commanded = snapshot.controls.iter().any(|(seq, _)| *seq > before);
+        if commanded && !self.view.hidden {
+            // A show (even of what already shows) brings it back after a click or a window
+            // switch put it away: the user asked for it
+            self.suppressed = false;
+        }
+        let visible = super::is_visible(&self.config, self.always, snapshot.layer.as_deref())
+            && super::has_content(&self.config, self.view, &snapshot);
         // Skip frames that change nothing on screen, such as a repeat after a reconnect
-        let unchanged = self.latest.layer == snapshot.layer
+        let unchanged = !view_changed
+            && self.latest.layer == snapshot.layer
             && self.latest.chord == snapshot.chord
             && self.latest.held == snapshot.held
             && self.latest.lookup == snapshot.lookup
@@ -435,7 +452,7 @@ impl Overlay {
         let Some(mut pixmap) = PixmapMut::from_bytes(canvas, width, height) else {
             return;
         };
-        self.renderer.draw(&self.latest, &mut pixmap);
+        self.renderer.draw_view(&self.latest, self.view, &mut pixmap);
         if !native {
             for pixel in canvas.as_chunks_mut::<4>().0.iter_mut() {
                 pixel.swap(0, 2);

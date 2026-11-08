@@ -168,6 +168,11 @@ pub fn meta_to_action(meta: &str, ctx: &Context) -> Action {
         // Lapwing's stitching: `{:stitch:A}` is a fingerspelled letter that joins with a dash
         "stitch" => meta_stitch(ctx, param),
         "stitch_last_word" => meta_stitch_last_word(ctx, param),
+        // keymux's own runtime overlay controls: `{:overlay:hide}`, `{:tape:clear}`, ...
+        // (see `overlay_control`; they type nothing)
+        name if super::overlay_control::NAMES.contains(&name) => {
+            super::overlay_control::meta_action(ctx, name, param)
+        }
         _ => ctx.new_action(),
     }
 }

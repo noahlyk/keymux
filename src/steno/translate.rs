@@ -182,11 +182,14 @@ impl StenoOutput {
 /// word, redo, say it again, swap the last two.
 const HISTORY_MACROS: [&str; 5] = ["undo", "undo_word", "redo", "again", "swap"];
 
-/// Whether a dictionary entry makes a transparent stroke: it carries `{:transparent}`, or it is
+/// Whether a dictionary entry makes a transparent stroke: it carries `{:transparent}`, it is an
+/// overlay control (`{:overlay:toggle}`, ...), or it is
 /// nothing but the command that opens the live lookup.
 #[allow(clippy::literal_string_with_formatting_args)] // a marker, not a format
 fn is_transparent_mapping(text: &str) -> bool {
-    text.contains("{:transparent}") || text.trim().eq_ignore_ascii_case("{plover:lookup}")
+    text.contains("{:transparent}")
+        || text.trim().eq_ignore_ascii_case("{plover:lookup}")
+        || super::overlay_control::is_in(text)
 }
 
 /// The keys of Plover's key-name set that move the cursor or delete text around it. A key
@@ -496,6 +499,7 @@ impl Translator {
                     .windows(8)
                     .any(|window| window.eq_ignore_ascii_case(b"{plover:"))
                     || (self.classes_enabled && is_transparent_mapping(text))
+                    || super::overlay_control::is_in(text)
             })
     }
 
@@ -2305,5 +2309,74 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         assert!(!text.contains("thanksgiving"), "{text:?}");
         let text = run(&mut t, &["SP", "THAS", "STKPW", "PHRUP", "+EUFG"]);
         assert!(text.ends_with("thanksgiving"), "{text:?}");
+    }
+
+    const CONTROL_JSON: &str = r#"{"KAT": "cat", "TKOG": "dog", "-G": "{^ing}",
+        "SKWR": "{:overlay:toggle}", "SKWR*": "{:tape:clear}", "-FP": "{:lookup:toggle}",
+        "-B": "{:tape:sideways}"}"#;
+
+    #[test]
+    fn overlay_controls_are_commands_that_type_nothing() {
+        let mut t = translator(CONTROL_JSON);
+        assert!(t.is_command(stroke("SKWR")));
+        assert!(t.is_command(stroke("SKWR*")));
+        assert!(t.is_command(stroke("-FP")));
+        assert!(!t.is_command(stroke("KAT")));
+        assert_eq!(commands_of(&mut t, "SKWR"), ["overlay_control:overlay:toggle"]);
+        assert_eq!(commands_of(&mut t, "SKWR*"), ["overlay_control:tape:clear"]);
+        assert_eq!(commands_of(&mut t, "-FP"), ["overlay_control:lookup:toggle"]);
+        assert_eq!(t.text(), "");
+        // A control that is not one runs nothing
+        assert!(commands_of(&mut t, "-B").is_empty());
+    }
+
+    const CONTROL_CLASS_JSON: &str = r#"{
+        "THAS": "thanks", "THAS/+EUFG": "thanksgiving", "KAT": "cat", "-G": "{^ing}",
+        "SKWR": "{:overlay:toggle}", "SKWR*": "{:tape:clear}", "-FP": "{:lookup:toggle}"
+    }"#;
+
+    #[test]
+    fn overlay_controls_are_transparent_strokes() {
+        let mut t = class_translator(CONTROL_CLASS_JSON, "control-class");
+        run(&mut t, &["KAT"]);
+        let before = history_len(&t);
+        let out = t.stroke(joined_stroke("SKWR"));
+        assert!(t.was_transparent());
+        assert_eq!(
+            out,
+            Some(StenoOutput::Ops(vec![OutputOp::Command(
+                "overlay_control:overlay:toggle".into()
+            )]))
+        );
+        assert_eq!(history_len(&t), before, "no history entry");
+        assert_eq!(run(&mut t, &["-G"]), "catting", "the suffix still attaches");
+    }
+
+    #[test]
+    fn a_control_in_the_middle_of_a_join_changes_nothing() {
+        for (name, control) in [("toggle", "SKWR"), ("clear", "SKWR*"), ("lookup", "-FP")] {
+            let mut t = class_translator(CONTROL_CLASS_JSON, &format!("control-mid-{name}"));
+            assert_eq!(
+                run(&mut t, &["THAS", control, "+EUFG"]),
+                "thanksgiving",
+                "{control}"
+            );
+            assert_eq!(history_len(&t), 1);
+        }
+    }
+
+    #[test]
+    fn a_join_carries_across_several_controls() {
+        let mut t = class_translator(CONTROL_CLASS_JSON, "control-several");
+        let text = run(&mut t, &["THAS", "SKWR", "SKWR*", "-FP", "+EUFG"]);
+        assert_eq!(text, "thanksgiving");
+    }
+
+    #[test]
+    fn a_control_breaks_the_join_only_when_the_classes_are_off() {
+        let mut t = class_translator(CONTROL_CLASS_JSON, "control-off");
+        t.set_stroke_classes(false);
+        assert_ne!(run(&mut t, &["THAS", "SKWR", "+EUFG"]), "thanksgiving");
+        assert!(!t.was_transparent());
     }
 }
