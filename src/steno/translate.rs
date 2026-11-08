@@ -847,9 +847,12 @@ impl Translator {
     }
 
     /// Undo a whole word: back to the translation that started it, so a stem and the suffixes
-    /// glued after it go together, and so does a word typed by hand.
+    /// glued after it go together, and so does a word typed by hand. A translation that replaced
+    /// earlier strokes of its word (a longer outline, or a plugin's reading of a whole join-key
+    /// run) puts those back when it is taken back; they are the same word, so they are taken back
+    /// too, one at a time, until the stroke that started it. One redo puts the whole word back.
     fn macro_undo_word(&mut self, stroke: u32, ops: &mut Vec<Op>) {
-        let found = self.take_back(|translation| {
+        let starts_word = |translation: &Translation| {
             !translation.origin.is_stroke()
                 || translation
                     .formatting
@@ -857,10 +860,23 @@ impl Translator {
                     .map(Action::effective)
                     .find(|action| action.text.as_deref().is_some_and(|text| !text.is_empty()))
                     .is_none_or(|action| !action.prev_attach)
-        });
-        if !found {
-            self.undo_fallback(stroke, ops);
+        };
+        let mut groups = 0;
+        while self.take_back(|_| true) {
+            groups += 1;
+            let taken = self.hist.redo.last().and_then(|group| group.last());
+            if taken.is_none_or(|t| starts_word(t) && t.replaced.is_empty()) {
+                break;
+            }
         }
+        if groups == 0 {
+            self.undo_fallback(stroke, ops);
+            return;
+        }
+        // One redo group for the whole word, oldest first, as redo replays it
+        let at = self.hist.redo.len() - groups;
+        let whole: Vec<Translation> = self.hist.redo.drain(at..).rev().flatten().collect();
+        self.hist.redo.push(whole);
     }
 
     /// Redo: put back what undo took back, `count` times over. Nothing to redo does nothing.
@@ -1407,6 +1423,25 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         // the stroke's raw keys
         t.stroke(stroke("TKOG"));
         assert_eq!(t.text(), "cat TKOG");
+    }
+
+    /// A plugin reading a whole join-key run replaces the run's earlier strokes on every stroke;
+    /// undo word takes the whole run back, not just its last stroke, and redo puts it all back.
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // `{:undo_word}` is a dictionary command
+    fn undo_word_takes_back_a_whole_plugin_run() {
+        let mut t = with_shout_plugin(r#"{"KAT": "cat", "*U": "{:undo_word}", "R*": "{:redo}"}"#, "undo_word_run");
+        let joined = stroke("TKOG") | (1 << 23);
+        t.stroke(stroke("KAT"));
+        t.stroke(stroke("TKOG"));
+        t.stroke(joined);
+        t.stroke(joined);
+        let whole = t.text();
+        assert!(whole.starts_with("cat ") && whole.len() > "cat TKOG".len(), "{whole:?}");
+        t.stroke(stroke("*U"));
+        assert_eq!(t.text(), "cat");
+        t.stroke(stroke("R*"));
+        assert_eq!(t.text(), whole);
     }
 
     #[test]
