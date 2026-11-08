@@ -356,6 +356,17 @@ pub struct StenoConfig {
     /// `{:firstup}`. Those then send on the last key up like any other.
     #[serde(default)]
     pub disable_first_up: bool,
+    /// Turn off the stroke classes: entries carrying `{:transparent}` (and `{plover:lookup}`,
+    /// which is transparent without it) become ordinary strokes in the history, and barriers
+    /// (cursor keys, `{:barrier}`) no longer end the outline context or stop undo.
+    #[serde(default)]
+    pub disable_transparent: bool,
+    /// Make `*` stop at a barrier (a cursor key or other entry that moved the cursor or edited
+    /// earlier text) instead of reaching back past it to the word before, as Plover does: what
+    /// is before a barrier is no longer next to the cursor, so taking it back deletes the wrong
+    /// text. Off by default, which keeps Plover's behaviour.
+    #[serde(default)]
+    pub undo_stops_at_barrier: bool,
     /// Entering this layer starts a fresh sentence: the first word has no space in front and
     /// nothing before it can be undone. Off by default, so steno carries on from whatever was
     /// typed, here or by hand.
@@ -788,6 +799,9 @@ pub struct OverlayConfig {
     pub tape_fade: f32,
     /// How many lines at the top of the tape fade out (see `tape_fade`). 0 turns the fade off.
     pub tape_fade_lines: usize,
+    /// Show transparent strokes (a lookup, ...) on the tape, dimmed, since they are not part of
+    /// the text. Off leaves them out of the overlay's tape.
+    pub tape_transparent: bool,
     /// A .ttf/.otf to use instead of the embedded Atkinson Hyperlegible
     pub font: Option<String>,
     /// Steno layers that show the overlay. Empty means every steno layer.
@@ -828,6 +842,7 @@ impl Default for OverlayConfig {
             tape_lines: None,
             tape_fade: 0.15,
             tape_fade_lines: 5,
+            tape_transparent: true,
             extra_keys: Vec::new(),
             overlay_overrides: HashMap::new(),
             key_groups: HashMap::new(),

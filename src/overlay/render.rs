@@ -810,6 +810,7 @@ impl Renderer {
             text: String::new(),
             unmatched: false,
             repeats: 0,
+            transparent: false,
         });
 
         let room = self.words_right - self.words_left;
@@ -819,7 +820,12 @@ impl Renderer {
         // entirely, so the ones that are shown always get their full text.
         let mut planned = Vec::new();
         let mut used = 0usize;
-        for entry in live.iter().chain(snapshot.tape.iter().rev()) {
+        let shown = snapshot
+            .tape
+            .iter()
+            .rev()
+            .filter(|entry| self.config.tape_transparent || !entry.transparent);
+        for entry in live.iter().chain(shown) {
             let text = Self::tape_entry_text(entry);
             let text_lines = wrap_text(&mut self.words, &text, room).len().max(1);
             if used + text_lines > budget {
@@ -844,6 +850,12 @@ impl Renderer {
                 self.config.tape_fade,
                 self.config.tape_fade_lines,
             );
+            // A transparent stroke is not part of the text: it reads dimmer than its neighbours
+            let fade = if entry.transparent {
+                fade * TRANSPARENT_DIM
+            } else {
+                fade
+            };
             self.draw_tape_line(pixmap, entry, row_top + baseline_in_line, fade);
             row_top = (*text_lines as f32).mul_add(self.line_height, row_top);
             lines_above += text_lines;
@@ -1329,6 +1341,9 @@ fn tail_that_fits<'a>(glyphs: &mut GlyphCache, text: &'a str, max: f32) -> &'a s
     }
 }
 
+/// How strong a transparent stroke's tape line is next to an ordinary one.
+const TRANSPARENT_DIM: f32 = 0.45;
+
 /// How strong a tape line is, by how many lines it is above the newest one (`0` is the newest)
 /// on a tape of `lines` lines: full strength everywhere except the last `fading` lines at the
 /// top, which fall in a straight line to `floor` at the topmost. The line just below those is
@@ -1708,6 +1723,7 @@ mod tests {
             text: text.into(),
             unmatched: text.is_empty(),
             repeats: 0,
+            transparent: false,
         }
     }
 
@@ -2299,6 +2315,7 @@ mod tests {
             text: "\"cat\"".into(),
             unmatched: false,
             repeats: 0,
+            transparent: false,
         };
         let baseline = 100.0;
         renderer.draw_tape_line(&mut pixmap.as_mut(), &entry, baseline, 1.0);
@@ -2369,6 +2386,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_transparent_stroke_is_dimmed_on_the_tape_and_can_be_left_out() {
+        let entry = |seq: u64, transparent: bool| TapeEntry {
+            seq,
+            stroke: 1 << 7,
+            text: "\"x\"".into(),
+            unmatched: false,
+            repeats: 0,
+            transparent,
+        };
+        let draw = |config: &OverlayConfig, entries: Vec<TapeEntry>| {
+            let mut renderer = Renderer::new(config, 1, 900).unwrap();
+            let (w, h) = renderer.size();
+            let mut pixmap = Pixmap::new(w, h).unwrap();
+            let snapshot = OverlaySnapshot {
+                layer: Some("steno".into()),
+                tape: entries.into(),
+                ..OverlaySnapshot::default()
+            };
+            renderer.draw(&snapshot, &mut pixmap.as_mut());
+            pixmap.data().to_vec()
+        };
+        let ink = |data: &[u8]| data.chunks(4).map(|p| u64::from(p[3])).sum::<u64>();
+        let config = OverlayConfig::default();
+        let ordinary = draw(&config, vec![entry(1, false)]);
+        let dimmed = draw(&config, vec![entry(1, true)]);
+        assert!(ink(&dimmed) > 0 && ink(&dimmed) < ink(&ordinary), "dimmed, not gone");
+        // Left out, it is as if it was never on the tape; kept, the real line is not disturbed
+        let hide = OverlayConfig {
+            tape_transparent: false,
+            ..OverlayConfig::default()
+        };
+        assert_eq!(draw(&hide, vec![entry(1, false), entry(2, true)]), ordinary);
+        assert_ne!(draw(&config, vec![entry(1, false), entry(2, true)]), ordinary);
+    }
+
     /// The ink colours of a drawn tape line: how many opaque-ish pixels sit near each colour.
     fn tape_ink(stroke_keys: &[usize], fade: f32) -> [usize; 4] {
         let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
@@ -2380,6 +2433,7 @@ mod tests {
             text: "\"x\"".into(),
             unmatched: false,
             repeats: 0,
+            transparent: false,
         };
         renderer.draw_tape_line(&mut pixmap.as_mut(), &entry, 100.0, fade);
         let theme = renderer.theme;
@@ -2454,6 +2508,7 @@ mod tests {
                 text: "\"x\"".into(),
                 unmatched: false,
                 repeats: 0,
+                transparent: false,
             };
             let baseline = 100.0;
             renderer.draw_tape_line(&mut pixmap.as_mut(), &entry, baseline, 1.0);
@@ -2916,6 +2971,7 @@ mod tests {
                 text: (*text).into(),
                 unmatched: text.is_empty(),
                 repeats: 0,
+                transparent: false,
             });
         }
         let write = |name: &str, renderer: &mut Renderer, snapshot: &OverlaySnapshot| {

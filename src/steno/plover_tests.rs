@@ -73,6 +73,9 @@ fn every_reference_case_types_what_plover_types() {
         let name = case["name"].as_str().unwrap();
         let dict = Arc::clone(&sets[case["set"].as_str().unwrap()]);
         let mut translator = Translator::with_shared(dict, options(&case["config"]));
+        // Plover has no transparent strokes (its lookup stroke is an ordinary one, so an outline
+        // may run through it): the oracle is compared with keymux's stroke classes off
+        translator.set_stroke_classes(false);
         let strokes = case["strokes"].as_array().unwrap();
         for (step, stroke_text) in strokes.iter().enumerate() {
             let ops = translator.stroke_ops(stroke(stroke_text.as_str().unwrap()));

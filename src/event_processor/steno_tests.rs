@@ -574,10 +574,10 @@ fn the_lookup_stroke_turns_the_keys_into_qwerty_input_to_a_query_and_nothing_is_
     );
     let open = hub.snapshot();
     assert_eq!(open.lookup.as_ref().map(|l| l.query.as_str()), Some(""));
-    assert_eq!(
-        open.tape.len(),
-        0,
-        "a stroke that only runs a command typed nothing, so it stays off the tape"
+    assert_eq!(open.tape.len(), 1, "the lookup stroke is on the tape");
+    assert!(
+        open.tape[0].transparent,
+        "as a transparent line: it is not part of the text"
     );
 
     // Typing is QWERTY: these keys are stroke keys on the steno layer, but now they are letters
@@ -601,8 +601,8 @@ fn the_lookup_stroke_turns_the_keys_into_qwerty_input_to_a_query_and_nothing_is_
     assert_eq!(found.hint, parse_stroke("KAPBD").unwrap());
     assert_eq!(
         hub.snapshot().tape.len(),
-        0,
-        "looking things up types nothing, and the command stroke that opened it is not on the tape"
+        1,
+        "the keys typed into the lookup are not strokes: only the stroke that opened it is on the tape"
     );
 
     // Backspace edits the query, and now it also suggests longer words

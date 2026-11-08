@@ -161,6 +161,10 @@ pub fn meta_to_action(meta: &str, ctx: &Context) -> Action {
         // keymux's own: `{:firstup}` marks a stroke the engine sends when its first key comes up.
         // It types nothing and changes nothing around it.
         "firstup" => ctx.copy_last_action(),
+        // keymux's own stroke classes (see `Translator::stroke`): `{:transparent}` is a stroke the
+        // history never sees, `{:barrier}` / `{:nobarrier}` say that a stroke does or does not
+        // end the outline context. Like `firstup` they type nothing and change nothing around them.
+        "transparent" | "barrier" | "nobarrier" => ctx.copy_last_action(),
         // Lapwing's stitching: `{:stitch:A}` is a fingerspelled letter that joins with a dash
         "stitch" => meta_stitch(ctx, param),
         "stitch_last_word" => meta_stitch_last_word(ctx, param),

@@ -182,6 +182,68 @@ impl StenoOutput {
 /// word, redo, say it again, swap the last two.
 const HISTORY_MACROS: [&str; 5] = ["undo", "undo_word", "redo", "again", "swap"];
 
+/// Whether a dictionary entry makes a transparent stroke: it carries `{:transparent}`, or it is
+/// nothing but the command that opens the live lookup.
+#[allow(clippy::literal_string_with_formatting_args)] // a marker, not a format
+fn is_transparent_mapping(text: &str) -> bool {
+    text.contains("{:transparent}") || text.trim().eq_ignore_ascii_case("{plover:lookup}")
+}
+
+/// The keys of Plover's key-name set that move the cursor or delete text around it. A key
+/// combination with one of them is a barrier; Return, Tab and the letters are not.
+const CURSOR_KEYS: [&str; 14] = [
+    "left",
+    "right",
+    "up",
+    "down",
+    "home",
+    "end",
+    "page_up",
+    "page_down",
+    "prior",
+    "next",
+    "backspace",
+    "delete",
+    "kp_home",
+    "kp_end",
+];
+
+/// Whether a translation ends the outline context: a key combination that moves the cursor or
+/// deletes text, `{:back}`, or an entry that says `{:barrier}`; `{:nobarrier}` says it is not
+/// one even so.
+#[allow(clippy::literal_string_with_formatting_args)] // a marker, not a format
+fn is_barrier(translation: &Translation) -> bool {
+    let english = translation.english.as_deref().unwrap_or_default();
+    if english.contains("{:nobarrier}") {
+        return false;
+    }
+    if english.contains("{:barrier}") || english.contains("{:back") {
+        return true;
+    }
+    translation.formatting.iter().any(|action| {
+        action.effective().combo.as_deref().is_some_and(|combo| {
+            combo
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|name| CURSOR_KEYS.iter().any(|key| name.eq_ignore_ascii_case(key)))
+        })
+    })
+}
+
+/// Whether a translation only types whitespace (a space, a newline, a tab): it separates what
+/// is before it from a continuation after it.
+fn is_separator(translation: &Translation) -> bool {
+    let mut typed = false;
+    for action in &translation.formatting {
+        if let Some(text) = action.effective().text.as_deref().filter(|t| !t.is_empty()) {
+            if !text.trim().is_empty() {
+                return false;
+            }
+            typed = true;
+        }
+    }
+    typed
+}
+
 /// Plover's `Macro`: a translation that is an action on the translator, not text.
 struct Macro {
     name: String,
@@ -256,6 +318,13 @@ pub struct Translator {
     /// The shared history while a stroke is being translated, and empty otherwise
     hist: History,
     unmatched: bool,
+    /// Whether the last stroke was a transparent one (see [`Self::stroke`])
+    transparent: bool,
+    /// Whether the stroke classes (`{:transparent}`, the lookup command's transparency, and
+    /// barriers) are honoured; `disable_transparent` turns them off
+    classes_enabled: bool,
+    /// Whether undo stops at a barrier (`undo_stops_at_barrier`)
+    undo_stops_at_barrier: bool,
 }
 
 /// A copy of a translator has a copy of the history too, so trying strokes on it (a lookup
@@ -269,6 +338,9 @@ impl Clone for Translator {
             shared: Arc::new(std::sync::Mutex::new(history)),
             hist: History::default(),
             unmatched: self.unmatched,
+            transparent: self.transparent,
+            classes_enabled: self.classes_enabled,
+            undo_stops_at_barrier: self.undo_stops_at_barrier,
         }
     }
 }
@@ -302,7 +374,27 @@ impl Translator {
             shared,
             hist: History::default(),
             unmatched: false,
+            transparent: false,
+            classes_enabled: true,
+            undo_stops_at_barrier: false,
         }
+    }
+
+    /// Turn the stroke classes on or off: `{:transparent}` (and the lookup command being
+    /// transparent) and barriers. On by default; off, every stroke is an ordinary one.
+    pub const fn set_stroke_classes(&mut self, enabled: bool) {
+        self.classes_enabled = enabled;
+    }
+
+    /// Make undo stop at a barrier instead of reaching back past it (Plover reaches back). Off by default.
+    pub const fn set_undo_stops_at_barrier(&mut self, stops: bool) {
+        self.undo_stops_at_barrier = stops;
+    }
+
+    /// Whether the last stroke was transparent: it ran its commands but left the history alone.
+    #[must_use]
+    pub const fn was_transparent(&self) -> bool {
+        self.transparent
     }
 
     /// The history this translator writes to.
@@ -403,12 +495,23 @@ impl Translator {
                 text.as_bytes()
                     .windows(8)
                     .any(|window| window.eq_ignore_ascii_case(b"{plover:"))
+                    || (self.classes_enabled && is_transparent_mapping(text))
             })
     }
 
     /// Translate a finished stroke and say what to do with the keyboard.
+    ///
+    /// Strokes come in three classes. A *transparent* stroke (an entry carrying
+    /// `{:transparent}`, or one that is just `{plover:lookup}`) runs its commands and key
+    /// combinations and is otherwise not there: not added to the history, so it flushes nothing,
+    /// resets no pending join, spacing or capitalisation, cannot be undone, and does not clear
+    /// what undo left to redo. A *barrier* (a key combination that moves the cursor or edits
+    /// earlier text, or an entry carrying `{:barrier}`) is an ordinary stroke that also ends the
+    /// outline context. Every other stroke is *normal*; a stroke that only types whitespace
+    /// separates a continuation from what came before.
     pub fn stroke(&mut self, stroke: u32) -> Option<StenoOutput> {
         self.unmatched = false;
+        self.transparent = false;
         self.check_out();
         let mut ops = Vec::new();
         self.translate_stroke(stroke, &mut ops);
@@ -435,6 +538,7 @@ impl Translator {
     #[cfg(test)]
     pub(crate) fn stroke_ops(&mut self, stroke: u32) -> Vec<Op> {
         self.unmatched = false;
+        self.transparent = false;
         self.check_out();
         let mut ops = Vec::new();
         self.translate_stroke(stroke, &mut ops);
@@ -489,6 +593,13 @@ impl Translator {
         let max_len = self.dict.longest_key();
         let mapping =
             self.lookup_with_prefix(max_len, &self.hist.state.translations, &[stroke], &[]);
+        if self.classes_enabled && !self.dict.joins(stroke) {
+            if let Some(text) = mapping.as_deref().filter(|m| is_transparent_mapping(m)) {
+                self.transparent = true;
+                ops.extend(self.transparent_ops(stroke, text));
+                return;
+            }
+        }
         if let Some(found) = mapping_to_macro(mapping.as_deref(), stroke) {
             // Taking back and putting back keep the redo history; anything else is new input,
             // but only once it actually changes something. Several macros here (the retro
@@ -536,6 +647,20 @@ impl Translator {
             info!("steno stroke {stroke:#x} not in dictionary");
         }
         self.translate_translation(translation);
+    }
+
+    /// What a transparent stroke asks of the keyboard: its commands and key combinations, in
+    /// order. Its text is dropped, and nothing about it is kept: it is formatted on a copy of the
+    /// formatter, after nothing, so it cannot read or change the spacing, capitals or look-ahead
+    /// of what came before.
+    fn transparent_ops(&self, stroke: u32, text: &str) -> Vec<Op> {
+        let mut formatter = self.hist.formatter.clone();
+        let mut item = Translation::new(vec![stroke], Some(text.to_string()));
+        formatter
+            .format(&[], &mut [&mut item], &mut [], self.dict.orthography())
+            .into_iter()
+            .filter(|op| matches!(op, Op::Command(_) | Op::Combo(_)))
+            .collect()
     }
 
     fn translate_macro(&mut self, found: &Macro, ops: &mut Vec<Op>) {
@@ -609,6 +734,22 @@ impl Translator {
         let mut group = Vec::new();
         let mut effective = false;
         for translation in all.iter().rev() {
+            // Undo stops at a barrier: what is before it is no longer next to the cursor, so
+            // taking it back would delete the wrong text. With nothing taken back yet, the
+            // barrier is the end of the history and what is before it is forgotten.
+            if self.classes_enabled && self.undo_stops_at_barrier && is_barrier(translation) {
+                if translation.has_undo() {
+                    // It changed text itself (`{:back}`): taking it back is what undo is for
+                    self.untranslate_translation(translation);
+                    group.push(translation.clone());
+                    effective = true;
+                } else if !effective {
+                    let state = &mut self.hist.state;
+                    state.tail = state.translations.pop();
+                    state.translations.clear();
+                }
+                break;
+            }
             self.untranslate_translation(translation);
             group.push(translation.clone());
             if translation.has_undo() {
@@ -906,6 +1047,11 @@ impl Translator {
             // Outlines are written for one set of dictionaries: strokes made by another, or text
             // typed by hand, end the run
             if !t.origin.is_stroke() || t.machine != self.machine {
+                break;
+            }
+            // A barrier moved the cursor or edited earlier text, so nothing reaches across it;
+            // a continuation does not reach across whitespace either
+            if self.classes_enabled && (is_barrier(t) || (joined && is_separator(t))) {
                 break;
             }
             num_strokes += t.strokes.len();
@@ -1961,5 +2107,203 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         commands_of(&mut t, "PHR*UP");
         assert!(commands_of(&mut t, "*").is_empty());
         assert_eq!(t.text(), "");
+    }
+
+    // The stroke classes: transparent, normal, barrier.
+
+    fn joined_stroke(text: &str) -> u32 {
+        if text == "*" {
+            return UNDO_STROKE;
+        }
+        Layout::plover_with(&['+'])
+            .unwrap()
+            .parse_stroke(text)
+            .unwrap_or_else(|| panic!("{text} is not a stroke"))
+    }
+
+    #[allow(clippy::literal_string_with_formatting_args)] // markers, not formats
+    const CLASS_JSON: &str = r#"{
+        "THAS": "thanks", "THAS/+EUFG": "thanksgiving", "TKOG": "dog", "KAT": "cat",
+        "PHRUP": "{plover:lookup}", "STKPW": "{:transparent}{plover:focus}",
+        "TKPWA": "{:transparent}ignored text",
+        "SP": "{^ ^}", "*": "=undo", "R-R": "{#Return}", "HR-L": "{#Left}", "PWA*RG": "{:barrier}",
+        "R*L": "{#Right}{:nobarrier}", "KA*PD": "{#Control_L(c)}", "RA*P": "{:back}"
+    }"#;
+
+    /// A translator over `json` with the shout plugin's join key (`+`, bit 23).
+    fn class_translator(json: &str, name: &str) -> Translator {
+        let dir = std::env::temp_dir().join(format!(
+            "keymux-translate-class-test-{}-{name}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let layout = Layout::plover_with(&['+']).unwrap();
+        let dict_path = dir.join("01-dict.json");
+        fs::write(&dict_path, json).unwrap();
+        fs::write(dir.join("02-shout.rs"), SHOUT_PLUGIN).unwrap();
+        let chain = Chain::load_cached(
+            &[dict_path, dir.join("02-shout.rs")],
+            &dir.join("cache"),
+            &layout,
+        );
+        Translator::with_shared(
+            Arc::new(chain),
+            Options {
+                start_attached: true,
+                ..Options::default()
+            },
+        )
+    }
+
+    fn run(t: &mut Translator, strokes: &[&str]) -> String {
+        for s in strokes {
+            t.stroke(joined_stroke(s));
+        }
+        t.text()
+    }
+
+    fn history_len(t: &Translator) -> usize {
+        journal::lock(&t.history()).state.translations.len()
+    }
+
+    #[test]
+    fn a_lookup_in_the_middle_of_a_join_changes_nothing() {
+        // The reported bug: THAS / lookup / +EUFG must be THAS / +EUFG
+        let mut plain = class_translator(CLASS_JSON, "lookup-plain");
+        assert_eq!(run(&mut plain, &["THAS", "+EUFG"]), "thanksgiving");
+        let mut t = class_translator(CLASS_JSON, "lookup-mid");
+        assert_eq!(run(&mut t, &["THAS", "PHRUP", "+EUFG"]), "thanksgiving");
+    }
+
+    #[test]
+    fn a_lookup_in_the_middle_breaks_the_join_when_the_classes_are_off() {
+        let mut t = class_translator(CLASS_JSON, "lookup-off");
+        t.set_stroke_classes(false);
+        assert_ne!(run(&mut t, &["THAS", "PHRUP", "+EUFG"]), "thanksgiving");
+    }
+
+    #[test]
+    fn a_transparent_stroke_is_not_in_the_history_and_still_runs_its_commands() {
+        let mut t = class_translator(CLASS_JSON, "transparent-history");
+        run(&mut t, &["KAT"]);
+        let before = history_len(&t);
+        let out = t.stroke(joined_stroke("STKPW"));
+        assert!(t.was_transparent());
+        assert_eq!(
+            out,
+            Some(StenoOutput::Ops(vec![OutputOp::Command("focus".into())]))
+        );
+        assert_eq!(history_len(&t), before);
+        // Its text is dropped, and the next word goes on with the spacing it had
+        assert_eq!(t.stroke(joined_stroke("TKPWA")), None);
+        assert_eq!(run(&mut t, &["TKOG"]), "cat dog");
+        assert!(!t.was_transparent());
+    }
+
+    #[test]
+    fn transparent_strokes_at_the_start_the_end_and_in_a_row_leave_no_trace() {
+        let mut t = class_translator(CLASS_JSON, "transparent-row");
+        let text = run(
+            &mut t,
+            &["PHRUP", "STKPW", "THAS", "PHRUP", "PHRUP", "STKPW", "+EUFG", "PHRUP"],
+        );
+        assert_eq!(text, "thanksgiving");
+        assert_eq!(history_len(&t), 1);
+    }
+
+    #[test]
+    fn undo_skips_transparent_strokes_and_redo_survives_them() {
+        let mut t = class_translator(CLASS_JSON, "transparent-undo");
+        run(&mut t, &["KAT", "TKOG", "PHRUP"]);
+        assert_eq!(run(&mut t, &["*"]), "cat");
+        run(&mut t, &["PHRUP"]);
+        assert_eq!(journal::lock(&t.history()).redo.len(), 1);
+        assert_eq!(run(&mut t, &["*"]), "");
+    }
+
+    #[test]
+    fn a_transparent_stroke_does_not_disturb_capitals_or_attachment() {
+        let json = r#"{"KAT": "cat", "TKOG": "dog", "KP*": "{-|}", "STKPW": "{:transparent}{plover:focus}"}"#;
+        let mut t = class_translator(json, "transparent-caps");
+        assert_eq!(run(&mut t, &["KAT", "KP*", "STKPW", "TKOG"]), "cat Dog");
+    }
+
+    #[test]
+    fn a_space_between_separates_a_continuation() {
+        let mut t = class_translator(CLASS_JSON, "space");
+        let text = run(&mut t, &["THAS", "SP", "+EUFG"]);
+        assert!(!text.contains("thanksgiving"), "{text:?}");
+        assert!(text.starts_with("thanks "), "{text:?}");
+    }
+
+    #[test]
+    fn a_cursor_key_is_a_barrier_a_continuation_does_not_cross() {
+        for key in ["HR-L", "PWA*RG", "RA*P"] {
+            let mut t = class_translator(CLASS_JSON, &format!("barrier-{}", key.len() + key.as_bytes()[0] as usize));
+            run(&mut t, &["THAS", key, "+EUFG"]);
+            let text = t.text();
+            assert!(!text.contains("thanksgiving"), "{key}: {text:?}");
+        }
+    }
+
+    #[test]
+    fn a_return_a_shortcut_and_a_nobarrier_entry_are_not_barriers() {
+        let barrier = |entry: &str, name: &str| {
+            let mut t = class_translator(CLASS_JSON, name);
+            run(&mut t, &["THAS"]);
+            t.stroke(joined_stroke(entry));
+            let shared = t.history();
+            let history = journal::lock(&shared);
+            is_barrier(history.state.translations.last().unwrap())
+        };
+        assert!(barrier("HR-L", "is-left"));
+        assert!(barrier("PWA*RG", "is-marked"));
+        assert!(!barrier("R-R", "not-return"));
+        assert!(!barrier("KA*PD", "not-copy"));
+        assert!(!barrier("R*L", "not-nobarrier"));
+    }
+
+    #[test]
+    fn barriers_do_nothing_when_the_classes_are_off() {
+        let mut t = class_translator(CLASS_JSON, "barrier-off");
+        t.set_stroke_classes(false);
+        run(&mut t, &["KAT", "HR-L", "TKOG"]);
+        assert_eq!(run(&mut t, &["*"]).trim(), "cat");
+    }
+
+    #[test]
+    fn undo_stops_at_a_barrier() {
+        let mut t = class_translator(CLASS_JSON, "undo-barrier");
+        t.set_undo_stops_at_barrier(true);
+        run(&mut t, &["KAT", "HR-L", "TKOG"]);
+        // The word after the cursor key goes
+        run(&mut t, &["*"]);
+        assert_eq!(t.text(), "cat");
+        // The next undo reaches the barrier and goes no further: it deletes a word with the
+        // keys that do it, and what was before the barrier is forgotten
+        let out = t.stroke(UNDO_STROKE);
+        assert_eq!(
+            out.map(StenoOutput::into_ops).unwrap_or_default().len(),
+            1,
+            "a word delete"
+        );
+        assert_eq!(history_len(&t), 0);
+    }
+
+    #[test]
+    fn undo_reaches_back_past_a_barrier_by_default_as_plover_does() {
+        let mut t = class_translator(CLASS_JSON, "undo-barrier-default");
+        run(&mut t, &["KAT", "HR-L", "TKOG"]);
+        run(&mut t, &["*"]);
+        assert_eq!(run(&mut t, &["*"]), "");
+    }
+
+    #[test]
+    fn mixed_classes_in_a_row_keep_each_rule() {
+        let mut t = class_translator(CLASS_JSON, "mixed");
+        let text = run(&mut t, &["THAS", "PHRUP", "SP", "PHRUP", "+EUFG"]);
+        assert!(!text.contains("thanksgiving"), "{text:?}");
+        let text = run(&mut t, &["SP", "THAS", "STKPW", "PHRUP", "+EUFG"]);
+        assert!(text.ends_with("thanksgiving"), "{text:?}");
     }
 }

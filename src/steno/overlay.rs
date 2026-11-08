@@ -30,6 +30,9 @@ pub struct TapeEntry {
     /// How many times it was repeated by holding it, on top of the once it was typed
     #[serde(default)]
     pub repeats: u32,
+    /// A transparent stroke: on the tape, but not part of the text (a lookup, ...)
+    #[serde(default)]
+    pub transparent: bool,
 }
 
 /// One result of a live lookup: a word, and the outline that types it.
@@ -152,6 +155,16 @@ impl OverlayHub {
 
     /// A stroke finished and was translated. Clears the lit keys.
     pub fn push_stroke(&self, stroke: u32, text: String, unmatched: bool) {
+        self.push_entry(stroke, text, unmatched, false);
+    }
+
+    /// A transparent stroke finished (see `Translator::stroke`): a tape line that is not part of
+    /// the text, which the overlay draws dimmed, or leaves out.
+    pub fn push_transparent(&self, stroke: u32, text: String) {
+        self.push_entry(stroke, text, false, true);
+    }
+
+    fn push_entry(&self, stroke: u32, text: String, unmatched: bool, transparent: bool) {
         self.update(|state| {
             // The tape only drops its oldest entry, so the newest one always holds the last seq
             let seq = state.tape.back().map_or(1, |last| last.seq + 1);
@@ -164,6 +177,7 @@ impl OverlayHub {
                 text,
                 unmatched,
                 repeats: 0,
+                transparent,
             });
             state.chord = 0;
             state.held = 0;
@@ -263,6 +277,16 @@ mod tests {
         let seqs: Vec<u64> = state.tape.iter().map(|entry| entry.seq).collect();
         assert_eq!(seqs, [1, 2]);
         assert!(state.tape[1].unmatched);
+    }
+
+    #[test]
+    fn a_transparent_stroke_is_a_marked_line_in_the_same_run() {
+        let hub = OverlayHub::default();
+        hub.push_stroke(0b1, "\"a\"".into(), false);
+        hub.push_transparent(0b10, "{plover:lookup}".into());
+        hub.push_stroke(0b100, "\"b\"".into(), false);
+        let flags: Vec<bool> = hub.snapshot().tape.iter().map(|e| e.transparent).collect();
+        assert_eq!(flags, [false, true, false]);
     }
 
     #[test]

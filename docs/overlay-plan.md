@@ -244,6 +244,7 @@ overlay: (
     tape_lines: None,      // Some(20) caps it; None fills the screen height
     tape_fade: 0.15,       // the oldest line's strength
     tape_fade_lines: 5,    // how many lines at the top fade; every other line is full strength
+    tape_transparent: true, // transparent strokes (a lookup, ...) show dimmed on the tape; false leaves them out
     font: None,            // path to a .ttf/.otf; None = embedded Atkinson Hyperlegible
     layers: [],            // steno layers that show it; empty = every steno layer
 ),
@@ -278,7 +279,12 @@ submode **inside the steno engine**: the layer doesn't change, but while it is o
 keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches the app.
 
 - **Trigger.** An ordinary dictionary entry, as in Plover (`run_command` handles `lookup`).
-  There is no config setting for it any more.
+  There is no config setting for it any more. The stroke is *transparent* (see the README's
+  "Stroke classes"): it runs the command but never enters the translation history, so a join
+  such as `THAS` / lookup / `+EUFG` still joins, and `*` skips it. It is a dimmed line on the
+  tape (`TapeEntry::transparent`; `tape_transparent: false` leaves it out, in `render.rs`). The
+  keys typed into the lookup go through `lookup_capture`, which calls `process_key_press`
+  directly and never reaches `steno_capture`, so they are not strokes and not on the tape.
 - **Keys.** `keymap.rs` routes every key to the open lookup (`lookup_key`), US QWERTY by
   keycap, Shift capitalizes (the dictionary is case-sensitive), Backspace edits, Esc/Enter
   close. Esc and Enter win over the layer's own remaps (a steno layer usually remaps Esc);

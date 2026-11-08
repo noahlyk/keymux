@@ -40,6 +40,7 @@ pub fn spawn(frames: Sender<OverlaySnapshot>) {
                 text: (*text).into(),
                 unmatched: text.is_empty(),
                 repeats: 0,
+                transparent: false,
             });
         }
         loop {
@@ -67,6 +68,7 @@ pub fn spawn(frames: Sender<OverlaySnapshot>) {
                     text: text.into(),
                     unmatched: text.is_empty(),
                     repeats: 0,
+                    transparent: false,
                 });
                 snapshot.generation += 1;
                 snapshot.chord = 0;

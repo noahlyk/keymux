@@ -153,6 +153,8 @@ impl StenoEngine {
             start_capitalized: config.start_capitalized,
             ..super::formatter::Options::default()
         });
+        translator.set_stroke_classes(!config.disable_transparent);
+        translator.set_undo_stops_at_barrier(config.undo_stops_at_barrier);
         Ok(Self {
             keys,
             held_keys: HashSet::new(),
@@ -484,14 +486,25 @@ impl StenoEngine {
     /// Translate a stroke. A repeat counts on the stroke's tape line instead of adding lines.
     fn translate(&mut self, stroke: u32, repeated: bool) -> Option<StenoOutput> {
         let output = self.translator.stroke(stroke);
-        // A stroke that only runs an engine command (opening the lookup, ...) typed nothing, so it
-        // has no place on the tape: the tape shows what was written, and a line for it would
-        // only be one more thing to undo past. Plover's undo already skips such a stroke.
-        let command_only = is_command_only(output.as_ref());
+        // A transparent stroke is on the tape (dimmed, marked `~` in the file) but not part of
+        // the text: its line says what it ran, so describe it before the commands are consumed
+        let transparent = self.translator.was_transparent();
+        let ran = transparent.then(|| tape::describe(output.as_ref(), false));
+        // A stroke that only runs an engine command (suspend, ...) typed nothing, so it has no
+        // place on the tape: the tape shows what was written, and a line for it would only be
+        // one more thing to undo past. Plover's undo already skips such a stroke.
+        let command_only = !transparent && is_command_only(output.as_ref());
         let output = self.run_commands(output);
         if command_only {
             tracing::debug!("steno command stroke {stroke:#x} kept off the tape");
             self.hub.clear_keys();
+            return output;
+        }
+        if let Some(description) = ran {
+            if let Some(tape) = &mut self.tape {
+                tape.stroke(stroke, &format!("~ {description}"));
+            }
+            self.hub.push_transparent(stroke, description);
             return output;
         }
         let unmatched = self.translator.was_unmatched();
@@ -861,6 +874,8 @@ mod tests {
             repeat_rate_ms: 40,
             disable_repeat: false,
             disable_first_up: false,
+            disable_transparent: false,
+            undo_stops_at_barrier: false,
             fresh_on_enter: false,
             disable_typing_history: false,
             typing_layout: "us".to_string(),
@@ -1144,5 +1159,97 @@ mod tests {
         assert!(!is_command_only(Some(&with_backspace)));
         assert!(!is_command_only(Some(&StenoOutput::Type("a".to_owned()))));
         assert!(!is_command_only(None));
+    }
+
+    fn engine_with_hub(json: &str) -> (StenoEngine, &'static OverlayHub) {
+        let mut engine = engine_with_dict(json);
+        let hub: &'static OverlayHub = Box::leak(Box::default());
+        engine.hub = hub;
+        (engine, hub)
+    }
+
+    fn stroke_of(text: &str) -> u32 {
+        Layout::plover().parse_stroke(text).unwrap()
+    }
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // a command, not a format
+    fn the_lookup_stroke_is_a_transparent_line_on_the_tape_and_opens_the_lookup() {
+        let (mut engine, hub) = engine_with_hub(r#"{"PHRUP": "{plover:lookup}", "KAT": "cat"}"#);
+        engine.translate(stroke_of("KAT"), false);
+        engine.translate(stroke_of("PHRUP"), false);
+        assert!(engine.lookup_active());
+        let tape = hub.snapshot().tape;
+        assert_eq!(tape.len(), 2);
+        assert!(!tape[0].transparent);
+        assert!(tape[1].transparent);
+        assert!(tape[1].text.contains("lookup"), "{:?}", tape[1].text);
+        // Nothing was added to the text, and the next word carries on from "cat"
+        engine.close_lookup();
+        engine.translate(stroke_of("KAT"), false);
+        assert_eq!(engine.translator.text(), "cat cat");
+    }
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // a command, not a format
+    fn with_the_classes_off_the_lookup_stroke_is_off_the_tape_as_before() {
+        let (mut engine, hub) = engine_with_hub(r#"{"PHRUP": "{plover:lookup}"}"#);
+        engine.translator.set_stroke_classes(false);
+        engine.translate(stroke_of("PHRUP"), false);
+        assert!(engine.lookup_active());
+        assert!(hub.snapshot().tape.is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // markers, not formats
+    fn a_transparent_stroke_sent_on_its_first_key_up_leaves_the_text_and_spacing_alone() {
+        let (mut engine, hub) = engine_with_hub(
+            r#"{"TKOG": "dog", "KAT": "{:transparent}{:firstup}{plover:focus}"}"#,
+        );
+        engine.translate(stroke_of("TKOG"), false);
+        let [k, a, t] = kat_keys(&engine);
+        let now = Instant::now();
+        for key in [k, a, t] {
+            engine.press(key, now);
+        }
+        // Sent on the first key up, with the others still held; a transparent line, no output
+        assert_eq!(engine.release(t), None);
+        assert_eq!(hub.snapshot().tape.len(), 2);
+        assert!(hub.snapshot().tape[1].transparent);
+        // Tapping a held key again is another transparent stroke
+        engine.press(t, now);
+        assert_eq!(engine.release(t), None);
+        assert_eq!(hub.snapshot().tape.len(), 3);
+        assert_eq!(engine.release(a), None);
+        assert_eq!(engine.release(k), None);
+        engine.translate(stroke_of("TKOG"), false);
+        assert_eq!(engine.translator.text(), "dog dog");
+    }
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // a marker, not a format
+    fn a_transparent_stroke_never_repeats() {
+        let mut engine = engine_with_dict(r#"{"KAT": "{:transparent}"}"#);
+        let keys = kat_keys(&engine);
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        tap(&mut engine, keys, t0, t0 + ms(50));
+        for key in keys {
+            engine.press(key, t0 + ms(150));
+        }
+        assert_eq!(engine.tick(t0 + ms(600)), None);
+        assert!(engine.repeating.is_none() && engine.arming.is_none());
+    }
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // a command, not a format
+    fn keys_typed_into_an_open_lookup_never_reach_the_translator_or_tape() {
+        let (mut engine, hub) = engine_with_hub(r#"{"PHRUP": "{plover:lookup}", "KAT": "cat"}"#);
+        engine.translate(stroke_of("PHRUP"), false);
+        for c in "kat".chars() {
+            engine.lookup_input(LookupKey::Char(c));
+        }
+        assert_eq!(engine.translator.text(), "");
+        assert_eq!(hub.snapshot().tape.len(), 1, "only the lookup stroke itself");
     }
 }
