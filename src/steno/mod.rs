@@ -7,12 +7,14 @@
 //! formats are ports of Plover's own, checked against it (see `tools/plover-golden`).
 
 pub mod action;
+pub mod answer;
 pub mod chord;
 pub mod commands;
 pub mod compose;
 pub mod dict;
 pub mod engine;
 pub mod formatter;
+pub mod interactive;
 pub mod journal;
 pub mod keycombo;
 pub mod layout;
@@ -33,6 +35,7 @@ pub mod source;
 pub mod tape;
 pub mod translate;
 pub mod typing;
+pub mod view;
 
 #[cfg(test)]
 mod lapwing_tests;

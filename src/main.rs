@@ -175,25 +175,43 @@ fn main() -> Result<()> {
                 cli::StenoAction::Theory { theory } => {
                     keymux::steno::setup::run_theory(config_dir, theory.as_deref())?;
                 }
-                cli::StenoAction::Layout => keymux::steno::commands::layout(&config_path)?,
+                cli::StenoAction::Layout => {
+                    keymux::steno::commands::layout(&config_path, config_dir)?;
+                }
+                // `keys` and `lookup` are one command; with no query, both open the
+                // interactive lookup
                 cli::StenoAction::Keys {
-                    text,
+                    text: query,
+                    show_keys,
+                    fast,
+                }
+                | cli::StenoAction::Lookup {
+                    query,
                     show_keys,
                     fast,
                 } => {
-                    keymux::steno::commands::keys(
+                    let query = (!query.is_empty()).then(|| query.join(" "));
+                    keymux::steno::commands::lookup(
                         &config_path,
                         config_dir,
-                        text.as_deref(),
-                        *show_keys,
-                        *fast,
+                        query.as_deref(),
+                        keymux::steno::commands::LookupOptions {
+                            show_keys: *show_keys,
+                            fast: *fast,
+                            stroke_mode: false,
+                        },
                     )?;
                 }
-                cli::StenoAction::Lookup { query } => {
-                    keymux::steno::commands::lookup(&config_path, config_dir, query);
-                }
                 cli::StenoAction::Stroke { stroke } => {
-                    keymux::steno::commands::show_stroke(&config_path, config_dir, stroke)?;
+                    keymux::steno::commands::lookup(
+                        &config_path,
+                        config_dir,
+                        stroke.as_deref(),
+                        keymux::steno::commands::LookupOptions {
+                            stroke_mode: true,
+                            ..Default::default()
+                        },
+                    )?;
                 }
                 cli::StenoAction::Add { stroke, text } => {
                     keymux::steno::commands::add(&config_path, config_dir, stroke, text)?;

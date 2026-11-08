@@ -311,7 +311,7 @@ keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches 
   which has its own copy of the layout, lights it on the stroke that carries it (`+-D`), on the
   top half of `S-` when placed there by `overlay_overrides`. The CLI (`keymux steno lookup`,
   `stroke`, `keys`, `add`) builds the same layout from the config's steno layer
-  (`commands::configured_stroke_layout`); only with no config or no `extra_keys` is it the plain
+  (`answer::EngineSetup::load`); only with no config or no `extra_keys` is it the plain
   `Layout::plover()` (`reverse::classify`/`display` are that default).
 - **Key groups are data.** Which keys one finger plays together (underlined as one on the tape and
   lookup) is `Layout::key_group(slot)`: an optional group id per key, any number of keys per id.
@@ -321,11 +321,11 @@ keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches 
   extra key sitting on a `SplitKey` slot inherits that slot's group unless `key_groups` names it.
   `extra_colors` (extra key's character to `Left`/`Vowel`/`Right`/`Misc`) sets its colour group,
   `Misc` by default. Nothing in `render.rs` names a particular key or theory. The CLI builds its layout from the
-  config too (`commands::configured_stroke_layout`), so it carries the same group data.
+  config too (`answer::EngineSetup::load`, which also applies `key_groups`), so it carries the same group data.
 - **Closing.** Esc/Enter, or leaving the steno layer (the hub clears it on a layer change, and
   the engine on re-entry), so a lookup can never be left eating keys.
 - **Needs the overlay.** The query and results are only drawn there, so without
-  `keymux overlay` running you'd be typing blind. A terminal fallback is `keymux steno keys`.
+  `keymux overlay` running you'd be typing blind. A terminal fallback is `keymux steno lookup` (or `keys`) with no query: the interactive lookup.
 
 ## Risks / open questions
 

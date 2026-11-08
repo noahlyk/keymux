@@ -731,7 +731,8 @@ already has it as `PHRUP` and `PHR*UP`, and you can add your own to any dictiona
   word's first stroke), otherwise with the dictionary's `{^}` entry between them (Plover,
   Lapwing); with neither, only word plus suffix is tried. The fewest strokes win, then the
   fewest keys, then the fewest pieces, up to three pieces. The row reads
-  `everybody's (composed: everybody + 's)`, and `keymux steno lookup` prints the same note. A
+  `everybody's (composed: everybody + 's)`, and `keymux steno lookup` prints a note under the
+  table (`everybody's was not a whole entry - composed (everybody + 's)`). A
   real entry always beats a composition. Without a join key the composed strokes are typed
   through the engine to prove they produce the word. Every piece is an indexed lookup (never a
   scan), so a miss stays instant on a million entries, and a key press cancels it like the
@@ -743,24 +744,92 @@ already has it as `PHRUP` and `PHR*UP`, and you can add your own to any dictiona
   behind. Tab and the arrow keys do nothing in it.
 
 Like any command, the stroke fires on its own, so it can't be the start of a longer outline.
-`keymux steno stroke HRAOUP` shows what a stroke types now, and "has no translation" means
+`keymux steno stroke HRAOUP` shows what a stroke types now, and "(no translation)" means
 it's free. It needs the overlay running to show anything (`keymux overlay`), since that is
-where the query and results appear. `keymux steno keys "word"` does the same lookup from a
-terminal.
+where the query and results appear. `keymux steno lookup` (or `keys`) with no query does the
+same lookup live in a terminal: see [Interactive lookup](#interactive-lookup).
 
 ### Steno commands
 
 | Command | What it does |
 |---|---|
 | `keymux steno theory lapwing` | Install Lapwing (or `plover`) and switch the other off. With no name, show what is installed |
-| `keymux steno layout` | Show every stroke key, the key that presses it, and its sound |
-| `keymux steno keys "candy"` | Show every outline that types a word properly. Words are split on spaces |
-| `keymux steno keys "candy" --fast` | Show only the fewest-stroke outline for each word |
-| `keymux steno keys "candy" --show-keys` | Also show the physical keys that press each stroke |
-| `keymux steno keys` | With no text, an interactive session: type strings one after another |
-| `keymux steno lookup cat` | Show the strokes that type a word (case-sensitive, as the dictionary spells it) |
-| `keymux steno stroke "KPA/TKAOEU"` | Show what a stroke types. Use `/` between strokes of one word |
-| `keymux steno add KAT "cat"` | Add or replace an entry in `00-user.json`, which beats every other dictionary |
+| `keymux steno layout` | Show every stroke key, the key that presses it, and its sound (the layer's own extra keys, such as `+`, too). Takes no query, so there is no interactive form |
+| `keymux steno lookup` | **Interactive lookup**: type a word, phrase or stroke and the answer follows as you type |
+| `keymux steno lookup cat` | Print that answer for `cat`: every outline that types it, best first, then longer words that start with it |
+| `keymux steno lookup "tell me how"` | A phrase: each word's outlines, one after another |
+| `keymux steno lookup KAT/-D` | A stroke (capitals, valid notation) is read forward: what it types, then the entries nearest to it |
+| `keymux steno lookup cat --fast` | Only the fewest-stroke outline of each word |
+| `keymux steno lookup cat --show-keys` | Also show the physical keys that press each stroke |
+| `keymux steno keys …` | Exactly `lookup …`: the same code, flags and output (`keys` is the older name) |
+| `keymux steno stroke` | The interactive lookup with every query read as stroke notation, lowercase allowed |
+| `keymux steno stroke "KPA/TKAOEU"` | Print what a stroke types and the entries nearest to it. Use `/` between strokes of one word |
+| `keymux steno add KAT "cat"` | Add or replace an entry in `00-user.json`, which beats every other dictionary. It writes a file, so it needs both arguments and has no interactive form |
+| `keymux steno tape` | Show what each recent stroke typed. `-f` keeps printing new strokes, `-n N` sets how many lines to start with |
+
+#### Interactive lookup
+
+The same spec is implemented by the lyk-steno-theory generator's `lookup`, with the one
+difference below. Every command that takes a query (`lookup`, `keys`, `stroke`) follows it:
+
+- **No argument opens the interactive session; an argument prints the same answer once.** The
+  bare form needs a terminal on both ends. With input piped in (`echo candy | keymux steno
+  lookup`) it reads one query per line, prints each answer followed by a blank line, and stops at
+  an empty line or the end of the input. A query that is only whitespace prints `Nothing to
+  look up`.
+- **What it resolves.** The *current engine setup*, read from your config the way the daemon
+  does: the steno layer literally named `steno` (else the first steno layer by name), its
+  dictionary chain (`dictionaries`, else the whole `steno` folder) with plugins, its
+  `extra_keys` and the join key a plugin declares, and its `layout` and `layout_overrides` for
+  the keys column. `spaces_after` and `start_capitalized` are ignored (an outline types a word
+  the same either way). A plugin that fails to compile is named in a warning on stderr; the
+  answer is then missing whatever it provides.
+- **The screen.** One line is the prompt (`› ` and your query); under it the answer is redrawn
+  in place after every key, and a dim line of hints closes it. It never switches screens, so
+  what you keep stays in your scrollback, and it never grows past the terminal's height (a line
+  `… N more lines` says what was cut). A burst of keys (a paste, a held Backspace) costs one
+  search.
+- **The answer** is a table, columns as in the generator's `quote` (`word`, then `outline` at
+  least 12 wide, then `keys` when shown), one row per outline, header in lowercase:
+  - A word's rows: its best outline first (the one that types the phrase right), then every other
+    outline that types it properly, fewest strokes first. Only the first row carries the word.
+    Outlines that glue to a neighbouring word (`{be^}`, `{^ing}`) are left out.
+  - A single word of two letters or more is followed by words that start with it, dimmed, each
+    with its best outline.
+  - A word with no entry is **composed** from entries when that takes no more strokes than
+    spelling it, with a note under the table: `everybody's was not a whole entry - composed
+    (everybody + 's)`. Otherwise it is **fingerspelled**: the word is in quotes and a note says
+    so. A word nothing can type shows `no stroke` in red. A real entry always wins.
+  - A stroke query (`KAT/-D`, or anything in `stroke` mode) shows what it types in quotes in the
+    `word` column (`(no translation)` if nothing matches), then the entries nearest to it, dimmed.
+  - Under the table: `keys (best outline of each word): N in S strokes`, the key and stroke
+    totals of each word's first row (completions and nearby entries are not counted).
+- **Colour**, where the terminal has it (`NO_COLOR` and a pipe turn it off): each key of an
+  outline is coloured by part of the keyboard as on the overlay's tape (green left hand, yellow
+  vowels, red right hand, blue `*`, number and extra keys; `extra_colors` picks an extra key's), the
+  `/` between strokes is dim, and keys one finger plays together (`key_groups`: `T K`, `P B`, …)
+  are underlined as one run. Colour never changes the text: the plain notation is identical.
+- **Keys.**
+
+  | Key | Does |
+  |---|---|
+  | any character | adds to the query (lookups are case-sensitive; capitals with no lowercase read as a stroke) |
+  | Backspace, Ctrl-W, Ctrl-U | delete a character, a word, the whole query |
+  | Tab | show or hide the keys column: the physical keys that press each stroke, in the layer's own layout (the join key included) |
+  | Ctrl-F | only the best outline of each word, or all of them |
+  | Enter | leave and keep the last answer on screen |
+  | Esc, Ctrl-C, Ctrl-D | leave and clear the screen it used |
+
+- **Flags**, the same on `lookup` and `keys`: `--show-keys` starts with the keys column shown and
+  `--fast` with only best outlines. `stroke` has neither.
+- **`lookup` and `keys` are one command.** `keys` was the interactive, keys-first tool and
+  `lookup` the one-shot, and they drifted apart; now `keys` is `lookup` under its old name. `stroke`
+  is the same session with every query forced to stroke notation (lowercase is read as capitals),
+  and prints an error for text that is not a stroke. `layout` and `add` have no query to
+  search for and keep their usage.
+- **Difference from the generator's `lookup`.** That one answers for three theories and shows
+  `lyk`, `plover` and `lapwing` columns side by side (and its own `keys (shared vocabulary only…)`
+  totals); keymux has the one engine setup, so there is one `outline` column and one total.
 | `keymux steno tape` | Show what each recent stroke typed. `-f` keeps printing new strokes, `-n N` sets how many lines to start with |
 
 ### On-screen overlay

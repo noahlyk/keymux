@@ -280,11 +280,13 @@ pub enum StenoAction {
     },
     /// Show the built-in QWERTY layout: each steno key, the key that presses it, and its sound
     Layout,
-    /// Show the keys that type a string on the QWERTY layout, e.g. `keymux steno keys "candy"`.
-    /// Leave out the text to type strings one after another in an interactive session.
+    /// The same lookup as `lookup` (they share one code path and print identical results): the
+    /// strokes that type a word or phrase, and the physical keys that press them with
+    /// `--show-keys`, e.g. `keymux steno keys "candy"`. With no text, opens the interactive
+    /// lookup: type, and the answer follows.
     Keys {
-        /// The text to type, split on spaces
-        text: Option<String>,
+        /// The text to type, split on spaces (or a stroke in capitals, to see what it types)
+        text: Vec<String>,
         /// Also show the physical keys that press each stroke
         #[arg(long)]
         show_keys: bool,
@@ -292,21 +294,32 @@ pub enum StenoAction {
         #[arg(long)]
         fast: bool,
     },
-    /// Look a word, phrase, or stroke up, whichever it is: `keymux steno lookup cat` finds the
-    /// stroke, `keymux steno lookup "tell me how"` finds the strokes for the whole phrase (one
-    /// per word unless a phrase entry covers more than one at once), and `keymux steno lookup
-    /// KAT/-D` (all caps, valid notation) finds what that stroke types instead. A word with no
-    /// dictionary entry is fingerspelled and shown in quotes, so you can tell the two apart.
+    /// Look a word, phrase, or stroke up, whichever it is: `keymux steno lookup cat` lists every
+    /// stroke that types it, best first, then longer words that start with it; `keymux steno
+    /// lookup "tell me how"` does each word of a phrase; and `keymux steno lookup KAT/-D` (all
+    /// caps, valid notation) finds what that stroke types instead. A word with no entry is
+    /// composed from entries or fingerspelled, and marked (quotes, or a note). It resolves
+    /// against the steno layer you run: its dictionaries, plugin, extra keys and join key.
+    /// With no query, opens the interactive lookup: type, and the answer follows live.
     Lookup {
         /// The word, phrase, or stroke to look up
-        query: String,
+        query: Vec<String>,
+        /// Also show the physical keys that press each stroke
+        #[arg(long)]
+        show_keys: bool,
+        /// Show only the fastest outline for each word, not every outline
+        #[arg(long)]
+        fast: bool,
     },
-    /// Show what a stroke types, e.g. `KAT` or `KPA/TKAOEU`
+    /// Show what a stroke types, e.g. `KAT` or `KPA/TKAOEU`, and the entries nearest to it.
+    /// With no stroke, opens the interactive lookup in stroke mode: type strokes, and what they
+    /// type follows.
     Stroke {
         /// Stroke in Plover notation; use `/` between strokes of one word
-        stroke: String,
+        stroke: Option<String>,
     },
-    /// Add a translation to your own dictionary (00-user.json), replacing any existing one
+    /// Add a translation to your own dictionary (00-user.json), replacing any existing one.
+    /// Needs both the stroke and the text (it writes a file, so there is no interactive form)
     Add {
         /// Stroke in Plover notation, e.g. `KAT` or `KPA/TKAOEU`
         stroke: String,

@@ -379,6 +379,16 @@ impl Chain {
         }
     }
 
+    /// How many plugins are running in this chain. Fewer than the plugin files there are means
+    /// some did not compile or load, which the chain logs and carries on without.
+    #[must_use]
+    pub fn plugin_count(&self) -> usize {
+        self.steps
+            .iter()
+            .filter(|step| matches!(step, Step::Plugin(_)))
+            .count()
+    }
+
     /// The translation of an exact outline: the first step with an answer, trying each in the
     /// priority order the files were given in. A plugin only ever answers for a single stroke,
     /// or a run of strokes that is really one word a theory's own join key stitched together on

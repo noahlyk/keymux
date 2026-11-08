@@ -544,6 +544,18 @@ impl Layout {
     /// A `-` stands between the left hand and the right when no vowel or star does.
     #[must_use]
     pub fn render_stroke(&self, bits: u32) -> String {
+        self.render_stroke_parts(bits)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect()
+    }
+
+    /// [`Self::render_stroke`] in pieces: each character of the notation with the stroke key it
+    /// stands for (`None` for the `-` that only marks where the hands part), in reading order.
+    /// Joined, the texts are exactly the rendered stroke, so a caller colouring keys can never
+    /// disagree with the plain notation.
+    #[must_use]
+    pub fn render_stroke_parts(&self, bits: u32) -> Vec<(String, Option<usize>)> {
         let flat = self.flat();
         let number_slot = self.number_slot();
         let left_end = self.left_end();
@@ -554,19 +566,19 @@ impl Layout {
         let key = |slot: usize| {
             if digits {
                 if let Some(&(_, digit)) = self.number_keys.iter().find(|(s, _)| *s == slot) {
-                    return digit;
+                    return (digit.to_string(), Some(slot));
                 }
             }
-            flat[slot].char
+            (flat[slot].char.to_string(), Some(slot))
         };
-        let mut out = String::new();
+        let mut out = Vec::new();
         for (i, k) in self.extra.iter().enumerate() {
             if down(self.extra_start() + i) {
-                out.push(k.char);
+                out.push((k.char.to_string(), Some(self.extra_start() + i)));
             }
         }
         if number && !digits {
-            out.push(self.number.char);
+            out.push((self.number.char.to_string(), Some(number_slot)));
         }
         out.extend((0..left_end).filter(|&slot| down(slot)).map(key));
         // With no vowel or star in between, right-hand letters would read as left-hand ones,
@@ -574,7 +586,7 @@ impl Layout {
         let middle = (left_end..right_start).any(down);
         let right = (right_start..number_slot).any(down);
         if !middle && right {
-            out.push('-');
+            out.push(("-".to_string(), None));
         }
         out.extend((left_end..number_slot).filter(|&slot| down(slot)).map(key));
         out
