@@ -365,6 +365,23 @@ keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches 
   (`is_command`, one `||`), `engine.rs` (`run_command` arm and `run_overlay_control`),
   `render.rs` (`draw` now calls `draw_view`).
 
+## 8. Undo at a barrier and `{:undo_or:KEYS}` [done, tested]
+
+- `undo_stops_at_barrier` (steno layer setting) now defaults to true: `*` stops at the last barrier
+  (`Translator::take_back`). Blocked, it behaves as undo with nothing to take back: the barrier
+  is used up, the history before it is forgotten, and the default fallback (Control+BackSpace)
+  is sent. `false` is Plover's behaviour; `plover_tests.rs` and the Lapwing chapter 26 test set
+  it false (and the stroke classes off) so they keep checking Plover parity.
+- `{:undo_or:KEYS}` is a history macro (`HISTORY_MACROS`, `Translator::macro_undo_or`): `take_back`
+  and, if nothing was taken back, the key combination `KEYS` through the same path as the word
+  delete fallback. `{:undo_or_ctrl+backspace}` and `{:undo_or:ctrl+backspace}` are shorthands
+  (`undo_or_combo`). Redo survives an undo, the fallback empties it. Grammar and examples: README,
+  steno layers.
+- **Shared spots with other work** (for a rebase): `translate.rs` (`HISTORY_MACROS`,
+  `mapping_to_macro`, `translate_stroke`'s `keeps_redo`, `translate_macro` arm, new
+  `macro_undo_or` and `undo_or_combo`, the default in `with_history`, tests), `engine.rs` (one
+  test config literal), `config.rs` (the default).
+
 ## Risks / open questions
 
 - Clicks falling through the overlay: the empty input region is set, and niri reports

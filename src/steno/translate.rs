@@ -180,7 +180,39 @@ impl StenoOutput {
 
 /// The macros keymux adds to Plover's, which work on the history as a whole: undo some or a
 /// word, redo, say it again, swap the last two.
-const HISTORY_MACROS: [&str; 5] = ["undo", "undo_word", "redo", "again", "swap"];
+const HISTORY_MACROS: [&str; 6] = ["undo", "undo_word", "undo_or", "redo", "again", "swap"];
+
+/// The key combination `{:undo_or:...}` falls back to, in Plover's key-name syntax. The
+/// canonical form is `Control_L(BackSpace)`; `ctrl+backspace` style (names joined by `+`,
+/// the last one pressed while the others are held) is accepted as a shorthand, with `ctrl`,
+/// `shift`, `alt` and `super` standing for their left-hand keys.
+fn undo_or_combo(argument: &str) -> String {
+    let argument = argument.trim();
+    if !argument.contains('+') || argument.contains(['(', ' ']) || argument == "+" {
+        return argument.to_string();
+    }
+    let names: Vec<String> = argument
+        .split('+')
+        .map(|name| match name.trim().to_lowercase().as_str() {
+            "ctrl" | "control" => "Control_L".to_string(),
+            "shift" => "Shift_L".to_string(),
+            "alt" => "Alt_L".to_string(),
+            "super" | "win" | "meta" => "Super_L".to_string(),
+            other => other.to_string(),
+        })
+        .collect();
+    let Some((last, held)) = names.split_last() else {
+        return String::new();
+    };
+    let mut combo = String::new();
+    for name in held {
+        combo.push_str(name);
+        combo.push('(');
+    }
+    combo.push_str(last);
+    combo.push_str(&")".repeat(held.len()));
+    combo
+}
 
 /// Whether a dictionary entry makes a transparent stroke: it carries `{:transparent}`, it is an
 /// overlay control (`{:overlay:toggle}`, ...), or it is
@@ -284,6 +316,11 @@ fn mapping_to_macro(mapping: Option<&str>, stroke: u32) -> Option<Macro> {
         .and_then(|rest| rest.strip_suffix('}'))
     {
         let (name, cmdline) = inner.split_once(':').unwrap_or((inner, ""));
+        // `{:undo_or_ctrl+backspace}`: the combination written into the name
+        let (name, cmdline) = match name.strip_prefix("undo_or_") {
+            Some(combo) if cmdline.is_empty() => ("undo_or", combo),
+            _ => (name, cmdline),
+        };
         if HISTORY_MACROS.contains(&name) {
             return Some(Macro {
                 name: name.to_string(),
@@ -379,7 +416,7 @@ impl Translator {
             unmatched: false,
             transparent: false,
             classes_enabled: true,
-            undo_stops_at_barrier: false,
+            undo_stops_at_barrier: true,
         }
     }
 
@@ -612,7 +649,8 @@ impl Translator {
             // to wipe out what undo left behind to redo: `self.hist.to_do` is always 0 on entry
             // (the previous flush reset it), so it being nonzero afterwards is exactly whether
             // this macro appended anything new.
-            let keeps_redo = matches!(found.name.as_str(), "undo" | "undo_word" | "redo");
+            let keeps_redo =
+                matches!(found.name.as_str(), "undo" | "undo_word" | "undo_or" | "redo");
             self.translate_macro(&found, ops);
             if !keeps_redo && self.hist.to_do > 0 {
                 self.hist.redo.clear();
@@ -674,6 +712,7 @@ impl Translator {
                 self.macro_undo(found.stroke, count, ops);
             }
             "undo_word" => self.macro_undo_word(found.stroke, ops),
+            "undo_or" => self.macro_undo_or(found.stroke, &found.cmdline, ops),
             "redo" => self.macro_redo(Self::repeat_count(&found.cmdline).max(1)),
             "again" => self.macro_again(),
             "swap" => self.macro_swap(),
@@ -787,6 +826,24 @@ impl Translator {
         if !found {
             self.undo_fallback(stroke, ops);
         }
+    }
+
+    /// Undo, or if it can't (nothing to take back, or a barrier is in the way), send the key
+    /// combination `cmdline` instead; with none given, the key combination plain undo falls
+    /// back to. Taking back keeps the redo history, the key combination is new input and
+    /// empties it. The combination is not kept in the history, as with plain undo's fallback.
+    fn macro_undo_or(&mut self, stroke: u32, cmdline: &str, ops: &mut Vec<Op>) {
+        if self.take_back(|_| true) {
+            return;
+        }
+        self.hist.redo.clear();
+        let combo = undo_or_combo(cmdline);
+        if combo.is_empty() {
+            self.undo_fallback(stroke, ops);
+            return;
+        }
+        let extra = Translation::new(vec![stroke], Some(format!("{{#{combo}}}{{^}}")));
+        ops.extend(self.flush(Some(extra)));
     }
 
     /// Undo a whole word: back to the translation that started it, so a stem and the suffixes
@@ -2275,31 +2332,162 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         assert_eq!(run(&mut t, &["*"]).trim(), "cat");
     }
 
+    #[allow(clippy::literal_string_with_formatting_args)] // markers, not formats
+    const UNDO_OR_JSON: &str = r#"{
+        "KAT": "cat", "TKOG": "dog", "PHRUP": "{plover:lookup}", "STKPW": "{:transparent}{plover:focus}",
+        "HR-L": "{#Left}", "PWA*RG": "{:barrier}", "TKEL": "{#Control_L(BackSpace)}",
+        "*U": "{:undo_or:Control_L(a)}", "*E": "{:undo_or:ctrl+backspace}",
+        "*EU": "{:undo_or_ctrl+backspace}", "*P": "{:undo_or}", "*": "=undo", "R-R": "{:redo}"
+    }"#;
+
+    /// The keys of one stroke, for comparing which combination was sent.
+    fn keys_of(t: &mut Translator, text: &str) -> Vec<(KeyCode, bool)> {
+        t.stroke(joined_stroke(text))
+            .map(StenoOutput::into_ops)
+            .unwrap_or_default()
+            .into_iter()
+            .find_map(|op| match op {
+                OutputOp::Keys(keys) => Some(keys),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    fn word_delete_keys() -> Vec<(KeyCode, bool)> {
+        vec![
+            (KeyCode::KC_LCTL, true),
+            (KeyCode::KC_BSPC, true),
+            (KeyCode::KC_BSPC, false),
+            (KeyCode::KC_LCTL, false),
+        ]
+    }
+
     #[test]
-    fn undo_stops_at_a_barrier() {
-        let mut t = class_translator(CLASS_JSON, "undo-barrier");
-        t.set_undo_stops_at_barrier(true);
-        run(&mut t, &["KAT", "HR-L", "TKOG"]);
-        // The word after the cursor key goes
-        run(&mut t, &["*"]);
-        assert_eq!(t.text(), "cat");
-        // The next undo reaches the barrier and goes no further: it deletes a word with the
-        // keys that do it, and what was before the barrier is forgotten
-        let out = t.stroke(UNDO_STROKE);
-        assert_eq!(
-            out.map(StenoOutput::into_ops).unwrap_or_default().len(),
-            1,
-            "a word delete"
-        );
+    fn undo_stops_at_a_barrier_by_default() {
+        for (name, barrier) in [("arrow", "HR-L"), ("word", "TKEL"), ("marked", "PWA*RG")] {
+            let mut t = class_translator(UNDO_OR_JSON, &format!("undo-barrier-{name}"));
+            run(&mut t, &["KAT", barrier, "TKOG"]);
+            // The word after the barrier goes
+            run(&mut t, &["*"]);
+            assert_eq!(t.text(), "cat", "{name}");
+            // The next undo meets the barrier and goes no further: it does what undo does with
+            // nothing to take back (deletes a word with the keys that do it), the barrier is
+            // used up and what was before it is forgotten, so "cat" is never taken back
+            let keys = keys_of(&mut t, "*");
+            assert_eq!(keys, word_delete_keys(), "{name}");
+            assert_eq!(history_len(&t), 0, "{name}");
+        }
+    }
+
+    #[test]
+    fn undo_right_after_a_barrier_is_blocked_too() {
+        let mut t = class_translator(UNDO_OR_JSON, "undo-barrier-direct");
+        run(&mut t, &["KAT", "HR-L"]);
+        assert_eq!(keys_of(&mut t, "*"), word_delete_keys());
         assert_eq!(history_len(&t), 0);
     }
 
     #[test]
-    fn undo_reaches_back_past_a_barrier_by_default_as_plover_does() {
-        let mut t = class_translator(CLASS_JSON, "undo-barrier-default");
+    fn undo_reaches_back_past_a_barrier_when_the_setting_is_off_as_plover_does() {
+        for barrier in ["HR-L", "TKEL", "PWA*RG"] {
+            let mut t = class_translator(UNDO_OR_JSON, "undo-barrier-off");
+            t.set_undo_stops_at_barrier(false);
+            run(&mut t, &["KAT", barrier, "TKOG"]);
+            run(&mut t, &["*"]);
+            assert_eq!(run(&mut t, &["*"]), "", "{barrier}");
+        }
+    }
+
+    #[test]
+    fn undo_or_undoes_when_it_can() {
+        for key in ["*U", "*E", "*EU", "*P"] {
+            let mut t = class_translator(UNDO_OR_JSON, "undo-or-can");
+            run(&mut t, &["KAT", "TKOG"]);
+            assert_eq!(run(&mut t, &[key]), "cat", "{key}");
+            assert_eq!(history_len(&t), 1, "{key}");
+            // Taking back keeps what redo can put back
+            assert_eq!(run(&mut t, &["R-R"]), "cat dog", "{key}");
+        }
+    }
+
+    #[test]
+    fn undo_or_sends_its_combination_when_blocked_by_a_barrier() {
+        let mut t = class_translator(UNDO_OR_JSON, "undo-or-blocked");
         run(&mut t, &["KAT", "HR-L", "TKOG"]);
-        run(&mut t, &["*"]);
-        assert_eq!(run(&mut t, &["*"]), "");
+        run(&mut t, &["*U"]);
+        assert_eq!(t.text(), "cat", "the word after the barrier is undone");
+        // Blocked now: the canonical form sends Control+a, not the word delete
+        assert_eq!(
+            keys_of(&mut t, "*U"),
+            vec![
+                (KeyCode::KC_LCTL, true),
+                (KeyCode::KC_A, true),
+                (KeyCode::KC_A, false),
+                (KeyCode::KC_LCTL, false),
+            ]
+        );
+        assert_eq!(history_len(&t), 0, "the barrier is used up");
+        // Each spelling of Control+BackSpace is what plain undo falls back to
+        for (key, name) in [("*E", "plus"), ("*EU", "name"), ("*P", "empty")] {
+            let mut t = class_translator(UNDO_OR_JSON, &format!("undo-or-blocked-{name}"));
+            run(&mut t, &["KAT", "TKEL"]);
+            assert_eq!(keys_of(&mut t, key), word_delete_keys(), "{key}");
+        }
+    }
+
+    #[test]
+    fn undo_or_blocked_empties_redo_but_undoing_keeps_it() {
+        let mut t = class_translator(UNDO_OR_JSON, "undo-or-redo");
+        run(&mut t, &["KAT", "HR-L", "TKOG", "*U"]);
+        // Blocked: the combination is new input, so what was undone cannot come back
+        keys_of(&mut t, "*U");
+        assert_eq!(run(&mut t, &["R-R"]), "cat");
+    }
+
+    #[test]
+    fn undo_or_with_nothing_to_undo_sends_its_combination() {
+        let mut t = class_translator(UNDO_OR_JSON, "undo-or-empty");
+        assert_eq!(keys_of(&mut t, "*E"), word_delete_keys());
+        // Again and again: it stays a key press each time
+        assert_eq!(keys_of(&mut t, "*E"), word_delete_keys());
+        assert_eq!(history_len(&t), 0);
+    }
+
+    #[test]
+    fn undo_or_repeated_undoes_each_word_then_sends_the_combination() {
+        let mut t = class_translator(UNDO_OR_JSON, "undo-or-repeat");
+        run(&mut t, &["KAT", "TKOG"]);
+        assert_eq!(run(&mut t, &["*E"]), "cat");
+        assert_eq!(run(&mut t, &["*E"]), "");
+        assert_eq!(keys_of(&mut t, "*E"), word_delete_keys());
+    }
+
+    #[test]
+    fn undo_or_skips_transparent_strokes_like_undo() {
+        let mut t = class_translator(UNDO_OR_JSON, "undo-or-transparent");
+        run(&mut t, &["KAT", "TKOG", "PHRUP", "STKPW"]);
+        assert_eq!(run(&mut t, &["*E"]), "cat", "the transparent strokes are not in the way");
+        let mut t = class_translator(UNDO_OR_JSON, "undo-or-transparent-blocked");
+        run(&mut t, &["KAT", "HR-L", "PHRUP", "STKPW"]);
+        assert_eq!(keys_of(&mut t, "*E"), word_delete_keys(), "and do not hide a barrier");
+    }
+
+    #[test]
+    fn undo_or_off_reaches_past_a_barrier_before_falling_back() {
+        let mut t = class_translator(UNDO_OR_JSON, "undo-or-off");
+        t.set_undo_stops_at_barrier(false);
+        run(&mut t, &["KAT", "HR-L"]);
+        assert_eq!(run(&mut t, &["*E"]), "");
+        assert_eq!(keys_of(&mut t, "*E"), word_delete_keys());
+    }
+
+    #[test]
+    fn undo_or_combination_shorthand() {
+        assert_eq!(undo_or_combo("ctrl+backspace"), "Control_L(backspace)");
+        assert_eq!(undo_or_combo("Ctrl+Shift+z"), "Control_L(Shift_L(z))");
+        assert_eq!(undo_or_combo("Control_L(BackSpace)"), "Control_L(BackSpace)");
+        assert_eq!(undo_or_combo("Left"), "Left");
+        assert_eq!(undo_or_combo(""), "");
     }
 
     #[test]

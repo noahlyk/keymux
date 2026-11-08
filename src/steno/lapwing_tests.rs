@@ -343,6 +343,9 @@ fn ch26_undo_after_movement_goes_on_to_the_word_before_it() {
     let mut dict = Dictionary::default();
     dict.merge_json(CH26, &Layout::plover()).unwrap();
     let mut translator = Translator::new(dict);
+    // Plover parity: keymux's default is that `*` stops at a movement (`undo_stops_at_barrier`),
+    // which Lapwing's chapter 26 predates; this test checks the Plover behaviour, so it is off
+    translator.set_undo_stops_at_barrier(false);
     translator.stroke(Layout::plover().parse_stroke("KAT").unwrap());
     translator.stroke(Layout::plover().parse_stroke("#TPH-R").unwrap());
     // As in Plover, undo skips a translation that typed nothing, and takes back the one before

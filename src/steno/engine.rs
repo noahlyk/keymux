@@ -912,7 +912,7 @@ mod tests {
             disable_repeat: false,
             disable_first_up: false,
             disable_transparent: false,
-            undo_stops_at_barrier: false,
+            undo_stops_at_barrier: true,
             fresh_on_enter: false,
             disable_typing_history: false,
             typing_layout: "us".to_string(),

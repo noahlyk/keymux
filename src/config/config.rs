@@ -364,8 +364,8 @@ pub struct StenoConfig {
     /// Make `*` stop at a barrier (a cursor key or other entry that moved the cursor or edited
     /// earlier text) instead of reaching back past it to the word before, as Plover does: what
     /// is before a barrier is no longer next to the cursor, so taking it back deletes the wrong
-    /// text. Off by default, which keeps Plover's behaviour.
-    #[serde(default)]
+    /// text. On by default; set it to false for Plover's behaviour.
+    #[serde(default = "default_true")]
     pub undo_stops_at_barrier: bool,
     /// Entering this layer starts a fresh sentence: the first word has no space in front and
     /// nothing before it can be undone. Off by default, so steno carries on from whatever was

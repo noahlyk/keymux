@@ -76,6 +76,9 @@ fn every_reference_case_types_what_plover_types() {
         // Plover has no transparent strokes (its lookup stroke is an ordinary one, so an outline
         // may run through it): the oracle is compared with keymux's stroke classes off
         translator.set_stroke_classes(false);
+        // And `*` reaching back past a cursor move, which Plover does and keymux's default
+        // (`undo_stops_at_barrier`) does not
+        translator.set_undo_stops_at_barrier(false);
         let strokes = case["strokes"].as_array().unwrap();
         for (step, stroke_text) in strokes.iter().enumerate() {
             let ops = translator.stroke_ops(stroke(stroke_text.as_str().unwrap()));
@@ -133,6 +136,9 @@ fn plovers_own_dictionaries_type_what_plover_types() {
     let mut failures = Vec::new();
     for (n, case) in cases.iter().enumerate() {
         let mut translator = Translator::with_shared(Arc::clone(&dict), options(&case["config"]));
+        // Plover parity: no stroke classes, and `*` reaches back past a cursor move as in Plover
+        translator.set_stroke_classes(false);
+        translator.set_undo_stops_at_barrier(false);
         let strokes = case["strokes"].as_array().unwrap();
         for (step, stroke_text) in strokes.iter().enumerate() {
             let ops = translator.stroke_ops(stroke(stroke_text.as_str().unwrap()));

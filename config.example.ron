@@ -380,6 +380,13 @@
                 // A stroke is completed after this long, even if a key is still held down.
                 // Normally strokes complete on release, so this is only a safety net.
                 stroke_timeout_ms: 1000,
+                // `*` stops at a barrier (a cursor key, a Backspace/Delete word operation,
+                // `{:back}`, `{:barrier}`): it does not reach past it to delete text that is
+                // no longer at the cursor, and does what undo does with nothing to undo instead
+                // (deletes a word). true is the default; false is Plover's behaviour.
+                // A dictionary entry `{:undo_or:ctrl+backspace}` is undo with a fallback key
+                // combination of your own (`{:undo_or:Control_L(BackSpace)}` is the same).
+                undo_stops_at_barrier: true,
             )),
             // Non-stroke keys listed here still work while steno is active,
             // e.g. KC_ESC: TO("base") to leave. Anything else is swallowed.
