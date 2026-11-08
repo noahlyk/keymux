@@ -446,6 +446,31 @@ pub extern "C" fn joins(bits: i64) -> i32 { i32::from(bits & (1 << 23) != 0) }
     }
 
     #[test]
+    fn a_config_join_key_is_the_glue_with_no_plugin_and_matches_a_plugins() {
+        let dir =
+            std::env::temp_dir().join(format!("keymux-compose-joinkey-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dict_path = dir.join("01-dict.json");
+        std::fs::write(&dict_path, DICT).unwrap();
+        let layout = Layout::plover_with_joins(&['+'], &['+']).unwrap();
+        let chain = Chain::load_cached(&[dict_path], &dir.join("cache"), &layout);
+        assert_eq!(chain.plugin_count(), 0);
+        let t = Translator::with_shared(
+            Arc::new(chain),
+            Options {
+                start_attached: true,
+                ..Options::default()
+            },
+        );
+        assert_eq!(glue_for(&t), Glue::JoinBit(1 << 23));
+        let found = compose_in(&t, "nomy").unwrap();
+        assert_eq!(found.strokes, vec![s("TPHO"), s("PHAOEU") | (1 << 23)]);
+        assert!(found.joined);
+        // without join_keys the join bit is not offered
+        assert_ne!(glue_for(&translator(DICT)), Glue::JoinBit(1 << 23));
+    }
+
+    #[test]
     fn composing_stays_fast_over_a_large_dictionary() {
         // A miss pays for this on every key press of the live lookup: every substring is an
         // indexed probe, never a scan. 150k entries by default; KEYMUX_COMPOSE_ENTRIES=1000000

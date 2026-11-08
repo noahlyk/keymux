@@ -75,6 +75,9 @@ pub struct Layout {
     /// An explicit group for each extra key, in `extra` order. `None` leaves it to the slot it
     /// is drawn over, if any (the overlay decides that; the layout cannot know where it is drawn).
     extra_groups: Vec<Option<u32>>,
+    /// The stroke bits of the extra keys the layer declares as join keys (`join_keys`): a stroke
+    /// with any of them down is a continuation stroke. 0 declares none.
+    join_mask: u32,
 }
 
 impl Layout {
@@ -152,6 +155,7 @@ impl Layout {
             ]
             .to_vec(),
             extra_groups: Vec::new(),
+            join_mask: 0,
         }
     }
 
@@ -175,6 +179,42 @@ impl Layout {
         } else {
             Err(errors)
         }
+    }
+
+    /// [`Self::plover_with`], plus the layer's `join_keys`: each must be one of `extra_keys`,
+    /// and a stroke with any of them down is then a continuation stroke (see
+    /// [`Self::join_mask`]). Empty `join_keys` behaves exactly like [`Self::plover_with`].
+    ///
+    /// # Errors
+    /// One message per problem found, including every join key that is not an extra key.
+    pub fn plover_with_joins(extra_keys: &[char], join_keys: &[char]) -> Result<Self, Vec<String>> {
+        let mut layout = Self::plover_with(extra_keys);
+        let mut errors = Vec::new();
+        if let Ok(built) = &mut layout {
+            for &ch in join_keys {
+                match built.extra.iter().position(|k| k.char == ch) {
+                    Some(i) => built.join_mask |= 1 << (built.extra_start() + i),
+                    None => errors.push(format!(
+                        "join_keys: {ch:?} is not one of the layer's extra_keys, so no stroke can have it"
+                    )),
+                }
+            }
+        }
+        match layout {
+            Ok(built) if errors.is_empty() => Ok(built),
+            Ok(_) => Err(errors),
+            Err(mut earlier) => {
+                earlier.append(&mut errors);
+                Err(earlier)
+            }
+        }
+    }
+
+    /// The stroke bits that make a stroke a continuation of the word before it, as the layer
+    /// declared them with `join_keys`. 0 when it declared none.
+    #[must_use]
+    pub const fn join_mask(&self) -> u32 {
+        self.join_mask
     }
 
     /// Build a layout from its pieces, validating that no key's character collides with
@@ -255,6 +295,7 @@ impl Layout {
             groups: vec![None; flat_len],
             extra_groups: vec![None; extra.len()],
             extra,
+            join_mask: 0,
         })
     }
 

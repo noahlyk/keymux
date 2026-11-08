@@ -98,6 +98,10 @@ word of its own. A plugin that has no use for this leaves it out entirely; a str
 never treated as a continuation by anything in keymux. `orthographic-fallback.rs` includes a
 working example - see its own comment for the bit it assumes.
 
+A plugin is no longer needed for this: the steno layer can declare the join key in its config
+(`extra_keys: ['+'], join_keys: ['+']`, see the README's steno Config section). If both are
+present, they are unioned: a stroke continues the word if either says so.
+
 ## Where things are cached
 
 A compiled plugin lives under the same cache root a dictionary's own binary copy is kept (see

@@ -288,6 +288,7 @@ const fn default_layer_priority() -> u32 {
 }
 
 /// What a layer does with the keys pressed while it's active.
+#[allow(clippy::large_enum_variant)] // one config value per layer, built once at load; boxing would ripple through every match
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LayerKind {
     /// Remap keys; anything unmapped falls through to the layers below.
@@ -310,6 +311,13 @@ pub struct StenoConfig {
     /// has it.
     #[serde(default)]
     pub extra_keys: Vec<char>,
+    /// Which of the `extra_keys` is a join key, e.g. `['+']`: a stroke with any of them down is
+    /// a continuation stroke, looked up only glued onto the strokes before it (`THAS/+EUFG`),
+    /// never as a fresh word start. Each must be listed in `extra_keys`. Empty (the default)
+    /// declares none; a dictionary plugin's own `joins` export, if it has one, is unioned with
+    /// this.
+    #[serde(default)]
+    pub join_keys: Vec<char>,
     /// Per-key changes to the preset, e.g. `{ "S-": Key(KC_Q) }`.
     #[serde(default)]
     pub layout_overrides: HashMap<String, KeyAction>,
@@ -1582,7 +1590,7 @@ impl Config {
                     || format!("steno layer \"{}\"", layer.0),
                     |id| format!("steno layer \"{}\" (keyboard \"{id}\")", layer.0),
                 );
-                let key_map = Layout::plover_with(&steno.extra_keys).and_then(|layout| {
+                let key_map = Layout::plover_with_joins(&steno.extra_keys, &steno.join_keys).and_then(|layout| {
                     preset(&steno.layout)
                         .map_err(|e| vec![e])
                         .and_then(|preset| layout.build_key_map(&preset, &steno.layout_overrides))
@@ -1777,6 +1785,24 @@ mod tests {
         // The daemon's reload sees the same thing the CLI shows
         let silent = config.validate_silent().unwrap_err().to_string();
         assert!(silent.contains(error.as_str()), "{silent}");
+    }
+
+    #[test]
+    fn a_join_key_that_is_not_an_extra_key_is_reported_by_check() {
+        let bad = parse(
+            r#"(layers: { "steno": (kind: Steno((extra_keys: ['+'], join_keys: ['~']))) })"#,
+        );
+        let report = bad.validate(None);
+        let errors: Vec<&str> = report.errors().collect();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("steno layer \"steno\"") && errors[0].contains("join_keys"),
+            "{errors:?}"
+        );
+        let good = parse(
+            r#"(layers: { "steno": (kind: Steno((extra_keys: ['+'], join_keys: ['+']))) })"#,
+        );
+        assert!(good.validate(None).is_ok());
     }
 
     #[test]

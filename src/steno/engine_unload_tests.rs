@@ -47,6 +47,7 @@ impl Rig {
         StenoConfig {
             layout: "qwerty".to_string(),
             extra_keys: Vec::new(),
+            join_keys: Vec::new(),
             layout_overrides: HashMap::new(),
             dictionaries: vec![self.dict_dir.to_string_lossy().into_owned()],
             stroke_timeout_ms: 5000,

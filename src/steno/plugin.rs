@@ -415,13 +415,14 @@ impl Chain {
         None
     }
 
-    /// Whether `bits` (one stroke) continues the word before it, in any plugin's own judgement -
-    /// a theory's own notion of a join key, if it gave one through [`Plugin::joins`]. `false` if
-    /// no plugin in the chain says so, including when there are no plugins at all: nothing here
-    /// is a built-in notion of what any particular key means.
+    /// Whether `bits` (one stroke) continues the word before it: it has one of the layer's
+    /// declared `join_keys` down, or any plugin says so through [`Plugin::joins`] (the two are
+    /// unioned). `false` if neither does, including when there are no plugins and no
+    /// `join_keys`: nothing here is a built-in notion of what any particular key means.
     #[must_use]
     pub fn joins(&self, bits: u32) -> bool {
-        self.steps.iter().any(|step| match step {
+        bits & self.layout.join_mask() != 0
+            || self.steps.iter().any(|step| match step {
             Step::Plugin(plugin) => lock(plugin).joins(bits),
             Step::Dict(_) => false,
         })
@@ -688,6 +689,37 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
             chain.lookup(&[kat, top]),
             None,
             "two unrelated strokes together must not reach the plugin, however short"
+        );
+    }
+
+    #[test]
+    fn config_join_keys_and_a_plugins_joins_are_unioned() {
+        let dir = tmp_dir().join("config_join_keys_and_a_plugins_joins_are_unioned");
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("doubler.rs");
+        fs::write(&source, DOUBLER_WITH_JOIN).unwrap();
+        // '~' is bit 23 (the plugin's join bit); '+' is bit 24, declared in config only
+        let layout = Layout::plover_with_joins(&['~', '+'], &['+']).unwrap();
+        let chain = Chain::load_cached(&[source], &dir.join("cache"), &layout);
+        assert_eq!(chain.plugin_count(), 1);
+        assert!(chain.joins(1 << 23), "the plugin's");
+        assert!(chain.joins(1 << 24), "the config's");
+        assert!(chain.joins((1 << 24) | 1), "any stroke with the key down");
+        assert!(!chain.joins(1), "neither");
+    }
+
+    #[test]
+    fn join_keys_must_be_extra_keys() {
+        let errors = Layout::plover_with_joins(&['+'], &['~', '+']).unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("'~'") && errors[0].contains("extra_keys"),
+            "{errors:?}"
+        );
+        assert!(Layout::plover_with_joins(&[], &['+']).is_err());
+        assert_eq!(
+            Layout::plover_with_joins(&['+'], &[]).unwrap(),
+            Layout::plover_with(&['+']).unwrap()
         );
     }
 

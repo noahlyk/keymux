@@ -669,12 +669,10 @@ impl Translator {
             // The longest outline ending in this stroke, two strokes or more (the stroke alone
             // is already looked up)
             .longest_match(window, &outlines, 2, &[])
-            // The stroke alone, if it is mapped
-            .or_else(|| {
-                (!joined)
-                    .then(|| mapping.map(|m| Translation::new(vec![stroke], Some(m))))
-                    .flatten()
-            })
+            // The stroke alone, if it is mapped. A continuation stroke gets here only when no
+            // joined outline matched, so its own entry (a suffix `{^ed}`, say) attaches to the
+            // previous output through the formatter.
+            .or_else(|| mapping.map(|m| Translation::new(vec![stroke], Some(m))))
             // No direct match: the same outlines with a suffix key folded off the stroke, as
             // Plover tries them only after every plain outline failed (a plugin at its own
             // place in the chain already had its chance, in `mapping` and in each attempt)
@@ -2216,6 +2214,84 @@ pub extern "C" fn joins(bits: i64) -> i32 {
                 ..Options::default()
             },
         )
+    }
+
+    /// A translator over `json` with NO plugin: the join key comes from the layout's
+    /// `join_keys` (an empty list declares none).
+    fn config_join_translator(json: &str, name: &str, join_keys: &[char]) -> Translator {
+        let dir = std::env::temp_dir().join(format!(
+            "keymux-translate-joinkey-test-{}-{name}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let layout = Layout::plover_with_joins(&['+'], join_keys).unwrap();
+        let dict_path = dir.join("01-dict.json");
+        fs::write(&dict_path, json).unwrap();
+        let chain = Chain::load_cached(&[dict_path], &dir.join("cache"), &layout);
+        assert_eq!(chain.plugin_count(), 0);
+        Translator::with_shared(
+            Arc::new(chain),
+            Options {
+                start_attached: true,
+                ..Options::default()
+            },
+        )
+    }
+
+    #[test]
+    fn a_config_join_key_joins_exactly_as_a_plugins_join_bit_does() {
+        for (i, strokes) in [
+            vec!["THAS", "+EUFG"],
+            vec!["THAS", "PHRUP", "+EUFG"],
+            vec!["THAS", "STKPW", "+EUFG"],
+            vec!["THAS", "+EUFG", "*"],
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut with_plugin = class_translator(CLASS_JSON, &format!("eq-plugin-{i}"));
+            let mut with_config =
+                config_join_translator(CLASS_JSON, &format!("eq-config-{i}"), &['+']);
+            assert_eq!(
+                run(&mut with_config, strokes),
+                run(&mut with_plugin, strokes),
+                "{strokes:?}"
+            );
+            assert_eq!(
+                history_len(&with_config),
+                history_len(&with_plugin),
+                "{strokes:?}"
+            );
+        }
+        let mut t = config_join_translator(CLASS_JSON, "eq-plain", &['+']);
+        assert_eq!(run(&mut t, &["THAS", "+EUFG"]), "thanksgiving");
+        let mut t = config_join_translator(CLASS_JSON, "eq-transparent", &['+']);
+        assert_eq!(
+            run(&mut t, &["THAS", "PHRUP", "STKPW", "+EUFG"]),
+            "thanksgiving"
+        );
+    }
+
+    #[test]
+    fn a_layer_without_join_keys_and_without_a_plugin_has_no_joins() {
+        let t = config_join_translator(CLASS_JSON, "none-declared", &[]);
+        assert!(!t.joins(joined_stroke("+EUFG")));
+        // A continuation stroke with no joined outline falls back to its own entry, so a
+        // suffix entry attaches with just its stroke - with or without the key declared
+        let suffix = r#"{"KAT": "cat", "+-D": "{^ed}", "THAS": "thanks", "THAS/+-D": "thanked", "PHRUP": "{plover:lookup}"}"#;
+        for (name, keys) in [("suffix-none", &[][..]), ("suffix-decl", &['+'][..])] {
+            let mut t = config_join_translator(suffix, name, keys);
+            assert_eq!(run(&mut t, &["KAT", "+-D"]), "catted", "{name}");
+        }
+        // a longer joined outline beats the standalone entry, transparent strokes in between
+        let mut t = config_join_translator(suffix, "suffix-longer", &['+']);
+        assert_eq!(run(&mut t, &["THAS", "+-D"]), "thanked");
+        let mut t = config_join_translator(suffix, "suffix-mid", &['+']);
+        assert_eq!(run(&mut t, &["THAS", "PHRUP", "+-D"]), "thanked");
+        let mut t = config_join_translator(suffix, "suffix-mid2", &['+']);
+        assert_eq!(run(&mut t, &["KAT", "PHRUP", "+-D"]), "catted");
+        let mut p = class_translator(suffix, "suffix-plugin-longer");
+        assert_eq!(run(&mut p, &["THAS", "+-D"]), "thanked");
     }
 
     fn run(t: &mut Translator, strokes: &[&str]) -> String {

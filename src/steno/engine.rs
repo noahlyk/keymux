@@ -135,7 +135,7 @@ impl StenoEngine {
         label: &str,
     ) -> Result<Self> {
         let layout =
-            Layout::plover_with(&config.extra_keys).map_err(|errors| anyhow!(errors.join("; ")))?;
+            Layout::plover_with_joins(&config.extra_keys, &config.join_keys).map_err(|errors| anyhow!(errors.join("; ")))?;
         let preset = preset(&config.layout).map_err(|e| anyhow!(e))?;
         let overrides: HashMap<String, KeyAction> = config.layout_overrides.clone();
         let keys = layout
@@ -1025,6 +1025,7 @@ mod tests {
         let config = StenoConfig {
             layout: "dvorak".to_string(),
             extra_keys: Vec::new(),
+            join_keys: Vec::new(),
             layout_overrides: HashMap::new(),
             dictionaries: Vec::new(),
             stroke_timeout_ms: 5000,

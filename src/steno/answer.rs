@@ -81,7 +81,9 @@ impl EngineSetup {
             setup.layer = Some(layer.0.clone());
             // A layer whose extra_keys don't build a layout is `keymux check`'s to report; the
             // commands carry on with the plain 23 keys
-            setup.layout = Layout::plover_with(&steno.extra_keys).unwrap_or_else(|_| Layout::plover());
+            setup.layout = Layout::plover_with_joins(&steno.extra_keys, &steno.join_keys)
+                .or_else(|_| Layout::plover_with(&steno.extra_keys))
+                .unwrap_or_else(|_| Layout::plover());
             setup.preset.clone_from(&steno.layout);
             setup.overrides.clone_from(&steno.layout_overrides);
             if !steno.dictionaries.is_empty() {
@@ -119,8 +121,9 @@ impl EngineSetup {
     /// The layer's dictionaries and plugins as the engine uses them, wrapped in a translator
     /// with nothing typed. The layer's spacing options (`spaces_after`, `start_capitalized`) are
     /// left out on purpose: an outline types a word the same either way, and answers are
-    /// checked by the text they type, which those options would only decorate. A plugin stays in the chain, so a join key
-    /// it declares, or an outline it answers, works here as it does in the daemon.
+    /// checked by the text they type, which those options would only decorate. The layer's `join_keys` are in its layout and a
+    /// plugin stays in the chain, so a join key declared either way, or an outline a plugin
+    /// answers, works here as it does in the daemon.
     ///
     /// Also says so when a plugin file did not load (the daemon only logs that): answers that
     /// lean on it, such as a join key, are then missing.
@@ -569,6 +572,25 @@ mod tests {
             layout_overrides: { "+": Key(KC_Q) },
         ))) },
     )"#;
+
+    #[test]
+    fn join_keys_in_the_layer_config_reach_the_cli_setup_and_its_translator() {
+        let dir = config_dir(
+            "join-keys",
+            r#"(layers: { "steno": (kind: Steno((
+                extra_keys: ['+'], join_keys: ['+'],
+                layout_overrides: { "+": Key(KC_Q) },
+            ))) })"#,
+            &[("a.json", r#"{"THAS": "thanks", "THAS/+EUFG": "thanksgiving"}"#)],
+        );
+        let setup = setup_in(&dir);
+        assert_eq!(setup.layout.join_mask(), 1 << 23);
+        let (translator, problem) = setup.translator();
+        assert_eq!(problem, None);
+        assert!(translator.joins(1 << 23));
+        let plain = setup_in(&config_dir("no-join-keys", JOIN_CONFIG, &[]));
+        assert_eq!(plain.layout.join_mask(), 0);
+    }
 
     #[test]
     fn with_no_config_the_setup_is_the_plain_defaults() {

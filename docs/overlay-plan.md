@@ -319,6 +319,10 @@ keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches 
   `stroke`, `keys`, `add`) builds the same layout from the config's steno layer
   (`answer::EngineSetup::load`); only with no config or no `extra_keys` is it the plain
   `Layout::plover()` (`reverse::classify`/`display` are that default).
+  Which extra key is a join key is the layer's `join_keys` (stored as `Layout::join_mask`, so every
+  holder of the layout, `Chain::joins` and `compose::glue_for` included, sees it; a plugin's
+  `joins` export is unioned with it). The overlay's own layout copy needs no `join_keys`: it
+  only draws.
 - **Key groups are data.** Which keys one finger plays together (underlined as one on the tape and
   lookup) is `Layout::key_group(slot)`: an optional group id per key, any number of keys per id.
   `Layout::plover()` declares today's pairs (`T K`, `P W`, `H R`, `A O`, `E U`, `F R`, `P B`,

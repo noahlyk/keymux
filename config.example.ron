@@ -373,6 +373,16 @@
                 // Run `keymux steno layout` to see every stroke key and the key that presses it.
                 // Change individual stroke keys, e.g. { "S-": Key(KC_Q) }
                 layout_overrides: {},
+                // Extra stroke keys beyond the standard 23 (a theory's join key, say), by the
+                // character written in stroke notation, e.g. ['+']; give each a physical key in
+                // layout_overrides: { "+": Key(KC_Q) }.
+                extra_keys: [],
+                // Which extra keys are join keys: a stroke with one down continues the word
+                // before it (THAS/+EUFG) and is never looked up as a word of its own. Each must
+                // be listed in extra_keys. Empty (the default) declares none; a dictionary
+                // plugin's own joins() export, if any, is unioned with this.
+                // Example: extra_keys: ['+'], join_keys: ['+'],
+                join_keys: [],
                 dictionaries: [
                     "~/.config/keymux/steno/user.json",
                     "~/.config/keymux/steno/main.json",
