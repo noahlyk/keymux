@@ -82,11 +82,25 @@
 //!
 //! `alloc` and `fallback` are required only of a plugin that reads words. One that only changes
 //! how the engine behaves (`joins`, `send_early`) leaves them out: a mod, never asked for a word.
+//!
+//! # A slow reading never holds up typing
+//!
+//! A plugin that reads words does it on a thread of its own (see [`super::worker`]), with an
+//! instance of its own: `joins` and `send_early`, asked on every stroke and key, go to a second
+//! instance of the same module on the engine's thread, so a long `fallback` never makes them
+//! wait. The translator waits for a reading only until the stroke's deadline (`plugin_deadline_ms`
+//! in the steno config, 30 by default). A reading in time is used as ever; one that is late is
+//! the stroke typed as if the plugin had no reading, and once it lands, if the stroke is still
+//! the last thing typed, the stroke is translated again with it, replacing what was typed. The
+//! two instances share nothing, so a plugin keeps whatever state it needs for `fallback` (a cache
+//! of the run read last, say) in the instance that reads, never relying on `joins` or
+//! `send_early` to see it.
 
 use super::dict::Dictionary;
 use super::layout::Layout;
 use super::parts::Parts;
 use super::source::is_plugin_file;
+use super::worker::{Asked, Budget, Worker};
 use crate::lock;
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -165,6 +179,8 @@ type Reads = (TypedFunc<i32, i32>, TypedFunc<(i32, i32), i64>);
 /// One loaded plugin: a WebAssembly module, instantiated so its exports can be called.
 pub(crate) struct Plugin {
     name: String,
+    /// The compiled module, to make another instance of it from (see [`Self::into_step`])
+    module: Module,
     store: Store<()>,
     memory: Option<Memory>,
     /// `alloc` and `fallback`, for a plugin that reads words; a mod has neither
@@ -190,7 +206,12 @@ impl Plugin {
         let engine = Engine::default();
         let module = Module::from_file(&engine, wasm)
             .map_err(|e| anyhow::anyhow!("{}: {e}", wasm.display()))?;
-        let mut store = Store::new(&engine, ());
+        Self::instantiate(name, module)
+    }
+
+    /// A fresh instance of `module`, with its own memory and state.
+    fn instantiate(name: String, module: Module) -> Result<Self> {
+        let mut store = Store::new(module.engine(), ());
         let instance = Instance::new(&mut store, &module, &[])
             .map_err(|e| anyhow::anyhow!("instantiating plugin {name:?}: {e}"))?;
         let memory = instance.get_memory(&mut store, "memory");
@@ -224,6 +245,7 @@ impl Plugin {
         }
         Ok(Self {
             name,
+            module,
             store,
             memory,
             reads,
@@ -231,6 +253,36 @@ impl Plugin {
             joins_known: rustc_hash::FxHashMap::default(),
             send_early,
         })
+    }
+
+    /// Ready this plugin to sit in a chain: a plugin that reads words reads on a thread of its
+    /// own, and answers `joins` and `send_early` (if it has them) from a second instance here,
+    /// so neither ever waits on a reading. See the module doc.
+    fn into_step(self) -> PluginStep {
+        let name = self.name.clone();
+        if self.reads.is_none() {
+            return PluginStep {
+                name,
+                mods: Some(Mutex::new(self)),
+                reader: None,
+            };
+        }
+        let mods = (self.joins.is_some() || self.send_early.is_some())
+            .then(|| Self::instantiate(name.clone(), self.module.clone()))
+            .and_then(|made| {
+                made.map_err(|e| tracing::warn!("plugin {name:?}: no second instance: {e:#}"))
+                    .ok()
+            })
+            .map(|mut plugin| {
+                plugin.reads = None;
+                Mutex::new(plugin)
+            });
+        let mut plugin = self;
+        let reader = Worker::spawn(
+            &name,
+            Box::new(move |outline: &str| plugin.fallback(outline)),
+        );
+        PluginStep { name, mods, reader }
     }
 
     /// Ask this plugin for a reading of a stroke outline that missed every dictionary, in
@@ -305,10 +357,19 @@ fn load_one(source: &Path, cache_dir: &Path) -> Result<Plugin> {
     Plugin::load(name, &wasm)
 }
 
+/// A plugin at its place in a chain.
+struct PluginStep {
+    name: String,
+    /// The instance asked `joins` and `send_early`, if the plugin has either
+    mods: Option<Mutex<Plugin>>,
+    /// The thread reading words, for a plugin that reads them
+    reader: Option<Worker>,
+}
+
 /// One step of a lookup: a run of dictionary files merged together, or one plugin.
 enum Step {
     Dict(Arc<Dictionary>),
-    Plugin(Box<Mutex<Plugin>>),
+    Plugin(Box<PluginStep>),
 }
 
 /// A dictionary lookup pipeline built from one priority-ordered file list.
@@ -370,10 +431,32 @@ impl Chain {
         Self {
             steps: vec![
                 Step::Dict(Arc::clone(&dict)),
-                Step::Plugin(Box::new(Mutex::new(plugin))),
+                Step::Plugin(Box::new(plugin.into_step())),
             ],
             dict,
             layout: Layout::plover(),
+        }
+    }
+
+    /// A chain over `dict` with a plugin that reads words with `read` (no wasm at all), in
+    /// `layout`: for tests that need a plugin to be slow exactly when they say.
+    pub(crate) fn test_with_reader(
+        dict: Dictionary,
+        layout: Layout,
+        read: super::worker::Read,
+    ) -> Self {
+        let dict = Arc::new(dict);
+        Self {
+            steps: vec![
+                Step::Dict(Arc::clone(&dict)),
+                Step::Plugin(Box::new(PluginStep {
+                    name: "reader".into(),
+                    mods: None,
+                    reader: Worker::spawn("reader", read),
+                })),
+            ],
+            dict,
+            layout,
         }
     }
 }
@@ -420,7 +503,7 @@ impl Chain {
                     pending.clear();
                 }
                 match load_one(path, &plugin_cache) {
-                    Ok(plugin) => steps.push(Step::Plugin(Box::new(Mutex::new(plugin)))),
+                    Ok(plugin) => steps.push(Step::Plugin(Box::new(plugin.into_step()))),
                     Err(e) => tracing::warn!("plugin {} not loaded: {e:#}", path.display()),
                 }
             } else {
@@ -456,21 +539,81 @@ impl Chain {
     /// really has "no reading"), swallowing whole runs of unrelated strokes into one guess
     /// instead of leaving them as separate words. A real multi-stroke brief is the dictionary's
     /// job; the plugin is the last resort for what nothing else recognizes, one word at a time.
+    ///
+    /// A plugin is waited on for as long as its reading takes; the translator, which must not
+    /// wait that long, asks through [`Self::lookup_within`].
     #[must_use]
     pub fn lookup(&self, strokes: &[u32]) -> Option<String> {
+        self.lookup_by(strokes, |plugin, reader, outline| {
+            match reader.ask(outline, None, false) {
+                Asked::Answered(found) => found,
+                Asked::Late => {
+                    tracing::warn!("plugin {}: no reading of {outline}", plugin.name);
+                    None
+                }
+            }
+        })
+    }
+
+    /// [`Self::lookup`], waiting on a plugin no later than `budget` allows. A plugin late with
+    /// its reading counts as having none, and `budget` keeps which outline it was late with;
+    /// after that, no plugin is waited on again this stroke (a reading already in is still
+    /// used). Every reading a plugin gave is noted in `budget` too, for the tape.
+    #[must_use]
+    pub(crate) fn lookup_within(&self, strokes: &[u32], budget: &Budget) -> Option<String> {
+        self.lookup_by(strokes, |plugin, reader, outline| {
+            let found = if budget.is_late() {
+                reader.ready(outline).flatten()
+            } else {
+                match reader.ask(outline, budget.until(), budget.first_ask()) {
+                    Asked::Answered(found) => found,
+                    Asked::Late => {
+                        budget.mark_late(strokes);
+                        None
+                    }
+                }
+            };
+            if let Some(text) = &found {
+                budget.note_read(strokes, &plugin.name, text);
+            }
+            found
+        })
+    }
+
+    fn lookup_by(
+        &self,
+        strokes: &[u32],
+        mut ask: impl FnMut(&PluginStep, &Worker, &str) -> Option<String>,
+    ) -> Option<String> {
         for step in &self.steps {
             let found = match step {
                 Step::Dict(dict) => dict.lookup(strokes).map(str::to_owned),
-                Step::Plugin(plugin) => self
-                    .is_one_word(strokes)
-                    .then(|| lock(plugin).fallback(&self.layout.render_strokes(strokes)))
-                    .flatten(),
+                Step::Plugin(plugin) => match &plugin.reader {
+                    Some(reader) if self.is_one_word(strokes) => {
+                        ask(plugin, reader, &self.layout.render_strokes(strokes))
+                    }
+                    _ => None,
+                },
             };
             if found.is_some() {
                 return found;
             }
         }
         None
+    }
+
+    /// Whether every plugin would now answer `strokes` at once: its late reading is in, or
+    /// nothing more is coming for it. See [`super::worker::Worker::settled`].
+    #[must_use]
+    pub(crate) fn settled(&self, strokes: &[u32]) -> bool {
+        let outline = self.layout.render_strokes(strokes);
+        self.steps.iter().all(|step| match step {
+            Step::Plugin(plugin) => plugin
+                .reader
+                .as_ref()
+                .is_none_or(|reader| reader.settled(&outline)),
+            Step::Dict(_) => true,
+        })
     }
 
     /// Whether `bits` (one stroke) continues the word before it: it has one of the layer's
@@ -481,7 +624,7 @@ impl Chain {
     pub fn joins(&self, bits: u32) -> bool {
         bits & self.layout.join_mask() != 0
             || self.steps.iter().any(|step| match step {
-                Step::Plugin(plugin) => lock(plugin).joins(bits),
+                Step::Plugin(plugin) => plugin.mods.as_ref().is_some_and(|m| lock(m).joins(bits)),
                 Step::Dict(_) => false,
             })
     }
@@ -491,7 +634,10 @@ impl Chain {
     #[must_use]
     pub fn send_early(&self, held: u32, stroke: u32) -> bool {
         self.steps.iter().any(|step| match step {
-            Step::Plugin(plugin) => lock(plugin).send_early(held, stroke),
+            Step::Plugin(plugin) => plugin
+                .mods
+                .as_ref()
+                .is_some_and(|m| lock(m).send_early(held, stroke)),
             Step::Dict(_) => false,
         })
     }

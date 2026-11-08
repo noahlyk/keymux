@@ -38,6 +38,7 @@ pub mod tape;
 pub mod translate;
 pub mod typing;
 pub mod view;
+pub(crate) mod worker;
 
 #[cfg(test)]
 mod lapwing_tests;

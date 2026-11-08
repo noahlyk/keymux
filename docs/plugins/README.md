@@ -118,6 +118,38 @@ with the next key pressed, and letting go of them alone sends nothing. `sticky-k
 make one key sticky: hold it, and each stroke goes as its other keys come up, the held key part of
 every one.
 
+## A slow reading never holds up typing
+
+A plugin that reads words does it on a thread of its own, so a `fallback` that takes a while
+never stalls the keyboard. The stroke waits for the reading only until a deadline, set per steno
+layer (`plugin_deadline_ms`, 30 by default):
+
+- **In time:** the reading is used exactly as if it had been asked in place.
+- **Late:** the stroke is typed as if the plugin had no reading (as its keys, or whatever the
+  dictionaries make of it), and typing goes on. When the reading lands, if that stroke is still
+  the last thing typed, it is translated again with the reading and what it typed is replaced
+  (backspaces, then the new text). If anything came first (another stroke, an undo, text typed by
+  hand), the reading is dropped.
+- **Newest first:** a newer stroke's question drops whatever earlier strokes asked that has not
+  started yet, so the thread always works toward the run being typed now. A run of joined
+  strokes asks about the whole run on every stroke, so the reading that lands is the whole run's.
+  A reading that has started cannot be stopped; it finishes and is kept for a moment, in case it
+  is asked for again.
+
+`joins` and `send_early` are answered by a second instance of the same module, on the engine's
+own thread, so they never wait behind a reading. The two instances share no memory: keep
+whatever `fallback` needs from call to call (a cache of the run read last, say) in what
+`fallback` itself sees, and never count on `joins` or `send_early` to see it, or to have set it.
+
+## On the tape
+
+A stroke's tape line (`keymux steno tape`) shows the stroke in the layer's own layout, extra keys
+included: a joined stroke is `+-G`, a stroke of the join key alone is `+`. When a plugin's reading
+is what a stroke typed, the line ends with `plugin:NAME "reading"` (`NAME` is the plugin file's
+stem, `05-solver` for `05-solver.rs`). A late reading that replaced what its stroke typed is a
+line of its own, `late`, with what the replacement typed and the same mark. A theory can score
+its fallback on real typing from these lines.
+
 ## Mods: a plugin that reads no words
 
 `alloc` and `fallback` are only required of a plugin that reads words. One that only changes how

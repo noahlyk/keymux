@@ -331,6 +331,12 @@ pub struct StenoConfig {
     /// long. Strokes normally finish when the last key is released, with no delay.
     #[serde(default = "default_stroke_timeout_ms")]
     pub stroke_timeout_ms: u32,
+    /// How long a stroke waits, in milliseconds, on a plugin's reading of a word that missed
+    /// every dictionary. A reading that takes longer never holds up typing: the stroke is typed
+    /// without it, and once the reading lands it replaces what the stroke typed, if that is
+    /// still the last thing typed. See `docs/plugins/README.md`.
+    #[serde(default = "default_plugin_deadline_ms")]
+    pub plugin_deadline_ms: u32,
     /// No longer used. Translation is immediate and corrects earlier text when a
     /// longer entry matches. Setting it is a validation warning.
     #[serde(default)]
@@ -412,6 +418,10 @@ fn default_steno_layout() -> String {
 
 const fn default_stroke_timeout_ms() -> u32 {
     5000
+}
+
+const fn default_plugin_deadline_ms() -> u32 {
+    30
 }
 
 /// Game mode configuration

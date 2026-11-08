@@ -12,6 +12,10 @@ keymux gains a *generic* plugin capability that any theory could use, documented
 - `send_early(held, stroke)` sends a stroke with keys still down (lyk's sticky-plus mod uses it).
 - A plugin with no `alloc`/`fallback` is a mod that reads no words.
 - Undo word takes back a whole run a plugin read.
+- A plugin reads on its own thread, waited on until `plugin_deadline_ms`; a late reading
+  replaces what its stroke typed once it lands, if that is still the last thing typed.
+- The tape shows strokes in the layer's layout (extra keys too, `+` alone) and marks a line a
+  plugin's reading typed with `plugin:NAME "reading"`.
 
 The theory-specific half of each feature lives in the theory's own repo, never here.
 

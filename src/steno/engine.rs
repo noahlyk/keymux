@@ -44,6 +44,9 @@ impl Default for Timing {
     }
 }
 
+/// How often [`StenoEngine::tick`] looks for a plugin's late reading while one is due.
+const LATE_POLL: Duration = Duration::from_millis(4);
+
 /// A stroke that is being sent again and again because its keys are held after a double tap.
 #[derive(Debug, Clone, Copy)]
 struct Repeating {
@@ -181,6 +184,7 @@ impl StenoEngine {
         });
         translator.set_stroke_classes(!config.disable_transparent);
         translator.set_undo_stops_at_barrier(config.undo_stops_at_barrier);
+        translator.set_plugin_deadline(Duration::from_millis(u64::from(config.plugin_deadline_ms)));
         Ok(Self {
             keys,
             held_keys: HashSet::new(),
@@ -200,7 +204,8 @@ impl StenoEngine {
             loading: !unloaded,
             too_small: false,
             backlog: Vec::new(),
-            tape: home.map(|home| tape::Tape::new(tape::default_path(home))),
+            tape: home
+                .map(|home| tape::Tape::with_layout(tape::default_path(home), layout.clone())),
             disabled_in_game_mode,
             hub: OverlayHub::global(),
             lookup: None,
@@ -415,18 +420,26 @@ impl StenoEngine {
             .filter(|&(stroke, _)| self.chord.is_fresh() && self.chord.pending() == stroke)
             .map(|(_, since)| since + self.timing.repeat_delay);
         let next_repeat = self.repeating.map(|repeating| repeating.next);
-        [stuck, repeat_starts, next_repeat]
+        // A plugin's reading came too late for the last stroke: look for it again shortly
+        let late = self
+            .translator
+            .has_late()
+            .then(|| Instant::now() + LATE_POLL);
+        [stuck, repeat_starts, next_repeat, late]
             .into_iter()
             .flatten()
             .min()
     }
 
-    /// Check the stuck-key timeout and pick up finished dictionary loads.
-    /// Returns output if a stuck stroke was flushed, or if strokes queued during
-    /// loading were just translated.
+    /// Check the stuck-key timeout and pick up finished dictionary loads and plugin readings
+    /// that came too late. Returns output if a stuck stroke was flushed, if strokes queued
+    /// during loading were just translated, or if a late reading replaced what its stroke typed.
     pub fn tick(&mut self, now: Instant) -> Option<StenoOutput> {
         self.sync_unload();
         if let Some(output) = self.poll_dictionary() {
+            return Some(output);
+        }
+        if let Some(output) = self.settle_late() {
             return Some(output);
         }
         if let Some(stroke) = self.chord.tick(now) {
@@ -467,6 +480,26 @@ impl StenoEngine {
         let stroke = repeating.stroke;
         self.last = Some((stroke, now));
         self.on_stroke(stroke, true)
+    }
+
+    /// The last stroke was typed without a plugin's reading that came too late: once it is in,
+    /// put the stroke right with it (see [`Translator::settle_late`]). On the tape as a `late`
+    /// line: what the replacement typed, and the plugin's reading.
+    fn settle_late(&mut self) -> Option<StenoOutput> {
+        if !self.translator.late_ready() {
+            return None;
+        }
+        let output = self.translator.settle_late()?;
+        let read = self.translator.plugin_read();
+        let description = tape::mark_plugin(
+            &tape::describe(Some(&output), self.translator.was_unmatched()),
+            read.as_ref()
+                .map(|(name, text)| (name.as_str(), text.as_str())),
+        );
+        if let Some(tape) = &mut self.tape {
+            tape.note("late", &description);
+        }
+        Some(output)
     }
 
     /// Swap in a dictionary when one arrives: the first, after which the strokes queued while
@@ -629,10 +662,17 @@ impl StenoEngine {
         let unmatched = self.translator.was_unmatched();
         let description = tape::describe(output.as_ref(), unmatched);
         if let Some(tape) = &mut self.tape {
+            // The tape file says which plugin read the word, and as what; the overlay does not
+            let read = self.translator.plugin_read();
+            let marked = tape::mark_plugin(
+                &description,
+                read.as_ref()
+                    .map(|(name, text)| (name.as_str(), text.as_str())),
+            );
             if repeated {
-                tape.repeat(stroke, &description);
+                tape.repeat(stroke, &marked);
             } else {
-                tape.stroke(stroke, &description);
+                tape.stroke(stroke, &marked);
             }
         }
         // Same description as the tape file, so the overlay and `keymux steno tape` agree
@@ -1031,6 +1071,7 @@ mod tests {
             layout_overrides: HashMap::new(),
             dictionaries: Vec::new(),
             stroke_timeout_ms: 5000,
+            plugin_deadline_ms: 30,
             translation_timeout_ms: None,
             spaces_after: false,
             start_attached: true,
@@ -1198,6 +1239,74 @@ mod tests {
             out = engine.release_at(key, up).or(out);
         }
         out
+    }
+
+    #[test]
+    fn a_late_plugin_reading_lands_on_a_tick_and_goes_on_the_tape() {
+        let (go, gate) = std::sync::mpsc::channel::<()>();
+        // A dictionary of one entry: with none at all, no stroke is looked up anywhere
+        let mut dict = Dictionary::default();
+        dict.merge_json(r#"{"TKOG": "dog"}"#, &Layout::plover())
+            .unwrap();
+        let chain = Chain::test_with_reader(
+            dict,
+            Layout::plover(),
+            Box::new(move |outline: &str| {
+                let _ = gate.recv();
+                Some(outline.to_lowercase())
+            }),
+        );
+        let mut engine = engine_with_dict("{}");
+        engine.translator = Translator::with_shared(
+            Arc::new(chain),
+            super::super::formatter::Options {
+                start_attached: true,
+                ..super::super::formatter::Options::default()
+            },
+        );
+        engine
+            .translator
+            .set_plugin_deadline(Duration::from_millis(5));
+        let dir = std::env::temp_dir().join(format!("keymux-engine-late-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("tape.txt");
+        engine.tape = Some(tape::Tape::with_layout(path.clone(), Layout::plover()));
+        let keys = kat_keys(&engine);
+        let t0 = Instant::now();
+        let raw = typed(tap(&mut engine, keys, t0, t0 + Duration::from_millis(30)));
+        // As its keys, the way any stroke that matched nothing is typed
+        assert_eq!(raw, "KA-T", "typed at once, without the reading");
+        let due = engine.next_deadline().expect("the engine looks again soon");
+        assert!(due <= Instant::now() + LATE_POLL);
+        assert_eq!(engine.tick(Instant::now()), None, "not in yet");
+        go.send(()).unwrap();
+        let started = Instant::now();
+        let replaced = loop {
+            if let Some(output) = engine.tick(Instant::now()) {
+                break output;
+            }
+            assert!(started.elapsed() < Duration::from_secs(10), "never landed");
+            std::thread::yield_now();
+        };
+        assert_eq!(engine.translator.text(), "kat");
+        assert!(
+            matches!(replaced, StenoOutput::Retype { backspaces: 4, ref text } if text == "kat"),
+            "{replaced:?}"
+        );
+        assert_eq!(engine.next_deadline(), None, "nothing more to look for");
+        engine.tape.as_ref().unwrap().flush();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert!(
+            lines[0].contains("KAT") && lines[0].ends_with('?'),
+            "{text}"
+        );
+        assert!(
+            lines[1].contains("late") && lines[1].ends_with("plugin:reader \"kat\""),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

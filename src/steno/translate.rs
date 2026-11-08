@@ -13,10 +13,33 @@ use super::journal::{self, History, MachineId, Origin, SharedHistory};
 use super::keycombo::key_events;
 use super::layout::render_stroke;
 use super::plugin::Chain;
+use super::worker::Budget;
 use crate::keycode::KeyCode;
 use smallvec::SmallVec;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
+
+/// How long a stroke waits on a plugin's reading before it is typed without it.
+///
+/// The config can say otherwise (`plugin_deadline_ms`). Tests, which run many at once on a busy
+/// machine, wait far longer unless they ask for a deadline, so none is late by accident.
+pub const DEFAULT_PLUGIN_DEADLINE: Duration = if cfg!(test) {
+    Duration::from_secs(10)
+} else {
+    Duration::from_millis(30)
+};
+
+/// A stroke typed without a plugin's reading, which came too late: put right once it lands,
+/// while the stroke's translation is still the last thing typed.
+#[derive(Debug, Clone)]
+struct Late {
+    stroke: u32,
+    /// The outline the plugin was late with
+    strokes: Vec<u32>,
+    /// What the stroke made without it
+    translation: Translation,
+}
 
 /// An outline being tried against the dictionary. The search tries many per stroke typed, and
 /// nearly all are short, so they live on the stack.
@@ -366,6 +389,15 @@ pub struct Translator {
     classes_enabled: bool,
     /// Whether undo stops at a barrier (`undo_stops_at_barrier`)
     undo_stops_at_barrier: bool,
+    /// How long a stroke waits on plugins
+    plugin_deadline: Duration,
+    /// The stroke's own wait on plugins, and what they read
+    budget: Budget,
+    /// The last stroke, typed without a plugin's reading that was late
+    late: Option<Late>,
+    /// The plugin, and its reading, that the last stroke typed, if a plugin's reading is what it
+    /// typed
+    plugin_read: Option<(String, String)>,
 }
 
 /// A copy of a translator has a copy of the history too, so trying strokes on it (a lookup
@@ -382,6 +414,10 @@ impl Clone for Translator {
             transparent: self.transparent,
             classes_enabled: self.classes_enabled,
             undo_stops_at_barrier: self.undo_stops_at_barrier,
+            plugin_deadline: self.plugin_deadline,
+            budget: Budget::default(),
+            late: None,
+            plugin_read: None,
         }
     }
 }
@@ -418,7 +454,85 @@ impl Translator {
             transparent: false,
             classes_enabled: true,
             undo_stops_at_barrier: true,
+            plugin_deadline: DEFAULT_PLUGIN_DEADLINE,
+            budget: Budget::default(),
+            late: None,
+            plugin_read: None,
         }
+    }
+
+    /// How long a stroke waits on a plugin's reading before it is typed without it (see
+    /// [`Self::settle_late`]).
+    pub const fn set_plugin_deadline(&mut self, deadline: Duration) {
+        self.plugin_deadline = deadline;
+    }
+
+    /// Whether the last stroke was typed without a plugin's reading that came too late, and
+    /// is waiting for it.
+    #[must_use]
+    pub const fn has_late(&self) -> bool {
+        self.late.is_some()
+    }
+
+    /// Whether the reading the last stroke waits for is in (or nothing more is coming), so
+    /// [`Self::settle_late`] would not wait.
+    #[must_use]
+    pub fn late_ready(&self) -> bool {
+        self.late
+            .as_ref()
+            .is_some_and(|late| self.dict.settled(&late.strokes))
+    }
+
+    /// The plugin, and its reading, that the last stroke (or the last [`Self::settle_late`])
+    /// typed, if a plugin's fallback reading is what it typed.
+    #[must_use]
+    pub fn plugin_read(&self) -> Option<(String, String)> {
+        self.plugin_read.clone()
+    }
+
+    /// Put right a stroke typed without a plugin's reading that came too late (see
+    /// [`Self::has_late`]): if what it made is still the last thing typed, take it back and
+    /// translate the stroke again, the reading now in hand, and say what to type to match.
+    /// `None` if nothing changes: a newer stroke, an undo or text typed by hand came first, and
+    /// the reading is dropped.
+    pub fn settle_late(&mut self) -> Option<StenoOutput> {
+        let late = self.late.take()?;
+        self.unmatched = false;
+        self.transparent = false;
+        self.plugin_read = None;
+        self.check_out();
+        let last = self
+            .hist
+            .state
+            .translations
+            .last()
+            .filter(|last| {
+                last.same(&late.translation)
+                    && last.machine == late.translation.machine
+                    && last.origin.is_stroke()
+            })
+            .cloned();
+        let Some(last) = last else {
+            self.check_in();
+            return None;
+        };
+        self.budget.start(Instant::now() + self.plugin_deadline);
+        let mut ops = Vec::new();
+        self.untranslate_translation(&last);
+        self.translate_stroke(late.stroke, &mut ops);
+        ops.extend(self.flush(None));
+        let output = self.finish(ops);
+        self.check_in();
+        output
+    }
+
+    /// A new stroke: a fresh wait on plugins, and nothing late any more.
+    fn begin_stroke(&mut self) {
+        self.unmatched = false;
+        self.transparent = false;
+        self.late = None;
+        self.plugin_read = None;
+        self.budget.start(Instant::now() + self.plugin_deadline);
     }
 
     /// Turn the stroke classes on or off: `{:transparent}` (and the lookup command being
@@ -459,6 +573,7 @@ impl Translator {
     /// Swap in a dictionary chain that other translators share. What is already typed is
     /// untouched, so `*` still takes it back; only the strokes from now on use the new one.
     pub fn set_shared(&mut self, dict: Arc<Chain>) {
+        self.late = None;
         self.dict = dict;
     }
 
@@ -560,8 +675,7 @@ impl Translator {
     /// outline context. Every other stroke is *normal*; a stroke that only types whitespace
     /// separates a continuation from what came before.
     pub fn stroke(&mut self, stroke: u32) -> Option<StenoOutput> {
-        self.unmatched = false;
-        self.transparent = false;
+        self.begin_stroke();
         self.check_out();
         let mut ops = Vec::new();
         self.translate_stroke(stroke, &mut ops);
@@ -587,8 +701,7 @@ impl Translator {
     /// to compare with Plover, which reports the combination as written.
     #[cfg(test)]
     pub(crate) fn stroke_ops(&mut self, stroke: u32) -> Vec<Op> {
-        self.unmatched = false;
-        self.transparent = false;
+        self.begin_stroke();
         self.check_out();
         let mut ops = Vec::new();
         self.translate_stroke(stroke, &mut ops);
@@ -695,7 +808,20 @@ impl Translator {
             self.unmatched = true;
             info!("steno stroke {stroke:#x} not in dictionary");
         }
+        self.plugin_read = translation.english.as_ref().and_then(|text| {
+            let plugin = self.budget.reader_of(&translation.strokes, text)?;
+            Some((plugin, text.clone()))
+        });
+        let late = self.budget.take_late();
         self.translate_translation(translation);
+        if let Some(strokes) = late {
+            let translation = self.hist.state.translations.last().cloned();
+            self.late = translation.map(|translation| Late {
+                stroke,
+                strokes,
+                translation,
+            });
+        }
     }
 
     /// What a transparent stroke asks of the keyboard: its commands and key combinations, in
@@ -1189,7 +1315,7 @@ impl Translator {
     }
 
     fn lookup_strokes(&self, strokes: &[u32]) -> Option<String> {
-        self.dict.lookup(strokes)
+        self.dict.lookup_within(strokes, &self.budget)
     }
 
     /// Look the strokes up, with the last one's suffix key folded in if there are suffixes: the
@@ -1310,6 +1436,7 @@ mod tests {
     use super::*;
     use crate::steno::layout::Layout;
     use std::fs;
+    use std::sync::mpsc;
 
     fn stroke(text: &str) -> u32 {
         if text == "*" {
@@ -1420,6 +1547,105 @@ pub extern "C" fn joins(bits: i64) -> i32 {
                 ..Options::default()
             },
         )
+    }
+
+    /// A translator whose one plugin reads an outline as itself in lower case, without the
+    /// slashes, but only as each reading is let go by the returned sender (dropping it lets every
+    /// reading go at once). It waits at most `deadline` on a reading.
+    fn with_gated_plugin(dict: &str, deadline: Duration) -> (Translator, mpsc::Sender<()>) {
+        let (go, gate) = mpsc::channel::<()>();
+        let layout = Layout::plover_with_joins(&['+'], &['+']).unwrap();
+        let mut dictionary = Dictionary::default();
+        dictionary.merge_json(dict, &layout).unwrap();
+        let chain = Chain::test_with_reader(
+            dictionary,
+            layout,
+            Box::new(move |outline: &str| {
+                let _ = gate.recv();
+                Some(outline.replace(['/', '+'], "").to_lowercase())
+            }),
+        );
+        let mut t = Translator::with_shared(
+            Arc::new(chain),
+            Options {
+                start_attached: true,
+                ..Options::default()
+            },
+        );
+        t.set_plugin_deadline(deadline);
+        (t, go)
+    }
+
+    fn settle(t: &mut Translator) -> Option<StenoOutput> {
+        let started = std::time::Instant::now();
+        while !t.late_ready() {
+            assert!(started.elapsed() < Duration::from_secs(10), "never settled");
+            std::thread::yield_now();
+        }
+        t.settle_late()
+    }
+
+    #[test]
+    fn a_reading_in_time_is_used_as_ever_and_noted_as_the_plugins() {
+        let (mut t, go) = with_gated_plugin(r#"{"KAT": "cat"}"#, Duration::from_secs(10));
+        drop(go);
+        t.stroke(stroke("KAT"));
+        assert_eq!(t.plugin_read(), None, "the dictionary's");
+        t.stroke(stroke("TOP"));
+        assert_eq!(t.text(), "cat top");
+        assert!(!t.has_late());
+        assert_eq!(t.plugin_read(), Some(("reader".into(), "top".into())));
+    }
+
+    #[test]
+    fn a_late_reading_types_the_stroke_as_its_keys_then_replaces_it_once_it_lands() {
+        let (mut t, go) = with_gated_plugin(r#"{"KAT": "cat"}"#, Duration::from_millis(5));
+        t.stroke(stroke("KAT"));
+        let typed = t.stroke(stroke("TOP"));
+        let raw = t.text();
+        assert!(
+            raw.starts_with("cat ") && raw != "cat top",
+            "typing goes on without the reading: {raw}"
+        );
+        assert!(typed.is_some());
+        assert!(t.has_late() && !t.late_ready());
+        go.send(()).unwrap();
+        let replaced = settle(&mut t);
+        assert!(replaced.is_some(), "the screen is put right");
+        assert_eq!(t.text(), "cat top");
+        assert!(!t.has_late());
+        assert_eq!(t.plugin_read(), Some(("reader".into(), "top".into())));
+        // And it is an ordinary translation now: undo takes it back
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "cat");
+    }
+
+    #[test]
+    fn a_late_reading_of_a_run_lands_on_the_run_as_it_now_is() {
+        let (mut t, go) = with_gated_plugin("{}", Duration::from_millis(5));
+        let layout = Layout::plover_with_joins(&['+'], &['+']).unwrap();
+        t.stroke(layout.parse_stroke("HRAOBG").unwrap());
+        // The next stroke of the run supersedes the first: only the whole run's reading counts
+        t.stroke(layout.parse_stroke("+UP").unwrap());
+        assert!(t.has_late());
+        go.send(()).unwrap(); // HRAOBG, already started, finishes; nobody wants it now
+        go.send(()).unwrap(); // the whole run
+        settle(&mut t);
+        assert_eq!(t.text(), "hraobgup");
+    }
+
+    #[test]
+    fn a_late_reading_for_a_stroke_no_longer_last_is_dropped() {
+        let (mut t, go) = with_gated_plugin(r#"{"KAT": "cat"}"#, Duration::from_millis(5));
+        t.stroke(stroke("TOP"));
+        t.stroke(stroke("KAT"));
+        assert!(
+            !t.has_late(),
+            "KAT superseded it, and was read in time from the dictionary"
+        );
+        drop(go);
+        let text = t.text();
+        assert!(text.ends_with(" cat") && !text.starts_with("top"), "{text}");
     }
 
     #[test]

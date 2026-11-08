@@ -5,7 +5,7 @@
 //! the disk: the typing path hands the line over and carries on.
 
 use super::dict::Dictionary;
-use super::layout::render_stroke;
+use super::layout::{render_stroke, Layout};
 use super::translate::{OutputOp, StenoOutput};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -54,17 +54,26 @@ pub fn describe(output: Option<&StenoOutput>, unmatched: bool) -> String {
     }
 }
 
+/// A line's description, marked with the plugin and reading that typed it, if a plugin did.
+///
+/// The mark (`plugin:NAME "text"`) goes after the description, so a theory can count how often
+/// its fallback was what typed a word, and what it read.
+#[must_use]
+pub fn mark_plugin(description: &str, plugin: Option<(&str, &str)>) -> String {
+    match plugin {
+        Some((name, text)) => format!("{description}  plugin:{name} {text:?}"),
+        None => description.to_owned(),
+    }
+}
+
 /// One tape line. A stroke that was repeated shows how many times, as `x3`, after the stroke.
-fn format_line(clock: &str, stroke: u32, description: &str, count: u32) -> String {
+fn format_line(clock: &str, shown: &str, description: &str, count: u32) -> String {
     let times = if count > 1 {
         format!("x{count} ")
     } else {
         String::new()
     };
-    format!(
-        "{clock}  {:<12} {times}{description}\n",
-        render_stroke(stroke)
-    )
+    format!("{clock}  {shown:<12} {times}{description}\n")
 }
 
 /// The tape file. A stroke repeated by holding its keys goes on the line it started, as a count,
@@ -73,17 +82,21 @@ fn format_line(clock: &str, stroke: u32, description: &str, count: u32) -> Strin
 pub struct Tape {
     path: PathBuf,
     writer: Sender<Entry>,
+    /// What strokes are written in: the layer's own layout, extra keys (a join key) included
+    layout: Option<Layout>,
 }
 
 /// One thing to put on the tape, done in the order asked.
 enum Entry {
     Stroke {
         stroke: u32,
+        shown: String,
         description: String,
         secs: u64,
     },
     Repeat {
         stroke: u32,
+        shown: String,
         description: String,
         secs: u64,
     },
@@ -100,7 +113,28 @@ impl Tape {
     #[must_use]
     pub fn new(path: PathBuf) -> Self {
         let writer = writer_for(&path);
-        Self { path, writer }
+        Self {
+            path,
+            writer,
+            layout: None,
+        }
+    }
+
+    /// A tape that writes strokes in `layout`, so a key it adds (a theory's join key, say) is
+    /// on the line too: `+-G`, and a stroke of the join key alone as `+`.
+    #[must_use]
+    pub fn with_layout(path: PathBuf, layout: Layout) -> Self {
+        Self {
+            layout: Some(layout),
+            ..Self::new(path)
+        }
+    }
+
+    fn shown(&self, stroke: u32) -> String {
+        self.layout.as_ref().map_or_else(
+            || render_stroke(stroke),
+            |layout| layout.render_stroke(stroke),
+        )
     }
 
     /// Add a line for `stroke`. Failures are logged, never fatal: a broken tape shouldn't stop
@@ -108,6 +142,7 @@ impl Tape {
     pub fn stroke(&mut self, stroke: u32, description: &str) {
         self.send(Entry::Stroke {
             stroke,
+            shown: self.shown(stroke),
             description: description.to_owned(),
             secs: now_secs(),
         });
@@ -118,6 +153,16 @@ impl Tape {
     pub fn repeat(&mut self, stroke: u32, description: &str) {
         self.send(Entry::Repeat {
             stroke,
+            shown: self.shown(stroke),
+            description: description.to_owned(),
+            secs: now_secs(),
+        });
+    }
+
+    /// Add a line that isn't a stroke, in order with the strokes: `kind` takes the stroke's place.
+    pub fn note(&mut self, kind: &str, description: &str) {
+        self.send(Entry::Note {
+            kind: kind.to_owned(),
             description: description.to_owned(),
             secs: now_secs(),
         });
@@ -192,6 +237,7 @@ struct Writer {
 /// The last stroke line written, so a repeat can rewrite it.
 struct Written {
     stroke: u32,
+    shown: String,
     /// Where the line starts in the file
     start: u64,
     clock: String,
@@ -204,14 +250,16 @@ impl Writer {
         let result = match entry {
             Entry::Stroke {
                 stroke,
+                shown,
                 description,
                 secs,
-            } => self.stroke(stroke, description, clock(secs)),
+            } => self.stroke(stroke, shown, description, clock(secs)),
             Entry::Repeat {
                 stroke,
+                shown,
                 description,
                 secs,
-            } => self.repeat(stroke, description, secs),
+            } => self.repeat(stroke, shown, description, secs),
             Entry::Note {
                 kind,
                 description,
@@ -232,11 +280,18 @@ impl Writer {
         }
     }
 
-    fn stroke(&mut self, stroke: u32, description: String, clock: String) -> std::io::Result<()> {
-        let line = format_line(&clock, stroke, &description, 1);
+    fn stroke(
+        &mut self,
+        stroke: u32,
+        shown: String,
+        description: String,
+        clock: String,
+    ) -> std::io::Result<()> {
+        let line = format_line(&clock, &shown, &description, 1);
         let start = self.append(&line)?;
         self.last = Some(Written {
             stroke,
+            shown,
             start,
             clock,
             description,
@@ -245,9 +300,15 @@ impl Writer {
         Ok(())
     }
 
-    fn repeat(&mut self, stroke: u32, description: String, secs: u64) -> std::io::Result<()> {
+    fn repeat(
+        &mut self,
+        stroke: u32,
+        shown: String,
+        description: String,
+        secs: u64,
+    ) -> std::io::Result<()> {
         if let Some(last) = self.last.as_ref().filter(|last| last.stroke == stroke) {
-            let line = format_line(&last.clock, stroke, &last.description, last.count + 1);
+            let line = format_line(&last.clock, &last.shown, &last.description, last.count + 1);
             if self.rewrite_tail(last.start, &line)? {
                 if let Some(last) = &mut self.last {
                     last.count += 1;
@@ -256,7 +317,7 @@ impl Writer {
             }
             // Something else wrote after it: this repeat starts a line of its own
         }
-        self.stroke(stroke, description, clock(secs))
+        self.stroke(stroke, shown, description, clock(secs))
     }
 
     /// Append `line`, and say where it starts. The file is opened each time, so a tape that
@@ -440,6 +501,43 @@ mod tests {
         assert!(first.contains("KAT"));
         assert!(first.ends_with("\" cat\""));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stroke_is_written_with_the_layouts_extra_keys_a_join_key_alone_too() {
+        let dir = std::env::temp_dir().join(format!("keymux-tape-extra-{}", std::process::id()));
+        let path = dir.join("tape.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+        let layout = Layout::plover_with_joins(&['+'], &['+']).unwrap();
+        let joined = layout.parse_stroke("+-G").unwrap();
+        let alone = layout.parse_stroke("+").unwrap();
+        let mut tape = Tape::with_layout(path.clone(), layout.clone());
+        tape.stroke(layout.parse_stroke("KAT").unwrap(), "\" cat\"");
+        tape.stroke(joined, "\"ing\"");
+        tape.repeat(joined, "\"ing\"");
+        tape.stroke(alone, "");
+        tape.flush();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert_eq!(lines[1].split_whitespace().nth(1), Some("+-G"), "{text}");
+        assert!(lines[1].ends_with("x2 \"ing\""), "{text}");
+        assert_eq!(lines[2].split_whitespace().nth(1), Some("+"), "{text}");
+        // A note goes through the same writer, after the strokes before it
+        tape.note("late", "\"x\"");
+        tape.flush();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.lines().nth(3).unwrap().contains("late"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_plugins_reading_is_marked_with_its_name_and_text() {
+        assert_eq!(
+            mark_plugin("\" lookup\"", Some(("05-solver", "lookup"))),
+            "\" lookup\"  plugin:05-solver \"lookup\""
+        );
+        assert_eq!(mark_plugin("\" cat\"", None), "\" cat\"");
     }
 
     #[test]
