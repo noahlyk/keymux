@@ -222,6 +222,7 @@ fn is_transparent_mapping(text: &str) -> bool {
     text.contains("{:transparent}")
         || text.trim().eq_ignore_ascii_case("{plover:lookup}")
         || super::overlay_control::is_in(text)
+        || super::engine_control::is_in(text)
 }
 
 /// The keys of Plover's key-name set that move the cursor or delete text around it. A key
@@ -537,6 +538,7 @@ impl Translator {
                     .any(|window| window.eq_ignore_ascii_case(b"{plover:"))
                     || (self.classes_enabled && is_transparent_mapping(text))
                     || super::overlay_control::is_in(text)
+                    || super::engine_control::is_in(text)
             })
     }
 
@@ -2566,5 +2568,25 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         t.set_stroke_classes(false);
         assert_ne!(run(&mut t, &["THAS", "SKWR", "+EUFG"]), "thanksgiving");
         assert!(!t.was_transparent());
+    }
+
+    #[test]
+    fn the_unload_control_is_a_transparent_command_that_types_nothing() {
+        let json = r#"{"KAT": "cat", "-G": "{^ing}", "SKWR": "{:engine:unload}", "-B": "{:engine:sideways}"}"#;
+        let mut t = class_translator(json, "engine-unload");
+        assert!(t.is_command(stroke("SKWR")), "never repeats when held");
+        run(&mut t, &["KAT"]);
+        let before = history_len(&t);
+        let out = t.stroke(joined_stroke("SKWR"));
+        assert!(t.was_transparent());
+        assert_eq!(
+            out,
+            Some(StenoOutput::Ops(vec![OutputOp::Command(
+                "engine_control:engine:unload".into()
+            )]))
+        );
+        assert_eq!(history_len(&t), before, "no history entry");
+        assert_eq!(run(&mut t, &["-G"]), "catting");
+        assert!(commands_of(&mut t, "-B").is_empty(), "another verb runs nothing");
     }
 }

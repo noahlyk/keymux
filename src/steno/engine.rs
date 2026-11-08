@@ -91,6 +91,21 @@ pub struct StenoEngine {
     leave_requested: bool,
     fresh_on_enter: bool,
     label: String,
+    /// Where the dictionaries come from, to load them again after an unload
+    source: Option<Source>,
+    /// The dictionaries are unloaded (`{:engine:unload}`): the next stroke loads them
+    unloaded: bool,
+    /// Shared by every layer that caches in the same folder: one layer unloading unloads all
+    scope: live::Scope,
+    /// The scope's unload count as this layer last saw it
+    epoch: u64,
+}
+
+/// What a layer's dictionaries are loaded from.
+#[derive(Debug, Clone)]
+struct Source {
+    roots: Vec<PathBuf>,
+    cache_dir: PathBuf,
 }
 
 /// Which set of dictionaries a layer stands for: the places they are loaded from, in order.
@@ -138,11 +153,22 @@ impl StenoEngine {
                 .collect()
         };
         let machine = machine_id(&roots);
-        let updates = live::subscribe(
+        let cache_dir = super::setup::cache_dir(config_dir);
+        let scope = live::scope(&cache_dir);
+        // After an unload, a config reload that rebuilds the layers leaves the dictionaries
+        // unloaded: they load when a stroke needs them
+        let unloaded = scope.is_unloaded();
+        let source = Source {
             roots,
-            super::setup::cache_dir(config_dir),
-            layout.clone(),
-        );
+            cache_dir,
+        };
+        let updates = (!unloaded).then(|| {
+            live::subscribe(
+                source.roots.clone(),
+                source.cache_dir.clone(),
+                layout.clone(),
+            )
+        });
 
         // Every layer and keyboard writes to the one history; this layer's dictionaries are its machine
         let mut translator =
@@ -170,8 +196,8 @@ impl StenoEngine {
             arming: None,
             repeating: None,
             translator,
-            updates: Some(updates),
-            loading: true,
+            updates,
+            loading: !unloaded,
             too_small: false,
             backlog: Vec::new(),
             tape: home.map(|home| tape::Tape::new(tape::default_path(home))),
@@ -183,6 +209,10 @@ impl StenoEngine {
             leave_requested: false,
             fresh_on_enter: config.fresh_on_enter,
             label: label.to_string(),
+            epoch: scope.epoch(),
+            scope,
+            unloaded,
+            source: Some(source),
         })
     }
 
@@ -296,6 +326,8 @@ impl StenoEngine {
     /// A stroke key went down.
     pub fn press(&mut self, key: KeyCode, now: Instant) {
         if let Some(&bit) = self.keys.get(&key) {
+            // Loading starts with the first key down, so it overlaps the time the chord takes
+            self.wake();
             self.held_keys.insert(key);
             let before = self.chord.held();
             self.chord.press(bit, now);
@@ -332,6 +364,7 @@ impl StenoEngine {
     /// [`Self::release`], at a given moment.
     pub fn release_at(&mut self, key: KeyCode, now: Instant) -> Option<StenoOutput> {
         let bit = *self.keys.get(&key)?;
+        self.sync_unload();
         self.held_keys.remove(&key);
         // A combined key (an override binding one physical key to several stroke keys at
         // once) shares bits with the keys still down, so keep those
@@ -390,6 +423,7 @@ impl StenoEngine {
     /// Returns output if a stuck stroke was flushed, or if strokes queued during
     /// loading were just translated.
     pub fn tick(&mut self, now: Instant) -> Option<StenoOutput> {
+        self.sync_unload();
         if let Some(output) = self.poll_dictionary() {
             return Some(output);
         }
@@ -465,16 +499,96 @@ impl StenoEngine {
             return None;
         }
         let mut merged = Merged::default();
-        for stroke in std::mem::take(&mut self.backlog) {
+        let mut queue = std::mem::take(&mut self.backlog).into_iter();
+        while let Some(stroke) = queue.next() {
             if let Some(output) = self.translate(stroke, false) {
                 merged.push(output);
+            }
+            // A stroke in the queue unloaded the dictionaries: the strokes after it wait, in
+            // order, for them to load again
+            if self.unloaded {
+                self.backlog = queue.collect();
+                if !self.backlog.is_empty() {
+                    self.begin_load();
+                }
+                break;
             }
         }
         merged.finish()
     }
 
+    /// Something needs the dictionaries: if they are unloaded, start loading them. Strokes wait
+    /// in the backlog (in order, none dropped) until they arrive.
+    fn wake(&mut self) {
+        self.sync_unload();
+        if self.unloaded {
+            self.begin_load();
+        }
+    }
+
+    /// Subscribe to the dictionaries again, on the loader thread: this thread never waits.
+    fn begin_load(&mut self) {
+        let Some(source) = &self.source else {
+            return;
+        };
+        self.updates = Some(live::subscribe(
+            source.roots.clone(),
+            source.cache_dir.clone(),
+            self.layout.clone(),
+        ));
+        self.loading = true;
+        self.unloaded = false;
+        self.epoch = self.scope.epoch();
+        tracing::debug!("steno dictionaries loading again for layer {}", self.label);
+    }
+
+    /// Another layer unloaded the dictionaries they share: drop this layer's copy too.
+    fn sync_unload(&mut self) {
+        let epoch = self.scope.epoch();
+        if epoch == self.epoch {
+            return;
+        }
+        self.epoch = epoch;
+        if self.source.is_some() && !self.unloaded {
+            self.release_dictionary();
+            // Strokes were waiting for a load that was cut off: load again for them
+            if !self.backlog.is_empty() {
+                self.begin_load();
+            }
+        }
+    }
+
+    /// Drop this layer's dictionaries, chain, plugin instances and lookup search, and give the
+    /// memory back. What was typed stays in the history. See [`super::engine_control`].
+    fn release_dictionary(&mut self) {
+        // An open lookup is closed: its search holds a copy of the dictionary, and is cancelled
+        self.close_lookup();
+        self.translator.set_shared(Arc::new(Chain::default()));
+        self.updates = None;
+        self.loading = false;
+        self.too_small = false;
+        self.unloaded = true;
+    }
+
+    /// `{:engine:unload}`. A second one while unloaded does nothing.
+    fn unload(&mut self) {
+        let Some(source) = &self.source else {
+            tracing::info!("steno engine has no files to load again, so it is not unloaded");
+            return;
+        };
+        if self.unloaded {
+            return;
+        }
+        let dir = source.cache_dir.clone();
+        self.release_dictionary();
+        // The loader thread drops what it holds and trims the heap; this thread goes on
+        let _ = live::unload(&dir);
+        self.epoch = self.scope.epoch();
+    }
+
     /// A stroke is done. `repeated` is a repeat of the stroke before it, from holding the keys.
     fn on_stroke(&mut self, stroke: u32, repeated: bool) -> Option<StenoOutput> {
+        self.wake();
         if self.loading {
             self.backlog.push(stroke);
             self.publish_keys();
@@ -556,6 +670,11 @@ impl StenoEngine {
             "lookup" if self.lookup.is_none() => self.open_lookup(),
             "lookup" => {}
             "set_config" => self.set_config(args),
+            super::engine_control::COMMAND => {
+                if super::engine_control::is_unload(args.split_once(':').map_or("", |(_, p)| p)) {
+                    self.unload();
+                }
+            }
             super::overlay_control::COMMAND => {
                 let (name, param) = args.split_once(':').unwrap_or((args, ""));
                 self.run_overlay_control(name, param);
@@ -611,6 +730,7 @@ impl StenoEngine {
     /// the loader thread.
     #[cfg(test)]
     pub fn wait_until_loaded(&mut self) {
+        self.wake();
         if self.loading {
             if let Some(Ok(dict)) = self.updates.as_ref().map(Receiver::recv) {
                 self.use_dictionary(dict);
@@ -633,12 +753,14 @@ fn is_command_only(output: Option<&StenoOutput>) -> bool {
 /// Whether an output is nothing but overlay controls (`{:overlay:toggle}`, `{:tape:clear}`, ...).
 fn is_control_only(output: Option<&StenoOutput>) -> bool {
     let prefix = format!("{}:", super::overlay_control::COMMAND);
+    let engine_prefix = format!("{}:", super::engine_control::COMMAND);
     match output {
         Some(StenoOutput::Ops(ops)) => {
             !ops.is_empty()
-                && ops
-                    .iter()
-                    .all(|op| matches!(op, OutputOp::Command(c) if c.starts_with(&prefix)))
+                && ops.iter().all(|op| {
+                    matches!(op, OutputOp::Command(c)
+                        if c.starts_with(&prefix) || c.starts_with(&engine_prefix))
+                })
         }
         _ => false,
     }
@@ -676,6 +798,10 @@ impl StenoEngine {
             leave_requested: false,
             fresh_on_enter: false,
             label: String::new(),
+            source: None,
+            unloaded: false,
+            scope: live::Scope::default(),
+            epoch: 0,
         }
     }
 
@@ -1382,3 +1508,7 @@ mod tests {
         assert_eq!(hub.snapshot().control_seq, 0);
     }
 }
+
+#[cfg(test)]
+#[path = "engine_unload_tests.rs"]
+mod unload_tests;

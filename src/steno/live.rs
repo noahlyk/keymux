@@ -22,6 +22,7 @@ use crate::lock;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -52,6 +53,9 @@ struct Entry {
     /// Every file parsed on its own, kept between reloads: only a changed file is read again
     parts: Parts,
     subscribers: Vec<Sender<Arc<Chain>>>,
+    /// Unloaded (`{:engine:unload}`): nothing is held and nothing is read again, not even when
+    /// the files change, until a layer subscribes to it again
+    unloaded: bool,
 }
 
 /// What the watcher needs to judge an event, shared with its callback.
@@ -84,6 +88,120 @@ enum Job {
     Check(Box<Key>),
     /// Something under a watched path changed: wait for quiet, then check every set
     Changed,
+    /// Drop everything held for the sets cached in this folder, give the memory back, and say
+    /// when that is done
+    Unload(PathBuf, Sender<()>),
+}
+
+/// Whether the dictionaries cached in one folder are unloaded, shared by every layer that uses
+/// that folder: one layer unloading unloads them all, and a config reload that rebuilds the
+/// layers leaves them unloaded until a stroke needs them.
+#[derive(Debug, Default)]
+struct ScopeState {
+    /// Counts unloads, so a layer can tell that one happened while it was not looking
+    epoch: AtomicU64,
+    unloaded: AtomicBool,
+}
+
+/// A layer's handle on its folder's [`ScopeState`].
+#[derive(Debug, Clone, Default)]
+pub struct Scope(Arc<ScopeState>);
+
+impl Scope {
+    /// How many times the dictionaries have been unloaded.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.0.epoch.load(Ordering::Acquire)
+    }
+
+    /// Whether the dictionaries are unloaded right now (and nothing has asked for them since).
+    #[must_use]
+    pub fn is_unloaded(&self) -> bool {
+        self.0.unloaded.load(Ordering::Acquire)
+    }
+}
+
+/// The [`Scope`] of the dictionaries cached in `cache_dir`.
+#[must_use]
+pub fn scope(cache_dir: &Path) -> Scope {
+    static SCOPES: OnceLock<Mutex<HashMap<PathBuf, Scope>>> = OnceLock::new();
+    lock(SCOPES.get_or_init(Mutex::default))
+        .entry(cache_dir.to_path_buf())
+        .or_default()
+        .clone()
+}
+
+/// Unload the dictionaries cached in `cache_dir`.
+///
+/// What the hub holds is dropped on the worker thread, the memory given back to the system, and
+/// the receiver is sent a message when that is done. Layers drop their own copy themselves (they see the scope's epoch change), so the memory
+/// is only freed once they have; call this after the calling layer has dropped its own.
+pub fn unload(cache_dir: &Path) -> Receiver<()> {
+    let scope = scope(cache_dir);
+    scope.0.unloaded.store(true, Ordering::Release);
+    scope.0.epoch.fetch_add(1, Ordering::AcqRel);
+    let (done, wait) = mpsc::channel();
+    let _ = hub().jobs.send(Job::Unload(cache_dir.to_path_buf(), done));
+    wait
+}
+
+/// Whether the hub holds a loaded dictionary or parsed files for the sets cached in `dir`.
+#[cfg(test)]
+pub(crate) fn holds(dir: &Path) -> bool {
+    lock(&hub().state)
+        .entries
+        .iter()
+        .any(|(key, entry)| key.cache_dir == dir && (entry.latest.is_some() || !entry.parts.is_empty()))
+}
+
+/// The resident memory of this process in kilobytes, or 0 where `/proc` can't say.
+#[must_use]
+pub fn resident_kb() -> u64 {
+    std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|statm| statm.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .map_or(0, |pages| pages * 4)
+}
+
+/// Hand freed heap back to the system. Dictionaries are packed arrays that are freed in a few
+/// large blocks, but the allocator keeps what it freed from the top of its arenas unless asked.
+pub fn trim_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: plain call into glibc's allocator, which is what this process allocates with.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+fn drop_held(dir: &Path, done: &Sender<()>) {
+    let before = resident_kb();
+    let scope = scope(dir);
+    let held: Vec<_> = {
+        let mut state = lock(&hub().state);
+        // Asked for again since the unload was queued (`subscribe` clears the flag before it
+        // takes this lock): the dictionaries are in use, so nothing is dropped
+        if !scope.is_unloaded() {
+            drop(state);
+            let _ = done.send(());
+            return;
+        }
+        state
+            .entries
+            .iter_mut()
+            .filter(|(key, _)| key.cache_dir == dir)
+            .map(|(_, entry)| {
+                entry.unloaded = true;
+                entry.built_from = 0;
+                (entry.latest.take(), std::mem::take(&mut entry.parts))
+            })
+            .collect()
+    };
+    // Freed with nothing locked
+    drop(held);
+    trim_memory();
+    let freed = before.saturating_sub(resident_kb());
+    info!("steno engine unloaded, {} MB freed", freed / 1024);
+    let _ = done.send(());
 }
 
 struct Hub {
@@ -122,6 +240,8 @@ pub fn subscribe(roots: Vec<PathBuf>, cache_dir: PathBuf, layout: Layout) -> Rec
         layout,
     };
     let (sender, receiver) = mpsc::channel();
+    // Asking for the dictionaries again is what loads them again
+    scope(&key.cache_dir).0.unloaded.store(false, Ordering::Release);
     {
         let mut interest = lock(&hub.interest);
         for root in &key.roots {
@@ -136,6 +256,7 @@ pub fn subscribe(roots: Vec<PathBuf>, cache_dir: PathBuf, layout: Layout) -> Rec
     {
         let mut state = lock(&hub.state);
         let entry = state.entries.entry(key.clone()).or_default();
+        entry.unloaded = false;
         if let Some(latest) = &entry.latest {
             let _ = sender.send(Arc::clone(latest));
         }
@@ -152,11 +273,13 @@ fn worker(queue: &Receiver<Job>) {
     while let Ok(job) = queue.recv() {
         match job {
             Job::Check(key) => refresh(&key),
+            Job::Unload(dir, done) => drop_held(&dir, &done),
             Job::Changed => {
                 // Wait until the files have been quiet, still serving new subscribers
                 loop {
                     match queue.recv_timeout(QUIET) {
                         Ok(Job::Check(key)) => refresh(&key),
+                        Ok(Job::Unload(dir, done)) => drop_held(&dir, &done),
                         Ok(Job::Changed) => {}
                         Err(RecvTimeoutError::Timeout) => break,
                         Err(RecvTimeoutError::Disconnected) => return,
@@ -197,6 +320,9 @@ fn refresh(key: &Key) {
         let Some(entry) = state.entries.get_mut(key) else {
             return;
         };
+        if entry.unloaded {
+            return;
+        }
         let first_time = entry.latest.is_none();
         if !first_time
             && entry.parts.is_current(&files)
@@ -245,6 +371,10 @@ fn refresh(key: &Key) {
     let Some(entry) = state.entries.get_mut(key) else {
         return;
     };
+    // Unloaded while this was being read: what was read is dropped, not kept
+    if entry.unloaded {
+        return;
+    }
     entry.parts = parts;
     let Some(dict) = dict else {
         return;

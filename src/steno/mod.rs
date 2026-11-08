@@ -24,6 +24,7 @@ pub mod meta;
 pub mod numbers;
 pub mod orthography;
 pub mod overlay;
+pub mod engine_control;
 pub mod overlay_control;
 pub mod packed;
 pub mod parts;

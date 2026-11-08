@@ -382,6 +382,34 @@ keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches 
   `macro_undo_or` and `undo_or_combo`, the default in `with_history`, tests), `engine.rs` (one
   test config literal), `config.rs` (the default).
 
+## 9. Unloading the engine [done, tested]
+
+`{:engine:unload}` (README, steno layers: "Freeing the dictionaries' memory"). No reload command:
+any later stroke loads again.
+
+- **Meta.** `steno/engine_control.rs` (like `overlay_control`): action with no text and the engine
+  command `engine_control:engine:unload`; transparent via `is_transparent_mapping`, `is_command`
+  (never repeats), command-only so off the tape (`is_control_only`).
+- **Where the memory is.** `live.rs` hub entries (`latest` chain, per-file `Parts`), every
+  engine's `Translator::dict`, and in-flight lookup searches' translator clones. No custom global
+  allocator, so glibc: the packed arrays are heap (`Vec<u32>`), the mapped cache pages are file
+  memory. The engine drops its own chain, then `live::unload(cache_dir)` has the loader thread
+  drop the hub's, `malloc_trim(0)`, and log the MB freed.
+- **Scope.** `live::Scope` per cache folder (epoch + unloaded flag). Another layer sharing the
+  folder sees the epoch change on its next press/tick and drops its copy. `from_config` on a
+  config reload starts unloaded while the flag is set; `live::subscribe` clears it.
+- **Lazy reload.** `StenoEngine::press` (first key of a stroke) and `on_stroke` call `wake`, which
+  resubscribes (the loader thread loads; the cache makes it a map+merge) and sets `loading`, so
+  strokes queue in `backlog` and replay in order in `tick` (`poll_dictionary`). A queued unload
+  re-queues the strokes after it. `refresh` ignores an entry marked unloaded, so file edits load
+  nothing; an unload racing a resubscribe is skipped by the loader (the flag is checked under the
+  hub lock).
+- **Kept.** The translation history (it is in `Translator::shared`, never the dictionary).
+  **Dropped:** the open lookup (`close_lookup`).
+- **Shared spots with other work** (for a rebase): `meta.rs` (one arm), `translate.rs` (two `||`),
+  `engine.rs` (fields, `press`, `tick`, `on_stroke`, `poll_dictionary`, `run_command`
+  arm, `is_control_only`), `live.rs`, `parts.rs` (`is_empty`, test only).
+
 ## Risks / open questions
 
 - Clicks falling through the overlay: the empty input region is set, and niri reports

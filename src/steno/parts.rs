@@ -104,6 +104,13 @@ pub struct Parts {
 }
 
 impl Parts {
+    /// Whether no file is held.
+    #[must_use]
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.by_path.is_empty()
+    }
+
     /// Which state the parts are in: different after every refresh that changed anything.
     #[must_use]
     pub const fn generation(&self) -> u64 {

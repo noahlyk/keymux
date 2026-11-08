@@ -170,6 +170,8 @@ pub fn meta_to_action(meta: &str, ctx: &Context) -> Action {
         "stitch_last_word" => meta_stitch_last_word(ctx, param),
         // keymux's own runtime overlay controls: `{:overlay:hide}`, `{:tape:clear}`, ...
         // (see `overlay_control`; they type nothing)
+        // keymux's own `{:engine:unload}` (see `engine_control`; it types nothing)
+        super::engine_control::NAME => super::engine_control::meta_action(ctx, param),
         name if super::overlay_control::NAMES.contains(&name) => {
             super::overlay_control::meta_action(ctx, name, param)
         }
