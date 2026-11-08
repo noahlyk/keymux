@@ -115,6 +115,15 @@ fn print_reverse(config_dir: &Path, layout: &Layout, phrase: &str) {
     {
         println!("(a quoted word has no dictionary entry — shown fingerspelled instead)");
     }
+    for segment in segments.iter().flatten() {
+        if let Some(pieces) = &segment.composed_of {
+            println!(
+                "{} {}",
+                segment.text,
+                super::reverse::composed_note(pieces)
+            );
+        }
+    }
 }
 
 /// Print the text a stroke (or `KPA/TKAOEU`-style sequence) types.

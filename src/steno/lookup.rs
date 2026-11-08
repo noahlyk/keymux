@@ -11,7 +11,6 @@ use super::commands::proper_outlines_in;
 use super::layout::Layout;
 use super::overlay::{LookupMode, LookupRow, LookupView, OverlayHub, TAPE_CAPACITY};
 use super::reverse::{self, Query};
-use super::shortest::shortest_outline_labeled;
 use super::translate::Translator;
 use super::typing::TypingLayout;
 use crate::keycode::KeyCode;
@@ -364,12 +363,18 @@ fn word_rows(
     let mut rows = Vec::new();
     let exact = proper_outlines_in(base, query);
     if exact.is_empty() {
-        if let Some(found) = shortest_outline_labeled(base.dictionary(), query) {
+        let missing = reverse::missing_word(base, base.dictionary(), query, cancelled);
+        if cancelled() {
+            return None;
+        }
+        if let Some(found) = &missing {
             rows.push(LookupRow {
-                text: if found.fingerspelled {
-                    format!("\"{query}\"")
-                } else {
-                    query.to_string()
+                text: match (&found.composed_of, found.fingerspelled) {
+                    (Some(pieces), _) => {
+                        format!("{query} {}", reverse::composed_note(pieces))
+                    }
+                    (None, true) => format!("\"{query}\""),
+                    (None, false) => query.to_string(),
                 },
                 outline: layout.render_strokes(&found.strokes),
             });

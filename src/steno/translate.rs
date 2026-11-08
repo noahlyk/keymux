@@ -340,6 +340,13 @@ impl Translator {
         journal::lock(&self.shared).formatter.options.clone()
     }
 
+    /// Whether a theory's plugin declares a stroke with these bits a continuation of the word
+    /// before it (see [`Chain::joins`]).
+    #[must_use]
+    pub fn joins(&self, bits: u32) -> bool {
+        self.dict.joins(bits)
+    }
+
     /// The dictionary strokes are translated with: the merged view of every dictionary file,
     /// ignoring where any plugin fell, since reverse lookup and completions have nothing a
     /// plugin could meaningfully join in on.

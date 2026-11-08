@@ -8,6 +8,7 @@
 //! looking one, and a caller showing the answer to someone has reason to say which it got.
 
 use super::commands::{exact_strokes, ranked_strokes, word_spans};
+use super::compose;
 use super::dict::Dictionary;
 use super::layout::Layout;
 use super::shortest::shortest_outline_labeled;
@@ -52,6 +53,9 @@ pub struct Segment {
     pub text: String,
     pub strokes: Vec<u32>,
     pub fingerspelled: bool,
+    /// The entries a word with none of its own was written from (`["everybody", "'s"]`, see
+    /// [`super::compose`]), when it was.
+    pub composed_of: Option<Vec<String>>,
 }
 
 /// `phrase`'s reverse lookup, one segment per word in order.
@@ -64,6 +68,17 @@ pub struct Segment {
 /// two can never answer differently for the same phrase.
 #[must_use]
 pub fn reverse_phrase(base: &Translator, dict: &Dictionary, phrase: &str) -> Vec<Option<Segment>> {
+    reverse_phrase_cancellable(base, dict, phrase, &|| false)
+}
+
+/// [`reverse_phrase`], giving up on composing a word (it is then spelled out) once `cancelled`.
+#[must_use]
+pub fn reverse_phrase_cancellable(
+    base: &Translator,
+    dict: &Dictionary,
+    phrase: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Vec<Option<Segment>> {
     let spans = word_spans(phrase);
     let words: Vec<&str> = spans.iter().map(|&(s, e)| &phrase[s..e]).collect();
     let candidates: Vec<Vec<Vec<u32>>> = words.iter().map(|&w| ranked_strokes(dict, w)).collect();
@@ -72,13 +87,7 @@ pub fn reverse_phrase(base: &Translator, dict: &Dictionary, phrase: &str) -> Vec
     let mut start = 0;
     while start < words.len() {
         if candidates[start].is_empty() {
-            chosen.push(
-                shortest_outline_labeled(dict, words[start]).map(|found| Segment {
-                    text: words[start].to_string(),
-                    strokes: found.strokes,
-                    fingerspelled: found.fingerspelled,
-                }),
-            );
+            chosen.push(missing_word(base, dict, words[start], cancelled));
             start += 1;
             continue;
         }
@@ -99,6 +108,7 @@ pub fn reverse_phrase(base: &Translator, dict: &Dictionary, phrase: &str) -> Vec
             text: word.to_string(),
             strokes,
             fingerspelled: false,
+            composed_of: None,
         };
         match exact_strokes(base, &wants, &candidates[start..end]) {
             Some(exact) => chosen.extend(
@@ -117,6 +127,40 @@ pub fn reverse_phrase(base: &Translator, dict: &Dictionary, phrase: &str) -> Vec
         start = end;
     }
     chosen
+}
+
+/// A word with no entry: written from entries (see [`super::compose`]) when that takes no more
+/// strokes than spelling it out would, otherwise fingerspelled.
+pub(crate) fn missing_word(
+    base: &Translator,
+    dict: &Dictionary,
+    word: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Option<Segment> {
+    if let Some(found) = compose::compose(&base.fresh(), word, cancelled) {
+        // Spelling a word takes one stroke a letter, so a composition that is no longer needs
+        // no comparison (and no scan for the spelled form)
+        if found.strokes.len() <= word.chars().count() {
+            return Some(Segment {
+                text: word.to_string(),
+                strokes: found.strokes,
+                fingerspelled: false,
+                composed_of: Some(found.pieces),
+            });
+        }
+    }
+    shortest_outline_labeled(dict, word).map(|found| Segment {
+        text: word.to_string(),
+        strokes: found.strokes,
+        fingerspelled: found.fingerspelled,
+        composed_of: None,
+    })
+}
+
+/// The note that says how a composed word was written: `(composed: everybody + 's)`.
+#[must_use]
+pub fn composed_note(pieces: &[String]) -> String {
+    format!("(composed: {})", pieces.join(" + "))
 }
 
 /// Dictionary entries closest to `strokes`, nearest first - "did you mean" outlines for a raw
@@ -218,6 +262,7 @@ mod tests {
                 text: "cat".to_string(),
                 strokes: vec![Layout::plover().parse_stroke("KAT").unwrap()],
                 fingerspelled: false,
+                composed_of: None,
             })]
         );
         let (words, strokes) = display(&segments);

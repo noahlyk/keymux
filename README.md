@@ -724,6 +724,18 @@ already has it as `PHRUP` and `PHR*UP`, and you can add your own to any dictiona
   The command line does the same: `keymux steno lookup`, `stroke`, `keys` and `add` read your
   config's steno layer `extra_keys` too, so `keymux steno lookup "ED/+-D"` parses and prints the
   `+` exactly as the daemon does (with no config or no `extra_keys`, the plain 23 keys).
+- A word with no entry of its own is composed from entries when that takes no more strokes
+  than fingerspelling it: a word plus a suffix entry (an entry whose definition is `{^text}`,
+  found by that shape, never by its outline), or two words. Two words are glued with the join
+  key if a plugin declares one (`joins`, which costs no stroke: it is added to the second
+  word's first stroke), otherwise with the dictionary's `{^}` entry between them (Plover,
+  Lapwing); with neither, only word plus suffix is tried. The fewest strokes win, then the
+  fewest keys, then the fewest pieces, up to three pieces. The row reads
+  `everybody's (composed: everybody + 's)`, and `keymux steno lookup` prints the same note. A
+  real entry always beats a composition. Without a join key the composed strokes are typed
+  through the engine to prove they produce the word. Every piece is an indexed lookup (never a
+  scan), so a miss stays instant on a million entries, and a key press cancels it like the
+  rest of the lookup.
 - Backspace edits the query, Shift capitalizes (lookups are case-sensitive), and **Esc or
   Enter** closes it, including a key you remapped to either. You're straight back in steno,
   mid-sentence.

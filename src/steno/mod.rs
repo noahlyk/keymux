@@ -9,6 +9,7 @@
 pub mod action;
 pub mod chord;
 pub mod commands;
+pub mod compose;
 pub mod dict;
 pub mod engine;
 pub mod formatter;
