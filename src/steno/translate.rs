@@ -480,6 +480,13 @@ impl Translator {
         self.dict.joins(bits)
     }
 
+    /// Whether a plugin wants the stroke in progress (`stroke`) sent now, with `held` still down
+    /// (see [`Chain::send_early`]).
+    #[must_use]
+    pub fn sends_early(&self, held: u32, stroke: u32) -> bool {
+        self.dict.send_early(held, stroke)
+    }
+
     /// The dictionary strokes are translated with: the merged view of every dictionary file,
     /// ignoring where any plugin fell, since reverse lookup and completions have nothing a
     /// plugin could meaningfully join in on.

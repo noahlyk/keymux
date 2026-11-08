@@ -59,6 +59,29 @@
 //! a word of its own. A plugin that has no use for this leaves it out entirely; a stroke is
 //! then never treated as a continuation by anything in keymux. See
 //! `docs/plugins/orthographic-fallback.rs` for a complete, working example (including `joins`).
+//!
+//! # The send-early interface (optional)
+//!
+//! A stroke is sent when its last key comes up. A theory that wants some strokes to go sooner,
+//! with keys still down, exports:
+//!
+//! ```ignore
+//! #[no_mangle]
+//! pub extern "C" fn send_early(held: i64, stroke: i64) -> i32;
+//! ```
+//!
+//! Asked each time a stroke key comes up while others are still down, with the bits of the keys
+//! still down (`held`) and of every key pressed for the stroke so far (`stroke`). Non-zero sends
+//! the stroke now, exactly as a `{:firstup}` entry is: the keys still down stay in the chord and
+//! go with the next key pressed, and letting go of them alone sends nothing. A key a theory makes
+//! sticky this way (held across stroke after stroke, each stroke going as the other keys come
+//! up) is its own business; keymux has no notion of any particular key behaving so. See
+//! `docs/plugins/sticky-key.rs`.
+//!
+//! # Mods
+//!
+//! `alloc` and `fallback` are required only of a plugin that reads words. One that only changes
+//! how the engine behaves (`joins`, `send_early`) leaves them out: a mod, never asked for a word.
 
 use super::dict::Dictionary;
 use super::layout::Layout;
@@ -76,7 +99,7 @@ use wasmtime::{Engine, Instance, Memory, Module, Store, TypedFunc};
 
 /// Bumped whenever the interface above changes, so a plugin compiled against an older one is
 /// recompiled rather than trusted.
-const ABI_VERSION: u32 = 1;
+const ABI_VERSION: u32 = 2;
 
 /// Where compiled plugins are cached, under the same cache root a dictionary's own binary copy
 /// is kept (see [`super::setup::cache_dir`]): `<cache>/steno/plugins`.
@@ -136,19 +159,24 @@ fn compiled(source: &Path, cache_dir: &Path) -> Result<PathBuf> {
     Ok(out)
 }
 
+/// A word-reading plugin's `alloc(len) -> ptr` and `fallback(ptr, len) -> packed`.
+type Reads = (TypedFunc<i32, i32>, TypedFunc<(i32, i32), i64>);
+
 /// One loaded plugin: a WebAssembly module, instantiated so its exports can be called.
 pub(crate) struct Plugin {
     name: String,
     store: Store<()>,
-    memory: Memory,
-    alloc: TypedFunc<i32, i32>,
-    fallback: TypedFunc<(i32, i32), i64>,
+    memory: Option<Memory>,
+    /// `alloc` and `fallback`, for a plugin that reads words; a mod has neither
+    reads: Option<Reads>,
     /// `joins(bits) -> bool`, if this plugin exports one - see the module doc's "join
     /// interface". Not every plugin cares, so this is the one export that's optional.
     joins: Option<TypedFunc<i64, i32>>,
     /// What `joins` answered for each stroke asked so far. A pure function of the stroke, and
     /// the longest-match search asks about the same few strokes many times per stroke typed.
     joins_known: rustc_hash::FxHashMap<u32, bool>,
+    /// `send_early(held, stroke) -> bool`, if this plugin exports one: see the module doc.
+    send_early: Option<TypedFunc<(i64, i64), i32>>,
 }
 
 impl fmt::Debug for Plugin {
@@ -165,28 +193,43 @@ impl Plugin {
         let mut store = Store::new(&engine, ());
         let instance = Instance::new(&mut store, &module, &[])
             .map_err(|e| anyhow::anyhow!("instantiating plugin {name:?}: {e}"))?;
-        let memory = instance
-            .get_memory(&mut store, "memory")
-            .with_context(|| format!("plugin {name:?} has no memory"))?;
+        let memory = instance.get_memory(&mut store, "memory");
         let alloc = instance
             .get_typed_func::<i32, i32>(&mut store, "alloc")
-            .map_err(|e| anyhow::anyhow!("plugin {name:?} has no alloc(len) -> ptr: {e}"))?;
+            .ok();
         let fallback = instance
             .get_typed_func::<(i32, i32), i64>(&mut store, "fallback")
-            .map_err(|e| {
-                anyhow::anyhow!("plugin {name:?} has no fallback(ptr, len) -> packed: {e}")
-            })?;
+            .ok();
+        let reads = match (alloc, fallback) {
+            (Some(alloc), Some(fallback)) => {
+                if memory.is_none() {
+                    bail!("plugin {name:?} reads words but has no memory");
+                }
+                Some((alloc, fallback))
+            }
+            (None, None) => None,
+            (None, Some(_)) => bail!("plugin {name:?} has fallback but no alloc(len) -> ptr"),
+            (Some(_), None) => {
+                bail!("plugin {name:?} has alloc but no fallback(ptr, len) -> packed")
+            }
+        };
         let joins = instance
             .get_typed_func::<i64, i32>(&mut store, "joins")
             .ok();
+        let send_early = instance
+            .get_typed_func::<(i64, i64), i32>(&mut store, "send_early")
+            .ok();
+        if reads.is_none() && joins.is_none() && send_early.is_none() {
+            bail!("plugin {name:?} exports none of fallback, joins, send_early");
+        }
         Ok(Self {
             name,
             store,
             memory,
-            alloc,
-            fallback,
+            reads,
             joins,
             joins_known: rustc_hash::FxHashMap::default(),
+            send_early,
         })
     }
 
@@ -198,16 +241,18 @@ impl Plugin {
     /// anything that only acts when a stroke maps to nothing at all — Plover's own rule for the
     /// bare `*` undo stroke among them.
     pub fn fallback(&mut self, outline: &str) -> Option<String> {
+        let (alloc, fallback) = self.reads.clone()?;
+        let memory = self.memory?;
         let bytes = outline.as_bytes();
         let len = i32::try_from(bytes.len()).ok()?;
-        let ptr = self.alloc.call(&mut self.store, len).ok()?;
+        let ptr = alloc.call(&mut self.store, len).ok()?;
         if ptr == 0 {
             return None;
         }
-        self.memory
+        memory
             .write(&mut self.store, usize::try_from(ptr).ok()?, bytes)
             .ok()?;
-        let packed = self.fallback.call(&mut self.store, (ptr, len)).ok()?;
+        let packed = fallback.call(&mut self.store, (ptr, len)).ok()?;
         if packed < 0 {
             return None;
         }
@@ -216,7 +261,7 @@ impl Plugin {
         #[allow(clippy::cast_sign_loss)]
         let out_len = usize::try_from(packed & 0xFFFF_FFFF).ok()?;
         let mut buf = vec![0u8; out_len];
-        self.memory.read(&self.store, out_ptr, &mut buf).ok()?;
+        memory.read(&self.store, out_ptr, &mut buf).ok()?;
         String::from_utf8(buf).ok().filter(|s| !s.is_empty())
     }
 
@@ -233,6 +278,19 @@ impl Plugin {
         let answer = joins.call(&mut self.store, i64::from(bits)).unwrap_or(0) != 0;
         self.joins_known.insert(bits, answer);
         answer
+    }
+
+    /// Ask this plugin whether the stroke in progress (`stroke`, every key pressed for it so
+    /// far) should be sent now, with `held` still down - see the module doc's "send-early
+    /// interface". `false` if it doesn't export `send_early`, or if the call failed.
+    pub fn send_early(&mut self, held: u32, stroke: u32) -> bool {
+        let Some(send_early) = &self.send_early else {
+            return false;
+        };
+        send_early
+            .call(&mut self.store, (i64::from(held), i64::from(stroke)))
+            .unwrap_or(0)
+            != 0
     }
 }
 
@@ -423,7 +481,17 @@ impl Chain {
     pub fn joins(&self, bits: u32) -> bool {
         bits & self.layout.join_mask() != 0
             || self.steps.iter().any(|step| match step {
-            Step::Plugin(plugin) => lock(plugin).joins(bits),
+                Step::Plugin(plugin) => lock(plugin).joins(bits),
+                Step::Dict(_) => false,
+            })
+    }
+
+    /// Whether the stroke in progress should be sent now, with `held` still down: any plugin
+    /// says so through [`Plugin::send_early`]. `false` with no plugin that exports it.
+    #[must_use]
+    pub fn send_early(&self, held: u32, stroke: u32) -> bool {
+        self.steps.iter().any(|step| match step {
+            Step::Plugin(plugin) => lock(plugin).send_early(held, stroke),
             Step::Dict(_) => false,
         })
     }
@@ -648,6 +716,37 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
             chain.lookup(&[Layout::plover().parse_stroke("TKPWEUPB").unwrap()]),
             Some("gin".to_string())
         );
+    }
+
+    #[test]
+    fn the_documented_mod_loads_without_fallback_and_answers_send_early() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("docs")
+            .join("plugins")
+            .join("sticky-key.rs");
+        let cache =
+            tmp_dir().join("the_documented_mod_loads_without_fallback_and_answers_send_early");
+        let chain = Chain::load_cached(&[source], &cache, &Layout::plover());
+        assert_eq!(
+            chain.plugin_count(),
+            1,
+            "a mod with no fallback still loads"
+        );
+        let kat = Layout::plover().parse_stroke("KAT").unwrap();
+        let sticky = 1 << 23;
+        assert!(
+            chain.send_early(sticky, kat | sticky),
+            "only the sticky key left down: send"
+        );
+        assert!(
+            !chain.send_early(sticky | kat, kat | sticky),
+            "other keys still down: wait"
+        );
+        assert!(
+            !chain.send_early(sticky, sticky),
+            "nothing but the sticky key: nothing to send"
+        );
+        assert_eq!(chain.lookup(&[kat]), None, "and it never reads a word");
     }
 
     #[test]

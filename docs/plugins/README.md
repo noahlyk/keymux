@@ -102,6 +102,29 @@ A plugin is no longer needed for this: the steno layer can declare the join key 
 (`extra_keys: ['+'], join_keys: ['+']`, see the README's steno Config section). If both are
 present, they are unioned: a stroke continues the word if either says so.
 
+### `send_early` (optional)
+
+A stroke is sent when its last key comes up. A plugin can send one sooner, with keys still down:
+
+```rust
+#[no_mangle]
+pub extern "C" fn send_early(held: i64, stroke: i64) -> i32 { /* ... */ }
+```
+
+Asked each time a stroke key comes up while others are still down, with the bits of the keys
+still down (`held`) and of every key pressed for the stroke so far (`stroke`). Non-zero sends the
+stroke now, the same way a `{:firstup}` entry does: the keys still down stay in the chord and go
+with the next key pressed, and letting go of them alone sends nothing. `sticky-key.rs` uses it to
+make one key sticky: hold it, and each stroke goes as its other keys come up, the held key part of
+every one.
+
+## Mods: a plugin that reads no words
+
+`alloc` and `fallback` are only required of a plugin that reads words. One that only changes how
+the engine behaves (`joins`, `send_early`) leaves them out and is a *mod*: it sits in the steno
+folder like any plugin, is never asked for a word, and must export at least one of the three.
+`sticky-key.rs` is a complete one.
+
 ## Where things are cached
 
 A compiled plugin lives under the same cache root a dictionary's own binary copy is kept (see

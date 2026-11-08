@@ -390,14 +390,16 @@ impl StenoEngine {
     }
 
     /// A key came up with others still down. A stroke whose dictionary entry carries
-    /// `{:firstup}` is sent now, and the keys still down wait for another key to go with them.
+    /// `{:firstup}` is sent now, or one a plugin's `send_early` asks for (a theory's sticky key,
+    /// say), and the keys still down wait for another key to go with them.
     fn sent_early(&mut self, released: u32) -> Option<u32> {
-        (self.timing.first_up
-            && !self.loading
+        let (held, stroke) = (self.chord.held(), self.chord.pending());
+        (!self.loading
             && released != 0
-            && self.chord.held() != 0
+            && held != 0
             && self.chord.is_fresh()
-            && self.translator.wants_first_up(self.chord.pending()))
+            && ((self.timing.first_up && self.translator.wants_first_up(stroke))
+                || self.translator.sends_early(held, stroke)))
         .then(|| self.chord.send_early())
         .flatten()
     }
@@ -1513,3 +1515,7 @@ mod tests {
 #[cfg(test)]
 #[path = "engine_unload_tests.rs"]
 mod unload_tests;
+
+#[cfg(test)]
+#[path = "send_early_tests.rs"]
+mod send_early_tests;

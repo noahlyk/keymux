@@ -12,14 +12,14 @@ const DICT: &str = r#"{
 }"#;
 
 /// A folder to itself, with a config folder inside it so the cache lands inside too.
-struct Rig {
-    root: PathBuf,
-    config_dir: PathBuf,
-    dict_dir: PathBuf,
+pub(super) struct Rig {
+    pub(super) root: PathBuf,
+    pub(super) config_dir: PathBuf,
+    pub(super) dict_dir: PathBuf,
 }
 
 impl Rig {
-    fn new(name: &str) -> Self {
+    pub(super) fn new(name: &str) -> Self {
         static N: AtomicU32 = AtomicU32::new(0);
         let root = std::env::temp_dir().join(format!(
             "keymux-unload-{name}-{}-{}",
@@ -43,7 +43,7 @@ impl Rig {
         crate::steno::setup::cache_dir(&self.config_dir)
     }
 
-    fn config(&self) -> StenoConfig {
+    pub(super) fn config(&self) -> StenoConfig {
         StenoConfig {
             layout: "qwerty".to_string(),
             extra_keys: Vec::new(),
@@ -111,7 +111,7 @@ fn hit(engine: &mut StenoEngine, outline: &str) -> Vec<StenoOutput> {
 }
 
 /// Tick until `done` or ten seconds, collecting output.
-fn settle(engine: &mut StenoEngine, mut out: Vec<StenoOutput>) -> String {
+pub(super) fn settle(engine: &mut StenoEngine, mut out: Vec<StenoOutput>) -> String {
     let end = Instant::now() + Duration::from_secs(10);
     while engine.loading && Instant::now() < end {
         out.extend(engine.tick(Instant::now()));
