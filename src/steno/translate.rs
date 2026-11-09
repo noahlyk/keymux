@@ -12,7 +12,7 @@ use super::formatter::{Formatter, Op, Options};
 use super::journal::{self, History, MachineId, Origin, SharedHistory};
 use super::keycombo::key_events;
 use super::layout::render_stroke;
-use super::plugin::Chain;
+use super::plugin::{Chain, CONTEXT_BYTES};
 use super::worker::Budget;
 use crate::keycode::KeyCode;
 use smallvec::SmallVec;
@@ -37,6 +37,10 @@ struct Late {
     stroke: u32,
     /// The outline the plugin was late with
     strokes: Vec<u32>,
+    /// The text before that outline, as the plugin was asked it
+    before: String,
+    /// Where the text before the stroke ended on screen (see [`Translator::stroke_start`])
+    start: usize,
     /// What the stroke made without it
     translation: Translation,
 }
@@ -82,6 +86,10 @@ pub struct Translation {
     pub machine: MachineId,
     /// Strokes, or text that was typed or erased by hand
     pub origin: Origin,
+    /// Where the text before it ends on screen (a byte offset into the history's `screen`)
+    /// when it was made: what a plugin is told precedes an outline starting here. `None` when
+    /// not known.
+    pub begins: Option<usize>,
 }
 
 impl Translation {
@@ -96,6 +104,7 @@ impl Translation {
             command_ran: false,
             machine: 0,
             origin: Origin::Stroke,
+            begins: None,
         }
     }
 
@@ -398,6 +407,9 @@ pub struct Translator {
     /// The plugin, and its reading, that the last stroke typed, if a plugin's reading is what it
     /// typed
     plugin_read: Option<(String, String)>,
+    /// Where the text before the stroke being translated ends on screen (a byte offset into the
+    /// history's `screen`): what a plugin is told precedes an outline starting with it
+    stroke_start: usize,
 }
 
 /// A copy of a translator has a copy of the history too, so trying strokes on it (a lookup
@@ -418,6 +430,7 @@ impl Clone for Translator {
             budget: Budget::default(),
             late: None,
             plugin_read: None,
+            stroke_start: 0,
         }
     }
 }
@@ -458,6 +471,7 @@ impl Translator {
             budget: Budget::default(),
             late: None,
             plugin_read: None,
+            stroke_start: 0,
         }
     }
 
@@ -480,7 +494,7 @@ impl Translator {
     pub fn late_ready(&self) -> bool {
         self.late
             .as_ref()
-            .is_some_and(|late| self.dict.settled(&late.strokes))
+            .is_some_and(|late| self.dict.settled(&late.strokes, &late.before))
     }
 
     /// The plugin, and its reading, that the last stroke (or the last [`Self::settle_late`])
@@ -517,6 +531,9 @@ impl Translator {
             return None;
         };
         self.budget.start(Instant::now() + self.plugin_deadline);
+        // Nothing was typed since (the stroke's translation is still the last thing), so the
+        // text before the stroke is where it was
+        self.stroke_start = late.start;
         let mut ops = Vec::new();
         self.untranslate_translation(&last);
         self.translate_stroke(late.stroke, &mut ops);
@@ -677,6 +694,7 @@ impl Translator {
     pub fn stroke(&mut self, stroke: u32) -> Option<StenoOutput> {
         self.begin_stroke();
         self.check_out();
+        self.stroke_start = self.hist.screen.len();
         let mut ops = Vec::new();
         self.translate_stroke(stroke, &mut ops);
         ops.extend(self.flush(None));
@@ -703,6 +721,7 @@ impl Translator {
     pub(crate) fn stroke_ops(&mut self, stroke: u32) -> Vec<Op> {
         self.begin_stroke();
         self.check_out();
+        self.stroke_start = self.hist.screen.len();
         let mut ops = Vec::new();
         self.translate_stroke(stroke, &mut ops);
         ops.extend(self.flush(None));
@@ -754,8 +773,13 @@ impl Translator {
 
     fn translate_stroke(&mut self, stroke: u32, ops: &mut Vec<Op>) {
         let max_len = self.dict.longest_key();
-        let mapping =
-            self.lookup_with_prefix(max_len, &self.hist.state.translations, &[stroke], &[]);
+        let mapping = self.lookup_with_prefix(
+            max_len,
+            &self.hist.state.translations,
+            &[stroke],
+            &[],
+            self.before(Some(self.stroke_start)),
+        );
         if self.classes_enabled && !self.dict.joins(stroke) {
             if let Some(text) = mapping.as_deref().filter(|m| is_transparent_mapping(m)) {
                 self.transparent = true;
@@ -797,7 +821,11 @@ impl Translator {
             // Plover tries them only after every plain outline failed (a plugin at its own
             // place in the chain already had its chance, in `mapping` and in each attempt)
             .or_else(|| {
-                let suffixes = self.involved_suffixes(stroke, &SUFFIX_KEYS);
+                let suffixes = self.involved_suffixes(
+                    stroke,
+                    &SUFFIX_KEYS,
+                    self.before(Some(self.stroke_start)),
+                );
                 (!suffixes.is_empty())
                     .then(|| self.longest_match(window, &outlines, 1, &suffixes))
                     .flatten()
@@ -814,14 +842,50 @@ impl Translator {
         });
         let late = self.budget.take_late();
         self.translate_translation(translation);
-        if let Some(strokes) = late {
+        if let Some((strokes, before)) = late {
             let translation = self.hist.state.translations.last().cloned();
             self.late = translation.map(|translation| Late {
                 stroke,
                 strokes,
+                before,
+                start: self.stroke_start,
                 translation,
             });
         }
+    }
+
+    /// The text before an outline whose text starts at `begins` on screen, as a plugin is
+    /// told it: at most the last [`CONTEXT_BYTES`] of what is known to be on screen there,
+    /// cut on a character boundary. Empty when nothing is known. A wall leaves nothing known
+    /// before it: anything that fences the history (a key that moves the caret, a shortcut, a
+    /// window change) empties the screen, and a barrier stroke (a key combination that moves
+    /// the cursor or deletes, which the screen does not follow) starts it over after itself.
+    fn before(&self, begins: Option<usize>) -> &str {
+        let screen = self.hist.screen.as_str();
+        let Some(mut end) = begins else {
+            return "";
+        };
+        end = end.min(screen.len());
+        while !screen.is_char_boundary(end) {
+            end -= 1;
+        }
+        let translations = &self.hist.state.translations;
+        let wall = translations
+            .iter()
+            .rposition(|t| t.begins.is_some_and(|at| at <= end) && is_barrier(t))
+            .map(|at| {
+                translations
+                    .get(at + 1)
+                    .map_or(Some(self.stroke_start), |next| next.begins)
+                    .unwrap_or(end)
+            })
+            .unwrap_or(0)
+            .min(end);
+        let mut start = end.saturating_sub(CONTEXT_BYTES).max(wall);
+        while !screen.is_char_boundary(start) {
+            start += 1;
+        }
+        &screen[start..end]
     }
 
     /// What a transparent stroke asks of the keyboard: its commands and key combinations, in
@@ -1200,8 +1264,9 @@ impl Translator {
             })
             .collect();
         if !english.is_empty() {
+            let begins = last.replaced.last().and_then(|t| t.begins);
             english.push(
-                self.lookup(&[lookup_stroke], &SUFFIX_KEYS)
+                self.lookup(&[lookup_stroke], &SUFFIX_KEYS, self.before(begins))
                     .unwrap_or_else(|| render_stroke(lookup_stroke)),
             );
             let mut t = Translation::new(vec![stroke], Some(english.join(" ")));
@@ -1214,6 +1279,13 @@ impl Translator {
     fn translate_translation(&mut self, mut translation: Translation) {
         if translation.origin.is_stroke() {
             translation.machine = self.machine;
+        }
+        // It starts where the first translation it replaces started, or else with this stroke
+        if translation.begins.is_none() {
+            translation.begins = translation
+                .replaced
+                .first()
+                .map_or(Some(self.stroke_start), |t| t.begins);
         }
         self.undo_all(&translation.replaced);
         self.do_all(vec![translation]);
@@ -1307,28 +1379,43 @@ impl Translator {
             .iter()
             .filter(|(_, strokes)| strokes.len() >= min_len)
             .find_map(|(i, strokes)| {
-                let mapping = self.lookup_with_prefix(max_len, &window[..*i], strokes, suffixes)?;
+                // What was typed before the outline's first stroke, never the outline's own
+                // text so far
+                let begins = window.get(*i).map_or(Some(self.stroke_start), |t| t.begins);
+                let mapping = self.lookup_with_prefix(
+                    max_len,
+                    &window[..*i],
+                    strokes,
+                    suffixes,
+                    self.before(begins),
+                )?;
                 let mut translation = Translation::new(strokes.to_vec(), Some(mapping));
                 translation.replaced = window[*i..].to_vec();
                 Some(translation)
             })
     }
 
-    fn lookup_strokes(&self, strokes: &[u32]) -> Option<String> {
-        self.dict.lookup_within(strokes, &self.budget)
+    /// Look the strokes up, typed after `before` (see [`Self::before`]).
+    fn lookup_strokes(&self, strokes: &[u32], before: &str) -> Option<String> {
+        self.dict.lookup_within(strokes, before, &self.budget)
     }
 
     /// Look the strokes up, with the last one's suffix key folded in if there are suffixes: the
     /// stroke without the key, then a space and the suffix's own translation.
-    fn lookup_with_suffix(&self, strokes: &[u32], suffixes: &[(u32, String)]) -> Option<String> {
+    fn lookup_with_suffix(
+        &self,
+        strokes: &[u32],
+        suffixes: &[(u32, String)],
+        before: &str,
+    ) -> Option<String> {
         if suffixes.is_empty() {
-            return self.lookup_strokes(strokes);
+            return self.lookup_strokes(strokes, before);
         }
         let (last, rest) = strokes.split_last()?;
         for (suffix_stroke, suffix_mapping) in suffixes {
             let mut without = Strokes::from_slice(rest);
             without.push(last & !suffix_stroke);
-            if let Some(main) = self.lookup_strokes(&without) {
+            if let Some(main) = self.lookup_strokes(&without, before) {
                 return Some(format!("{main} {suffix_mapping}"));
             }
         }
@@ -1336,24 +1423,29 @@ impl Translator {
     }
 
     /// The suffix keys `stroke` has that have a translation of their own.
-    fn involved_suffixes(&self, stroke: u32, suffix_keys: &[u32]) -> Vec<(u32, String)> {
+    fn involved_suffixes(
+        &self,
+        stroke: u32,
+        suffix_keys: &[u32],
+        before: &str,
+    ) -> Vec<(u32, String)> {
         suffix_keys
             .iter()
             .filter(|&&key| stroke & key == key)
-            .filter_map(|&key| Some((key, self.lookup_strokes(&[key])?)))
+            .filter_map(|&key| Some((key, self.lookup_strokes(&[key], before)?)))
             .collect()
     }
 
     /// The translation of an outline, looking for a suffix key folded in if there is no entry.
-    fn lookup(&self, strokes: &[u32], suffix_keys: &[u32]) -> Option<String> {
-        if let Some(found) = self.lookup_strokes(strokes) {
+    fn lookup(&self, strokes: &[u32], suffix_keys: &[u32], before: &str) -> Option<String> {
+        if let Some(found) = self.lookup_strokes(strokes, before) {
             return Some(found);
         }
-        let suffixes = self.involved_suffixes(*strokes.last()?, suffix_keys);
+        let suffixes = self.involved_suffixes(*strokes.last()?, suffix_keys, before);
         if suffixes.is_empty() {
             return None;
         }
-        self.lookup_with_suffix(strokes, &suffixes)
+        self.lookup_with_suffix(strokes, &suffixes, before)
     }
 
     /// Whether the word before is complete, so a stroke may start a new one.
@@ -1377,11 +1469,12 @@ impl Translator {
         last_translations: &[Translation],
         strokes: &[u32],
         suffixes: &[(u32, String)],
+        before: &str,
     ) -> Option<String> {
         if strokes.len() < max_len && Self::previous_word_is_finished(last_translations) {
             let mut prefixed: Strokes = smallvec::smallvec![0];
             prefixed.extend_from_slice(strokes);
-            if let Some(found) = self.lookup_with_suffix(&prefixed, suffixes) {
+            if let Some(found) = self.lookup_with_suffix(&prefixed, suffixes, before) {
                 return Some(found);
             }
         }
@@ -1390,7 +1483,7 @@ impl Translator {
         // word, so trying it is never pointless the way trying an arbitrarily long accidental
         // window would be.
         if strokes.len() <= max_len || self.is_join_continuation(strokes) {
-            return self.lookup_with_suffix(strokes, suffixes);
+            return self.lookup_with_suffix(strokes, suffixes, before);
         }
         None
     }
@@ -1560,7 +1653,7 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         let chain = Chain::test_with_reader(
             dictionary,
             layout,
-            Box::new(move |outline: &str| {
+            Box::new(move |outline: &str, _: &str| {
                 let _ = gate.recv();
                 Some(outline.replace(['/', '+'], "").to_lowercase())
             }),
@@ -1632,6 +1725,138 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         go.send(()).unwrap(); // the whole run
         settle(&mut t);
         assert_eq!(t.text(), "hraobgup");
+    }
+
+    /// A translator over `dict` and, after it, a real plugin that reads each outline as
+    /// `(TEXT|OUTLINE)`, `TEXT` being what its `context` export was given just before.
+    fn with_context_plugin(dict: &str, test_name: &str) -> Translator {
+        let dir = std::env::temp_dir().join(format!(
+            "keymux-translate-context-test-{}-{test_name}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let dict_path = dir.join("01-dict.json");
+        let plugin_path = dir.join("02-echo.rs");
+        fs::write(&dict_path, dict).unwrap();
+        fs::write(&plugin_path, super::super::plugin::tests::ECHO_CONTEXT).unwrap();
+        let chain = Chain::load_cached(
+            &[dict_path, plugin_path],
+            &dir.join("cache"),
+            &Layout::plover(),
+        );
+        Translator::with_shared(
+            Arc::new(chain),
+            Options {
+                start_attached: true,
+                ..Options::default()
+            },
+        )
+    }
+
+    #[test]
+    fn a_plugin_is_told_the_text_typed_before_the_outline() {
+        let mut t = with_context_plugin(r#"{"TKOG": "dog"}"#, "before");
+        t.stroke(stroke("KAT"));
+        assert_eq!(t.text(), "(|KAT)", "nothing before the first stroke");
+        t.stroke(stroke("TKOG"));
+        t.stroke(stroke("TOP"));
+        assert_eq!(t.text(), "(|KAT) dog ((|KAT) dog|TOP)");
+    }
+
+    #[test]
+    fn a_run_is_told_the_text_before_its_first_stroke_never_its_own() {
+        let mut t = with_context_plugin(r#"{"TKOG": "dog"}"#, "run");
+        t.stroke(stroke("TKOG"));
+        t.stroke(stroke("KAT"));
+        assert_eq!(t.text(), "dog (dog|KAT)");
+        // Bit 23 is the plugin's join key: the run KAT/TOP is one word, asked about whole
+        t.stroke(stroke("TOP") | (1 << 23));
+        assert_eq!(
+            t.text(),
+            "dog (dog|KAT/TOP)",
+            "what the run typed so far is not part of what came before it"
+        );
+    }
+
+    #[test]
+    fn a_wall_leaves_a_plugin_nothing_before_the_outline() {
+        let mut t = with_context_plugin(r#"{"TKOG": "dog"}"#, "wall");
+        t.stroke(stroke("TKOG"));
+        // A key press, a window change: what is at the cursor is no longer known
+        t.start_fresh();
+        t.stroke(stroke("KAT"));
+        assert_eq!(t.text(), "(|KAT)");
+    }
+
+    #[test]
+    fn a_stroke_that_moves_the_cursor_is_a_wall_too() {
+        let mut t = with_context_plugin(r#"{"TKOG": "dog", "HREFT": "{#Left}"}"#, "barrier");
+        t.stroke(stroke("TKOG"));
+        t.stroke(stroke("HREFT"));
+        t.stroke(stroke("KAT"));
+        assert_eq!(t.text(), "dog (|KAT)", "the screen no longer says what is at the cursor");
+        t.stroke(stroke("TOP"));
+        assert_eq!(
+            t.text(),
+            "dog (|KAT) ( (|KAT)|TOP)",
+            "what was typed after it is known again"
+        );
+    }
+
+    #[test]
+    fn text_typed_by_hand_is_known_and_told() {
+        let mut t = with_context_plugin(r#"{"TKOG": "dog"}"#, "by-hand");
+        type_by_hand(&t, "hi ");
+        t.stroke(stroke("KAT"));
+        assert_eq!(t.text(), "hi (hi |KAT)");
+    }
+
+    #[test]
+    fn the_text_before_is_cut_to_its_last_256_bytes_on_a_character_boundary() {
+        // 401 bytes: the last 256 start inside an `é`, so the cut moves on past it
+        let long = format!("{}x", "é".repeat(200));
+        let mut t = with_context_plugin(&format!(r#"{{"TKOG": "{long}"}}"#), "cap");
+        t.stroke(stroke("TKOG"));
+        t.stroke(stroke("KAT"));
+        let told = format!("{}x", "é".repeat(127));
+        assert_eq!(told.len(), 255);
+        assert_eq!(t.text(), format!("{long} ({told}|KAT)"));
+    }
+
+    #[test]
+    fn a_late_reading_is_asked_with_the_text_before_its_stroke_and_lands() {
+        let (go, gate) = mpsc::channel::<()>();
+        let mut dictionary = Dictionary::default();
+        dictionary
+            .merge_json(r#"{"TKOG": "dog"}"#, &Layout::plover())
+            .unwrap();
+        let chain = Chain::test_with_reader_of(
+            dictionary,
+            Layout::plover(),
+            Box::new(move |outline: &str, before: &str| {
+                let _ = gate.recv();
+                Some(format!("({before}|{})", outline.to_lowercase()))
+            }),
+            true,
+        );
+        let mut t = Translator::with_shared(
+            Arc::new(chain),
+            Options {
+                start_attached: true,
+                ..Options::default()
+            },
+        );
+        t.set_plugin_deadline(Duration::from_millis(5));
+        t.stroke(stroke("TKOG"));
+        t.stroke(stroke("TOP"));
+        assert!(t.has_late(), "{}", t.text());
+        go.send(()).unwrap();
+        settle(&mut t);
+        assert_eq!(
+            t.text(),
+            "dog (dog|top)",
+            "asked again with the same text, not what the stroke typed without it"
+        );
     }
 
     #[test]

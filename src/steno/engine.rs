@@ -1256,7 +1256,7 @@ mod tests {
         let chain = Chain::test_with_reader(
             dict,
             Layout::plover(),
-            Box::new(move |outline: &str| {
+            Box::new(move |outline: &str, _: &str| {
                 let _ = gate.recv();
                 Some(outline.to_lowercase())
             }),

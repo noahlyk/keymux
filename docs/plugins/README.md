@@ -4,8 +4,9 @@ A plugin is one ordinary `.rs` file, real Rust, nothing else: no separate crate,
 to write, no build step to run by hand. It lives in your steno folder exactly where a dictionary
 file would (`~/.config/keymux/steno/`, any name ending in `.rs`, any depth of folder), and keeps
 its place in that same priority order: see `src/steno/source.rs` for how a number prefix, a
-plain file or a plain folder rank against each other. keymux compiles and loads it the moment
-it's first needed and again whenever the file changes, the same way a dictionary reloads live.
+plain file or a plain folder rank against each other. keymux compiles and loads it in the
+background as the steno folder loads, and again whenever the file changes, the same way a
+dictionary reloads live.
 
 A plugin is asked in its own turn, exactly like a dictionary file: if nothing ahead of it in the
 folder's priority order answered, it gets a chance before whatever comes after. Numbered ahead
@@ -118,6 +119,48 @@ with the next key pressed, and letting go of them alone sends nothing. `sticky-k
 make one key sticky: hold it, and each stroke goes as its other keys come up, the held key part of
 every one.
 
+### `init` (optional)
+
+```rust
+#[no_mangle]
+pub extern "C" fn init() { /* ... */ }   // `-> i32` is accepted too; the number is ignored
+```
+
+Called exactly once on the instance that reads words, on its own thread, right after it is made
+and before any `context` or `fallback`: the place to build tables up front instead of on the first
+reading. It runs as the steno folder loads, and again for the new instance whenever a plugin
+file changes; the load waits for it (up to 2 seconds) before the new dictionaries are used, so the
+first stroke never pays for it. A stroke that needs the plugin while `init` is still running is
+late (see below), never held up. A mod's one instance is `init`ed as it loads. The second instance
+that answers `joins` and `send_early` for a plugin that reads words is never `init`ed, so those two
+must not depend on it. An `init` that traps leaves the plugin reading nothing (a mod is left out).
+
+### `context` (optional)
+
+```rust
+#[no_mangle]
+pub extern "C" fn context(ptr: i32, len: i32) { /* ... */ }
+```
+
+Called immediately before every `fallback`, on the same instance, with the text typed just before
+the outline being asked about, written as UTF-8 at an address `alloc` returned (as `fallback`'s
+input is; an empty text is `alloc(0)` and `len` 0; if `alloc` declines a non-empty one, `context`
+is skipped for that reading). It is meant only to inform the `fallback` that follows.
+
+- **What text:** what keymux knows is on screen before the outline's first stroke: steno output and
+  text typed by hand (Enter and Tab included). For a joined run it is the text before the run's
+  first stroke, never what the run typed so far.
+- **How much:** at most the last 256 bytes, the cut moved forward to a character boundary, so it
+  can be 253 to 256 bytes when there is more.
+- **Walls:** empty after anything that leaves keymux not knowing what precedes the cursor: a key
+  that moves the caret (an arrow, Delete, Escape), a shortcut, a window change, or a stroke whose
+  key combination moves the cursor or deletes (a barrier). Only what was typed after the last
+  wall is given.
+- **Questions:** the same outline after different text is a different question, read again. A
+  reading that is late keeps the text it was asked with.
+- `context` is not called before `joins` or `send_early`, nor by anything but the reading
+  instance. A plugin without it is asked exactly as before.
+
 ## A slow reading never holds up typing
 
 A plugin that reads words does it on a thread of its own, so a `fallback` that takes a while
@@ -139,7 +182,8 @@ layer (`plugin_deadline_ms`, 30 by default):
 `joins` and `send_early` are answered by a second instance of the same module, on the engine's
 own thread, so they never wait behind a reading. The two instances share no memory: keep
 whatever `fallback` needs from call to call (a cache of the run read last, say) in what
-`fallback` itself sees, and never count on `joins` or `send_early` to see it, or to have set it.
+`fallback` itself sees (it, `init` and `context` share the reading instance), and never count on
+`joins` or `send_early` to see it, or to have set it.
 
 ## On the tape
 
@@ -156,7 +200,8 @@ theory can score its fallback on real typing from these lines.
 
 `alloc` and `fallback` are only required of a plugin that reads words. One that only changes how
 the engine behaves (`joins`, `send_early`) leaves them out and is a *mod*: it sits in the steno
-folder like any plugin, is never asked for a word, and must export at least one of the three.
+folder like any plugin, is never asked for a word, and must export `fallback`, `joins` or
+`send_early` (`init` and `context` alone are not enough).
 `sticky-key.rs` is a complete one.
 
 ## Where things are cached

@@ -9,8 +9,8 @@
 //! nothing earlier in the folder answers.
 //!
 //! A plugin is real Rust, compiled with the exact `rustc` this build of keymux runs on, to a
-//! sandboxed WebAssembly module via [`wasmtime`], the moment it is first used and again
-//! whenever the file changes, cached by content hash exactly the way a dictionary is parsed
+//! sandboxed WebAssembly module via [`wasmtime`], in the background as the steno folder loads
+//! and again whenever the file changes, cached by content hash exactly the way a dictionary is parsed
 //! once and kept as a binary copy (see [`super::dict::load_cached`]). Running it this way,
 //! rather than as a native library, means a bug in a plugin cannot corrupt keymux's memory or
 //! bring the daemon down with it: a crash, a bad read or an infinite loop becomes an ordinary
@@ -78,6 +78,39 @@
 //! up) is its own business; keymux has no notion of any particular key behaving so. See
 //! `docs/plugins/sticky-key.rs`.
 //!
+//! # The init interface (optional)
+//!
+//! ```ignore
+//! #[no_mangle]
+//! pub extern "C" fn init(); // or `-> i32`, ignored
+//! ```
+//!
+//! Called once on the instance that reads words, on its own thread, right after it is made and
+//! before any `context` or `fallback`: the place to build tables up front. The instance is made,
+//! and `init` run, as the steno folder loads (or a plugin file changes), and the load waits for
+//! it (up to `READY_WAIT`, 2 seconds) before the new chain is used, so no stroke pays for it; a stroke
+//! asked about while it is still running is simply late. A mod's one instance is `init`ed as it
+//! loads; the instance answering `joins` and `send_early` for a plugin that reads words is not.
+//! An `init` that traps leaves the plugin reading nothing (or a mod left out).
+//!
+//! # The context interface (optional)
+//!
+//! ```ignore
+//! #[no_mangle]
+//! pub extern "C" fn context(ptr: i32, len: i32);
+//! ```
+//!
+//! Called on the reading instance immediately before every `fallback`, with the UTF-8 text typed
+//! before the outline's first stroke, written at an address `alloc` returned: at most the last
+//! [`CONTEXT_BYTES`] bytes (cut forward to a character boundary) of what keymux knows is on
+//! screen, which starts over empty at a wall: anything that fences the history (a key that
+//! moves the caret, a shortcut, a window change), or a barrier stroke (a key combination that
+//! moves the cursor or deletes). Text typed by hand (Enter and Tab too) is known, so it is
+//! included. It never includes what the outline's own strokes typed so far (a run's provisional
+//! text). Empty when nothing is known. A question's text is part of it: the same outline after
+//! other text is another question, read again. A plugin without `context` is asked
+//! exactly as before, its questions carrying no text.
+//!
 //! # Mods
 //!
 //! `alloc` and `fallback` are required only of a plugin that reads words. One that only changes
@@ -100,7 +133,7 @@ use super::dict::Dictionary;
 use super::layout::Layout;
 use super::parts::Parts;
 use super::source::is_plugin_file;
-use super::worker::{Asked, Budget, Worker};
+use super::worker::{Asked, Budget, Read, Worker};
 use crate::lock;
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -176,6 +209,20 @@ fn compiled(source: &Path, cache_dir: &Path) -> Result<PathBuf> {
 /// A word-reading plugin's `alloc(len) -> ptr` and `fallback(ptr, len) -> packed`.
 type Reads = (TypedFunc<i32, i32>, TypedFunc<(i32, i32), i64>);
 
+/// How long a folder's load waits for its plugins to be ready to read (see [`Chain::from_parts`])
+/// before it is used anyway: a plugin still not ready reads late, never holding typing up.
+const READY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Most of the text before an outline given to a plugin's `context`, in bytes.
+pub const CONTEXT_BYTES: usize = 256;
+
+/// A plugin's `init()`, with or without an `i32` it returns (and that is ignored).
+#[derive(Clone)]
+enum Init {
+    Plain(TypedFunc<(), ()>),
+    Number(TypedFunc<(), i32>),
+}
+
 /// One loaded plugin: a WebAssembly module, instantiated so its exports can be called.
 pub(crate) struct Plugin {
     name: String,
@@ -193,6 +240,10 @@ pub(crate) struct Plugin {
     joins_known: rustc_hash::FxHashMap<u32, bool>,
     /// `send_early(held, stroke) -> bool`, if this plugin exports one: see the module doc.
     send_early: Option<TypedFunc<(i64, i64), i32>>,
+    /// `init()`, if this plugin exports one: see the module doc.
+    init: Option<Init>,
+    /// `context(ptr, len)`, if this plugin exports one: see the module doc.
+    context: Option<TypedFunc<(i32, i32), ()>>,
 }
 
 impl fmt::Debug for Plugin {
@@ -243,6 +294,25 @@ impl Plugin {
         if reads.is_none() && joins.is_none() && send_early.is_none() {
             bail!("plugin {name:?} exports none of fallback, joins, send_early");
         }
+        let init = instance
+            .get_typed_func::<(), ()>(&mut store, "init")
+            .ok()
+            .map(Init::Plain)
+            .or_else(|| {
+                instance
+                    .get_typed_func::<(), i32>(&mut store, "init")
+                    .ok()
+                    .map(Init::Number)
+            });
+        if init.is_none() && instance.get_func(&mut store, "init").is_some() {
+            bail!("plugin {name:?} has init, but not init() or init() -> i32");
+        }
+        let context = instance
+            .get_typed_func::<(i32, i32), ()>(&mut store, "context")
+            .ok();
+        if context.is_none() && instance.get_func(&mut store, "context").is_some() {
+            bail!("plugin {name:?} has context, but not context(ptr, len)");
+        }
         Ok(Self {
             name,
             module,
@@ -252,37 +322,102 @@ impl Plugin {
             joins,
             joins_known: rustc_hash::FxHashMap::default(),
             send_early,
+            init,
+            context,
         })
     }
 
     /// Ready this plugin to sit in a chain: a plugin that reads words reads on a thread of its
-    /// own, and answers `joins` and `send_early` (if it has them) from a second instance here,
-    /// so neither ever waits on a reading. See the module doc.
+    /// own, from an instance made (and `init`ed) there, and answers `joins` and `send_early`
+    /// (if it has them) from this instance, so neither ever waits on a reading. A mod is
+    /// `init`ed here. See the module doc.
     fn into_step(self) -> PluginStep {
         let name = self.name.clone();
-        if self.reads.is_none() {
+        let mut plugin = self;
+        if plugin.reads.is_none() {
+            let mods = match plugin.init() {
+                Ok(()) => Some(Mutex::new(plugin)),
+                Err(e) => {
+                    tracing::warn!("plugin {name:?} left out: {e:#}");
+                    None
+                }
+            };
             return PluginStep {
                 name,
-                mods: Some(Mutex::new(self)),
+                mods,
                 reader: None,
+                context: false,
             };
         }
-        let mods = (self.joins.is_some() || self.send_early.is_some())
-            .then(|| Self::instantiate(name.clone(), self.module.clone()))
-            .and_then(|made| {
-                made.map_err(|e| tracing::warn!("plugin {name:?}: no second instance: {e:#}"))
-                    .ok()
-            })
-            .map(|mut plugin| {
-                plugin.reads = None;
-                Mutex::new(plugin)
-            });
-        let mut plugin = self;
-        let reader = Worker::spawn(
-            &name,
-            Box::new(move |outline: &str| plugin.fallback(outline)),
-        );
-        PluginStep { name, mods, reader }
+        let context = plugin.context.is_some();
+        let module = plugin.module.clone();
+        let mods = (plugin.joins.is_some() || plugin.send_early.is_some()).then(|| {
+            plugin.reads = None;
+            Mutex::new(plugin)
+        });
+        let reader_name = name.clone();
+        let reader = Worker::spawn_with(&name, Box::new(move || Self::reader(reader_name, module)));
+        PluginStep {
+            name,
+            mods,
+            reader,
+            context,
+        }
+    }
+
+    /// What reads words on a plugin's own thread: an instance of `module` made there, `init`ed
+    /// before it reads anything. One that cannot be made, or whose `init` fails, reads nothing.
+    fn reader(name: String, module: Module) -> Read {
+        let made = Self::instantiate(name.clone(), module).and_then(|mut plugin| {
+            plugin.init()?;
+            Ok(plugin)
+        });
+        match made {
+            Ok(mut plugin) => {
+                Box::new(move |outline: &str, before: &str| plugin.read(outline, before))
+            }
+            Err(e) => {
+                tracing::warn!("plugin {name:?} reads nothing: {e:#}");
+                Box::new(|_: &str, _: &str| None)
+            }
+        }
+    }
+
+    /// Call the plugin's `init`, if it has one. `Err` if it failed (trapped).
+    fn init(&mut self) -> Result<()> {
+        match self.init.clone() {
+            None => Ok(()),
+            Some(Init::Plain(init)) => init.call(&mut self.store, ()),
+            Some(Init::Number(init)) => init.call(&mut self.store, ()).map(|_| ()),
+        }
+        .map_err(|e| anyhow::anyhow!("init failed: {e}"))
+    }
+
+    /// Write `bytes` into memory the plugin's `alloc` gives: where, and how long. `None` if it
+    /// has no `alloc`, or declined.
+    fn write(&mut self, bytes: &[u8]) -> Option<(i32, i32)> {
+        let (alloc, _) = self.reads.clone()?;
+        let memory = self.memory?;
+        let len = i32::try_from(bytes.len()).ok()?;
+        let ptr = alloc.call(&mut self.store, len).ok()?;
+        if ptr == 0 && len > 0 {
+            return None;
+        }
+        memory
+            .write(&mut self.store, usize::try_from(ptr).ok()?, bytes)
+            .ok()?;
+        Some((ptr, len))
+    }
+
+    /// Read `outline`, typed after `before`: the text is given to `context` first, if the
+    /// plugin has one, then [`Self::fallback`] reads.
+    fn read(&mut self, outline: &str, before: &str) -> Option<String> {
+        if let Some(context) = self.context.clone() {
+            if let Some(at) = self.write(before.as_bytes()) {
+                let _ = context.call(&mut self.store, at);
+            }
+        }
+        self.fallback(outline)
     }
 
     /// Ask this plugin for a reading of a stroke outline that missed every dictionary, in
@@ -293,17 +428,12 @@ impl Plugin {
     /// anything that only acts when a stroke maps to nothing at all — Plover's own rule for the
     /// bare `*` undo stroke among them.
     pub fn fallback(&mut self, outline: &str) -> Option<String> {
-        let (alloc, fallback) = self.reads.clone()?;
+        let (_, fallback) = self.reads.clone()?;
         let memory = self.memory?;
-        let bytes = outline.as_bytes();
-        let len = i32::try_from(bytes.len()).ok()?;
-        let ptr = alloc.call(&mut self.store, len).ok()?;
+        let (ptr, len) = self.write(outline.as_bytes())?;
         if ptr == 0 {
             return None;
         }
-        memory
-            .write(&mut self.store, usize::try_from(ptr).ok()?, bytes)
-            .ok()?;
         let packed = fallback.call(&mut self.store, (ptr, len)).ok()?;
         if packed < 0 {
             return None;
@@ -364,6 +494,20 @@ struct PluginStep {
     mods: Option<Mutex<Plugin>>,
     /// The thread reading words, for a plugin that reads them
     reader: Option<Worker>,
+    /// Whether it is given the text before each outline (it exports `context`)
+    context: bool,
+}
+
+impl PluginStep {
+    /// The text before an outline as this plugin is asked it: none for one that has no use
+    /// for it, so its questions are exactly what they always were.
+    const fn before<'a>(&self, before: &'a str) -> &'a str {
+        if self.context {
+            before
+        } else {
+            ""
+        }
+    }
 }
 
 /// One step of a lookup: a run of dictionary files merged together, or one plugin.
@@ -445,6 +589,17 @@ impl Chain {
         layout: Layout,
         read: super::worker::Read,
     ) -> Self {
+        Self::test_with_reader_of(dict, layout, read, false)
+    }
+
+    /// [`Self::test_with_reader`], `context` saying whether the reader is given the text
+    /// before each outline, as a plugin that exports `context` is.
+    pub(crate) fn test_with_reader_of(
+        dict: Dictionary,
+        layout: Layout,
+        read: super::worker::Read,
+        context: bool,
+    ) -> Self {
         let dict = Arc::new(dict);
         Self {
             steps: vec![
@@ -453,11 +608,23 @@ impl Chain {
                     name: "reader".into(),
                     mods: None,
                     reader: Worker::spawn("reader", read),
+                    context,
                 })),
             ],
             dict,
             layout,
         }
+    }
+
+    /// Whether every plugin's reader is made: see [`Worker::wait_ready`].
+    pub(crate) fn is_ready(&self) -> bool {
+        self.steps.iter().all(|step| match step {
+            Step::Plugin(plugin) => plugin
+                .reader
+                .as_ref()
+                .is_none_or(|reader| reader.wait_ready(std::time::Instant::now())),
+            Step::Dict(_) => true,
+        })
     }
 }
 
@@ -513,6 +680,22 @@ impl Chain {
         if !pending.is_empty() {
             steps.push(Step::Dict(Arc::new(parts.layered(&pending))));
         }
+        // Each plugin makes its reader on its own thread, `init` and all, side by side with the
+        // others. The chain is wanted ready to read, so the first stroke after a load or a
+        // change does not pay for it; one that takes too long reads late instead.
+        let until = std::time::Instant::now() + READY_WAIT;
+        for step in &steps {
+            if let Step::Plugin(plugin) = step {
+                if let Some(reader) = &plugin.reader {
+                    if !reader.wait_ready(until) {
+                        tracing::warn!(
+                            "plugin {} not ready yet; it reads late until it is",
+                            plugin.name
+                        );
+                    }
+                }
+            }
+        }
         Self {
             dict,
             steps,
@@ -542,15 +725,18 @@ impl Chain {
     ///
     /// A plugin is waited on for as long as its reading takes; the translator, which must not
     /// wait that long, asks through [`Self::lookup_within`].
+    ///
+    /// A plugin that exports `context` is given no text before the outline: nothing is known
+    /// to precede it here. The translator, which knows, asks through `lookup_within`.
     #[must_use]
     pub fn lookup(&self, strokes: &[u32]) -> Option<String> {
-        self.lookup_by(strokes, |plugin, reader, outline| {
-            match reader.ask(outline, None, false) {
-                Asked::Answered(found) => found,
-                Asked::Late => {
-                    tracing::warn!("plugin {}: no reading of {outline}", plugin.name);
-                    None
-                }
+        self.lookup_by(strokes, "", |plugin, reader, outline, before| match reader
+            .ask(outline, before, None, false)
+        {
+            Asked::Answered(found) => found,
+            Asked::Late => {
+                tracing::warn!("plugin {}: no reading of {outline}", plugin.name);
+                None
             }
         })
     }
@@ -558,17 +744,24 @@ impl Chain {
     /// [`Self::lookup`], waiting on a plugin no later than `budget` allows. A plugin late with
     /// its reading counts as having none, and `budget` keeps which outline it was late with;
     /// after that, no plugin is waited on again this stroke (a reading already in is still
-    /// used). Every reading a plugin gave is noted in `budget` too, for the tape.
+    /// used). Every reading a plugin gave is noted in `budget` too, for the tape. `before` is
+    /// the text typed before the outline's first stroke (at most [`CONTEXT_BYTES`]), given to
+    /// a plugin that exports `context`.
     #[must_use]
-    pub(crate) fn lookup_within(&self, strokes: &[u32], budget: &Budget) -> Option<String> {
-        self.lookup_by(strokes, |plugin, reader, outline| {
+    pub(crate) fn lookup_within(
+        &self,
+        strokes: &[u32],
+        before: &str,
+        budget: &Budget,
+    ) -> Option<String> {
+        self.lookup_by(strokes, before, |plugin, reader, outline, asked_before| {
             let found = if budget.is_late() {
-                reader.ready(outline).flatten()
+                reader.ready(outline, asked_before).flatten()
             } else {
-                match reader.ask(outline, budget.until(), budget.first_ask()) {
+                match reader.ask(outline, asked_before, budget.until(), budget.first_ask()) {
                     Asked::Answered(found) => found,
                     Asked::Late => {
-                        budget.mark_late(strokes);
+                        budget.mark_late(strokes, before);
                         None
                     }
                 }
@@ -583,15 +776,19 @@ impl Chain {
     fn lookup_by(
         &self,
         strokes: &[u32],
-        mut ask: impl FnMut(&PluginStep, &Worker, &str) -> Option<String>,
+        before: &str,
+        mut ask: impl FnMut(&PluginStep, &Worker, &str, &str) -> Option<String>,
     ) -> Option<String> {
         for step in &self.steps {
             let found = match step {
                 Step::Dict(dict) => dict.lookup(strokes).map(str::to_owned),
                 Step::Plugin(plugin) => match &plugin.reader {
-                    Some(reader) if self.is_one_word(strokes) => {
-                        ask(plugin, reader, &self.layout.render_strokes(strokes))
-                    }
+                    Some(reader) if self.is_one_word(strokes) => ask(
+                        plugin,
+                        reader,
+                        &self.layout.render_strokes(strokes),
+                        plugin.before(before),
+                    ),
                     _ => None,
                 },
             };
@@ -602,16 +799,16 @@ impl Chain {
         None
     }
 
-    /// Whether every plugin would now answer `strokes` at once: its late reading is in, or
-    /// nothing more is coming for it. See [`super::worker::Worker::settled`].
+    /// Whether every plugin would now answer `strokes` typed after `before` at once: its late
+    /// reading is in, or nothing more is coming for it. See [`super::worker::Worker::settled`].
     #[must_use]
-    pub(crate) fn settled(&self, strokes: &[u32]) -> bool {
+    pub(crate) fn settled(&self, strokes: &[u32], before: &str) -> bool {
         let outline = self.layout.render_strokes(strokes);
         self.steps.iter().all(|step| match step {
             Step::Plugin(plugin) => plugin
                 .reader
                 .as_ref()
-                .is_none_or(|reader| reader.settled(&outline)),
+                .is_none_or(|reader| reader.settled(&outline, plugin.before(before))),
             Step::Dict(_) => true,
         })
     }
@@ -706,7 +903,7 @@ impl Chain {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::OnceLock;
 
@@ -991,6 +1188,200 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
             chain.lookup(&[kat, joined_top]),
             Some("KKAATT//TTOOPP".to_string()),
             "a join-key continuation is one word, so the plugin is still asked about it whole"
+        );
+    }
+
+    /// Counts its `init` calls, and reads every outline as how many there were by then; `joins`
+    /// answers whether its own instance was `init`ed. `RETURNS` is what `init` returns.
+    fn counting_init(returns: &str) -> String {
+        let (sig, ret) = match returns {
+            "" => ("", ""),
+            _ => (" -> i32", "0"),
+        };
+        format!(
+            r#"
+use std::sync::atomic::{{AtomicI32, Ordering}};
+static INITS: AtomicI32 = AtomicI32::new(0);
+
+#[no_mangle]
+pub extern "C" fn init(){sig} {{
+    INITS.fetch_add(1, Ordering::SeqCst);
+    {ret}
+}}
+
+#[no_mangle]
+pub extern "C" fn alloc(len: i32) -> i32 {{
+    let mut v: Vec<u8> = vec![0u8; len as usize];
+    let ptr = v.as_mut_ptr();
+    std::mem::forget(v);
+    ptr as i32
+}}
+
+#[no_mangle]
+pub extern "C" fn fallback(_ptr: i32, _len: i32) -> i64 {{
+    let mut out = format!("inits={{}}", INITS.load(Ordering::SeqCst)).into_bytes();
+    let out_len = out.len();
+    let out_ptr = out.as_mut_ptr();
+    std::mem::forget(out);
+    (i64::from(out_ptr as i32) << 32) | i64::from(out_len as i32)
+}}
+
+#[no_mangle]
+pub extern "C" fn joins(_bits: i64) -> i32 {{
+    i32::from(INITS.load(Ordering::SeqCst) > 0)
+}}
+"#
+        )
+    }
+
+    fn chain_of(test: &str, file: &str, source: &str) -> Chain {
+        let dir = tmp_dir().join(test);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(file);
+        fs::write(&path, source).unwrap();
+        Chain::load_cached(&[path], &dir.join("cache"), &Layout::plover())
+    }
+
+    #[test]
+    fn init_is_called_once_on_load_before_any_reading() {
+        let chain = chain_of("init_once", "counting.rs", &counting_init(""));
+        assert!(
+            chain.is_ready(),
+            "the reader is made and inited as the folder loads, not on the first stroke"
+        );
+        let kat = Layout::plover().parse_stroke("KAT").unwrap();
+        let top = Layout::plover().parse_stroke("TOP").unwrap();
+        assert_eq!(
+            chain.lookup(&[kat]),
+            Some("inits=1".into()),
+            "before the first reading"
+        );
+        assert_eq!(
+            chain.lookup(&[top]),
+            Some("inits=1".into()),
+            "and never again"
+        );
+        assert!(
+            !chain.joins(1 << 23),
+            "the instance answering joins is not the one inited: they share nothing"
+        );
+    }
+
+    #[test]
+    fn an_init_that_returns_a_number_is_called_too() {
+        let chain = chain_of("init_number", "counting.rs", &counting_init("i32"));
+        let kat = Layout::plover().parse_stroke("KAT").unwrap();
+        assert_eq!(chain.lookup(&[kat]), Some("inits=1".into()));
+    }
+
+    #[test]
+    fn a_mod_is_inited_as_it_loads() {
+        const MOD: &str = r#"
+use std::sync::atomic::{AtomicBool, Ordering};
+static READY: AtomicBool = AtomicBool::new(false);
+#[no_mangle]
+pub extern "C" fn init() {
+    READY.store(true, Ordering::SeqCst);
+}
+#[no_mangle]
+pub extern "C" fn send_early(_held: i64, _stroke: i64) -> i32 {
+    i32::from(READY.load(Ordering::SeqCst))
+}
+"#;
+        let chain = chain_of("init_mod", "mod.rs", MOD);
+        assert_eq!(chain.plugin_count(), 1);
+        assert!(
+            chain.send_early(1, 3),
+            "its init ran before it was asked anything"
+        );
+    }
+
+    #[test]
+    fn a_plugin_whose_init_fails_reads_nothing_and_the_chain_still_works() {
+        let source = counting_init("").replace(
+            "INITS.fetch_add(1, Ordering::SeqCst);",
+            "INITS.fetch_add(1, Ordering::SeqCst); core::arch::wasm32::unreachable();",
+        );
+        let chain = chain_of("init_fails", "failing.rs", &source);
+        let kat = Layout::plover().parse_stroke("KAT").unwrap();
+        assert_eq!(chain.lookup(&[kat]), None);
+    }
+
+    /// Reads every outline as `(TEXT|OUTLINE)`, `TEXT` being what `context` last gave it.
+    pub const ECHO_CONTEXT: &str = r#"
+use std::sync::Mutex;
+static CONTEXT: Mutex<String> = Mutex::new(String::new());
+
+#[no_mangle]
+pub extern "C" fn alloc(len: i32) -> i32 {
+    let mut v: Vec<u8> = vec![0u8; len as usize];
+    let ptr = v.as_mut_ptr();
+    std::mem::forget(v);
+    ptr as i32
+}
+
+#[no_mangle]
+pub extern "C" fn context(ptr: i32, len: i32) {
+    let input = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    *CONTEXT.lock().unwrap() = String::from_utf8(input.to_vec()).unwrap_or_else(|_| "BAD UTF-8".into());
+}
+
+#[no_mangle]
+pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
+    let input = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let outline = std::str::from_utf8(input).unwrap_or("");
+    let mut out = format!("({}|{outline})", CONTEXT.lock().unwrap()).into_bytes();
+    let out_len = out.len();
+    let out_ptr = out.as_mut_ptr();
+    std::mem::forget(out);
+    (i64::from(out_ptr as i32) << 32) | i64::from(out_len as i32)
+}
+
+// Bit 23 is this test's own made-up join key
+#[no_mangle]
+pub extern "C" fn joins(bits: i64) -> i32 {
+    i32::from(bits & (1 << 23) != 0)
+}
+"#;
+
+    #[test]
+    fn a_plain_lookup_gives_context_no_text() {
+        let chain = chain_of("context_plain", "echo.rs", ECHO_CONTEXT);
+        let kat = Layout::plover().parse_stroke("KAT").unwrap();
+        assert_eq!(chain.lookup(&[kat]), Some("(|KAT)".into()));
+    }
+
+    #[test]
+    fn context_is_given_before_each_reading() {
+        let chain = chain_of("context_each", "echo.rs", ECHO_CONTEXT);
+        let kat = Layout::plover().parse_stroke("KAT").unwrap();
+        let budget = Budget::default();
+        budget.start(std::time::Instant::now() + std::time::Duration::from_secs(10));
+        assert_eq!(
+            chain.lookup_within(&[kat], "the", &budget),
+            Some("(the|KAT)".into())
+        );
+        budget.start(std::time::Instant::now() + std::time::Duration::from_secs(10));
+        assert_eq!(
+            chain.lookup_within(&[kat], "", &budget),
+            Some("(|KAT)".into()),
+            "an empty text is given too, never the last one left over"
+        );
+    }
+
+    #[test]
+    fn a_plugin_without_context_is_asked_exactly_as_before() {
+        let chain = chain_of("context_none", "doubler.rs", DOUBLER);
+        let kat = Layout::plover().parse_stroke("KAT").unwrap();
+        let budget = Budget::default();
+        budget.start(std::time::Instant::now() + std::time::Duration::from_secs(10));
+        assert_eq!(
+            chain.lookup_within(&[kat], "the", &budget),
+            Some("KKAATT".into())
+        );
+        assert!(
+            chain.settled(&[kat], "anything"),
+            "its questions carry no text"
         );
     }
 
