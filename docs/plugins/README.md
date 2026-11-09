@@ -161,6 +161,60 @@ is skipped for that reading). It is meant only to inform the `fallback` that fol
 - `context` is not called before `joins` or `send_early`, nor by anything but the reading
   instance. A plugin without it is asked exactly as before.
 
+### History: the strokes before a word (optional)
+
+A plugin may import two host functions (module `keymux`) to read back the strokes struck before
+the run it is being asked about, one at a time. Nothing to export; a plugin that does not import
+them is asked exactly as before, and one that does still loads everywhere (the host defines them
+for every instance).
+
+```rust
+#[link(wasm_import_module = "keymux")]
+extern "C" {
+    fn history_len() -> i32;
+    fn history_stroke(k: i32) -> i64;
+}
+```
+
+- `history_len() -> i32`: how many strokes of history there are before the run (since the last
+  wall), at most `i32::MAX`.
+- `history_stroke(k: i32) -> i64`: the stroke `k` steps back. `k = 0` is the stroke right before
+  the run's first stroke, `k = 1` the one before that, and so on. The value is the stroke's key
+  bits, the layout `joins(bits)` and `send_early` receive, as a non-negative `i64`; `-1` if `k` is
+  negative, or past the oldest stroke or the wall.
+
+Both answer `0` / `-1` anywhere but inside a `fallback` call: in `joins`, `send_early`, `init`,
+`context` and in `alloc`, and in a `fallback` for a lookup that carries no history (for example
+a reverse lookup). Each call is O(1); reading `k` strokes is `k` calls, whatever the history's
+length, and nothing is copied.
+
+- **What is in it:** the strokes of the translations the engine keeps, in order: every stroke
+  struck that left a translation, including ones whose text is empty, ones that matched nothing,
+  and ones consumed into a multi-stroke entry (both strokes of `KAT/TOP` are there). The strokes
+  of the run being asked about are not; neither are strokes that made no translation (a
+  transparent stroke, an engine command such as undo itself).
+- **Undo:** taking a translation back removes its strokes (a multi-stroke entry gives back the
+  strokes it replaced as they were). A question never sees strokes that are no longer there: if
+  undo cuts into the history while the plugin reads, the calls answer `0` / `-1` (that answer is
+  thrown away anyway).
+- **Walls:** the history starts over empty at the same walls `context` does (a caret-moving key,
+  a shortcut, a window change, `start_fresh`, a barrier stroke, which is itself before the wall),
+  and also when text is typed by hand.
+- **Questions:** the same outline after different strokes is a different question, read again.
+  A late reading keeps the history it was asked with.
+- **Limit:** the newest 1,048,576 strokes (4 MiB) at least are kept; the oldest go a block at a
+  time (up to 65,536 over the limit before they do). Read as far back as you need, not to the end.
+
+A plugin checking whether the previous stroke was a given one:
+
+```rust
+const PREVIOUS: i64 = 1 << 23; // whatever bits your theory cares about
+
+fn previous_was_marked() -> bool {
+    unsafe { history_stroke(0) == PREVIOUS }
+}
+```
+
 ## A slow reading never holds up typing
 
 A plugin that reads words does it on a thread of its own, so a `fallback` that takes a while

@@ -111,6 +111,13 @@
 //! other text is another question, read again. A plugin without `context` is asked
 //! exactly as before, its questions carrying no text.
 //!
+//! # The history interface (optional)
+//!
+//! A plugin may import `history_len() -> i32` and `history_stroke(k: i32) -> i64` from the
+//! module `keymux` to read back the strokes struck before the run it is asked about, newest
+//! first (`k = 0` the stroke right before the run), `-1` past the oldest, a wall or outside a
+//! `fallback`. The strokes are a [`super::strokes::StrokeLog`]; see `docs/plugins/README.md`.
+//!
 //! # Mods
 //!
 //! `alloc` and `fallback` are required only of a plugin that reads words. One that only changes
@@ -133,6 +140,7 @@ use super::dict::Dictionary;
 use super::layout::Layout;
 use super::parts::Parts;
 use super::source::is_plugin_file;
+use super::strokes::{StrokeLog, Window};
 use super::worker::{Asked, Budget, Read, Worker};
 use crate::lock;
 use anyhow::{bail, Context, Result};
@@ -142,7 +150,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use wasmtime::{Engine, Instance, Memory, Module, Store, TypedFunc};
+use wasmtime::{Caller, Engine, Linker, Memory, Module, Store, TypedFunc};
 
 /// Bumped whenever the interface above changes, so a plugin compiled against an older one is
 /// recompiled rather than trusted.
@@ -216,6 +224,37 @@ const READY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// Most of the text before an outline given to a plugin's `context`, in bytes.
 pub const CONTEXT_BYTES: usize = 256;
 
+/// What the host functions a plugin imports (see the module doc's "history interface") can see
+/// of the instance they are called from.
+#[derive(Default)]
+struct Host {
+    /// The strokes before the run the plugin is being asked about, while its `fallback` runs
+    /// and at no other time
+    asked: Option<Window>,
+}
+
+/// The module the host functions a plugin may import are in.
+const HOST_MODULE: &str = "keymux";
+
+/// Make the linker every plugin instance is made with: the host functions a plugin may import,
+/// whether it does or not.
+fn host_linker(engine: &Engine) -> wasmtime::Result<Linker<Host>> {
+    let mut linker = Linker::new(engine);
+    linker.func_wrap(
+        HOST_MODULE,
+        "history_len",
+        |caller: Caller<'_, Host>| -> i32 { caller.data().asked.as_ref().map_or(0, Window::len) },
+    )?;
+    linker.func_wrap(
+        HOST_MODULE,
+        "history_stroke",
+        |caller: Caller<'_, Host>, k: i32| -> i64 {
+            caller.data().asked.as_ref().map_or(-1, |w| w.stroke(k))
+        },
+    )?;
+    Ok(linker)
+}
+
 /// A plugin's `init()`, with or without an `i32` it returns (and that is ignored).
 #[derive(Clone)]
 enum Init {
@@ -228,7 +267,9 @@ pub(crate) struct Plugin {
     name: String,
     /// The compiled module, to make another instance of it from (see [`Self::into_step`])
     module: Module,
-    store: Store<()>,
+    store: Store<Host>,
+    /// Whether the module imports the history functions
+    history: bool,
     memory: Option<Memory>,
     /// `alloc` and `fallback`, for a plugin that reads words; a mod has neither
     reads: Option<Reads>,
@@ -262,8 +303,13 @@ impl Plugin {
 
     /// A fresh instance of `module`, with its own memory and state.
     fn instantiate(name: String, module: Module) -> Result<Self> {
-        let mut store = Store::new(module.engine(), ());
-        let instance = Instance::new(&mut store, &module, &[])
+        let mut store = Store::new(module.engine(), Host::default());
+        let history = module.imports().any(|import| {
+            import.module() == HOST_MODULE
+                && matches!(import.name(), "history_len" | "history_stroke")
+        });
+        let instance = host_linker(module.engine())
+            .and_then(|linker| linker.instantiate(&mut store, &module))
             .map_err(|e| anyhow::anyhow!("instantiating plugin {name:?}: {e}"))?;
         let memory = instance.get_memory(&mut store, "memory");
         let alloc = instance
@@ -317,6 +363,7 @@ impl Plugin {
             name,
             module,
             store,
+            history,
             memory,
             reads,
             joins,
@@ -347,9 +394,11 @@ impl Plugin {
                 mods,
                 reader: None,
                 context: false,
+                history: false,
             };
         }
         let context = plugin.context.is_some();
+        let history = plugin.history;
         let module = plugin.module.clone();
         let mods = (plugin.joins.is_some() || plugin.send_early.is_some()).then(|| {
             plugin.reads = None;
@@ -362,6 +411,7 @@ impl Plugin {
             mods,
             reader,
             context,
+            history,
         }
     }
 
@@ -373,12 +423,14 @@ impl Plugin {
             Ok(plugin)
         });
         match made {
-            Ok(mut plugin) => {
-                Box::new(move |outline: &str, before: &str| plugin.read(outline, before))
-            }
+            Ok(mut plugin) => Box::new(
+                move |outline: &str, before: &str, window: Option<&Window>| {
+                    plugin.read(outline, before, window)
+                },
+            ),
             Err(e) => {
                 tracing::warn!("plugin {name:?} reads nothing: {e:#}");
-                Box::new(|_: &str, _: &str| None)
+                Box::new(|_: &str, _: &str, _: Option<&Window>| None)
             }
         }
     }
@@ -409,15 +461,16 @@ impl Plugin {
         Some((ptr, len))
     }
 
-    /// Read `outline`, typed after `before`: the text is given to `context` first, if the
-    /// plugin has one, then [`Self::fallback`] reads.
-    fn read(&mut self, outline: &str, before: &str) -> Option<String> {
+    /// Read `outline`, typed after `before` and the strokes of `window`: the text is given to
+    /// `context` first, if the plugin has one, then `fallback` reads, with the strokes
+    /// readable through the history functions.
+    fn read(&mut self, outline: &str, before: &str, window: Option<&Window>) -> Option<String> {
         if let Some(context) = self.context.clone() {
             if let Some(at) = self.write(before.as_bytes()) {
                 let _ = context.call(&mut self.store, at);
             }
         }
-        self.fallback(outline)
+        self.fallback_after(outline, window)
     }
 
     /// Ask this plugin for a reading of a stroke outline that missed every dictionary, in
@@ -427,14 +480,23 @@ impl Plugin {
     /// one would mean this is "mapped" as far as the engine can tell, silently defeating
     /// anything that only acts when a stroke maps to nothing at all — Plover's own rule for the
     /// bare `*` undo stroke among them.
+    #[cfg(test)]
     pub fn fallback(&mut self, outline: &str) -> Option<String> {
+        self.fallback_after(outline, None)
+    }
+
+    /// [`Self::fallback`], with `window` readable by the plugin while it runs.
+    fn fallback_after(&mut self, outline: &str, window: Option<&Window>) -> Option<String> {
         let (_, fallback) = self.reads.clone()?;
         let memory = self.memory?;
         let (ptr, len) = self.write(outline.as_bytes())?;
         if ptr == 0 {
             return None;
         }
-        let packed = fallback.call(&mut self.store, (ptr, len)).ok()?;
+        self.store.data_mut().asked = window.cloned();
+        let packed = fallback.call(&mut self.store, (ptr, len));
+        self.store.data_mut().asked = None;
+        let packed = packed.ok()?;
         if packed < 0 {
             return None;
         }
@@ -496,6 +558,8 @@ struct PluginStep {
     reader: Option<Worker>,
     /// Whether it is given the text before each outline (it exports `context`)
     context: bool,
+    /// Whether it reads the strokes before each outline (it imports the history functions)
+    history: bool,
 }
 
 impl PluginStep {
@@ -508,6 +572,27 @@ impl PluginStep {
             ""
         }
     }
+
+    /// The strokes before the run, as this plugin may read them: none for one that does not
+    /// import the history functions, so its questions are exactly what they always were.
+    fn window(&self, before: &Before<'_>) -> Option<Window> {
+        if !self.history {
+            return None;
+        }
+        before.log.map(|log| log.window(before.base))
+    }
+}
+
+/// What is before a run of strokes that a plugin may be told: the text typed (see `context`),
+/// and the strokes struck (see the history functions), as of the run's first stroke.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Before<'a> {
+    /// The text typed before the run
+    pub text: &'a str,
+    /// The absolute index in `log` of the run's first stroke
+    pub base: u64,
+    /// The strokes struck, if known
+    pub log: Option<&'a StrokeLog>,
 }
 
 /// One step of a lookup: a run of dictionary files merged together, or one plugin.
@@ -609,6 +694,7 @@ impl Chain {
                     mods: None,
                     reader: Worker::spawn("reader", read),
                     context,
+                    history: false,
                 })),
             ],
             dict,
@@ -730,15 +816,19 @@ impl Chain {
     /// to precede it here. The translator, which knows, asks through `lookup_within`.
     #[must_use]
     pub fn lookup(&self, strokes: &[u32]) -> Option<String> {
-        self.lookup_by(strokes, "", |plugin, reader, outline, before| match reader
-            .ask(outline, before, None, false)
-        {
-            Asked::Answered(found) => found,
-            Asked::Late => {
-                tracing::warn!("plugin {}: no reading of {outline}", plugin.name);
-                None
-            }
-        })
+        self.lookup_by(
+            strokes,
+            Before::default(),
+            |plugin, reader, outline, before, window| match reader
+                .ask(outline, before, window, None, false)
+            {
+                Asked::Answered(found) => found,
+                Asked::Late => {
+                    tracing::warn!("plugin {}: no reading of {outline}", plugin.name);
+                    None
+                }
+            },
+        )
     }
 
     /// [`Self::lookup`], waiting on a plugin no later than `budget` allows. A plugin late with
@@ -751,33 +841,43 @@ impl Chain {
     pub(crate) fn lookup_within(
         &self,
         strokes: &[u32],
-        before: &str,
+        before: Before<'_>,
         budget: &Budget,
     ) -> Option<String> {
-        self.lookup_by(strokes, before, |plugin, reader, outline, asked_before| {
-            let found = if budget.is_late() {
-                reader.ready(outline, asked_before).flatten()
-            } else {
-                match reader.ask(outline, asked_before, budget.until(), budget.first_ask()) {
-                    Asked::Answered(found) => found,
-                    Asked::Late => {
-                        budget.mark_late(strokes, before);
-                        None
+        self.lookup_by(
+            strokes,
+            before,
+            |plugin, reader, outline, asked_before, window| {
+                let found = if budget.is_late() {
+                    reader.ready(outline, asked_before, window).flatten()
+                } else {
+                    match reader.ask(
+                        outline,
+                        asked_before,
+                        window,
+                        budget.until(),
+                        budget.first_ask(),
+                    ) {
+                        Asked::Answered(found) => found,
+                        Asked::Late => {
+                            budget.mark_late(strokes, before.text, before.base);
+                            None
+                        }
                     }
+                };
+                if let Some(text) = &found {
+                    budget.note_read(strokes, &plugin.name, text);
                 }
-            };
-            if let Some(text) = &found {
-                budget.note_read(strokes, &plugin.name, text);
-            }
-            found
-        })
+                found
+            },
+        )
     }
 
     fn lookup_by(
         &self,
         strokes: &[u32],
-        before: &str,
-        mut ask: impl FnMut(&PluginStep, &Worker, &str, &str) -> Option<String>,
+        before: Before<'_>,
+        mut ask: impl FnMut(&PluginStep, &Worker, &str, &str, Option<&Window>) -> Option<String>,
     ) -> Option<String> {
         for step in &self.steps {
             let found = match step {
@@ -787,7 +887,8 @@ impl Chain {
                         plugin,
                         reader,
                         &self.layout.render_strokes(strokes),
-                        plugin.before(before),
+                        plugin.before(before.text),
+                        plugin.window(&before).as_ref(),
                     ),
                     _ => None,
                 },
@@ -802,13 +903,16 @@ impl Chain {
     /// Whether every plugin would now answer `strokes` typed after `before` at once: its late
     /// reading is in, or nothing more is coming for it. See [`super::worker::Worker::settled`].
     #[must_use]
-    pub(crate) fn settled(&self, strokes: &[u32], before: &str) -> bool {
+    pub(crate) fn settled(&self, strokes: &[u32], before: Before<'_>) -> bool {
         let outline = self.layout.render_strokes(strokes);
         self.steps.iter().all(|step| match step {
-            Step::Plugin(plugin) => plugin
-                .reader
-                .as_ref()
-                .is_none_or(|reader| reader.settled(&outline, plugin.before(before))),
+            Step::Plugin(plugin) => plugin.reader.as_ref().is_none_or(|reader| {
+                reader.settled(
+                    &outline,
+                    plugin.before(before.text),
+                    plugin.window(&before).as_ref(),
+                )
+            }),
             Step::Dict(_) => true,
         })
     }
@@ -1358,12 +1462,26 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         let budget = Budget::default();
         budget.start(std::time::Instant::now() + std::time::Duration::from_secs(10));
         assert_eq!(
-            chain.lookup_within(&[kat], "the", &budget),
+            chain.lookup_within(
+                &[kat],
+                Before {
+                    text: "the",
+                    ..Before::default()
+                },
+                &budget
+            ),
             Some("(the|KAT)".into())
         );
         budget.start(std::time::Instant::now() + std::time::Duration::from_secs(10));
         assert_eq!(
-            chain.lookup_within(&[kat], "", &budget),
+            chain.lookup_within(
+                &[kat],
+                Before {
+                    text: "",
+                    ..Before::default()
+                },
+                &budget
+            ),
             Some("(|KAT)".into()),
             "an empty text is given too, never the last one left over"
         );
@@ -1376,11 +1494,24 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         let budget = Budget::default();
         budget.start(std::time::Instant::now() + std::time::Duration::from_secs(10));
         assert_eq!(
-            chain.lookup_within(&[kat], "the", &budget),
+            chain.lookup_within(
+                &[kat],
+                Before {
+                    text: "the",
+                    ..Before::default()
+                },
+                &budget
+            ),
             Some("KKAATT".into())
         );
         assert!(
-            chain.settled(&[kat], "anything"),
+            chain.settled(
+                &[kat],
+                Before {
+                    text: "anything",
+                    ..Before::default()
+                }
+            ),
             "its questions carry no text"
         );
     }

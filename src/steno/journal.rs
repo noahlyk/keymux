@@ -14,6 +14,7 @@
 
 use super::action::{rightmost_word, Action, Case};
 use super::formatter::Formatter;
+use super::strokes::StrokeLog;
 use super::translate::Translation;
 use std::sync::{Arc, Mutex};
 
@@ -84,6 +85,9 @@ pub struct History {
     pub redo: Vec<Vec<Translation>>,
     /// Words typed by hand that were finished (by a space) and not yet put on the tape
     pub finished_words: Vec<String>,
+    /// The strokes of the translations, in order, for plugins to read back (a wall is where
+    /// text came from elsewhere than strokes); see [`super::strokes`]
+    pub strokes: StrokeLog,
 }
 
 /// The history every keyboard of a user shares.
@@ -215,6 +219,7 @@ impl History {
 
     /// Record an entry that is already on screen, with its formatting made for it.
     fn push_recorded(&mut self, origin: Origin, machine: MachineId) {
+        self.strokes.wall();
         let before: &[Translation] = match (&self.state.translations[..], &self.state.tail) {
             ([], Some(tail)) => std::slice::from_ref(tail),
             (translations, _) => translations,

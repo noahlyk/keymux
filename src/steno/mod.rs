@@ -35,12 +35,15 @@ pub mod rtf;
 pub mod setup;
 pub mod shortest;
 pub mod source;
+pub mod strokes;
 pub mod tape;
 pub mod translate;
 pub mod typing;
 pub mod view;
 pub(crate) mod worker;
 
+#[cfg(test)]
+mod history_tests;
 #[cfg(test)]
 mod lapwing_tests;
 #[cfg(test)]

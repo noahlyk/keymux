@@ -12,6 +12,7 @@
 //! whatever the plugin builds up front in its `init`. A question asked meanwhile waits in the
 //! queue like any other, so a stroke asked about then is late, never held up.
 
+use super::strokes::Window;
 use crate::lock;
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
@@ -21,14 +22,16 @@ use std::time::Instant;
 const KEPT: usize = 64;
 
 /// One plugin's reading of an outline (the first argument), given the text typed before it (the
-/// second; empty for a plugin that does not ask for it): `None` for no reading.
-pub type Read = Box<dyn FnMut(&str, &str) -> Option<String> + Send>;
+/// second; empty for a plugin that does not ask for it) and the strokes before it (the third;
+/// none for a plugin that does not ask for them): `None` for no reading.
+pub type Read = Box<dyn FnMut(&str, &str, Option<&Window>) -> Option<String> + Send>;
 
 /// What makes a [`Read`], run once on the worker's own thread before it reads anything.
 pub type Setup = Box<dyn FnOnce() -> Read + Send>;
 
-/// One question: an outline, and the text before it.
-type Question = (String, String);
+/// One question: an outline, the text before it, and the strokes before it. Two questions are
+/// the same if all three are.
+type Question = (String, String, Option<Window>);
 
 /// What asking for a reading came to.
 #[derive(Debug, PartialEq, Eq)]
@@ -50,25 +53,34 @@ struct Queue {
     closed: bool,
 }
 
-fn is(question: &Question, outline: &str, before: &str) -> bool {
-    question.0 == outline && question.1 == before
+fn is(question: &Question, outline: &str, before: &str, window: Option<&Window>) -> bool {
+    question.0 == outline
+        && question.1 == before
+        && question.2.as_ref().map(Window::seen) == window.map(Window::seen)
 }
 
 impl Queue {
     /// The reading of `outline` after `before` if one is in, taken: `Some(None)` is a reading
     /// of nothing.
     #[allow(clippy::option_option)] // read as nothing, and not read yet, are different things
-    fn take(&mut self, outline: &str, before: &str) -> Option<Option<String>> {
+    fn take(
+        &mut self,
+        outline: &str,
+        before: &str,
+        window: Option<&Window>,
+    ) -> Option<Option<String>> {
         let at = self
             .answers
             .iter()
-            .position(|(q, _)| is(q, outline, before))?;
+            .position(|(q, _)| is(q, outline, before, window))?;
         self.answers.remove(at).map(|(_, answer)| answer)
     }
 
-    fn is_asked(&self, outline: &str, before: &str) -> bool {
-        self.busy.as_ref().is_some_and(|q| is(q, outline, before))
-            || self.waiting.iter().any(|q| is(q, outline, before))
+    fn is_asked(&self, outline: &str, before: &str, window: Option<&Window>) -> bool {
+        self.busy
+            .as_ref()
+            .is_some_and(|q| is(q, outline, before, window))
+            || self.waiting.iter().any(|q| is(q, outline, before, window))
     }
 }
 
@@ -120,7 +132,7 @@ impl Worker {
                             queue = rung.wait(queue).unwrap_or_else(|e| e.into_inner());
                         }
                     };
-                    let answer = read(&question.0, &question.1);
+                    let answer = read(&question.0, &question.1, question.2.as_ref());
                     let mut queue = lock(queue);
                     queue.busy = None;
                     queue.answers.push_back((question, answer));
@@ -162,23 +174,30 @@ impl Worker {
     /// Ask for a reading of `outline`, typed after `before`, waiting no later than `until`
     /// (`None`: as long as it takes). `newest` says this is the first ask of a newer stroke:
     /// what older ones asked for that has not started is dropped first.
-    pub fn ask(&self, outline: &str, before: &str, until: Option<Instant>, newest: bool) -> Asked {
+    pub fn ask(
+        &self,
+        outline: &str,
+        before: &str,
+        window: Option<&Window>,
+        until: Option<Instant>,
+        newest: bool,
+    ) -> Asked {
         let (queue, rung) = &*self.shared;
         let mut queue = lock(queue);
-        if let Some(answer) = queue.take(outline, before) {
+        if let Some(answer) = queue.take(outline, before, window) {
             return Asked::Answered(answer);
         }
         if newest {
             queue.waiting.clear();
         }
-        if !queue.is_asked(outline, before) {
+        if !queue.is_asked(outline, before, window) {
             queue
                 .waiting
-                .push_back((outline.to_owned(), before.to_owned()));
+                .push_back((outline.to_owned(), before.to_owned(), window.cloned()));
             rung.notify_all();
         }
         loop {
-            if let Some(answer) = queue.take(outline, before) {
+            if let Some(answer) = queue.take(outline, before, window) {
                 return Asked::Answered(answer);
             }
             queue = match until {
@@ -199,17 +218,25 @@ impl Worker {
     /// A reading already made of `outline` after `before`, if there is one, without asking or
     /// waiting.
     #[allow(clippy::option_option)] // read as nothing, and not read yet, are different things
-    pub fn ready(&self, outline: &str, before: &str) -> Option<Option<String>> {
-        lock(&self.shared.0).take(outline, before)
+    pub fn ready(
+        &self,
+        outline: &str,
+        before: &str,
+        window: Option<&Window>,
+    ) -> Option<Option<String>> {
+        lock(&self.shared.0).take(outline, before, window)
     }
 
     /// Whether asking for `outline` after `before` now would be answered at once: its reading
     /// is in, or it was never asked for (or was dropped for a newer stroke's) and nothing is
     /// being read.
-    pub fn settled(&self, outline: &str, before: &str) -> bool {
+    pub fn settled(&self, outline: &str, before: &str, window: Option<&Window>) -> bool {
         let queue = lock(&self.shared.0);
-        queue.answers.iter().any(|(q, _)| is(q, outline, before))
-            || (!queue.is_asked(outline, before) && queue.busy.is_none())
+        queue
+            .answers
+            .iter()
+            .any(|(q, _)| is(q, outline, before, window))
+            || (!queue.is_asked(outline, before, window) && queue.busy.is_none())
     }
 }
 
@@ -228,7 +255,7 @@ pub struct Budget {
     asked: std::cell::Cell<bool>,
     /// The outline a plugin was late with, and the text before it, and so every plugin asked
     /// after it this stroke was not waited on
-    late: std::cell::RefCell<Option<(Vec<u32>, String)>>,
+    late: std::cell::RefCell<Option<(Vec<u32>, String, u64)>>,
     /// Every reading a plugin gave this stroke: outline, plugin, reading
     read: std::cell::RefCell<Vec<(Vec<u32>, String, String)>>,
 }
@@ -255,13 +282,14 @@ impl Budget {
         self.late.borrow().is_some()
     }
 
-    pub fn mark_late(&self, strokes: &[u32], before: &str) {
+    /// `base` is the absolute index of the first stroke of `strokes` in the stroke log
+    pub fn mark_late(&self, strokes: &[u32], before: &str, base: u64) {
         self.late
             .borrow_mut()
-            .get_or_insert_with(|| (strokes.to_vec(), before.to_owned()));
+            .get_or_insert_with(|| (strokes.to_vec(), before.to_owned(), base));
     }
 
-    pub fn take_late(&self) -> Option<(Vec<u32>, String)> {
+    pub fn take_late(&self) -> Option<(Vec<u32>, String, u64)> {
         self.late.borrow_mut().take()
     }
 
@@ -292,7 +320,7 @@ mod tests {
         let (go, gate) = mpsc::channel::<()>();
         let worker = Worker::spawn(
             "gated",
-            Box::new(move |outline: &str, _: &str| {
+            Box::new(move |outline: &str, _: &str, _: Option<&Window>| {
                 let _ = gate.recv();
                 Some(outline.repeat(2))
             }),
@@ -307,16 +335,20 @@ mod tests {
 
     #[test]
     fn an_answer_in_time_is_the_answer() {
-        let worker =
-            Worker::spawn("quick", Box::new(|o: &str, _: &str| Some(o.to_lowercase()))).unwrap();
+        let worker = Worker::spawn(
+            "quick",
+            Box::new(|o: &str, _: &str, _: Option<&Window>| Some(o.to_lowercase())),
+        )
+        .unwrap();
         assert_eq!(
-            worker.ask("KAT", "", None, true),
+            worker.ask("KAT", "", None, None, true),
             Asked::Answered(Some("kat".into()))
         );
         assert_eq!(
             worker.ask(
                 "TOP",
                 "",
+                None,
                 Some(Instant::now() + Duration::from_secs(5)),
                 true
             ),
@@ -327,29 +359,32 @@ mod tests {
     #[test]
     fn a_late_answer_is_kept_until_picked_up_once() {
         let (worker, go) = gated();
-        assert_eq!(worker.ask("KAT", "", Some(soon()), true), Asked::Late);
-        assert!(!worker.settled("KAT", ""));
+        assert_eq!(worker.ask("KAT", "", None, Some(soon()), true), Asked::Late);
+        assert!(!worker.settled("KAT", "", None));
         go.send(()).unwrap();
-        while !worker.settled("KAT", "") {
+        while !worker.settled("KAT", "", None) {
             std::thread::yield_now();
         }
-        assert_eq!(worker.ready("KAT", ""), Some(Some("KATKAT".into())));
-        assert_eq!(worker.ready("KAT", ""), None, "picked up once");
+        assert_eq!(worker.ready("KAT", "", None), Some(Some("KATKAT".into())));
+        assert_eq!(worker.ready("KAT", "", None), None, "picked up once");
     }
 
     #[test]
     fn asking_again_while_it_is_read_does_not_read_it_twice() {
         let (worker, go) = gated();
-        assert_eq!(worker.ask("KAT", "", Some(soon()), true), Asked::Late);
-        assert_eq!(worker.ask("KAT", "", Some(soon()), false), Asked::Late);
+        assert_eq!(worker.ask("KAT", "", None, Some(soon()), true), Asked::Late);
+        assert_eq!(
+            worker.ask("KAT", "", None, Some(soon()), false),
+            Asked::Late
+        );
         go.send(()).unwrap();
         assert_eq!(
-            worker.ask("KAT", "", None, false),
+            worker.ask("KAT", "", None, None, false),
             Asked::Answered(Some("KATKAT".into()))
         );
         drop(go);
         // Nothing else was queued: the thread is idle, not reading KAT a second time
-        while !worker.settled("TOP", "") {
+        while !worker.settled("TOP", "", None) {
             std::thread::yield_now();
         }
     }
@@ -357,34 +392,43 @@ mod tests {
     #[test]
     fn a_newer_stroke_drops_what_older_ones_asked_that_has_not_started() {
         let (worker, go) = gated();
-        assert_eq!(worker.ask("A", "", Some(soon()), true), Asked::Late);
-        assert_eq!(worker.ask("A/+B", "", Some(soon()), true), Asked::Late);
-        assert_eq!(worker.ask("A/+B/+C", "", Some(soon()), true), Asked::Late);
+        assert_eq!(worker.ask("A", "", None, Some(soon()), true), Asked::Late);
+        assert_eq!(
+            worker.ask("A/+B", "", None, Some(soon()), true),
+            Asked::Late
+        );
+        assert_eq!(
+            worker.ask("A/+B/+C", "", None, Some(soon()), true),
+            Asked::Late
+        );
         // A had started and finishes; A/+B was dropped before it started; A/+B/+C is next
         go.send(()).unwrap();
         go.send(()).unwrap();
         assert_eq!(
-            worker.ask("A/+B/+C", "", None, false),
+            worker.ask("A/+B/+C", "", None, None, false),
             Asked::Answered(Some("A/+B/+CA/+B/+C".into()))
         );
-        assert_eq!(worker.ready("A", ""), Some(Some("AA".into())));
-        assert_eq!(worker.ready("A/+B", ""), None, "never read");
-        assert!(worker.settled("A/+B", ""), "and nothing is coming for it");
+        assert_eq!(worker.ready("A", "", None), Some(Some("AA".into())));
+        assert_eq!(worker.ready("A/+B", "", None), None, "never read");
+        assert!(
+            worker.settled("A/+B", "", None),
+            "and nothing is coming for it"
+        );
     }
 
     #[test]
     fn the_text_before_is_part_of_the_question() {
         let worker = Worker::spawn(
             "context",
-            Box::new(|o: &str, before: &str| Some(format!("{before}|{o}"))),
+            Box::new(|o: &str, before: &str, _: Option<&Window>| Some(format!("{before}|{o}"))),
         )
         .unwrap();
         assert_eq!(
-            worker.ask("KAT", "the", None, true),
+            worker.ask("KAT", "the", None, None, true),
             Asked::Answered(Some("the|KAT".into()))
         );
         assert_eq!(
-            worker.ask("KAT", "a", None, true),
+            worker.ask("KAT", "a", None, None, true),
             Asked::Answered(Some("a|KAT".into())),
             "the same outline after other text is another question"
         );
@@ -399,7 +443,7 @@ mod tests {
             Box::new(move || {
                 let _ = made_on.send(std::thread::current().id());
                 let _ = gate.recv();
-                Box::new(|o: &str, _: &str| Some(o.to_lowercase())) as Read
+                Box::new(|o: &str, _: &str, _: Option<&Window>| Some(o.to_lowercase())) as Read
             }),
         )
         .unwrap();
@@ -411,13 +455,13 @@ mod tests {
         );
         assert!(!worker.wait_ready(soon()), "not made yet");
         // A question asked while it is made is late, never held up, and not yet settled
-        assert_eq!(worker.ask("KAT", "", Some(soon()), true), Asked::Late);
-        assert!(!worker.settled("KAT", ""));
+        assert_eq!(worker.ask("KAT", "", None, Some(soon()), true), Asked::Late);
+        assert!(!worker.settled("KAT", "", None));
         go.send(()).unwrap();
         assert!(worker.wait_ready(Instant::now() + Duration::from_secs(10)));
         // And it is read once the reader is made
         assert_eq!(
-            worker.ask("KAT", "", None, false),
+            worker.ask("KAT", "", None, None, false),
             Asked::Answered(Some("kat".into()))
         );
     }
@@ -428,12 +472,12 @@ mod tests {
         budget.start(Instant::now());
         assert!(budget.first_ask());
         assert!(!budget.first_ask());
-        budget.mark_late(&[1, 2], "the");
-        budget.mark_late(&[2], "");
+        budget.mark_late(&[1, 2], "the", 7);
+        budget.mark_late(&[2], "", 9);
         budget.note_read(&[3], "p", "cat");
         assert_eq!(budget.reader_of(&[3], "cat"), Some("p".into()));
         assert_eq!(budget.reader_of(&[3], "dog"), None);
-        assert_eq!(budget.take_late(), Some((vec![1, 2], "the".into())));
+        assert_eq!(budget.take_late(), Some((vec![1, 2], "the".into(), 7)));
         budget.start(Instant::now());
         assert!(budget.first_ask() && !budget.is_late());
         assert_eq!(budget.reader_of(&[3], "cat"), None);

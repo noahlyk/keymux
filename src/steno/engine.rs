@@ -1256,10 +1256,12 @@ mod tests {
         let chain = Chain::test_with_reader(
             dict,
             Layout::plover(),
-            Box::new(move |outline: &str, _: &str| {
-                let _ = gate.recv();
-                Some(outline.to_lowercase())
-            }),
+            Box::new(
+                move |outline: &str, _: &str, _: Option<&crate::steno::strokes::Window>| {
+                    let _ = gate.recv();
+                    Some(outline.to_lowercase())
+                },
+            ),
         );
         let mut engine = engine_with_dict("{}");
         engine.translator = Translator::with_shared(

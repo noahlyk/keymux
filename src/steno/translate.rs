@@ -12,7 +12,8 @@ use super::formatter::{Formatter, Op, Options};
 use super::journal::{self, History, MachineId, Origin, SharedHistory};
 use super::keycombo::key_events;
 use super::layout::render_stroke;
-use super::plugin::{Chain, CONTEXT_BYTES};
+use super::plugin::{Before, Chain, CONTEXT_BYTES};
+use super::strokes::StrokeLog;
 use super::worker::Budget;
 use crate::keycode::KeyCode;
 use smallvec::SmallVec;
@@ -39,6 +40,10 @@ struct Late {
     strokes: Vec<u32>,
     /// The text before that outline, as the plugin was asked it
     before: String,
+    /// The strokes before it, as the plugin was asked them: the stroke log, and where in it the
+    /// outline starts
+    log: StrokeLog,
+    base: u64,
     /// Where the text before the stroke ended on screen (see [`Translator::stroke_start`])
     start: usize,
     /// What the stroke made without it
@@ -416,7 +421,8 @@ pub struct Translator {
 /// does) doesn't touch what the original has typed.
 impl Clone for Translator {
     fn clone(&self) -> Self {
-        let history = journal::lock(&self.shared).clone();
+        let mut history = journal::lock(&self.shared).clone();
+        history.strokes = history.strokes.copy();
         Self {
             dict: Arc::clone(&self.dict),
             machine: self.machine,
@@ -492,9 +498,16 @@ impl Translator {
     /// [`Self::settle_late`] would not wait.
     #[must_use]
     pub fn late_ready(&self) -> bool {
-        self.late
-            .as_ref()
-            .is_some_and(|late| self.dict.settled(&late.strokes, &late.before))
+        self.late.as_ref().is_some_and(|late| {
+            self.dict.settled(
+                &late.strokes,
+                Before {
+                    text: &late.before,
+                    base: late.base,
+                    log: Some(&late.log),
+                },
+            )
+        })
     }
 
     /// The plugin, and its reading, that the last stroke (or the last [`Self::settle_late`])
@@ -778,7 +791,7 @@ impl Translator {
             &self.hist.state.translations,
             &[stroke],
             &[],
-            self.before(Some(self.stroke_start)),
+            self.asked(Some(self.stroke_start), 0),
         );
         if self.classes_enabled && !self.dict.joins(stroke) {
             if let Some(text) = mapping.as_deref().filter(|m| is_transparent_mapping(m)) {
@@ -824,7 +837,7 @@ impl Translator {
                 let suffixes = self.involved_suffixes(
                     stroke,
                     &SUFFIX_KEYS,
-                    self.before(Some(self.stroke_start)),
+                    self.asked(Some(self.stroke_start), 0),
                 );
                 (!suffixes.is_empty())
                     .then(|| self.longest_match(window, &outlines, 1, &suffixes))
@@ -842,12 +855,14 @@ impl Translator {
         });
         let late = self.budget.take_late();
         self.translate_translation(translation);
-        if let Some((strokes, before)) = late {
+        if let Some((strokes, before, base)) = late {
             let translation = self.hist.state.translations.last().cloned();
             self.late = translation.map(|translation| Late {
                 stroke,
                 strokes,
                 before,
+                log: self.hist.strokes.clone(),
+                base,
                 start: self.stroke_start,
                 translation,
             });
@@ -886,6 +901,17 @@ impl Translator {
             start += 1;
         }
         &screen[start..end]
+    }
+
+    /// What a plugin is told precedes an outline whose text starts at `begins` on screen and
+    /// whose first stroke is the `back`th from the end of the stroke log: the text (see
+    /// [`Self::before`]) and the strokes.
+    fn asked(&self, begins: Option<usize>, back: usize) -> Before<'_> {
+        Before {
+            text: self.before(begins),
+            base: self.hist.strokes.end().saturating_sub(back as u64),
+            log: Some(&self.hist.strokes),
+        }
     }
 
     /// What a transparent stroke asks of the keyboard: its commands and key combinations, in
@@ -987,6 +1013,7 @@ impl Translator {
                     let state = &mut self.hist.state;
                     state.tail = state.translations.pop();
                     state.translations.clear();
+                    self.hist.strokes.wall();
                 }
                 break;
             }
@@ -1266,7 +1293,7 @@ impl Translator {
         if !english.is_empty() {
             let begins = last.replaced.last().and_then(|t| t.begins);
             english.push(
-                self.lookup(&[lookup_stroke], &SUFFIX_KEYS, self.before(begins))
+                self.lookup(&[lookup_stroke], &SUFFIX_KEYS, self.asked(begins, 1))
                     .unwrap_or_else(|| render_stroke(lookup_stroke)),
             );
             let mut t = Translation::new(vec![stroke], Some(english.join(" ")));
@@ -1287,17 +1314,51 @@ impl Translator {
                 .first()
                 .map_or(Some(self.stroke_start), |t| t.begins);
         }
-        self.undo_all(&translation.replaced);
-        self.do_all(vec![translation]);
+        let replaced = translation.replaced.clone();
+        self.exchange(&replaced, vec![translation]);
     }
 
     fn untranslate_translation(&mut self, translation: &Translation) {
-        self.undo_all(std::slice::from_ref(translation));
-        self.do_all(translation.replaced.clone());
+        self.exchange(
+            std::slice::from_ref(translation),
+            translation.replaced.clone(),
+        );
+    }
+
+    /// Take `removed` off the end of the history and put `added` on: and keep the stroke log
+    /// the strokes of the history. Strokes the two share at the start are not touched, so a
+    /// longer outline replacing the ones it covers cuts nothing from the log, and a lineage
+    /// (see [`super::strokes`]) changes only where strokes really are taken back.
+    fn exchange(&mut self, removed: &[Translation], added: Vec<Translation>) {
+        let strokes_of = |translations: &[Translation]| -> Vec<u32> {
+            translations
+                .iter()
+                .filter(|t| t.origin.is_stroke())
+                .flat_map(|t| t.strokes.iter().copied())
+                .collect()
+        };
+        let (out, into) = (strokes_of(removed), strokes_of(&added));
+        let shared = out.iter().zip(&into).take_while(|(a, b)| a == b).count();
+        self.pop_translations(removed);
+        self.hist.to_do += added.len();
+        self.hist.state.translations.extend(added);
+        self.hist.strokes.pop(out.len() - shared);
+        self.hist.strokes.push(&into[shared..]);
     }
 
     /// Take the translations off the end of the history, last first.
     fn undo_all(&mut self, translations: &[Translation]) {
+        self.pop_translations(translations);
+        let strokes = translations
+            .iter()
+            .filter(|t| t.origin.is_stroke())
+            .map(|t| t.strokes.len())
+            .sum();
+        self.hist.strokes.pop(strokes);
+    }
+
+    /// [`Self::undo_all`] for the translations alone, the stroke log left to the caller.
+    fn pop_translations(&mut self, translations: &[Translation]) {
         for expected in translations.iter().rev() {
             let Some(popped) = self.hist.state.translations.pop() else {
                 return;
@@ -1309,11 +1370,6 @@ impl Translator {
                 self.hist.to_undo.insert(0, popped);
             }
         }
-    }
-
-    fn do_all(&mut self, translations: Vec<Translation>) {
-        self.hist.to_do += translations.len();
-        self.hist.state.translations.extend(translations);
     }
 
     /// The last translations a new stroke may make a longer outline with, oldest first. A
@@ -1382,12 +1438,13 @@ impl Translator {
                 // What was typed before the outline's first stroke, never the outline's own
                 // text so far
                 let begins = window.get(*i).map_or(Some(self.stroke_start), |t| t.begins);
+                let back = window[*i..].iter().map(|t| t.strokes.len()).sum();
                 let mapping = self.lookup_with_prefix(
                     max_len,
                     &window[..*i],
                     strokes,
                     suffixes,
-                    self.before(begins),
+                    self.asked(begins, back),
                 )?;
                 let mut translation = Translation::new(strokes.to_vec(), Some(mapping));
                 translation.replaced = window[*i..].to_vec();
@@ -1396,7 +1453,7 @@ impl Translator {
     }
 
     /// Look the strokes up, typed after `before` (see [`Self::before`]).
-    fn lookup_strokes(&self, strokes: &[u32], before: &str) -> Option<String> {
+    fn lookup_strokes(&self, strokes: &[u32], before: Before<'_>) -> Option<String> {
         self.dict.lookup_within(strokes, before, &self.budget)
     }
 
@@ -1406,7 +1463,7 @@ impl Translator {
         &self,
         strokes: &[u32],
         suffixes: &[(u32, String)],
-        before: &str,
+        before: Before<'_>,
     ) -> Option<String> {
         if suffixes.is_empty() {
             return self.lookup_strokes(strokes, before);
@@ -1427,7 +1484,7 @@ impl Translator {
         &self,
         stroke: u32,
         suffix_keys: &[u32],
-        before: &str,
+        before: Before<'_>,
     ) -> Vec<(u32, String)> {
         suffix_keys
             .iter()
@@ -1437,7 +1494,7 @@ impl Translator {
     }
 
     /// The translation of an outline, looking for a suffix key folded in if there is no entry.
-    fn lookup(&self, strokes: &[u32], suffix_keys: &[u32], before: &str) -> Option<String> {
+    fn lookup(&self, strokes: &[u32], suffix_keys: &[u32], before: Before<'_>) -> Option<String> {
         if let Some(found) = self.lookup_strokes(strokes, before) {
             return Some(found);
         }
@@ -1469,7 +1526,7 @@ impl Translator {
         last_translations: &[Translation],
         strokes: &[u32],
         suffixes: &[(u32, String)],
-        before: &str,
+        before: Before<'_>,
     ) -> Option<String> {
         if strokes.len() < max_len && Self::previous_word_is_finished(last_translations) {
             let mut prefixed: Strokes = smallvec::smallvec![0];
@@ -1486,6 +1543,30 @@ impl Translator {
             return self.lookup_with_suffix(strokes, suffixes, before);
         }
         None
+    }
+
+    /// Mark in the stroke log the walls the last `done` translations made, now they are
+    /// formatted (whether one is a barrier depends on the keys it typed): a barrier, or text not
+    /// from strokes, ends the history of strokes at its own end.
+    fn wall_after_barriers(&self, done: usize) {
+        let translations = &self.hist.state.translations;
+        let new = &translations[translations.len() - done.min(translations.len())..];
+        let strokes: u64 = new
+            .iter()
+            .filter(|t| t.origin.is_stroke())
+            .map(|t| t.strokes.len() as u64)
+            .sum();
+        let mut at = self.hist.strokes.end().saturating_sub(strokes);
+        for t in new {
+            if t.origin.is_stroke() {
+                at += t.strokes.len() as u64;
+                if is_barrier(t) {
+                    self.hist.strokes.wall_at(at);
+                }
+            } else {
+                self.hist.strokes.wall_at(at);
+            }
+        }
     }
 
     /// Format what was done and undone since the last flush, and return what to type to match.
@@ -1518,6 +1599,7 @@ impl Translator {
         } else {
             Vec::new()
         };
+        self.wall_after_barriers(to_do);
         let keep = self.dict.longest_key().max(UNDO_LENGTH);
         self.hist.state.restrict_size(keep);
         ops
@@ -1653,10 +1735,12 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         let chain = Chain::test_with_reader(
             dictionary,
             layout,
-            Box::new(move |outline: &str, _: &str| {
-                let _ = gate.recv();
-                Some(outline.replace(['/', '+'], "").to_lowercase())
-            }),
+            Box::new(
+                move |outline: &str, _: &str, _: Option<&crate::steno::strokes::Window>| {
+                    let _ = gate.recv();
+                    Some(outline.replace(['/', '+'], "").to_lowercase())
+                },
+            ),
         );
         let mut t = Translator::with_shared(
             Arc::new(chain),
@@ -1833,10 +1917,12 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         let chain = Chain::test_with_reader_of(
             dictionary,
             Layout::plover(),
-            Box::new(move |outline: &str, before: &str| {
-                let _ = gate.recv();
-                Some(format!("({before}|{})", outline.to_lowercase()))
-            }),
+            Box::new(
+                move |outline: &str, before: &str, _: Option<&crate::steno::strokes::Window>| {
+                    let _ = gate.recv();
+                    Some(format!("({before}|{})", outline.to_lowercase()))
+                },
+            ),
             true,
         );
         let mut t = Translator::with_shared(
