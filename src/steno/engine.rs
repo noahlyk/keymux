@@ -491,14 +491,19 @@ impl StenoEngine {
         }
         let output = self.translator.settle_late()?;
         let read = self.translator.plugin_read();
+        let unmatched = self.translator.was_unmatched();
+        let unmarked = tape::describe(Some(&output), unmatched);
         let description = tape::mark_plugin(
-            &tape::describe(Some(&output), self.translator.was_unmatched()),
+            &unmarked,
             read.as_ref()
                 .map(|(name, text)| (name.as_str(), text.as_str())),
         );
         if let Some(tape) = &mut self.tape {
             tape.note("late", &description);
         }
+        // On the overlay too, under the line it greys, so what is in full colour is what is on
+        // screen
+        self.hub.push_late(unmarked, unmatched);
         Some(output)
     }
 
@@ -1271,6 +1276,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("tape.txt");
         engine.tape = Some(tape::Tape::with_layout(path.clone(), Layout::plover()));
+        let hub: &'static OverlayHub = Box::leak(Box::default());
+        engine.set_hub(hub);
         let keys = kat_keys(&engine);
         let t0 = Instant::now();
         let raw = typed(tap(&mut engine, keys, t0, t0 + Duration::from_millis(30)));
@@ -1298,14 +1305,23 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2, "{text}");
+        // A miss says what it typed after its `?`
         assert!(
-            lines[0].contains("KAT") && lines[0].ends_with('?'),
+            lines[0].contains("KAT") && lines[0].ends_with("? \"KA-T\""),
             "{text}"
         );
         assert!(
             lines[1].contains("late") && lines[1].ends_with("plugin:reader \"kat\""),
             "{text}"
         );
+        // On the overlay, the late reading is a line of its own, and what the stroke typed
+        // without it ("KA-T") is grey: taken back
+        let tape = hub.snapshot().tape;
+        assert_eq!(tape.len(), 2, "{tape:?}");
+        assert!(tape[0].unmatched);
+        assert_eq!(tape[0].gone, [[0, 4]]);
+        assert_eq!((tape[1].stroke, tape[1].text.as_str()), (0, "-4 \"kat\""));
+        assert!(tape[1].gone.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

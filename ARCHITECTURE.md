@@ -459,10 +459,10 @@ Steno is a layer kind: `kind: Steno((...))`. A steno layer captures its stroke k
 - **Translation**: each completed stroke is translated immediately. A multi-stroke entry such as `KPA/TKAOEU` replaces the text of the earlier strokes when it matches, so text already typed can be rewritten (retro-correction).
 - **Undo**: the stroke `*` reverses the last translation, including any retro-correction. Space and Backspace are swallowed while there is text to undo, and act normally once nothing is left.
 - **Placeholder**: a stroke that matches nothing on its own but starts a longer entry types `_`. The next stroke either completes the entry and replaces the `_`, or doesn't and the `_` is removed. Space and undo also remove it.
-- **Unmatched strokes**: type nothing, and appear as `?` on the tape.
+- **Unmatched strokes**: are typed as their keys, and appear on the tape as `?` followed by what they typed.
 - **Delete** always reaches the screen, even on a steno layer.
 - **Dictionaries**: Plover JSON files, highest priority first. They are parsed once and cached as a binary file in `steno/cache`, keyed by the sha256 of each source file, so a changed dictionary is re-parsed automatically.
-- **Tape**: every stroke is logged to `~/.local/state/keymux/steno-tape.txt`. `keymux steno tape -f` follows it live.
+- **Tape**: every stroke is logged to `~/.local/state/keymux/steno-tape.txt`. `keymux steno tape -f` follows it live. `steno/erasure.rs` replays the tape's descriptions (`-N "text"`) to know which characters of each line are still on screen; the overlay hub keeps that per line (`TapeEntry::gone`) and the overlay and `keymux steno tape` draw what a later line took back, and the `-N` counts, grey. Generic: it reads only backspace counts and text, never a theory's rules.
 
 ---
 

@@ -13,6 +13,7 @@ pub mod commands;
 pub mod compose;
 pub mod dict;
 pub mod engine;
+pub mod erasure;
 pub mod formatter;
 pub mod interactive;
 pub mod journal;

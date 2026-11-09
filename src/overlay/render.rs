@@ -16,12 +16,12 @@ use super::ViewState;
 use super::geometry::{KeyGroup, Keyboard, Rect};
 use super::glyphs::{self, GlyphCache};
 use crate::config::{Half, KeyColor, OverlayConfig};
+use crate::steno::erasure::{self, Ink};
 use crate::steno::layout::Layout;
 use crate::steno::overlay::{
     LookupMode, LookupRow, LookupView, OverlaySnapshot, TapeEntry, TAPE_CAPACITY,
 };
 use anyhow::Result;
-use std::borrow::Cow;
 use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, PixmapMut, Stroke, Transform};
 
 /// Space between the content and the left/right edge of the overlay, logical px
@@ -94,6 +94,8 @@ pub(crate) struct Theme {
     /// What each stroke typed: the main thing to read
     pub words: [u8; 4],
     pub unmatched: [u8; 4],
+    /// What a later stroke took back, and the `-N` counts: there to read, but not on screen
+    pub gone: [u8; 4],
 }
 
 impl Default for Theme {
@@ -111,6 +113,7 @@ impl Default for Theme {
             strokes: [192, 201, 216, 255],
             words: [248, 250, 253, 255],
             unmatched: [255, 120, 120, 255],
+            gone: [128, 136, 150, 255],
         }
     }
 }
@@ -119,7 +122,12 @@ impl Theme {
     /// The tape's text at `opacity` (zero to one) of its full strength.
     fn with_text_opacity(mut self, opacity: f32) -> Self {
         let opacity = opacity.clamp(0.0, 1.0);
-        for color in [&mut self.strokes, &mut self.words, &mut self.unmatched] {
+        for color in [
+            &mut self.strokes,
+            &mut self.words,
+            &mut self.unmatched,
+            &mut self.gone,
+        ] {
             color[3] = (f32::from(color[3]) * opacity).round() as u8;
         }
         self
@@ -819,6 +827,7 @@ impl Renderer {
             unmatched: false,
             repeats: 0,
             transparent: false,
+            gone: Vec::new(),
         });
 
         let room = self.words_right - self.words_left;
@@ -870,20 +879,33 @@ impl Renderer {
         }
     }
 
-    /// The text a tape entry's own line shows, before any "held down x N" prefix: "?" for a
-    /// stroke that matched nothing, its translated text otherwise.
-    fn tape_entry_text(entry: &TapeEntry) -> Cow<'_, str> {
-        let text = if entry.unmatched {
-            Cow::Borrowed("?")
+    /// The text a tape entry's own line shows: "?" for a stroke that matched nothing, its
+    /// translated text otherwise, after a count (`x3`) for a stroke held down to repeat.
+    fn tape_entry_text(entry: &TapeEntry) -> String {
+        Self::tape_entry_runs(entry)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect()
+    }
+
+    /// [`Self::tape_entry_text`] as runs in their ink: the `-N` counts grey, and what later
+    /// strokes took back (an undo, a correction, a late reading) grey, so the text in full
+    /// colour is what is on screen. A miss's `?` goes grey once all it typed was taken back.
+    fn tape_entry_runs(entry: &TapeEntry) -> Vec<(String, Ink)> {
+        let pieces = erasure::pieces(entry.output());
+        let typed = erasure::typed_len(&pieces);
+        let alive = erasure::alive_from_gone(&entry.gone, typed);
+        let mut runs = if entry.unmatched {
+            let undone = typed > 0 && alive.iter().all(|alive| !alive);
+            vec![("?".to_owned(), if undone { Ink::Gone } else { Ink::Normal })]
         } else {
-            display_text(&entry.text)
+            erasure::runs(&pieces, &alive, false)
         };
         // A stroke held down repeats: one line with a count, not a line for each
         if entry.repeats > 0 {
-            Cow::Owned(format!("x{} {text}", entry.repeats + 1))
-        } else {
-            text
+            runs.insert(0, (format!("x{} ", entry.repeats + 1), Ink::Normal));
         }
+        runs
     }
 
     /// The colour group of the `index`th extra key: what `extra_colors` says, `Misc` otherwise.
@@ -1318,16 +1340,27 @@ impl Renderer {
         } else {
             self.theme.words
         };
-        let text = Self::tape_entry_text(entry);
-        draw_text_wrapped(
-            pixmap,
+        let (normal, gone) = (fade_color(color, fade), fade_color(self.theme.gone, fade));
+        let mut text = String::new();
+        let mut colors = Vec::new();
+        for (run, ink) in Self::tape_entry_runs(entry) {
+            let color = if ink == Ink::Gone { gone } else { normal };
+            colors.extend(run.chars().map(|_| color));
+            text.push_str(&run);
+        }
+        let lines = wrap_text(
             &mut self.words,
             &text,
+            (self.words_right - self.words_left).max(0.0),
+        );
+        draw_lines_colored(
+            pixmap,
+            &mut self.words,
+            &lines,
+            &colors,
             self.words_left,
             baseline,
-            self.words_right,
             self.line_height,
-            fade_color(color, fade),
             self.scale,
         );
     }
@@ -1367,25 +1400,6 @@ fn line_fade(from_bottom: usize, lines: usize, floor: f32, fading: usize) -> f32
     let past = (from_bottom + 1 + fading).saturating_sub(lines);
     let t = (past as f32 / fading as f32).min(1.0);
     (1.0 - floor).mul_add(-t, 1.0)
-}
-
-/// The tape file writes translations as Rust string literals (`"the"`, or `-3 "the"` when a
-/// stroke took back three characters first); show them without the quotes.
-fn display_text(text: &str) -> Cow<'_, str> {
-    let unquote = |t: &str| {
-        t.strip_prefix('"')
-            .and_then(|t| t.strip_suffix('"'))
-            .map(str::to_owned)
-    };
-    if let Some((back, rest)) = text.split_once(' ') {
-        let is_count = back
-            .strip_prefix('-')
-            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
-        if let (true, Some(typed)) = (is_count, unquote(rest)) {
-            return Cow::Owned(format!("{back} {typed}"));
-        }
-    }
-    unquote(text).map_or(Cow::Borrowed(text), Cow::Owned)
 }
 
 fn with_alpha([r, g, b, a]: [u8; 4], alpha: u8) -> [u8; 4] {
@@ -1565,29 +1579,8 @@ fn wrap_text(glyphs: &mut GlyphCache, text: &str, max_width: f32) -> Vec<String>
     lines
 }
 
-/// Like [`draw_text_clipped`], but wraps instead of truncating: `text` starts at `baseline`,
-/// continuing on further lines (each `pitch` further down) as needed to fit within `right`
-/// rather than ever being cut short with an ellipsis. Returns how many lines it drew, so the
-/// caller can budget the vertical space whatever comes after it needs.
-#[allow(clippy::too_many_arguments)]
-fn draw_text_wrapped(
-    pixmap: &mut PixmapMut,
-    glyphs: &mut GlyphCache,
-    text: &str,
-    x: f32,
-    baseline: f32,
-    right: f32,
-    pitch: f32,
-    color: [u8; 4],
-    scale: f32,
-) -> usize {
-    let lines = wrap_text(glyphs, text, (right - x).max(0.0));
-    draw_lines(pixmap, glyphs, &lines, x, baseline, pitch, color, scale);
-    lines.len()
-}
-
-/// Draw already-wrapped `lines`, one below the other, `pitch` apart - the drawing half of
-/// [`draw_text_wrapped`], split out so lines wrapped some other way (such as
+/// Draw already-wrapped `lines` (from [`wrap_text`]), one below the other, `pitch` apart, so
+/// lines wrapped some other way (such as
 /// [`wrap_paired`]'s, broken on the same word boundaries as a companion column rather than on
 /// this column's own width) can be drawn without wrapping the text over again, which would just
 /// undo that pairing.
@@ -1606,6 +1599,31 @@ fn draw_lines(
         let mut cx = x.round();
         let line_baseline = pitch.mul_add(i as f32, baseline);
         for c in line.chars() {
+            draw_char(pixmap, glyphs, c, cx, line_baseline, color, scale);
+            cx += glyphs.get(c).advance.round();
+        }
+    }
+}
+
+/// [`draw_lines`] with a colour for each character of the lines, in order across them: the
+/// tape's text, where what was taken back is grey.
+#[allow(clippy::too_many_arguments)]
+fn draw_lines_colored(
+    pixmap: &mut PixmapMut,
+    glyphs: &mut GlyphCache,
+    lines: &[String],
+    colors: &[[u8; 4]],
+    x: f32,
+    baseline: f32,
+    pitch: f32,
+    scale: f32,
+) {
+    let mut colors = colors.iter();
+    for (i, line) in lines.iter().enumerate() {
+        let mut cx = x.round();
+        let line_baseline = pitch.mul_add(i as f32, baseline);
+        for c in line.chars() {
+            let color = colors.next().copied().unwrap_or([0; 4]);
             draw_char(pixmap, glyphs, c, cx, line_baseline, color, scale);
             cx += glyphs.get(c).advance.round();
         }
@@ -1732,6 +1750,7 @@ mod tests {
             unmatched: text.is_empty(),
             repeats: 0,
             transparent: false,
+            gone: Vec::new(),
         }
     }
 
@@ -2324,6 +2343,7 @@ mod tests {
             unmatched: false,
             repeats: 0,
             transparent: false,
+            gone: Vec::new(),
         };
         let baseline = 100.0;
         renderer.draw_tape_line(&mut pixmap.as_mut(), &entry, baseline, 1.0);
@@ -2403,6 +2423,7 @@ mod tests {
             unmatched: false,
             repeats: 0,
             transparent,
+            gone: Vec::new(),
         };
         let draw = |config: &OverlayConfig, entries: Vec<TapeEntry>| {
             let mut renderer = Renderer::new(config, 1, 900).unwrap();
@@ -2442,6 +2463,7 @@ mod tests {
             unmatched: false,
             repeats: 0,
             transparent: false,
+            gone: Vec::new(),
         };
         renderer.draw_tape_line(&mut pixmap.as_mut(), &entry, 100.0, fade);
         let theme = renderer.theme;
@@ -2517,6 +2539,7 @@ mod tests {
                 unmatched: false,
                 repeats: 0,
                 transparent: false,
+                gone: Vec::new(),
             };
             let baseline = 100.0;
             renderer.draw_tape_line(&mut pixmap.as_mut(), &entry, baseline, 1.0);
@@ -2897,27 +2920,35 @@ mod tests {
             held: parse_stroke("#TKA*UPL").unwrap(),
             ..OverlaySnapshot::default()
         };
+        // Through a hub, as the daemon keeps them, so an undo and a correction grey what they
+        // took back
         let words = [
             ("TH", "\"this\""),
-            ("S", "\"is\""),
-            ("A", "\"a\""),
-            ("TEFT", "\"test\""),
-            ("OF", "\"of\""),
-            ("-T", "\"the\""),
-            ("STEPB", "\"steno\""),
-            ("OEFR", "\"over\""),
-            ("STKPWHR", ""),
-            ("STKPWHRAOEUFRPBLGTSDZ", "\"everything\""),
-            ("PWEUG", "\"big\""),
-            ("TKPWAEUPL", "\"game\""),
-            ("KWRAOU", "\"you\""),
+            ("S", "\" is\""),
+            ("A", "\" a\""),
+            ("TEFT", "\" test\""),
+            ("OF", "\" of\""),
+            ("-T", "\" the\""),
+            ("STEPB", "\" stone\""),
+            ("*", "-6 \"\""),
+            ("STEPB", "\" steno\""),
+            ("OEFR", "\" over\""),
+            ("STKPWHR", "? \" STKPWHR\""),
+            ("*", "-8 \"\""),
+            ("STEU", "\" city\""),
+            ("-Z", "-1 \"ies\""),
+            ("STKPWHRAOEUFRPBLGTSDZ", "\" everything\""),
+            ("PWEUG", "\" big\""),
+            ("TKPWAEUPL", "\" game\""),
+            ("KWRAOU", "\" you\""),
         ];
+        let hub = crate::steno::overlay::OverlayHub::default();
         for i in 0..renderer.tape_lines() {
             let (stroke, text) = words[i % words.len()];
-            snapshot
-                .tape
-                .push_back(tape_entry(i as u64 + 1, stroke, text));
+            let unmatched = text.starts_with('?');
+            hub.push_stroke(parse_stroke(stroke).unwrap(), text.into(), unmatched);
         }
+        snapshot.tape = hub.snapshot().tape;
         let mut pixmap = Pixmap::new(w, h).unwrap();
         renderer.draw(&snapshot, &mut pixmap.as_mut());
         let mut out = format!("P6 {w} {h} 255\n").into_bytes();
@@ -2980,6 +3011,7 @@ mod tests {
                 unmatched: text.is_empty(),
                 repeats: 0,
                 transparent: false,
+                gone: Vec::new(),
             });
         }
         let write = |name: &str, renderer: &mut Renderer, snapshot: &OverlaySnapshot| {
@@ -3715,9 +3747,27 @@ mod tests {
 
     #[test]
     fn translations_drop_the_tape_quotes() {
-        assert_eq!(display_text("\"the\""), "the");
-        assert_eq!(display_text("-3 \"the\""), "-3 the");
-        assert_eq!(display_text("KC_A KC_B"), "KC_A KC_B");
+        let text = |text: &str| Renderer::tape_entry_text(&tape_entry(1, "T", text));
+        assert_eq!(text("\"the\""), "the");
+        assert_eq!(text("-3 \"the\""), "-3 the");
+        assert_eq!(text("KC_A KC_B"), "KC_A KC_B");
+    }
+
+    #[test]
+    fn what_a_later_stroke_took_back_and_the_counts_are_grey() {
+        let hub = crate::steno::overlay::OverlayHub::default();
+        hub.push_stroke(1, "\" city\"".into(), false);
+        hub.push_stroke(2, "-1 \"ies\"".into(), false);
+        hub.push_stroke(4, "? \" KAT\"".into(), true);
+        hub.push_stroke(8, "-4 \"\"".into(), false);
+        let tape = hub.snapshot().tape;
+        let runs = |i: usize| Renderer::tape_entry_runs(&tape[i]);
+        let (n, g) = (Ink::Normal, Ink::Gone);
+        assert_eq!(runs(0), [(" cit".to_owned(), n), ("y".to_owned(), g)]);
+        assert_eq!(runs(1), [("-1".to_owned(), g), (" ies".to_owned(), n)]);
+        // The miss was undone whole: its `?` is grey
+        assert_eq!(runs(2), [("?".to_owned(), g)]);
+        assert_eq!(runs(3), [("-4".to_owned(), g), (" ".to_owned(), n)]);
     }
 
     /// The group number of each key in `stroke`'s run, with `-` and ungrouped keys as `None`

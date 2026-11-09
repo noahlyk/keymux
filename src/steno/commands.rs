@@ -470,7 +470,18 @@ pub fn add(config_path: &Path, config_dir: &Path, stroke: &str, text: &str) -> R
     Ok(())
 }
 
+/// Lines read before the first one shown, so a backspace near the top of what is shown lands on
+/// the characters it took back.
+const TAPE_CONTEXT: usize = 200;
+
+/// The most lines `keymux steno tape -f` keeps to replay; older ones have scrolled away.
+const TAPE_KEPT: usize = 2000;
+
 /// Print the last `lines` tape entries, and with `follow`, keep printing new ones.
+///
+/// On a terminal, each `-N` count and whatever a later line took back are dimmed (see
+/// [`tape::paint`]), so what is in full colour is what is on screen. Following, a new line
+/// that takes back characters of lines already printed redraws them dimmed.
 pub fn tail_tape(home: &Path, lines: usize, follow: bool) -> Result<()> {
     let path = tape::default_path(home);
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
@@ -478,8 +489,15 @@ pub fn tail_tape(home: &Path, lines: usize, follow: bool) -> Result<()> {
         println!("No steno tape yet at {}", path.display());
         return Ok(());
     }
+    let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
     let all: Vec<&str> = existing.lines().collect();
-    for line in &all[all.len().saturating_sub(lines)..] {
+    let first_shown = all.len().saturating_sub(lines);
+    let mut view = TapeView::new(
+        &all[first_shown.saturating_sub(TAPE_CONTEXT)..],
+        all.len() - first_shown,
+        tty && console::colors_enabled(),
+    );
+    for line in view.shown() {
         println!("{line}");
     }
     if !follow {
@@ -488,7 +506,6 @@ pub fn tail_tape(home: &Path, lines: usize, follow: bool) -> Result<()> {
 
     // A stroke that repeats rewrites its own line, so follow from the start of the last line
     // shown, not the end of the file
-    let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
     let trimmed = existing.trim_end_matches('\n');
     let mut line_start = trimmed.rfind('\n').map_or(0, |i| i + 1);
     let mut shown = trimmed[line_start..].to_owned();
@@ -512,26 +529,103 @@ pub fn tail_tape(home: &Path, lines: usize, follow: bool) -> Result<()> {
             continue;
         };
         let complete = &tail[..=end];
-        let first = format!("{shown}\n");
-        let new = if shown.is_empty() {
-            complete
-        } else if let Some(rest) = complete.strip_prefix(&first) {
-            rest
-        } else if tty {
-            // The line shown last was rewritten, such as by a stroke that repeated: draw it again
-            print!("\x1b[1A\r\x1b[2K");
-            complete
+        let got: Vec<&str> = complete.lines().collect();
+        let (rewritten, new) = if shown.is_empty() {
+            (None, &got[..])
+        } else if got.first() == Some(&shown.as_str()) {
+            (None, &got[1..])
         } else {
-            &complete[complete.find('\n').map_or(0, |i| i + 1)..]
+            // The line shown last was rewritten, such as by a stroke that repeated
+            (got.first().copied(), got.get(1..).unwrap_or_default())
         };
-        if !new.is_empty() {
-            print!("{new}");
+        let out = view.advance(rewritten, new, tty);
+        if !out.is_empty() {
+            print!("{out}");
             stdout.flush()?;
         }
         let whole = complete.trim_end_matches('\n');
         let last = whole.rfind('\n').map_or(0, |i| i + 1);
         line_start += last;
         whole[last..].clone_into(&mut shown);
+    }
+}
+
+/// The tape lines `keymux steno tape` has read, the last `shown` of them printed, and how each
+/// was printed, so a later line that dims an earlier one can redraw it.
+struct TapeView {
+    lines: Vec<String>,
+    shown: usize,
+    color: bool,
+    painted: Vec<String>,
+}
+
+impl TapeView {
+    fn new(lines: &[&str], shown: usize, color: bool) -> Self {
+        let mut view = Self {
+            lines: lines.iter().map(|line| (*line).to_owned()).collect(),
+            shown,
+            color,
+            painted: Vec::new(),
+        };
+        view.paint();
+        view
+    }
+
+    fn paint(&mut self) {
+        let lines: Vec<&str> = self.lines.iter().map(String::as_str).collect();
+        self.painted = tape::paint(&lines, self.color);
+    }
+
+    /// The printed lines, as printed.
+    fn shown(&self) -> &[String] {
+        &self.painted[self.painted.len() - self.shown.min(self.painted.len())..]
+    }
+
+    /// Take in the last line `rewritten` and the `new` lines after it, and say what to print:
+    /// on a terminal, the lines already printed that now read differently are drawn again in
+    /// place (cursor up, and back), then the new lines.
+    fn advance(&mut self, rewritten: Option<&str>, new: &[&str], tty: bool) -> String {
+        let before = self.painted.clone();
+        if let Some(line) = rewritten {
+            match self.lines.last_mut() {
+                Some(last) => line.clone_into(last),
+                None => self.lines.push(line.to_owned()),
+            }
+        }
+        self.lines.extend(new.iter().map(|line| (*line).to_owned()));
+        self.shown += new.len();
+        let dropped = self.lines.len().saturating_sub(TAPE_KEPT);
+        self.lines.drain(..dropped);
+        self.shown = self.shown.min(self.lines.len());
+        self.paint();
+
+        let mut out = String::new();
+        if tty {
+            // The lines printed before: their places on screen, bottom up, by what is there now
+            let (rows, cols) = console::Term::stdout().size();
+            let cols = usize::from(cols.max(1));
+            let old = &before[dropped.min(before.len())..];
+            let printed = self.shown - new.len();
+            let mut up = 0usize;
+            for back in 1..=printed.min(old.len()) {
+                let was = &old[old.len() - back];
+                up += console::measure_text_width(was).max(1).div_ceil(cols);
+                if up > usize::from(rows) {
+                    break;
+                }
+                let now = &self.painted[old.len() - back];
+                if now != was {
+                    // Save the cursor, go up to the line, draw it, and come back
+                    out.push_str(&format!("\x1b7\x1b[{up}A\r\x1b[2K{now}\x1b8"));
+                }
+            }
+        }
+        // Not a terminal: a rewritten line can't be drawn again, so it is left as it was
+        for line in &self.painted[self.painted.len() - new.len()..] {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
     }
 }
 
@@ -551,6 +645,24 @@ mod tests {
     use super::*;
     use crate::config::KeyAction;
     use crate::steno::layout::{build_key_map, without_extra_keys};
+
+    #[test]
+    fn following_the_tape_redraws_a_printed_line_a_new_one_took_back() {
+        let the = r#"10:00:00  -T           " the""#;
+        let cat = r#"10:00:01  KAT          " cat""#;
+        let mut view = TapeView::new(&[the, cat], 2, true);
+        assert_eq!(view.shown(), [the, cat]);
+        let out = view.advance(None, &[r#"10:00:02  *            -4 """#], true);
+        // " cat", one line up, drawn again dimmed in place; then the undo, its count dimmed
+        assert_eq!(
+            out,
+            "\u{1b}7\u{1b}[1A\r\u{1b}[2K10:00:01  KAT          \"\u{1b}[2m cat\u{1b}[0m\"\u{1b}8\
+             10:00:02  *            \u{1b}[2m-4\u{1b}[0m \"\"\n"
+        );
+        // Not a terminal: only the new lines, as they are
+        let mut plain = TapeView::new(&[the], 1, false);
+        assert_eq!(plain.advance(None, &[cat], false), format!("{cat}\n"));
+    }
 
     #[test]
     fn strokes_round_trip_through_their_text() {

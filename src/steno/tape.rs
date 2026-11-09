@@ -5,6 +5,7 @@
 //! the disk: the typing path hands the line over and carries on.
 
 use super::dict::Dictionary;
+use super::erasure::{self, Ink, Screen};
 use super::layout::{render_stroke, Layout};
 use super::translate::{OutputOp, StenoOutput};
 use std::collections::HashMap;
@@ -23,11 +24,19 @@ pub fn default_path(home: &Path) -> PathBuf {
 }
 
 /// One tape line's description of what a stroke did.
+///
+/// A stroke that matched nothing is typed as its keys, and marked `?` first: `? "KAT"`. What
+/// follows the `?` is what it typed, so a reader of the tape (the overlay, `keymux steno tape`)
+/// can tell which characters a later undo took back (see [`super::erasure`]).
 #[must_use]
 pub fn describe(output: Option<&StenoOutput>, unmatched: bool) -> String {
-    // The stroke is typed as its keys, but the tape marks it as one that matched nothing
     if unmatched {
-        return "?".to_string();
+        let typed = describe(output, false);
+        return if typed.is_empty() {
+            "?".to_string()
+        } else {
+            format!("? {typed}")
+        };
     }
     match output {
         Some(StenoOutput::Type(text)) => format!("{text:?}"),
@@ -408,6 +417,136 @@ pub fn describe_typed(dict: &Dictionary, word: &str) -> String {
     }
 }
 
+/// The kind a note line has in place of a stroke when it is a word typed by hand.
+const TYPED_NOTE: &str = "typed";
+
+/// Tape lines as `keymux steno tape` prints them.
+///
+/// With `color`, each `-N` count and every character a later line took back (an undo, a correction, a plugin's reading of a run, a late
+/// reading) dimmed, so what is in full colour is what is on screen. Without, the lines as they
+/// are. The lines are replayed in order (see [`super::erasure`]), so give a few lines before the
+/// ones to show for a backspace near the top to land on.
+#[must_use]
+pub fn paint(lines: &[&str], color: bool) -> Vec<String> {
+    if !color {
+        return lines.iter().map(|line| (*line).to_owned()).collect();
+    }
+    let read: Vec<Option<Read<'_>>> = lines.iter().map(|line| Read::of(line)).collect();
+    let mut screen = Screen::default();
+    for (id, line) in read.iter().enumerate() {
+        let Some(line) = line else { continue };
+        if line.shown == TYPED_NOTE || (line.unmatched && line.pieces.is_empty()) {
+            // Typed by hand, or a miss from before the tape said what it typed: the tape can't
+            // say what is on screen past this
+            screen.seal();
+            continue;
+        }
+        screen.line(id as u64);
+        for _ in 0..line.times {
+            screen.apply(&line.pieces);
+        }
+    }
+    lines
+        .iter()
+        .zip(&read)
+        .enumerate()
+        .map(|(id, (raw, line))| {
+            line.as_ref().map_or_else(
+                || (*raw).to_owned(),
+                |line| line.paint(raw, screen.alive(id as u64)),
+            )
+        })
+        .collect()
+}
+
+/// A tape line taken apart: `CLOCK  SHOWN  [xN ][~ ][? ]DESCRIPTION[  MARK]`.
+struct Read<'a> {
+    /// Up to where the description starts: the clock and the stroke, or a note's kind
+    head: &'a str,
+    shown: &'a str,
+    /// The `xN `, `~ ` and `? ` before the description
+    marks: &'a str,
+    times: usize,
+    unmatched: bool,
+    pieces: Vec<erasure::Piece>,
+    /// A plugin's mark or a suggestion after the description
+    tail: &'a str,
+}
+
+impl<'a> Read<'a> {
+    fn of(line: &'a str) -> Option<Self> {
+        let after_clock = line.find("  ")?;
+        let rest = &line[after_clock..];
+        let shown_start = after_clock + (rest.len() - rest.trim_start().len());
+        let shown_len = line[shown_start..]
+            .find(' ')
+            .unwrap_or(line.len() - shown_start);
+        let shown = &line[shown_start..shown_start + shown_len];
+        let after_shown = shown_start + shown_len;
+        let description_start = line[after_shown..]
+            .find(|c: char| c != ' ')
+            .map_or(line.len(), |i| after_shown + i);
+        let head = &line[..description_start];
+        let marks_start = &line[description_start..];
+        let mut body = marks_start;
+        let mut times = 1;
+        let mut unmatched = false;
+        loop {
+            let (word, after) = body.split_once(' ').unwrap_or((body, ""));
+            if let Some(count) = word
+                .strip_prefix('x')
+                .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+            {
+                times = count.parse().unwrap_or(1);
+            } else if word == "?" {
+                unmatched = true;
+            } else if word != "~" {
+                break;
+            }
+            body = after;
+        }
+        let marks = &marks_start[..marks_start.len() - body.len()];
+        let (pieces, tail) = erasure::split(body);
+        Some(Self {
+            head,
+            shown,
+            marks,
+            times,
+            unmatched,
+            pieces,
+            tail,
+        })
+    }
+
+    /// The line again, with the counts and what `alive` says was taken back dimmed.
+    fn paint(&self, raw: &str, alive: &[bool]) -> String {
+        let dim = |text: &str| console::style(text).dim().force_styling(true).to_string();
+        let runs = erasure::runs(&self.pieces, alive, true);
+        let plain: String = runs.iter().map(|(text, _)| text.as_str()).collect();
+        // Only a line read back exactly is painted; anything else is shown as it is
+        if format!("{}{}{plain}{}", self.head, self.marks, self.tail) != raw {
+            return raw.to_owned();
+        }
+        let typed = erasure::typed_len(&self.pieces);
+        let undone =
+            typed > 0 && alive.len() >= typed && alive.iter().rev().take(typed).all(|alive| !alive);
+        let mut out = self.head.to_owned();
+        if self.unmatched && undone {
+            out.push_str(&dim(self.marks));
+        } else {
+            out.push_str(self.marks);
+        }
+        for (text, ink) in runs {
+            match ink {
+                Ink::Normal => out.push_str(&text),
+                Ink::Gone => out.push_str(&dim(&text)),
+            }
+        }
+        out.push_str(self.tail);
+        out
+    }
+}
+
 /// Seconds since the epoch, taken when a line is asked for rather than when it is written.
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -443,6 +582,11 @@ mod tests {
             "-2 \"ies\""
         );
         assert_eq!(describe(None, true), "?");
+        // A miss says what it typed after its mark, so an undo of it can be followed
+        assert_eq!(
+            describe(Some(&StenoOutput::Type(" KAT".into())), true),
+            "? \" KAT\""
+        );
         assert_eq!(describe(None, false), "");
     }
 
@@ -595,5 +739,78 @@ mod tests {
             "{text}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `paint`ed lines with what is dimmed in `[...]`.
+    fn painted(lines: &[&str]) -> Vec<String> {
+        paint(lines, true)
+            .into_iter()
+            .map(|line| line.replace("\u{1b}[2m", "[").replace("\u{1b}[0m", "]"))
+            .collect()
+    }
+
+    #[test]
+    fn the_printed_tape_dims_what_later_lines_took_back_and_the_counts() {
+        let lines = [
+            r#"10:00:00  -T           " the""#,
+            r#"10:00:01  KAT          " cat""#,
+            r#"10:00:02  *            -4 """#,
+            r#"10:00:03  STEU         " city""#,
+            r#"10:00:04  -Z           -1 "ies"  plugin:05-solver "cities""#,
+            r#"10:00:05  KAT          ? " KAT""#,
+            r#"10:00:06  late         -4 " cat"  plugin:05-solver "cat""#,
+        ];
+        assert_eq!(
+            painted(&lines),
+            [
+                r#"10:00:00  -T           " the""#,
+                r#"10:00:01  KAT          "[ cat]""#,
+                r#"10:00:02  *            [-4] """#,
+                r#"10:00:03  STEU         " cit[y]""#,
+                r#"10:00:04  -Z           [-1] "ies"  plugin:05-solver "cities""#,
+                // A miss replaced whole by a late reading: its `?` is dim too
+                r#"10:00:05  KAT          [? ]"[ KAT]""#,
+                r#"10:00:06  late         [-4] " cat"  plugin:05-solver "cat""#,
+            ]
+        );
+        // Without colour, or with it stripped, the lines are exactly the file's
+        assert_eq!(paint(&lines, false), lines);
+        let stripped: Vec<String> = paint(&lines, true)
+            .iter()
+            .map(|line| console::strip_ansi_codes(line).into_owned())
+            .collect();
+        assert_eq!(stripped, lines);
+    }
+
+    #[test]
+    fn the_printed_tape_follows_a_run_back_over_several_lines_and_stops_at_typing() {
+        let lines = [
+            r#"10:00:00  -T           " the""#,
+            r#"10:00:01  typed        " by""#,
+            r#"10:00:02  APBT         " ant""#,
+            r#"10:00:03  TAOE         x2 " tee""#,
+            r#"10:00:04  +            -12 " antietam""#,
+            r#"10:00:05  *            -20 """#,
+        ];
+        assert_eq!(
+            painted(&lines),
+            [
+                r#"10:00:00  -T           " the""#,
+                r#"10:00:01  typed        " by""#,
+                r#"10:00:02  APBT         "[ ant]""#,
+                // Held, it typed " tee" twice; drawn as the last time
+                r#"10:00:03  TAOE         x2 "[ tee]""#,
+                r#"10:00:04  +            [-12] "[ antietam]""#,
+                // Past the word typed by hand, nothing is put down to the tape
+                r#"10:00:05  *            [-20] """#,
+            ]
+        );
+        // A miss from before the tape said what it typed is a wall as well
+        let old = [
+            r#"10:00:00  -T           " the""#,
+            "10:00:01  KAT          ?",
+            r#"10:00:02  *            -3 """#,
+        ];
+        assert_eq!(painted(&old)[0], old[0]);
     }
 }

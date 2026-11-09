@@ -147,8 +147,10 @@ A stroke's tape line (`keymux steno tape`) shows the stroke in the layer's own l
 included: a joined stroke is `+-G`, a stroke of the join key alone is `+`. When a plugin's reading
 is what a stroke typed, the line ends with `plugin:NAME "reading"` (`NAME` is the plugin file's
 stem, `05-solver` for `05-solver.rs`). A late reading that replaced what its stroke typed is a
-line of its own, `late`, with what the replacement typed and the same mark. A theory can score
-its fallback on real typing from these lines.
+line of its own, `late`, with what the replacement typed and the same mark; the overlay shows it
+too, as a line with no stroke, and greys what the stroke typed without it. A stroke that matched
+nothing is `?` followed by what it typed (`? "KA-T"`), so a reader can follow an undo of it. A
+theory can score its fallback on real typing from these lines.
 
 ## Mods: a plugin that reads no words
 

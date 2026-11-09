@@ -746,7 +746,7 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
 - With nothing on the tape, `*` presses Ctrl+Backspace, which deletes the word before the cursor in nearly every app.
 - `#` repeats the last stroke.
 - A stroke that matches nothing on its own, but starts a longer entry, is typed as its keys, such as `KPA-`. The next stroke completes the entry and replaces them. If it doesn't, they stay until `*` takes them back.
-- A stroke that matches nothing is typed as its keys too, in capitals with one hyphen between the hands and the star on the right (`STPWHA-UBGSZ`), and is marked `?` on the tape. `*` takes it back like any word.
+- A stroke that matches nothing is typed as its keys too, in capitals with one hyphen between the hands and the star on the right (`STPWHA-UBGSZ`), and is marked `?` on the tape, followed by what it typed (`? "STPWHA-UBGSZ"`). `*` takes it back like any word.
 
 ### Live lookup
 
@@ -814,7 +814,7 @@ same lookup live in a terminal: see [Interactive lookup](#interactive-lookup).
 | `keymux steno stroke` | The interactive lookup with every query read as stroke notation, lowercase allowed |
 | `keymux steno stroke "KPA/TKAOEU"` | Print what a stroke types and the entries nearest to it. Use `/` between strokes of one word |
 | `keymux steno add KAT "cat"` | Add or replace an entry in `00-user.json`, which beats every other dictionary. It writes a file, so it needs both arguments and has no interactive form |
-| `keymux steno tape` | Show what each recent stroke typed. `-f` keeps printing new strokes, `-n N` sets how many lines to start with |
+| `keymux steno tape` | Show what each recent stroke typed. `-f` keeps printing new strokes, `-n N` sets how many lines to start with. On a terminal, `-N` counts and what a later stroke took back are dimmed (and redrawn dimmed as you follow) |
 
 #### Interactive lookup
 
@@ -879,7 +879,7 @@ difference below. Every command that takes a query (`lookup`, `keys`, `stroke`) 
 - **Difference from the generator's `lookup`.** That one answers for three theories and shows
   `lyk`, `plover` and `lapwing` columns side by side (and its own `keys (shared vocabulary only…)`
   totals); keymux has the one engine setup, so there is one `outline` column and one total.
-| `keymux steno tape` | Show what each recent stroke typed. `-f` keeps printing new strokes, `-n N` sets how many lines to start with |
+| `keymux steno tape` | Show what each recent stroke typed. `-f` keeps printing new strokes, `-n N` sets how many lines to start with. On a terminal, `-N` counts and what a later stroke took back are dimmed (and redrawn dimmed as you follow) |
 
 ### On-screen overlay
 
@@ -891,7 +891,7 @@ yellow for the vowels, red for the right hand, light blue for `*` and `#`. Keys 
 of but that are still part of the stroke are dimmer. Each finished stroke lands on the tape
 with what it typed: the steno letters as one coloured run (a colour per hand, keys one finger
 plays together underlined, a `-` only where steno order needs it), and the word in larger
-white text. A stroke you hold down to repeat stays on one line with a count (`x12`) instead of filling the tape, in `keymux steno tape` too. The tape runs up the screen by default (`tape_lines` caps it), set tight (about one text height per line), and stops as far below the top of the screen as the keyboard diagram is above the bottom (`margin_y`, 14 px, one setting for both; it is measured to the first line's ink, and if your screen leaves a bigger gap under the diagram, raise it), so the whole overlay has the same margin at both ends. Every line is at full strength except the last five at the top, which fade out to a faint oldest line (`tape_fade` is that line's strength, `tape_fade_lines` how many lines fade). There is no
+white text. A stroke you hold down to repeat stays on one line with a count (`x12`) instead of filling the tape, in `keymux steno tape` too. **What was taken back is grey.** A stroke that takes characters back first shows the count as `-N` in grey (`-1 ies`), and the characters it took back are greyed where they were typed, on the earlier lines: an undo greys the whole word it took back, a suffix that drops a `y` greys just that `y` (` cit`*`y`*), and a plugin's reading of a whole run, or a late reading that replaces what its stroke typed (a line of its own with no stroke, under the line it greys), greys every line it reached back into. So the text in full colour is exactly what is on screen and grey is what was typed and then removed. A miss (`?`) goes grey once all it typed was taken back. A key press (Enter, an arrow) or typing by hand on a plain layer is a wall: a later backspace is never put down to a line from before it, since the tape can't see what it did to the text. `keymux steno tape` dims the same things on a terminal (the file itself stays plain text). The tape runs up the screen by default (`tape_lines` caps it), set tight (about one text height per line), and stops as far below the top of the screen as the keyboard diagram is above the bottom (`margin_y`, 14 px, one setting for both; it is measured to the first line's ink, and if your screen leaves a bigger gap under the diagram, raise it), so the whole overlay has the same margin at both ends. Every line is at full strength except the last five at the top, which fade out to a faint oldest line (`tape_fade` is that line's strength, `tape_fade_lines` how many lines fade). There is no
 background by default, only the keys and text. The text is slightly transparent (`text_opacity`) on a soft dark shadow, and lit keys glow in their colour; over a white window the light text is soft by design. Set `background` for a
 panel if your wallpaper is very busy. A stroke with many keys is set in smaller letters so every
 key fits. The overlay never takes clicks or focus. It costs next to nothing: it only redraws when a key or the tape changes.

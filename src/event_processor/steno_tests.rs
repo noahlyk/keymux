@@ -1119,3 +1119,30 @@ fn with_no_dictionary_strokes_type_as_they_are_and_one_dropped_in_takes_over_whi
     }
     assert_eq!(p.current_layer_name(), "chords", "still in steno");
 }
+
+#[test]
+fn the_overlay_greys_what_an_undo_took_back_but_not_past_typing_by_hand() {
+    let fixture = Fixture::new("overlay-gone");
+    let mut p = fixture.processor_with(CONFIG, r#"{"KAT": "cat", "-T": "the"}"#);
+    let hub = private_hub();
+    p.set_overlay_hub(hub);
+    enter_steno(&mut p);
+    let (k, a, t, star) = (KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P, KeyCode::KC_T);
+    chord(&mut p, &[t]);
+    chord(&mut p, &[k, a, t]);
+    // `*` takes back " cat": that line's text is all gone, "the" is untouched
+    chord(&mut p, &[star]);
+    let tape = hub.snapshot().tape;
+    let gone: Vec<Vec<[u32; 2]>> = tape.iter().map(|entry| entry.gone.clone()).collect();
+    assert_eq!(tape[2].text, "-4 \"\"");
+    assert_eq!(gone, [vec![], vec![[0, 4]], vec![]]);
+
+    // Typed by hand on the plain layer: the overlay's tape can't follow that, so the next undo
+    // (the "x", here) greys nothing of "the"
+    p.process_key(KeyCode::KC_TAB, false);
+    touch(&mut p, KeyCode::KC_X);
+    enter_steno(&mut p);
+    chord(&mut p, &[star]);
+    let tape = hub.snapshot().tape;
+    assert!(tape[0].gone.is_empty(), "{tape:?}");
+}

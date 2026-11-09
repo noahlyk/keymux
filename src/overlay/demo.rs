@@ -3,45 +3,43 @@
 
 use crate::steno::layout::{parse_stroke, parse_strokes_trimmed};
 use crate::steno::overlay::{
-    LookupMode, LookupRow, LookupView, OverlaySnapshot, TapeEntry, TAPE_CAPACITY,
+    LookupMode, LookupRow, LookupView, OverlayHub, OverlaySnapshot, TAPE_CAPACITY,
 };
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
 use std::time::Duration;
 
-const STROKES: [(&str, &str); 12] = [
+// An undo and a miss taken back show what a later stroke took back, grey
+const STROKES: [(&str, &str); 15] = [
     ("TH", "\"this\""),
-    ("S", "\"is\""),
-    ("A", "\"a\""),
-    ("TEFT", "\"test\""),
-    ("OF", "\"of\""),
-    ("-T", "\"the\""),
-    ("STEPB", "\"steno\""),
-    ("OEFR", "\"over\""),
-    ("STKPWHR", ""),
-    ("PWEUG", "\"big\""),
-    ("TKPWAEUPL", "\"game\""),
-    ("KWRAOU", "\"you\""),
+    ("S", "\" is\""),
+    ("A", "\" a\""),
+    ("TEFT", "\" test\""),
+    ("OF", "\" of\""),
+    ("-T", "\" the\""),
+    ("STEPB", "\" stone\""),
+    ("*", "-6 \"\""),
+    ("STEPB", "\" steno\""),
+    ("OEFR", "\" over\""),
+    ("STKPWHR", "? \" STKPWHR\""),
+    ("*", "-8 \"\""),
+    ("PWEUG", "\" big\""),
+    ("TKPWAEUPL", "\" game\""),
+    ("KWRAOU", "\" you\""),
 ];
 
 /// Show the overlay, then press and release each demo stroke key by key, forever.
 pub fn spawn(frames: Sender<OverlaySnapshot>) {
     std::thread::spawn(move || {
-        let mut snapshot = OverlaySnapshot {
-            layer: Some("demo".into()),
-            ..OverlaySnapshot::default()
+        // A hub of its own, so the demo's tape is kept (and greyed) as the daemon's is
+        let hub = OverlayHub::default();
+        hub.set_layer(Some("demo"));
+        let push = |stroke: &str, text: &str| {
+            let bits = parse_stroke(stroke).expect("demo strokes are valid");
+            hub.push_stroke(bits, text.into(), text.starts_with('?'));
         };
         // Start with a full tape, so the whole-screen layout shows straight away
-        let mut seq = 0;
         for (stroke, text) in STROKES.iter().cycle().take(TAPE_CAPACITY) {
-            seq += 1;
-            snapshot.tape.push_back(TapeEntry {
-                seq,
-                stroke: parse_stroke(stroke).expect("demo strokes are valid"),
-                text: (*text).into(),
-                unmatched: text.is_empty(),
-                repeats: 0,
-                transparent: false,
-            });
+            push(stroke, text);
         }
         loop {
             for (stroke, text) in STROKES {
@@ -50,35 +48,19 @@ pub fn spawn(frames: Sender<OverlaySnapshot>) {
                 let mut lit = 0;
                 for slot in (0..23).filter(|slot| bits & (1 << slot) != 0) {
                     lit |= 1 << slot;
-                    snapshot.generation += 1;
-                    snapshot.chord = lit;
-                    snapshot.held = lit;
-                    if frames.send(snapshot.clone()).is_err() {
+                    hub.set_keys(lit, lit);
+                    if frames.send(hub.snapshot()).is_err() {
                         return;
                     }
                     std::thread::sleep(Duration::from_millis(90));
                 }
-                seq += 1;
-                if snapshot.tape.len() == TAPE_CAPACITY {
-                    snapshot.tape.pop_front();
-                }
-                snapshot.tape.push_back(TapeEntry {
-                    seq,
-                    stroke: bits,
-                    text: text.into(),
-                    unmatched: text.is_empty(),
-                    repeats: 0,
-                    transparent: false,
-                });
-                snapshot.generation += 1;
-                snapshot.chord = 0;
-                snapshot.held = 0;
-                if frames.send(snapshot.clone()).is_err() {
+                push(stroke, text);
+                if frames.send(hub.snapshot()).is_err() {
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(500));
             }
-            if !lookup(&frames, &mut snapshot) {
+            if !lookup(&frames, &hub) {
                 return;
             }
         }
@@ -96,11 +78,10 @@ const LOOKUP_WORDS: [(&str, &str); 5] = [
 
 /// Open a lookup, type a word into it one letter at a time, then close it. Returns `false`
 /// when the overlay has gone.
-fn lookup(frames: &Sender<OverlaySnapshot>, snapshot: &mut OverlaySnapshot) -> bool {
-    let show = |snapshot: &mut OverlaySnapshot, view: Option<LookupView>| {
-        snapshot.generation += 1;
-        snapshot.lookup = view;
-        frames.send(snapshot.clone()).is_ok()
+fn lookup(frames: &Sender<OverlaySnapshot>, hub: &OverlayHub) -> bool {
+    let show = |view: Option<LookupView>| {
+        hub.set_lookup(view);
+        frames.send(hub.snapshot()).is_ok()
     };
     let word = "candy";
     for end in 0..=word.len() {
@@ -128,11 +109,11 @@ fn lookup(frames: &Sender<OverlaySnapshot>, snapshot: &mut OverlaySnapshot) -> b
             strokes,
             mode: LookupMode::Word,
         };
-        if !show(snapshot, Some(view)) {
+        if !show(Some(view)) {
             return false;
         }
         std::thread::sleep(Duration::from_millis(700));
     }
     std::thread::sleep(Duration::from_millis(1500));
-    show(snapshot, None)
+    show(None)
 }

@@ -67,6 +67,19 @@ impl KeymapProcessor {
         if self.layer_stack.is_game_mode_active() {
             return;
         }
+        // Typed by hand: the overlay's tape cannot follow it, so a later undo is not put down
+        // to a word on the tape
+        let typed = match result {
+            ProcessResult::EmitKey(key, true) => !key.is_modifier(),
+            ProcessResult::MultipleEvents(events) => events
+                .iter()
+                .any(|(key, pressed)| *pressed && !key.is_modifier()),
+            ProcessResult::TypeString(text) => !text.is_empty(),
+            _ => false,
+        };
+        if typed {
+            self.overlay_hub.seal();
+        }
         let words = self.typing.follow(result);
         let Some(path) = self.typing.tape.as_deref().filter(|_| !words.is_empty()) else {
             return;

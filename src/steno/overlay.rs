@@ -5,12 +5,13 @@
 //! hub keeps only the latest state plus a generation counter, not a queue of events. A
 //! slow subscriber skips the states it missed, so it can never hold up typing.
 
+use super::erasure::{self, Screen};
 use super::overlay_control::ViewCommand;
 use crate::lock;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 /// Tape entries kept for the overlay: enough to fill a tall screen, since the tape runs the
@@ -34,6 +35,27 @@ pub struct TapeEntry {
     /// A transparent stroke: on the tape, but not part of the text (a lookup, ...)
     #[serde(default)]
     pub transparent: bool,
+    /// The characters this line typed that a later line took back (an undo, a correction, a
+    /// late reading), as `[start, end)` ranges over the characters its text types (one time
+    /// through, for a repeated line); the overlay draws them grey. See [`super::erasure`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gone: Vec<[u32; 2]>,
+}
+
+impl TapeEntry {
+    /// The output part of the line's text: without the `?` a stroke that matched nothing is
+    /// marked with.
+    #[must_use]
+    pub fn output(&self) -> &str {
+        if self.unmatched {
+            self.text
+                .strip_prefix('?')
+                .unwrap_or(&self.text)
+                .trim_start()
+        } else {
+            &self.text
+        }
+    }
 }
 
 /// One result of a live lookup: a word, and the outline that types it.
@@ -100,6 +122,25 @@ pub struct OverlaySnapshot {
     /// and applies none of the older ones, so a restart goes back to the configured start.
     #[serde(default)]
     pub controls: VecDeque<(u64, ViewCommand)>,
+    /// The tape replayed: which characters of each line are still on screen. The daemon's own
+    /// bookkeeping for `TapeEntry::gone`; never sent to an overlay.
+    #[serde(skip)]
+    pub screen: Arc<Screen>,
+}
+
+impl OverlaySnapshot {
+    /// Bring every line's `gone` up to date with the screen, after a line changed it.
+    fn refresh_gone(&mut self) {
+        let mut lines = self.screen.every_gone().peekable();
+        for entry in &mut self.tape {
+            while lines.next_if(|(id, _)| *id < entry.seq).is_some() {}
+            if let Some((_, gone)) = lines.next_if(|(id, _)| *id == entry.seq) {
+                if entry.gone != gone {
+                    entry.gone = gone;
+                }
+            }
+        }
+    }
 }
 
 /// View commands kept for a slow subscriber to catch up on.
@@ -174,8 +215,26 @@ impl OverlayHub {
         self.update(|state| {
             let changed = !state.tape.is_empty();
             state.tape.clear();
+            Arc::make_mut(&mut state.screen).clear();
             changed
         });
+    }
+
+    /// The text was changed in a way the tape does not show (typing by hand, on a plain layer):
+    /// nothing on the tape so far is greyed by a later backspace. Nothing to redraw.
+    pub fn seal(&self) {
+        let mut state = lock(&self.state);
+        // Every key typed by hand comes here: leave the screen alone (unshared) if it is sealed
+        if !state.screen.sealed() {
+            Arc::make_mut(&mut state.screen).seal();
+        }
+    }
+
+    /// A plugin's reading came late and replaced what its stroke typed (`text` is the
+    /// replacement, described as on the tape): a line of its own, with no stroke, under the line
+    /// it greys.
+    pub fn push_late(&self, text: String, unmatched: bool) {
+        self.push_entry(0, text, unmatched, false);
     }
 
     /// A stroke finished that belongs on no tape (an engine command): clear the lit keys without
@@ -207,14 +266,23 @@ impl OverlayHub {
             if state.tape.len() == TAPE_CAPACITY {
                 state.tape.pop_front();
             }
-            state.tape.push_back(TapeEntry {
+            let entry = TapeEntry {
                 seq,
                 stroke,
                 text,
                 unmatched,
                 repeats: 0,
                 transparent,
-            });
+                gone: Vec::new(),
+            };
+            let screen = Arc::make_mut(&mut state.screen);
+            if let Some(first) = state.tape.front() {
+                screen.forget_before(first.seq);
+            }
+            screen.line(seq);
+            screen.apply(&erasure::pieces(entry.output()));
+            state.tape.push_back(entry);
+            state.refresh_gone();
             state.chord = 0;
             state.held = 0;
             true
@@ -229,6 +297,9 @@ impl OverlayHub {
                 return false;
             };
             last.repeats += 1;
+            let pieces = erasure::pieces(last.output());
+            Arc::make_mut(&mut state.screen).apply(&pieces);
+            state.refresh_gone();
             state.chord = 0;
             state.held = 0;
             true
@@ -374,6 +445,44 @@ mod tests {
         // A repeat of a stroke that is not the newest line has no line to count on
         hub.push_repeat(0b1, "\"a\"".into(), false);
         assert_eq!(hub.snapshot().tape.len(), 3);
+    }
+
+    #[test]
+    fn a_line_says_which_of_its_characters_later_lines_took_back() {
+        let hub = OverlayHub::default();
+        hub.push_stroke(1, "\" over\"".into(), false);
+        hub.push_stroke(2, "\" ten\"".into(), false);
+        // One reading of the run takes back six characters, over two lines
+        hub.push_stroke(4, "-6 \"ture\"".into(), false);
+        let gone = |hub: &OverlayHub| -> Vec<Vec<[u32; 2]>> {
+            hub.snapshot().tape.iter().map(|e| e.gone.clone()).collect()
+        };
+        assert_eq!(gone(&hub), [vec![[3, 5]], vec![[0, 4]], vec![]]);
+        // Held, an undo takes back more each time it repeats: "ture", then the " ov" left
+        hub.push_stroke(8, "-4 \"\"".into(), false);
+        hub.push_repeat(8, "-4 \"\"".into(), false);
+        assert_eq!(gone(&hub)[..3], [vec![[0, 5]], vec![[0, 4]], vec![[0, 4]]]);
+        // A late reading greys what its stroke typed without it
+        hub.push_stroke(16, "? \"X\"".into(), true);
+        hub.push_late("-1 \"ex\"".into(), false);
+        let tape = hub.snapshot().tape;
+        assert_eq!(tape[4].gone, [[0, 1]]);
+        assert_eq!((tape[5].stroke, tape[5].gone.len()), (0, 0));
+    }
+
+    #[test]
+    fn typing_by_hand_seals_the_tape_and_clearing_forgets_it() {
+        let hub = OverlayHub::default();
+        hub.push_stroke(1, "\" one\"".into(), false);
+        let before = hub.snapshot().generation;
+        hub.seal();
+        assert_eq!(hub.snapshot().generation, before, "nothing to redraw");
+        hub.push_stroke(2, "-3 \"\"".into(), false);
+        assert!(hub.snapshot().tape[0].gone.is_empty());
+        hub.clear_tape();
+        hub.push_stroke(1, "\"a\"".into(), false);
+        hub.push_stroke(2, "-1 \"\"".into(), false);
+        assert_eq!(hub.snapshot().tape[0].gone, [[0, 1]]);
     }
 
     #[test]
