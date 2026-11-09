@@ -38,7 +38,7 @@ pub struct TapeEntry {
     /// The characters this line typed that a later line took back (an undo, a correction, a
     /// late reading), as `[start, end)` ranges over the characters its text types (one time
     /// through, for a repeated line); the overlay draws them grey. See [`super::erasure`].
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub gone: Vec<[u32; 2]>,
 }
 
@@ -555,6 +555,30 @@ mod tests {
         let hub = OverlayHub::default();
         let cancel = AtomicBool::new(false);
         assert_eq!(hub.wait_newer(0, Duration::from_millis(10), &cancel), None);
+    }
+
+    /// The overlay reads what the daemon writes with bincode, which has no field names: a field
+    /// left out when empty shifts every field after it, and the first frame with a tape line
+    /// fails to read
+    #[test]
+    fn a_snapshot_with_tape_lines_survives_the_wire() {
+        let line = |gone: Vec<[u32; 2]>| TapeEntry {
+            seq: 1,
+            stroke: 0b101,
+            text: "cat".into(),
+            unmatched: false,
+            repeats: 0,
+            transparent: false,
+            gone,
+        };
+        let sent = OverlaySnapshot {
+            generation: 7,
+            tape: VecDeque::from([line(Vec::new()), line(vec![[0, 1]]), line(Vec::new())]),
+            ..OverlaySnapshot::default()
+        };
+        let bytes = bincode::serialize(&sent).unwrap();
+        let got: OverlaySnapshot = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(got, sent);
     }
 
     #[test]
