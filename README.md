@@ -929,8 +929,35 @@ overlay: (
     key_groups: {},      // { "S-": 20, "T-": 20, "K-": 20 } makes S T K a trio
     // The colour of an extra key, by its character: Left, Vowel, Right or Misc (the default)
     extra_colors: {},    // { "+": Right }
+    // Keys that fuse into one bigger key while all of them are in the stroke (see below)
+    merge_keys: true,      // false draws every key on its own, whatever the groups say
+    merge_defaults: true,  // false drops the built-in letter groups and leaves only `merges`
+    merges: [],            // [(keys: ["A-", "O-"], label: Some("AO"))]
 ),
 ```
+
+**Merged keys.** While every key of a group is in the stroke (held, or let go but still in the
+stroke), the diagram draws them as one larger key in the colour of the group's first key, with the
+group's label centred on it; a partly pressed group lights its keys one by one as usual, and only
+the highlight fuses, the unlit diagram never changes. The built-in groups are the standard steno
+letter chords whose keys are next to each other: `T P H` is N, `P H` M, `K W R` Y, `T K` D, `P W` B,
+`H R` L, `T P` F, `T K P W` G, `S K W R` J, `S T K P W` Z, and on the right `-P B` N, `-P L` M,
+`-B G` K, `-F P` CH, `-R B` SH, `-P B L G` J, `-G S` SHUN. (`S R` V and `K R` C are left out: a key
+lies between them.) `merges` adds groups: `keys` are key names as in `key_groups` (`"T-"`, `"-B"`,
+`"A-"`, `"*"`; not `#` or an extra key), at least two, all connected through neighbouring keys (an
+`L` or a 2x2 block is fine; a thumb key is not next to a finger key), and `label` is optional (left
+out, each key keeps its own letter). An entry with the same keys as a built-in group replaces it;
+`enabled: false` removes it. Where groups overlap the biggest group fully in the stroke wins (`T P
+H` beats `T P`), then the earlier one, config entries ahead of built-in ones; keys in no winning
+group light on their own. `keymux check` reports a bad group as an error and the overlay skips it.
+
+The fused shape is the union of its keys with the gaps between neighbours filled. Its outer
+corners keep the radius of the key that owns them, the sides where keys meet are straight, and
+a corner folding inwards (the inside of an `L`) gets a small fillet. A thumb paddle has a round end
+(half circle); merged with a neighbouring paddle it loses it in the middle and keeps a quarter
+circle at each outer bottom corner, with a straight bottom between: `(keys: ["A-", "O-"], label:
+Some("AO"))` and `(keys: ["-E", "-U"], label: Some("EU"))` draw one wide paddle each.
+`keymux overlay --demo` includes several of these strokes.
 
 An extra key drawn over a standard key (`overlay_overrides`, `SplitKey`) is in that key's group
 unless `key_groups` names it; run `keymux check` to see entries that name no key.

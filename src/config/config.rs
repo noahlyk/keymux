@@ -842,6 +842,39 @@ pub struct OverlayConfig {
     /// The colour group an extra key is drawn in, keyed by its character: `Left`, `Vowel`,
     /// `Right` or `Misc`. An extra key left out is `Misc`.
     pub extra_colors: HashMap<String, KeyColor>,
+    /// Master switch for merging: with it off every key is drawn on its own, whatever the
+    /// groups below say. See [`KeyMerge`].
+    pub merge_keys: bool,
+    /// Whether the built-in groups (the standard steno letter chords: `T P H` is `N`, `P H`
+    /// is `M`, ...) are used. Off leaves only `merges`.
+    pub merge_defaults: bool,
+    /// Groups of keys that fuse into one shape while all are down, added to the built-in ones:
+    /// an entry with the same keys as a built-in one replaces it (a new label, or `enabled:
+    /// false` to drop it).
+    pub merges: Vec<KeyMerge>,
+}
+
+/// A group of keys the overlay draws as one bigger key while every one of them is in the
+/// stroke. The keys must be next to each other on the diagram (see the README).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KeyMerge {
+    /// Key names, as in `key_groups`: `"T-"`, `"P-"`, `"-B"`, `"A-"`, `"*"`
+    pub keys: Vec<String>,
+    /// Text drawn centred on the merged shape. `None` keeps each key's own letter.
+    pub label: Option<String>,
+    /// `false` removes the built-in group with these keys instead of adding one
+    pub enabled: bool,
+}
+
+impl Default for KeyMerge {
+    fn default() -> Self {
+        Self {
+            keys: Vec::new(),
+            label: None,
+            enabled: true,
+        }
+    }
 }
 
 impl Default for OverlayConfig {
@@ -865,6 +898,9 @@ impl Default for OverlayConfig {
             overlay_overrides: HashMap::new(),
             key_groups: HashMap::new(),
             extra_colors: HashMap::new(),
+            merge_keys: true,
+            merge_defaults: true,
+            merges: Vec::new(),
             font: None,
             layers: Vec::new(),
         }
@@ -1657,6 +1693,12 @@ impl Config {
                         check.warnings.push(format!("overlay: {problem}, so it does nothing"));
                     }
                 }
+                #[cfg(feature = "overlay")]
+                check.errors.extend(
+                    crate::overlay::merge::problems(overlay, &layout)
+                        .into_iter()
+                        .map(|problem| format!("overlay: {problem}")),
+                );
                 for key in overlay.extra_colors.keys() {
                     let mut chars = key.chars();
                     let extra = matches!((chars.next(), chars.next()), (Some(ch), None) if overlay.extra_keys.contains(&ch));
@@ -1835,6 +1877,37 @@ mod tests {
             "{warnings:?}"
         );
         assert!(warnings.iter().any(|w| w.contains("\"^\"")), "{warnings:?}");
+    }
+
+    #[cfg(feature = "overlay")]
+    #[test]
+    fn key_merges_parse_with_the_optional_fields_left_out_and_bad_ones_are_errors() {
+        let config = parse(
+            r#"(overlay: (
+                merge_defaults: false,
+                merges: [
+                    (keys: ["T-", "P-", "H-"], label: Some("N")),
+                    (keys: ["A-", "O-"]),
+                    (keys: ["T-", "K-"], enabled: false),
+                ],
+            ))"#,
+        );
+        assert_eq!(config.overlay.merges.len(), 3);
+        assert_eq!(config.overlay.merges[1].label, None);
+        assert!(config.overlay.merges[1].enabled);
+        assert!(!config.overlay.merges[2].enabled);
+        assert!(config.overlay.merge_keys, "on unless switched off");
+        let report = config.validate(None);
+        assert!(report.is_ok(), "{:?}", report.errors().collect::<Vec<_>>());
+        // Keys that are not next to each other, or no key at all: errors, in plain words
+        let bad = parse(
+            r#"(overlay: (merges: [(keys: ["T-", "-T"]), (keys: ["Q-", "T-"])]))"#,
+        );
+        let report = bad.validate(None);
+        let errors: Vec<&str> = report.errors().collect();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors.iter().any(|e| e.contains("next to each other")));
+        assert!(errors.iter().any(|e| e.contains("no steno key")));
     }
 
     #[test]

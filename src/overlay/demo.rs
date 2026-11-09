@@ -9,7 +9,8 @@ use smithay_client_toolkit::reexports::calloop::channel::Sender;
 use std::time::Duration;
 
 // An undo and a miss taken back show what a later stroke took back, grey
-const STROKES: [(&str, &str); 15] = [
+// (a few use the groups that fuse into one key: T P H, P H, S K W R, -P B, -G S, ...)
+const STROKES: [(&str, &str); 19] = [
     ("TH", "\"this\""),
     ("S", "\" is\""),
     ("A", "\" a\""),
@@ -25,6 +26,10 @@ const STROKES: [(&str, &str); 15] = [
     ("PWEUG", "\" big\""),
     ("TKPWAEUPL", "\" game\""),
     ("KWRAOU", "\" you\""),
+    ("TPHOE", "\" no\""),
+    ("PHAEUPB", "\" main\""),
+    ("SKWRUPL", "\" jump\""),
+    ("TKPWAO-GS", "\" good\""),
 ];
 
 /// Show the overlay, then press and release each demo stroke key by key, forever.

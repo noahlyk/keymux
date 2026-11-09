@@ -15,6 +15,7 @@ use super::anim;
 use super::ViewState;
 use super::geometry::{KeyGroup, Keyboard, Rect};
 use super::glyphs::{self, GlyphCache};
+use super::merge;
 use crate::config::{Half, KeyColor, OverlayConfig};
 use crate::steno::erasure::{self, Ink};
 use crate::steno::layout::Layout;
@@ -162,6 +163,19 @@ type Unit = Vec<Run>;
 /// ids are the theory's data, so this is kept clear of anything a sane config would use.
 const SPLIT_GROUP_BASE: u32 = 1_000_000;
 
+/// A merge group's fused outline and where its label is centred.
+struct MergeShape {
+    merge: merge::Merge,
+    path: Path,
+    center: (f32, f32),
+}
+
+impl std::borrow::Borrow<merge::Merge> for MergeShape {
+    fn borrow(&self) -> &merge::Merge {
+        &self.merge
+    }
+}
+
 pub struct Renderer {
     config: OverlayConfig,
     /// Which keys exist and what they're called. [`Layout::plover`] for now - threading a real
@@ -178,6 +192,8 @@ pub struct Renderer {
     keyboard: Option<Keyboard>,
     /// One pad per key, indexed by slot, built once
     key_shapes: Vec<Path>,
+    /// One fused shape per group of keys that can merge, in `merge::resolve`'s order
+    merge_shapes: Vec<MergeShape>,
     /// One pad per [`super::geometry::Keyboard::extra`] badge, same order
     extra_shapes: Vec<Path>,
     /// Bottom of the tape area, line pitch and how many lines fit, physical px
@@ -371,15 +387,25 @@ impl Renderer {
         // the same soft corners as the pads. Radii are clamped to fit by `rounded_rect`.
         // A key split in two (`S-` with the join key on its top half) squares the corners where
         // the halves meet, like the two keys of any other column.
+        // The top and bottom corner radii of a standard key's pad (the `#` bar excepted)
+        let pad_radii = |k: &Keyboard, slot: usize| -> (f32, f32) {
+            let soft = k.keys[0].w * PAD_TOP_ROUND;
+            let taken = k
+                .splits
+                .iter()
+                .flatten()
+                .find(|(idx, _)| *idx == slot)
+                .map(|(_, half)| *half);
+            // The extra key took one half, so this slot is the other one
+            let square_top = has_square_top(slot) || taken == Some(Half::Top);
+            let square_bottom = has_square_bottom(slot) || taken == Some(Half::Bottom);
+            (
+                if square_top { 0.0 } else { soft },
+                if square_bottom { 0.0 } else { f32::MAX },
+            )
+        };
         let key_shapes = keyboard.as_ref().map_or_else(Vec::new, |k| {
             let soft = k.keys[0].w * PAD_TOP_ROUND;
-            let taken = |slot: usize| {
-                k.splits
-                    .iter()
-                    .flatten()
-                    .find(|(idx, _)| *idx == slot)
-                    .map(|(_, half)| *half)
-            };
             k.keys
                 .iter()
                 .enumerate()
@@ -387,14 +413,37 @@ impl Renderer {
                     if slot == number_slot {
                         return rounded_rect(*r, soft, soft);
                     }
-                    // The extra key took one half, so this slot is the other one
-                    let square_top = has_square_top(slot) || taken(slot) == Some(Half::Top);
-                    let square_bottom = has_square_bottom(slot) || taken(slot) == Some(Half::Bottom);
-                    rounded_rect(
-                        *r,
-                        if square_top { 0.0 } else { soft },
-                        if square_bottom { 0.0 } else { f32::MAX },
-                    )
+                    let (top, bottom) = pad_radii(k, slot);
+                    rounded_rect(*r, top, bottom)
+                })
+                .collect()
+        });
+        // Groups of keys drawn as one while all are in the stroke (see `merge`)
+        let merge_shapes = keyboard.as_ref().map_or_else(Vec::new, |k| {
+            let (merges, problems) = merge::resolve(config, &layout, k);
+            for problem in problems {
+                tracing::warn!("overlay: {problem}");
+            }
+            let soft = k.keys[0].w * PAD_TOP_ROUND;
+            let tol = k.keys[1].w * merge::NEIGHBOUR_GAP;
+            merges
+                .into_iter()
+                .filter_map(|merge| {
+                    let members: Vec<merge::Member> = merge
+                        .slots
+                        .iter()
+                        .map(|&slot| {
+                            let (top, bottom) = pad_radii(k, slot);
+                            merge::Member::new(k.keys[slot], top, bottom)
+                        })
+                        .collect();
+                    let corners = merge::outline(&members, tol, soft);
+                    let path = merge::path(&corners)?;
+                    Some(MergeShape {
+                        center: merge::label_center(&corners),
+                        merge,
+                        path,
+                    })
                 })
                 .collect()
         });
@@ -441,6 +490,7 @@ impl Renderer {
             panel,
             keyboard,
             key_shapes,
+            merge_shapes,
             extra_shapes,
             tape_bottom,
             line_height,
@@ -734,7 +784,40 @@ impl Renderer {
                 None
             }
         };
+        // Groups of keys all in the stroke fuse into one shape (the biggest group wins where
+        // they overlap); the fused keys are lit by it, not on their own
+        let fused = if self.config.merge_keys {
+            merge::select(&self.merge_shapes, snapshot.held | snapshot.chord | hint)
+        } else {
+            Vec::new()
+        };
+        let fused_bits = fused
+            .iter()
+            .fold(0, |bits, &i| bits | self.merge_shapes[i].merge.bits);
+        let relabelled_bits = fused.iter().fold(0, |bits, &i| {
+            let merge = &self.merge_shapes[i].merge;
+            if merge.label.is_some() {
+                bits | merge.bits
+            } else {
+                bits
+            }
+        });
+        // Whole group held: full strength; otherwise some of it is only still in the stroke
+        let fused_look = |i: usize| {
+            let merge = &self.merge_shapes[i].merge;
+            let accent = self.theme.accent(Keyboard::group(merge.slots[0]));
+            let held = snapshot.held & merge.bits == merge.bits;
+            (accent, held)
+        };
+        for &i in &fused {
+            let (accent, held) = fused_look(i);
+            let strength = if held { 1.0 } else { GLOW_DIM };
+            glow(pixmap, &self.merge_shapes[i].path, accent, strength, self.scale);
+        }
         for (slot, shape) in self.key_shapes.iter().enumerate() {
+            if fused_bits & (1 << slot) != 0 {
+                continue;
+            }
             if let Some(strength) = lit_strength(1u32 << slot) {
                 let accent = self.theme.accent(Keyboard::group(slot));
                 glow(pixmap, shape, accent, strength, self.scale);
@@ -746,12 +829,25 @@ impl Renderer {
                 glow(pixmap, shape, accent, strength, self.scale);
             }
         }
+        for &i in &fused {
+            let (accent, held) = fused_look(i);
+            fill(
+                pixmap,
+                &self.merge_shapes[i].path,
+                if held { accent } else { with_alpha(accent, 150) },
+            );
+        }
         for (slot, shape) in self.key_shapes.iter().enumerate() {
             let bit = 1u32 << slot;
+            if relabelled_bits & bit != 0 {
+                continue; // the fused shape's own label is drawn below
+            }
             let accent = self.theme.accent(Keyboard::group(slot));
             // Held keys full strength; keys already let go but still in the stroke dimmer,
             // so you can watch the stroke build up
-            let label_color = if snapshot.held & bit != 0 {
+            let label_color = if fused_bits & bit != 0 {
+                self.theme.label_lit // on the fused shape, already filled
+            } else if snapshot.held & bit != 0 {
                 fill(pixmap, shape, accent);
                 self.theme.label_lit
             } else if (snapshot.chord | hint) & bit != 0 {
@@ -776,6 +872,30 @@ impl Renderer {
                 label_color,
                 self.scale,
             );
+        }
+
+        // A fused shape's label, centred on it
+        for &i in &fused {
+            let MergeShape { merge, center, .. } = &self.merge_shapes[i];
+            let Some(text) = &merge.label else {
+                continue;
+            };
+            let width: f32 = text.chars().map(|ch| self.labels.get(ch).advance).sum();
+            let baseline = self.labels.ascent().mul_add(0.36, center.1);
+            let mut x = center.0 - width / 2.0;
+            for ch in text.chars() {
+                let advance = self.labels.get(ch).advance;
+                draw_char(
+                    pixmap,
+                    &mut self.labels,
+                    ch,
+                    x,
+                    baseline,
+                    self.theme.label_lit,
+                    self.scale,
+                );
+                x += advance;
+            }
         }
 
         // Keys beyond the standard 23 (currently just the join key): no physical slot of
@@ -3912,5 +4032,171 @@ mod tests {
             .data()
             .iter()
             .any(|byte| *byte != 0));
+    }
+
+    // ---- merged keys ----
+
+    fn keys_drawn(config: &OverlayConfig, stroke: &str, held: bool) -> (Renderer, Pixmap) {
+        use crate::steno::layout::parse_stroke;
+        let mut renderer = Renderer::new(config, 1, 900).unwrap();
+        let (w, h) = renderer.size();
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        let bits = parse_stroke(stroke).unwrap();
+        let snapshot = OverlaySnapshot {
+            layer: Some("steno".into()),
+            held: if held { bits } else { 0 },
+            chord: bits,
+            ..OverlaySnapshot::default()
+        };
+        renderer.draw(&snapshot, &mut pixmap.as_mut());
+        (renderer, pixmap)
+    }
+
+    fn alpha_at(pixmap: &Pixmap, x: f32, y: f32) -> u8 {
+        pixmap.pixel(x as u32, y as u32).unwrap().alpha()
+    }
+
+    /// The middle of the gap between two side by side keys
+    fn gap_between(a: Rect, b: Rect) -> (f32, f32) {
+        ((a.x + a.w + b.x) / 2.0, a.y + a.h / 2.0)
+    }
+
+    #[test]
+    fn a_whole_group_held_fuses_its_keys_and_fills_the_gaps() {
+        // T P H: the standard N
+        let (renderer, merged) = keys_drawn(&OverlayConfig::default(), "TPH", true);
+        let keys = renderer.keyboard.as_ref().unwrap().keys;
+        for (a, b) in [(1, 3), (3, 5)] {
+            let (x, y) = gap_between(keys[a], keys[b]);
+            assert!(alpha_at(&merged, x, y) > 250, "gap {a}-{b} filled when merged");
+        }
+        // Merging off: the same keys lit one by one leave the gap between them dark
+        let off = OverlayConfig {
+            merge_keys: false,
+            ..OverlayConfig::default()
+        };
+        let (_, apart) = keys_drawn(&off, "TPH", true);
+        let (x, y) = gap_between(keys[1], keys[3]);
+        assert!(alpha_at(&apart, x, y) < 150, "{}", alpha_at(&apart, x, y));
+        // ...and so with the built-in groups turned off
+        let no_defaults = OverlayConfig {
+            merge_defaults: false,
+            ..OverlayConfig::default()
+        };
+        let (_, apart) = keys_drawn(&no_defaults, "TPH", true);
+        assert!(alpha_at(&apart, x, y) < 150);
+    }
+
+    #[test]
+    fn a_partial_press_lights_only_its_own_keys_and_fuses_what_is_whole() {
+        let (renderer, pixmap) = keys_drawn(&OverlayConfig::default(), "TP", true);
+        let keys = renderer.keyboard.as_ref().unwrap().keys;
+        // T P is F: fused; H beside it is not lit and its gap to P stays dark
+        let (x, y) = gap_between(keys[1], keys[3]);
+        assert!(alpha_at(&pixmap, x, y) > 250);
+        let (x, y) = gap_between(keys[3], keys[5]);
+        assert!(alpha_at(&pixmap, x, y) < 150);
+        let h = keys[5];
+        let unlit = pixmap.pixel((h.x + h.w / 2.0) as u32, (h.y + 4.0) as u32).unwrap();
+        assert!(unlit.red() < 100, "H is not lit");
+        // T alone is no group
+        let (renderer, one) = keys_drawn(&OverlayConfig::default(), "T", true);
+        let keys = renderer.keyboard.as_ref().unwrap().keys;
+        let (x, y) = gap_between(keys[1], keys[3]);
+        assert!(alpha_at(&one, x, y) < 150);
+    }
+
+    #[test]
+    fn the_biggest_group_wins_when_one_holds_another() {
+        // T K P W fuses as G (one block), not as T K and P W or T P and so on: the gap between
+        // the two columns is filled at both rows
+        let (renderer, pixmap) = keys_drawn(&OverlayConfig::default(), "TKPW", true);
+        let keys = renderer.keyboard.as_ref().unwrap().keys;
+        let (x, y) = gap_between(keys[1], keys[3]);
+        assert!(alpha_at(&pixmap, x, y) > 250);
+        let (x, y) = gap_between(keys[2], keys[4]);
+        assert!(alpha_at(&pixmap, x, y) > 250);
+        // ...and the seam between T and K is filled too (they are one shape)
+        let (t, k) = (keys[1], keys[2]);
+        assert!(alpha_at(&pixmap, t.x + t.w / 2.0, f32::midpoint(t.bottom(), k.y)) > 250);
+    }
+
+    #[test]
+    fn a_stroke_in_progress_dims_the_fused_shape_and_a_held_one_does_not() {
+        let (renderer, dim) = keys_drawn(&OverlayConfig::default(), "TPH", false);
+        let t = renderer.keyboard.as_ref().unwrap().keys[1];
+        let (_, held) = keys_drawn(&OverlayConfig::default(), "TPH", true);
+        let (x, y) = (t.x + 3.0, t.y + t.h / 2.0);
+        assert!(alpha_at(&dim, x, y) < alpha_at(&held, x, y));
+        let (gx, gy) = gap_between(t, renderer.keyboard.as_ref().unwrap().keys[3]);
+        assert!(alpha_at(&dim, gx, gy) > 100, "still fused while only in the stroke");
+    }
+
+    #[test]
+    fn a_paddle_pair_is_one_wide_paddle_with_a_quarter_pipe_at_each_bottom_corner() {
+        let config = OverlayConfig {
+            merges: vec![crate::config::KeyMerge {
+                keys: vec!["A-".into(), "O-".into()],
+                label: Some("AO".into()),
+                enabled: true,
+            }],
+            ..OverlayConfig::default()
+        };
+        let (renderer, pixmap) = keys_drawn(&config, "AO", true);
+        let (a, o) = {
+            let keys = renderer.keyboard.as_ref().unwrap().keys;
+            (keys[7], keys[8])
+        };
+        let bottom = a.bottom();
+        // The flat bottom runs through the middle, where two half circles would have dipped away
+        let mid = (a.x + a.w + o.x) / 2.0;
+        assert!(alpha_at(&pixmap, mid, bottom - 2.0) > 250, "flat bottom between the paddles");
+        assert!(alpha_at(&pixmap, mid, a.y + a.h / 2.0) > 250);
+        // The outer bottom corners are rounded off
+        assert!(alpha_at(&pixmap, a.x + 1.0, bottom - 2.0) < 100, "only the glow reaches it");
+        assert!(alpha_at(&pixmap, o.x + o.w - 2.0, bottom - 2.0) < 100);
+        // Unmerged, the paddles each have their own round end and a dip between them
+        let (_, apart) = keys_drawn(&OverlayConfig::default(), "AO", true);
+        assert!(alpha_at(&apart, mid, bottom - 2.0) < 150);
+    }
+
+    /// Writes the merged shapes as PPMs to `$OVERLAY_PREVIEW_DIR`:
+    /// `OVERLAY_PREVIEW_DIR=/tmp/m cargo test preview_merge -- --ignored`
+    #[test]
+    #[ignore = "writes images for eyeballing"]
+    fn preview_merge() {
+        let dir = std::env::var("OVERLAY_PREVIEW_DIR").expect("set OVERLAY_PREVIEW_DIR");
+        let config = OverlayConfig {
+            merges: vec![
+                crate::config::KeyMerge {
+                    keys: vec!["A-".into(), "O-".into()],
+                    label: Some("AO".into()),
+                    enabled: true,
+                },
+                crate::config::KeyMerge {
+                    keys: vec!["-E".into(), "-U".into()],
+                    label: Some("EU".into()),
+                    enabled: true,
+                },
+            ],
+            width: 560,
+            ..OverlayConfig::default()
+        };
+        for stroke in [
+            "TPH", "KWR", "TKPW", "SKWR", "STKPW", "TP-PBLG", "AO", "-EU", "TKPWAO-GS", "SKWRAEU",
+            "T", "TK-PB", "TPHAO",
+        ] {
+            let (renderer, pixmap) = keys_drawn(&config, stroke, true);
+            let (w, h) = renderer.size();
+            let kb = renderer.keyboard.as_ref().unwrap();
+            let top = (kb.keys[22].y - 10.0) as u32;
+            let mut out = format!("P6 {w} {} 255\n", h - top).into_bytes();
+            for px in pixmap.data().as_chunks::<4>().0.iter().skip((top * w) as usize) {
+                for c in &px[..3] {
+                    out.push(c + (60 * (255 - u32::from(px[3])) / 255) as u8);
+                }
+            }
+            std::fs::write(format!("{dir}/{stroke}.ppm"), out).unwrap();
+        }
     }
 }

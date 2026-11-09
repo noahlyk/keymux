@@ -332,6 +332,14 @@ keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches 
   `extra_colors` (extra key's character to `Left`/`Vowel`/`Right`/`Misc`) sets its colour group,
   `Misc` by default. Nothing in `render.rs` names a particular key or theory. The CLI builds its layout from the
   config too (`answer::EngineSetup::load`, which also applies `key_groups`), so it carries the same group data.
+- **Merged keys are overlay-side config.** `src/overlay/merge.rs` holds the pure part: the
+  built-in standard letter groups (`DEFAULTS`, generic steno, no theory's chords), `resolve` (config
+  `merges` over them, validated against the keyboard geometry: connected through neighbours within
+  0.3 key widths), `select` (the biggest group fully lit, then earlier, no shared key) and `outline`/
+  `path` (union of the member rects with the gaps and any hole filled, convex corners take the owning
+  member's radius, so two paddles keep an outer quarter circle each and a flat bottom). Nothing
+  crosses the wire: the renderer picks groups from `held | chord | hint` each frame, so a group fuses
+  and unfuses without flicker. `merge_keys` / `merge_defaults` / `merges` live in `OverlayConfig`.
 - **Closing.** Esc/Enter, or leaving the steno layer (the hub clears it on a layer change, and
   the engine on re-entry), so a lookup can never be left eating keys.
 - **Needs the overlay.** The query and results are only drawn there, so without

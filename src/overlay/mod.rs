@@ -11,6 +11,7 @@ mod client;
 mod demo;
 pub mod geometry;
 pub mod glyphs;
+pub mod merge;
 pub mod render;
 mod wayland;
 
