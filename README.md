@@ -932,31 +932,71 @@ overlay: (
     // Keys that fuse into one bigger key while all of them are in the stroke (see below)
     merge_keys: true,      // false draws every key on its own, whatever the groups say
     merge_defaults: true,  // false drops the built-in letter groups and leaves only `merges`
-    merges: [],            // [(keys: ["A-", "O-"], label: Some("AO"))]
+    merges: [],            // [(keys: ["T-", "H-"], label: Some("TH"), bridge: true)]
 ),
 ```
 
 **Merged keys.** While every key of a group is in the stroke (held, or let go but still in the
 stroke), the diagram draws them as one larger key in the colour of the group's first key, with the
 group's label centred on it; a partly pressed group lights its keys one by one as usual, and only
-the highlight fuses, the unlit diagram never changes. The built-in groups are the standard steno
-letter chords whose keys are next to each other: `T P H` is N, `P H` M, `K W R` Y, `T K` D, `P W` B,
-`H R` L, `T P` F, `T K P W` G, `S K W R` J, `S T K P W` Z, and on the right `-P B` N, `-P L` M,
-`-B G` K, `-F P` CH, `-R B` SH, `-P B L G` J, `-G S` SHUN. (`S R` V and `K R` C are left out: a key
-lies between them.) `merges` adds groups: `keys` are key names as in `key_groups` (`"T-"`, `"-B"`,
-`"A-"`, `"*"`; not `#` or an extra key), at least two, all connected through neighbouring keys (an
-`L` or a 2x2 block is fine; a thumb key is not next to a finger key), and `label` is optional (left
-out, each key keeps its own letter). An entry with the same keys as a built-in group replaces it;
-`enabled: false` removes it. Where groups overlap the biggest group fully in the stroke wins (`T P
-H` beats `T P`), then the earlier one, config entries ahead of built-in ones; keys in no winning
-group light on their own. `keymux check` reports a bad group as an error and the overlay skips it.
+the highlight fuses, the unlit diagram never changes.
+
+Built-in groups (only chords every steno typist reads as one unit: single letters, `CH`, `SH`,
+`SHUN`, `NCH`, and the two thumb pairs, whose labels are their keys; no consonant clusters such as
+`ST`, `FT`, `-PT`, `-LT`, no vowel across the thumb gap, nothing a theory or dictionary decides):
+
+| Keys | Label | | Keys | Label |
+| --- | --- | --- | --- | --- |
+| `T P H` | N | | `-P -B` | N |
+| `P H` | M | | `-P -L` | M |
+| `K W R` | Y | | `-B -G` | K |
+| `T K` | D | | `-F -P` | CH |
+| `P W` | B | | `-R -B` | SH |
+| `H R` | L | | `-P -B -L -G` | J |
+| `T P` | F | | `-G -S` | SHUN |
+| `T K P W` | G | | `-B -G -S` | X |
+| `S K W R` | J | | `-F -R -P -B` | NCH |
+| `S T K P W` | Z | | `A O` | AO |
+| `K W` | Q | | `-E -U` | EU |
+| `S R` (bridged) | V | | `K R` (bridged) | C |
+
+Left out as not one reliable unit or not joinable: `K P` = X (diagonal keys), `K H` = CH (diagonal),
+`S H`, `T H`, `ST`, `SK`, `-FT`, `-PT`, `-LT`, `-FPL`, `-PBG`, `-RPB`, `-RBG`, `-LG` (clusters or
+spellings that are only sometimes a unit) and the vowels across the thumb gap (`AE`, `AU`, `OE`,
+`OU`, `AOE`, `AOU`, `AOEU`, `AEU`, `OEU`).
+
+**Bridged groups.** `S R` (V) and `K R` (C) are not next to each other: `K` and `W` lie between `S`
+and `R`, `W` between `K` and `R`. They are drawn as two separate pieces joined by a thin connector
+(a third of a key wide, the same colour, at the height the two pieces share, running behind the
+unpressed keys in between); the unpressed key between is not lit. The label sits on the bigger
+piece (the first on a tie), not on the thin connector. A group is bridged when it is listed with
+`bridge: true`; the pieces (each connected through neighbouring keys) must share some height, be
+no more than 4 key widths apart, and have none of the group's keys between them. Without
+`bridge: true` a group must be one connected piece.
+
+`merges` adds groups: `keys` are key names as in `key_groups` (`"T-"`, `"-B"`, `"A-"`, `"*"`; not
+`#` or an extra key), at least two, all connected through neighbouring keys (an `L` or a 2x2 block
+is fine; a thumb key is not next to a finger key) unless `bridge: true`, and `label` is optional
+(left out, each key keeps its own letter). An entry with the same keys as a built-in group replaces
+it; `enabled: false` removes it (`(keys: ["S-", "R-"], enabled: false)` drops V). `keymux check`
+reports a bad group as an error and the overlay skips it.
+
+**Which groups win.** Several groups can be fully in the stroke at once and share keys. The
+diagram picks a set of groups with no key in common by these rules, in order: (1) cover the most
+lit keys; (2) then the set whose single biggest group is biggest; (3) then the fewest groups;
+(4) then the earlier groups (config entries ahead of built-in ones, then the table's order). Keys
+in no chosen group light on their own. So `S T K P W H R` is `Z` + `L` (7 keys, a 5-key group), not
+`J` + `N` (7 keys, a 4-key group); `T K P H` is `D` + `M` (4 keys), not `N` and a lone `K` (3);
+`S T K P W` is `Z` alone; `-B -G -S` is `X`, not `K` or `SHUN`; a half-pressed group merges
+nothing. The search is exhaustive over the fully lit groups but stops after 20,000 steps, so a huge
+custom config gets a good cover, not always the best; the result never changes between frames.
 
 The fused shape is the union of its keys with the gaps between neighbours filled. Its outer
 corners keep the radius of the key that owns them, the sides where keys meet are straight, and
 a corner folding inwards (the inside of an `L`) gets a small fillet. A thumb paddle has a round end
 (half circle); merged with a neighbouring paddle it loses it in the middle and keeps a quarter
-circle at each outer bottom corner, with a straight bottom between: `(keys: ["A-", "O-"], label:
-Some("AO"))` and `(keys: ["-E", "-U"], label: Some("EU"))` draw one wide paddle each.
+circle at each outer bottom corner, with a straight bottom between: the built-in `A O` and `-E -U`
+each draw one wide paddle.
 `keymux overlay --demo` includes several of these strokes.
 
 An extra key drawn over a standard key (`overlay_overrides`, `SplitKey`) is in that key's group

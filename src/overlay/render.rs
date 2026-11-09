@@ -440,7 +440,7 @@ impl Renderer {
                     let corners = merge::outline(&members, tol, soft);
                     let path = merge::path(&corners)?;
                     Some(MergeShape {
-                        center: merge::label_center(&corners),
+                        center: merge::label_spot(&members, &corners, tol),
                         merge,
                         path,
                     })
@@ -4139,6 +4139,7 @@ mod tests {
                 keys: vec!["A-".into(), "O-".into()],
                 label: Some("AO".into()),
                 enabled: true,
+                bridge: false,
             }],
             ..OverlayConfig::default()
         };
@@ -4156,7 +4157,11 @@ mod tests {
         assert!(alpha_at(&pixmap, a.x + 1.0, bottom - 2.0) < 100, "only the glow reaches it");
         assert!(alpha_at(&pixmap, o.x + o.w - 2.0, bottom - 2.0) < 100);
         // Unmerged, the paddles each have their own round end and a dip between them
-        let (_, apart) = keys_drawn(&OverlayConfig::default(), "AO", true);
+        let off = OverlayConfig {
+            merge_keys: false,
+            ..OverlayConfig::default()
+        };
+        let (_, apart) = keys_drawn(&off, "AO", true);
         assert!(alpha_at(&apart, mid, bottom - 2.0) < 150);
     }
 
@@ -4172,19 +4177,20 @@ mod tests {
                     keys: vec!["A-".into(), "O-".into()],
                     label: Some("AO".into()),
                     enabled: true,
+                    bridge: false,
                 },
                 crate::config::KeyMerge {
                     keys: vec!["-E".into(), "-U".into()],
                     label: Some("EU".into()),
                     enabled: true,
+                    bridge: false,
                 },
             ],
             width: 560,
             ..OverlayConfig::default()
         };
         for stroke in [
-            "TPH", "KWR", "TKPW", "SKWR", "STKPW", "TP-PBLG", "AO", "-EU", "TKPWAO-GS", "SKWRAEU",
-            "T", "TK-PB", "TPHAO",
+            "KW", "-BGS", "-FRPB", "AO", "-EU", "SR", "KR", "STKPWHR", "SKR", "TKPH", "SKWR", "TPH-PB",
         ] {
             let (renderer, pixmap) = keys_drawn(&config, stroke, true);
             let (w, h) = renderer.size();

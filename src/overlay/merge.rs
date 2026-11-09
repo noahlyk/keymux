@@ -25,9 +25,12 @@ use std::borrow::Borrow;
 use std::collections::{HashMap, VecDeque};
 use tiny_skia::{Path, PathBuilder};
 
-/// The standard steno letter chords whose keys sit next to each other on the diagram, as key
-/// names and the letter they spell. (`S R` = V and `K R` = C are left out: their keys are not
-/// neighbours, a key lies between them.) Right-hand labels carry no hyphen, like the key labels.
+/// The standard steno letter and vowel chords, as key names and the letter or sound they spell.
+/// Only chords every steno typist reads as one unit: single letters, `CH`, `SH`, `SHUN`, `NCH`
+/// and the two thumb pairs `A O` and `E U` (labelled with their keys); no consonant clusters (`ST`, `FT`, `-PT`...) and nothing a
+/// theory or dictionary decides, and no vowel across the thumb gap. Keys with a key between them
+/// (`S R` = V, `K R` = C) are drawn as separate pieces joined by a thin connector (see
+/// [`links`]). The order breaks ties between groups. Right-hand labels carry no hyphen.
 pub const DEFAULTS: &[(&[&str], &str)] = &[
     (&["T-", "P-", "H-"], "N"),
     (&["P-", "H-"], "M"),
@@ -46,11 +49,21 @@ pub const DEFAULTS: &[(&[&str], &str)] = &[
     (&["-R", "-B"], "SH"),
     (&["-P", "-B", "-L", "-G"], "J"),
     (&["-G", "-S"], "SHUN"),
+    (&["K-", "W-"], "Q"),
+    (&["-B", "-G", "-S"], "X"),
+    (&["-F", "-R", "-P", "-B"], "NCH"),
+    (&["A-", "O-"], "AO"),
+    (&["-E", "-U"], "EU"),
+    (&["S-", "R-"], "V"),
+    (&["K-", "R-"], "C"),
 ];
 
 /// How far apart, in key widths, two keys may be and still be neighbours: the gap between
 /// columns is 0.16, the thumbs' drop under the finger rows is over 0.5.
 pub const NEIGHBOUR_GAP: f32 = 0.3;
+/// How far apart, in key widths, two pieces of a bridged group may be: the span from `S-` to
+/// `R-` is 2.5, the longest on the diagram, `A-` to `-U`, 3.6.
+pub const BRIDGE_REACH: f32 = 4.0;
 /// Width the keyboard is laid out at to check groups, when there is no real size (`keymux check`)
 const PROBE_WIDTH: f32 = 1000.0;
 const EPS: f32 = 0.01;
@@ -63,6 +76,8 @@ pub struct Merge {
     /// The members' stroke bits
     pub bits: u32,
     pub label: Option<String>,
+    /// Pieces that are not next to each other are joined by a thin connector
+    pub bridge: bool,
 }
 
 /// One member key of a shape: where it is and the radii of its top and bottom corners.
@@ -127,6 +142,78 @@ fn bridge(a: &Rect, b: &Rect) -> Option<Rect> {
     }
 }
 
+/// For a group whose keys fall into several pieces (each piece connected through neighbours), the
+/// thin connectors that join them side by side, left to right: a third of a key wide, centred on
+/// the height the two pieces share, running through whatever unpressed keys lie between. `None`
+/// if they cannot be joined (no shared height, too far apart, or a member in the way); empty if
+/// the group is one piece.
+#[must_use]
+pub fn links(rects: &[Rect], tol: f32) -> Option<Vec<Rect>> {
+    let n = rects.len();
+    let mut piece: Vec<usize> = (0..n).collect();
+    loop {
+        let mut changed = false;
+        for i in 0..n {
+            for j in 0..n {
+                if piece[i] < piece[j] && adjacent(&rects[i], &rects[j], tol) {
+                    piece[j] = piece[i];
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut ids: Vec<usize> = piece.clone();
+    ids.sort_unstable();
+    ids.dedup();
+    let left = |id: usize| {
+        (0..n)
+            .filter(|&i| piece[i] == id)
+            .map(|i| rects[i].x)
+            .fold(f32::MAX, f32::min)
+    };
+    ids.sort_by(|&a, &b| left(a).total_cmp(&left(b)));
+    let mut out: Vec<Rect> = Vec::new();
+    for pair in ids.windows(2) {
+        let mut best: Option<(f32, f32, Rect)> = None;
+        for a in (0..n).filter(|&i| piece[i] == pair[0]) {
+            for b in (0..n).filter(|&i| piece[i] == pair[1]) {
+                let (ra, rb) = (rects[a], rects[b]);
+                let thick = ra.w.min(rb.w) / 3.0;
+                let dx = rb.x - (ra.x + ra.w);
+                let (lo, hi) = (ra.y.max(rb.y), ra.bottom().min(rb.bottom()));
+                if dx <= EPS || dx > BRIDGE_REACH * ra.w || hi - lo < thick {
+                    continue;
+                }
+                let rect = Rect {
+                    x: ra.x + ra.w,
+                    y: (lo + hi) / 2.0 - thick / 2.0,
+                    w: dx,
+                    h: thick,
+                };
+                let overlap = hi - lo;
+                if best.is_none_or(|(d, o, _)| dx < d - EPS || (dx < d + EPS && overlap > o)) {
+                    best = Some((dx, overlap, rect));
+                }
+            }
+        }
+        let (_, _, rect) = best?;
+        let hits = rects.iter().any(|r| {
+            rect.x < r.x + r.w - EPS
+                && rect.x + rect.w > r.x + EPS
+                && rect.y < r.bottom() - EPS
+                && rect.bottom() > r.y + EPS
+        });
+        if hits {
+            return None;
+        }
+        out.push(rect);
+    }
+    Some(out)
+}
+
 fn coords(values: impl Iterator<Item = f32>) -> Vec<f32> {
     let mut v: Vec<f32> = values.collect();
     v.sort_by(f32::total_cmp);
@@ -140,6 +227,8 @@ fn coords(values: impl Iterator<Item = f32>) -> Vec<f32> {
 #[must_use]
 pub fn outline(members: &[Member], tol: f32, concave_radius: f32) -> Vec<Corner> {
     let mut rects: Vec<Rect> = members.iter().map(|m| m.rect).collect();
+    let plain: Vec<Rect> = rects.clone();
+    rects.extend(links(&plain, tol).unwrap_or_default());
     for (i, a) in members.iter().enumerate() {
         for b in &members[i + 1..] {
             if adjacent(&a.rect, &b.rect, tol) {
@@ -366,28 +455,98 @@ pub fn label_center(corners: &[Corner]) -> (f32, f32) {
             inside
         }
     });
-    if inside { at } else { middle }
+    if inside {
+        at
+    } else {
+        middle
+    }
 }
 
-/// Which groups to draw merged for the lit keys: every group whose keys are all lit, the biggest
-/// first (a tie goes to the earlier one, config entries ahead of built-in ones), and none that
-/// shares a key with one already taken. Returns indices into `merges`.
+/// Where a bridged group's label goes: on its biggest key, since the connector is too thin for a
+/// letter; the first such key on a tie. A group in one piece uses [`label_center`].
 #[must_use]
-pub fn select<T: Borrow<Merge>>(merges: &[T], lit: u32) -> Vec<usize> {
-    let bits = |i: usize| merges[i].borrow().bits;
-    let mut order: Vec<usize> = (0..merges.len())
-        .filter(|&i| bits(i) & lit == bits(i))
-        .collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(merges[i].borrow().slots.len()));
-    let mut taken = 0u32;
-    let mut chosen = Vec::new();
-    for i in order {
-        if bits(i) & taken == 0 {
-            taken |= bits(i);
-            chosen.push(i);
+pub fn label_spot(members: &[Member], corners: &[Corner], tol: f32) -> (f32, f32) {
+    let rects: Vec<Rect> = members.iter().map(|m| m.rect).collect();
+    if links(&rects, tol).is_none_or(|l| l.is_empty()) {
+        return label_center(corners);
+    }
+    let big = rects.iter().fold(rects[0], |best, r| {
+        if r.w * r.h > best.w * best.h + EPS {
+            *r
+        } else {
+            best
+        }
+    });
+    (big.x + big.w / 2.0, big.y + big.h / 2.0)
+}
+
+/// Most search steps `select` takes before settling for the best cover found so far
+const SELECT_BUDGET: usize = 20_000;
+
+type Score = (
+    u32,
+    usize,
+    std::cmp::Reverse<usize>,
+    std::cmp::Reverse<Vec<usize>>,
+);
+
+struct Search<'a> {
+    bits: &'a [u32],
+    sizes: &'a [usize],
+    cands: &'a [usize],
+    steps: usize,
+    best: Option<Score>,
+}
+
+fn search(s: &mut Search, from: usize, taken: u32, chosen: &mut Vec<usize>) {
+    if !chosen.is_empty() {
+        let key = (
+            taken.count_ones(),
+            chosen.iter().map(|&i| s.sizes[i]).max().unwrap_or(0),
+            std::cmp::Reverse(chosen.len()),
+            std::cmp::Reverse(chosen.clone()),
+        );
+        if s.best.as_ref().is_none_or(|b| key > *b) {
+            s.best = Some(key);
         }
     }
-    chosen
+    for k in from..s.cands.len() {
+        s.steps += 1;
+        if s.steps > SELECT_BUDGET {
+            return;
+        }
+        let i = s.cands[k];
+        if s.bits[i] & taken == 0 {
+            chosen.push(i);
+            search(s, k + 1, taken | s.bits[i], chosen);
+            chosen.pop();
+        }
+    }
+}
+
+/// Which groups to draw merged for the lit keys: a set of groups that are fully lit and share no
+/// key, chosen by, in this order, (1) the most lit keys covered, (2) the biggest single group,
+/// (3) the fewest groups, (4) the earliest groups (config entries ahead of built-in ones). So
+/// holding `S T K P W H R` is `Z` + `L` (7 keys, a 5-key group), not `J` + `N` (7 keys, a 4-key
+/// group); a small group never takes keys a bigger cover needs; lit keys in no chosen group light
+/// on their own. Deterministic; the search is capped, so a huge config only gets a good cover, not
+/// the best. Returns indices into `merges`, ascending.
+#[must_use]
+pub fn select<T: Borrow<Merge>>(merges: &[T], lit: u32) -> Vec<usize> {
+    let bits: Vec<u32> = merges.iter().map(|m| m.borrow().bits).collect();
+    let sizes: Vec<usize> = merges.iter().map(|m| m.borrow().slots.len()).collect();
+    let cands: Vec<usize> = (0..merges.len())
+        .filter(|&i| bits[i] != 0 && bits[i] & lit == bits[i])
+        .collect();
+    let mut state = Search {
+        bits: &bits,
+        sizes: &sizes,
+        cands: &cands,
+        steps: 0,
+        best: None,
+    };
+    search(&mut state, 0, 0, &mut Vec::new());
+    state.best.map_or_else(Vec::new, |b| b.3 .0)
 }
 
 /// Check one group's keys against the layout and the keyboard; the slots, or why not.
@@ -396,6 +555,7 @@ fn slots_of(
     layout: &Layout,
     keyboard: &Keyboard,
     connected: bool,
+    bridge: bool,
 ) -> Result<Vec<usize>, String> {
     let number = layout.number_slot();
     let mut slots = Vec::new();
@@ -419,25 +579,19 @@ fn slots_of(
             return Err(format!("merges: {keys:?} has fewer than two keys"));
         }
         let tol = keyboard.keys[1].w * NEIGHBOUR_GAP;
-        let mut reached = vec![slots[0]];
-        let mut grew = true;
-        while grew {
-            grew = false;
-            for &s in &slots {
-                if !reached.contains(&s)
-                    && reached
-                        .iter()
-                        .any(|&r| adjacent(&keyboard.keys[r], &keyboard.keys[s], tol))
-                {
-                    reached.push(s);
-                    grew = true;
-                }
+        let rects: Vec<Rect> = slots.iter().map(|&s| keyboard.keys[s]).collect();
+        match links(&rects, tol) {
+            Some(l) if l.is_empty() || bridge => {}
+            Some(_) | None if !bridge => {
+                return Err(format!(
+                    "merges: {keys:?} are not all next to each other on the diagram (set bridge: true to join them with a connector)"
+                ));
             }
-        }
-        if reached.len() != slots.len() {
-            return Err(format!(
-                "merges: {keys:?} are not all next to each other on the diagram"
-            ));
+            _ => {
+                return Err(format!(
+                    "merges: {keys:?} cannot be joined: their pieces share no height, are over {BRIDGE_REACH} keys apart or have a member between"
+                ));
+            }
         }
     }
     Ok(slots)
@@ -463,11 +617,12 @@ pub fn resolve(
     if config.merge_defaults {
         for (names, label) in DEFAULTS {
             let keys: Vec<String> = names.iter().map(|&n| n.to_owned()).collect();
-            if let Ok(slots) = slots_of(&keys, layout, keyboard, true) {
+            if let Ok(slots) = slots_of(&keys, layout, keyboard, true, true) {
                 defaults.push(Merge {
                     bits: bits(&slots),
                     slots,
                     label: Some((*label).to_owned()),
+                    bridge: true,
                 });
             }
         }
@@ -477,9 +632,10 @@ pub fn resolve(
         keys,
         label,
         enabled,
+        bridge,
     } in &config.merges
     {
-        match slots_of(keys, layout, keyboard, *enabled) {
+        match slots_of(keys, layout, keyboard, *enabled, *bridge) {
             Err(problem) => problems.push(problem),
             Ok(slots) => {
                 let bits = bits(&slots);
@@ -493,6 +649,7 @@ pub fn resolve(
                         slots,
                         bits,
                         label: label.clone(),
+                        bridge: *bridge,
                     });
                 }
             }
@@ -697,12 +854,22 @@ mod tests {
             ("-RB", "SH"),
             ("-PBLG", "J"),
             ("-GS", "SHUN"),
+            ("KW", "Q"),
+            ("-BGS", "X"),
+            ("-FRPB", "NCH"),
+            ("AO", "AO"),
+            ("-EU", "EU"),
+            ("SR", "V"),
+            ("KR", "C"),
         ] {
             assert_eq!(label_of(&merges, keys).as_deref(), Some(label), "{keys}");
         }
-        // Their keys are not next to each other
-        assert_eq!(label_of(&merges, "SR"), None);
-        assert_eq!(label_of(&merges, "KR"), None);
+        // Not reliable as one unit, or no connector can join them: never built in
+        for keys in [
+            "KP", "ST", "-FT", "-PT", "-LT", "SH", "TH", "AE", "OE", "OU", "AU", "AOEU",
+        ] {
+            assert_eq!(label_of(&merges, keys), None, "{keys}");
+        }
         assert_eq!(merges.len(), DEFAULTS.len());
     }
 
@@ -721,9 +888,8 @@ mod tests {
         // STKPW holds TKPW (G), TK, PW, TP: Z alone
         assert_eq!(chosen("STKPW"), [Some("Z".to_owned())]);
         assert_eq!(chosen("TKPW"), [Some("G".to_owned())]);
-        // TPH with a K below T (TK is D, sharing T): no bigger group, so the biggest fully pressed one and then
-        // what is left over: N (3 keys), K stays alone
-        assert_eq!(chosen("TKPH"), [Some("N".to_owned())]);
+        // T K P H: N (T P H) leaves K alone, 3 keys; D (T K) + M (P H) cover all 4
+        assert_eq!(chosen("TKPH"), [Some("M".to_owned()), Some("D".to_owned())]);
         // TP (F) and PW (B) share P and are the same size: the one listed first, B
         assert_eq!(chosen("TPW"), [Some("B".to_owned())]);
         assert!(chosen("T").is_empty());
@@ -741,18 +907,21 @@ mod tests {
                     keys: vec!["P-".into(), "H-".into()],
                     label: Some("m".into()),
                     enabled: true,
+                    bridge: false,
                 },
                 // Dropped
                 KeyMerge {
                     keys: vec!["T-".into(), "K-".into()],
                     label: None,
                     enabled: false,
+                    bridge: false,
                 },
                 // A paddle pair, new
                 KeyMerge {
-                    keys: vec!["A-".into(), "O-".into()],
-                    label: Some("AO".into()),
+                    keys: vec!["S-".into(), "T-".into()],
+                    label: Some("ST".into()),
                     enabled: true,
+                    bridge: false,
                 },
             ],
             ..OverlayConfig::default()
@@ -761,7 +930,7 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(label_of(&merges, "PH").as_deref(), Some("m"));
         assert_eq!(label_of(&merges, "TK"), None);
-        assert_eq!(label_of(&merges, "AO").as_deref(), Some("AO"));
+        assert_eq!(label_of(&merges, "ST").as_deref(), Some("ST"));
         assert_eq!(
             merges.len(),
             DEFAULTS.len() + 1 - 1 + 1 - 1,
@@ -778,11 +947,13 @@ mod tests {
                 slots: vec![1, 3],
                 bits: 0b1010,
                 label: Some("a".into()),
+                bridge: false,
             },
             Merge {
                 slots: vec![3, 5],
                 bits: 0b101000,
                 label: Some("b".into()),
+                bridge: false,
             },
         ];
         assert_eq!(select(&tie, 0b101010), [0]);
@@ -802,6 +973,7 @@ mod tests {
                 keys: vec!["-E".into(), "-U".into()],
                 label: None,
                 enabled: true,
+                bridge: false,
             }],
             ..OverlayConfig::default()
         };
@@ -822,6 +994,7 @@ mod tests {
                     keys: keys.iter().map(|k| (*k).to_owned()).collect(),
                     label: None,
                     enabled: true,
+                    bridge: false,
                 }],
                 ..OverlayConfig::default()
             };
@@ -836,5 +1009,143 @@ mod tests {
         assert!(bad(&["W-", "A-"])[0].contains("next to each other"));
         // The same keys as a built-in group are fine: they replace it
         assert!(bad(&["T-", "P-"]).is_empty());
+    }
+
+    fn labels(merges: &[Merge], keys: &str) -> Vec<String> {
+        select(merges, parse_stroke(keys).unwrap())
+            .into_iter()
+            .map(|i| merges[i].label.clone().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn the_cover_of_s_t_k_p_w_h_r_is_z_and_l_not_j_and_n() {
+        let merges = merges(&OverlayConfig::default());
+        // Z (5) + L (2) and J (4) + N (3) both cover all 7 keys with 2 groups: the bigger single
+        // group decides
+        assert_eq!(labels(&merges, "STKPWHR"), ["L", "Z"]);
+    }
+
+    #[test]
+    fn covering_more_keys_beats_a_bigger_group_and_a_smaller_group_never_steals_keys() {
+        let merges = merges(&OverlayConfig::default());
+        // N (T P H) alone covers 3 of T K P H; D + M cover 4
+        assert_eq!(labels(&merges, "TKPH"), ["M", "D"]);
+        // S T K P W: Z covers 5, TK + PW only 4
+        assert_eq!(labels(&merges, "STKPW"), ["Z"]);
+        // T P H plus the right hand's -P -B: two Ns, nothing inside N gets its own letter
+        assert_eq!(labels(&merges, "TPH-PB"), ["N", "N"]);
+        // -F -R -P -B: NCH and CH + SH (-FP, -RB) both cover 4, one group beats two
+        assert_eq!(labels(&merges, "-FRPB"), ["NCH"]);
+        // -P -B -L -G: J alone
+        assert_eq!(labels(&merges, "-PBLG"), ["J"]);
+        // -B -G -S: X (3) beats K (-BG) and SHUN (-GS), which share G
+        assert_eq!(labels(&merges, "-BGS"), ["X"]);
+    }
+
+    #[test]
+    fn a_partial_press_leaves_keys_unmerged_and_ties_go_to_the_earlier_group() {
+        let merges = merges(&OverlayConfig::default());
+        // Only part of every group: nothing merges
+        assert!(labels(&merges, "S").is_empty());
+        assert!(labels(&merges, "TW").is_empty());
+        assert!(labels(&merges, "-FB").is_empty());
+        // S T K P with W missing: T K is D, S and P light on their own
+        assert_eq!(labels(&merges, "STKP"), ["D"]);
+        // S K R: SR (V) and KR (C) share R and are the same size: the earlier in the list, V
+        assert_eq!(labels(&merges, "SKR"), ["V"]);
+        assert_eq!(labels(&merges, "KWR"), ["Y"]);
+    }
+
+    #[test]
+    fn the_search_is_capped_and_still_answers_with_many_groups() {
+        // Every pair of 20 keys is a group: the cap stops the search, the answer is still a cover
+        let merges: Vec<Merge> = (0..20)
+            .flat_map(|a| (a + 1..20).map(move |b| (a, b)))
+            .map(|(a, b)| Merge {
+                slots: vec![a, b],
+                bits: 1 << a | 1 << b,
+                label: None,
+                bridge: false,
+            })
+            .collect();
+        let chosen = select(&merges, (1 << 20) - 1);
+        assert!(!chosen.is_empty());
+        let mut seen = 0u32;
+        for i in chosen {
+            assert_eq!(seen & merges[i].bits, 0, "no shared key");
+            seen |= merges[i].bits;
+        }
+    }
+
+    #[test]
+    fn s_r_and_k_r_are_joined_by_a_connector_through_the_unpressed_keys() {
+        let (layout, keyboard) = plover();
+        let rects = |names: &[&str]| -> Vec<Rect> {
+            names
+                .iter()
+                .map(|n| keyboard.keys[layout.slot_by_name(n).unwrap()])
+                .collect()
+        };
+        let tol = keyboard.keys[1].w * NEIGHBOUR_GAP;
+        let w = keyboard.keys[1].w;
+        // K R: W lies between them; one connector, a third of a key thick, at the keys' mid height
+        let kr = rects(&["K-", "R-"]);
+        let l = links(&kr, tol).unwrap();
+        assert_eq!(l.len(), 1);
+        assert!((l[0].h - w / 3.0).abs() < 0.01);
+        assert!((l[0].x - (kr[0].x + kr[0].w)).abs() < 0.01);
+        assert!((l[0].x + l[0].w - kr[1].x).abs() < 0.01);
+        assert!((l[0].y + l[0].h / 2.0 - (kr[0].y + kr[0].h / 2.0)).abs() < 0.01);
+        // S R: the connector runs at R's height, out of the tall S's right edge
+        let sr = rects(&["S-", "R-"]);
+        let l = links(&sr, tol).unwrap();
+        assert_eq!(l.len(), 1);
+        assert!((l[0].y + l[0].h / 2.0 - (sr[1].y + sr[1].h / 2.0)).abs() < 0.01);
+        // One piece: no connector. A thumb and a finger key share no height: cannot be joined
+        assert_eq!(links(&rects(&["T-", "P-"]), tol), Some(vec![]));
+        assert_eq!(links(&rects(&["W-", "A-"]), tol), None);
+        // The outline of K R is one shape with the connector in it
+        let members: Vec<Member> = kr.iter().map(|&r| square(r)).collect();
+        let corners = outline(&members, tol, 1.0);
+        assert!((bounds(&corners).w - (kr[1].x + kr[1].w - kr[0].x)).abs() < 0.01);
+        // Label on a key, not on the thin connector
+        let (x, _) = label_spot(&members, &corners, tol);
+        assert!((x - (kr[0].x + kr[0].w / 2.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_config_group_needs_bridge_true_to_span_a_gap() {
+        let (layout, _) = plover();
+        let with = |bridge: bool, keys: &[&str]| {
+            let config = OverlayConfig {
+                merges: vec![KeyMerge {
+                    keys: keys.iter().map(|k| (*k).to_owned()).collect(),
+                    label: Some("x".into()),
+                    enabled: true,
+                    bridge,
+                }],
+                ..OverlayConfig::default()
+            };
+            problems(&config, &layout)
+        };
+        assert!(with(false, &["T-", "H-"])[0].contains("bridge: true"));
+        assert!(with(true, &["T-", "H-"]).is_empty());
+        assert!(with(true, &["W-", "A-"])[0].contains("cannot be joined"));
+        // Dropping a built-in bridged group works like any other
+        let config = OverlayConfig {
+            merges: vec![KeyMerge {
+                keys: vec!["S-".into(), "R-".into()],
+                label: None,
+                enabled: false,
+                bridge: false,
+            }],
+            ..OverlayConfig::default()
+        };
+        let (layout, keyboard) = plover();
+        let (merges, problems) = resolve(&config, &layout, &keyboard);
+        assert!(problems.is_empty());
+        assert_eq!(label_of(&merges, "SR"), None);
+        assert_eq!(label_of(&merges, "KR").as_deref(), Some("C"));
     }
 }

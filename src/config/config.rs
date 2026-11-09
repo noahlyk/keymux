@@ -865,6 +865,9 @@ pub struct KeyMerge {
     pub label: Option<String>,
     /// `false` removes the built-in group with these keys instead of adding one
     pub enabled: bool,
+    /// Allow keys that are not all next to each other (`S-` and `R-`): the pieces are joined by
+    /// a thin connector through the keys between them
+    pub bridge: bool,
 }
 
 impl Default for KeyMerge {
@@ -873,6 +876,7 @@ impl Default for KeyMerge {
             keys: Vec::new(),
             label: None,
             enabled: true,
+            bridge: false,
         }
     }
 }
