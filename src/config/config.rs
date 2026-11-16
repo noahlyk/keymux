@@ -318,7 +318,15 @@ pub struct StenoConfig {
     /// this.
     #[serde(default)]
     pub join_keys: Vec<char>,
-    /// Per-key changes to the preset, e.g. `{ "S-": Key(KC_Q) }`.
+    /// Per-key changes to the preset, e.g. `{ "S-": Key(KC_Q) }`: a stroke key's (or an extra
+    /// key's) own physical key. An entry written `"SLOT|KC"` instead gives the stroke key one
+    /// more physical key besides its own, the same form the preset writes its own (`"S-|Q"`, `"*|G"`):
+    /// `{ "+": Key(KC_T), "+|G": Key(KC_G) }` presses `+` from T and from G. The part after `|`
+    /// is only a label. A layer's aliases are bound before the preset's, so one beats the
+    /// preset's alias on the same key (`"+|G"` takes G from the preset's `"*|G"`); a physical
+    /// key two of them (or one and a stroke key's own key) claim is an error, except the same
+    /// stroke key twice, which is only redundant. A preset's alias on a key a stroke key
+    /// was moved onto just gives way.
     #[serde(default)]
     pub layout_overrides: HashMap<String, KeyAction>,
     /// Plover-format dictionaries, highest priority first. Each is a file, or a folder whose
@@ -777,6 +785,14 @@ pub enum OverlayPlacement {
     /// Drawn over half of an existing standard key's own spot instead — for a keyboard where
     /// an extra key really does share a key with one half of it, such as a split S-.
     SplitKey { slot: String, half: Half },
+    /// Its own tall key (as tall as `*`, two rows), in a column of its own inserted just left
+    /// of the named slot's column. The diagram grows one column wider; the slot's column and
+    /// everything right of it shift over by one. `ColumnBefore("*")` puts a join key between the
+    /// left hand and the star. Several extra keys may name the same slot: they line up in the
+    /// order of `extra_keys`.
+    ColumnBefore(String),
+    /// Like `ColumnBefore`, but just right of the named slot's column.
+    ColumnAfter(String),
 }
 
 /// How `keymux overlay` looks. Every field has a default, so `overlay: ()` is enough.
@@ -830,7 +846,8 @@ pub struct OverlayConfig {
     /// just as `overlay_overrides` already needs its own copy of where to draw it.
     pub extra_keys: Vec<char>,
     /// Where an extra key (beyond the standard 23) is drawn, keyed by its own character, e.g.
-    /// `{ "+": SplitKey(slot: "S-", half: Top) }`. An extra key left out draws as the default
+    /// `{ "+": SplitKey(slot: "S-", half: Top) }` or `{ "+": ColumnBefore("*") }` (its own tall
+    /// key in a new column just left of the star's). An extra key left out draws as the default
     /// badge.
     pub overlay_overrides: HashMap<String, OverlayPlacement>,
     /// Which keys one finger plays together, so the tape underlines them as one: a group number
@@ -1720,14 +1737,20 @@ impl Config {
                             "overlay: override for \"{key}\" names no extra key, so it does nothing"
                         ));
                     }
-                    let OverlayPlacement::SplitKey { slot, .. } = placement else {
+                    let (OverlayPlacement::SplitKey { slot, .. }
+                    | OverlayPlacement::ColumnBefore(slot)
+                    | OverlayPlacement::ColumnAfter(slot)) = placement
+                    else {
                         continue;
                     };
+                    // The `#` bar spans every column, so a column can't go beside it
+                    let column = !matches!(placement, OverlayPlacement::SplitKey { .. });
                     let standard = layout.slot_by_name(slot).is_some()
-                        && !overlay.extra_keys.iter().any(|ch| ch.to_string() == *slot);
+                        && !overlay.extra_keys.iter().any(|ch| ch.to_string() == *slot)
+                        && !(column && slot == "#");
                     if !standard {
                         check.warnings.push(format!(
-                            "overlay: \"{key}\" is placed on \"{slot}\", which is no standard key, so it draws as a badge"
+                            "overlay: \"{key}\" is placed on \"{slot}\", which is no standard key there, so it draws as a badge"
                         ));
                     }
                 }
@@ -1881,6 +1904,62 @@ mod tests {
             "{warnings:?}"
         );
         assert!(warnings.iter().any(|w| w.contains("\"^\"")), "{warnings:?}");
+    }
+
+    #[test]
+    fn the_left_index_join_key_config_parses_and_checks() {
+        let config = parse(
+            r#"(
+                layers: { "steno": (kind: Steno((
+                    extra_keys: ['+'],
+                    layout_overrides: {
+                        "*": Key(KC_Y),
+                        "+": Key(KC_T),
+                        "+|G": Key(KC_G),
+                    },
+                ))) },
+                overlay: (
+                    extra_keys: ['+'],
+                    overlay_overrides: { "+": ColumnBefore("*") },
+                ),
+            )"#,
+        );
+        let report = config.validate(None);
+        assert!(report.is_ok(), "{:?}", report.errors().collect::<Vec<_>>());
+        assert_eq!(report.warnings().count(), 0);
+        assert_eq!(
+            config.overlay.overlay_overrides["+"],
+            OverlayPlacement::ColumnBefore("*".to_string())
+        );
+    }
+
+    #[test]
+    fn a_layout_alias_that_clashes_is_an_error_in_check() {
+        let config = parse(
+            r#"(layers: { "steno": (kind: Steno((
+                extra_keys: ['+'],
+                layout_overrides: { "+": Key(KC_T), "+|G": Key(KC_G), "S-|G": Key(KC_G) },
+            ))) })"#,
+        );
+        let report = config.validate(None);
+        let errors: Vec<&str> = report.errors().collect();
+        assert!(
+            errors.iter().any(|e| e.contains("KC_G") && e.contains("used by both")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_column_placement_on_no_standard_key_is_a_warning() {
+        let config = parse(
+            r##"(overlay: (
+                extra_keys: ['+', '^'],
+                overlay_overrides: { "+": ColumnBefore("#"), "^": ColumnAfter("NOPE") },
+            ))"##,
+        );
+        let report = config.validate(None);
+        assert!(report.is_ok());
+        assert_eq!(report.warnings().count(), 2, "{:?}", report.warnings().collect::<Vec<_>>());
     }
 
     #[cfg(feature = "overlay")]

@@ -9,7 +9,7 @@
 use super::commands::proper_outlines_in;
 use super::engine::resolve_dictionary_path;
 use super::formatter::Options;
-use super::layout::{preset, without_extra_keys, Layout};
+use super::layout::{preset, without_extra_keys, Layout, EXTRA_KEY_SEPARATOR};
 use super::plugin::Chain;
 use super::reverse::{self, Query};
 use super::setup::{cache_dir, default_dictionaries};
@@ -111,11 +111,40 @@ impl EngineSetup {
     pub fn keys_by_bit(&self) -> Result<HashMap<u32, KeyCode>> {
         // Main keys only, so each stroke key names one physical key
         let preset = without_extra_keys(preset(&self.preset).map_err(|e| anyhow!(e))?);
+        // Aliases of the layer (`"+|G"`) are further keys for a stroke key, not its main one
+        let main: HashMap<String, KeyAction> = self
+            .overrides
+            .iter()
+            .filter(|(name, _)| !name.contains(EXTRA_KEY_SEPARATOR))
+            .map(|(name, action)| (name.clone(), action.clone()))
+            .collect();
         let map = self
             .layout
-            .build_key_map(&preset, &self.overrides)
+            .build_key_map(&preset, &main)
             .map_err(|errs| anyhow!(errs.join("; ")))?;
         Ok(map.into_iter().map(|(key, bit)| (bit, key)).collect())
+    }
+
+    /// The physical keys that press a single stroke key besides its main one, as (stroke
+    /// slot, key) ordered by slot then key: what the preset's aliases and the layer's own
+    /// (`"+|G"`) come to once every override is applied.
+    ///
+    /// # Errors
+    /// When the preset is unknown or the overrides don't build a key map.
+    pub fn alias_keys(&self) -> Result<Vec<(usize, KeyCode)>> {
+        let main: std::collections::HashSet<KeyCode> =
+            self.keys_by_bit()?.into_values().collect();
+        let map = self
+            .layout
+            .build_key_map(&preset(&self.preset).map_err(|e| anyhow!(e))?, &self.overrides)
+            .map_err(|errs| anyhow!(errs.join("; ")))?;
+        let mut aliases: Vec<(usize, KeyCode)> = map
+            .into_iter()
+            .filter(|(key, bits)| bits.is_power_of_two() && !main.contains(key))
+            .map(|(key, bits)| (bits.trailing_zeros() as usize, key))
+            .collect();
+        aliases.sort_by_key(|&(slot, key)| (slot, key as u32));
+        Ok(aliases)
     }
 
     /// The layer's dictionaries and plugins as the engine uses them, wrapped in a translator
@@ -633,6 +662,33 @@ mod tests {
         let join = 1u32 << setup_in(&dir).layout.extra_start();
         assert_eq!(keys.get(&join), Some(&KeyCode::KC_Q));
         assert_eq!(keys.get(&(1 << 1)), preset("qwerty").unwrap().get("T-"));
+    }
+
+    #[test]
+    fn the_left_index_join_layout_reaches_the_setup_key_by_key() {
+        let dir = config_dir(
+            "left_index_join",
+            r#"(layers: { "steno": (kind: Steno((
+                extra_keys: ['+'],
+                layout_overrides: { "*": Key(KC_Y), "+": Key(KC_T), "+|G": Key(KC_G) },
+            ))) })"#,
+            &[],
+        );
+        let setup = setup_in(&dir);
+        let keys = setup.keys_by_bit().unwrap();
+        let join = 1u32 << setup.layout.extra_start();
+        let star = 1u32 << 9;
+        // One main key per stroke key: the aliases are not in it
+        assert_eq!(keys[&join], KeyCode::KC_T);
+        assert_eq!(keys[&star], KeyCode::KC_Y);
+        // The aliases that remain, by stroke slot: S- on Q, the join key on G, the star on H
+        let aliases = setup.alias_keys().unwrap();
+        let slot = |bit: u32| bit.trailing_zeros() as usize;
+        assert!(aliases.contains(&(0, KeyCode::KC_Q)));
+        assert!(aliases.contains(&(slot(join), KeyCode::KC_G)));
+        assert!(aliases.contains(&(9, KeyCode::KC_H)));
+        assert!(!aliases.iter().any(|&(s, k)| s == 9 && k == KeyCode::KC_G));
+        assert!(!aliases.iter().any(|&(s, k)| s == 9 && k == KeyCode::KC_T));
     }
 
     #[test]

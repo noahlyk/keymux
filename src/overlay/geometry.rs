@@ -97,6 +97,9 @@ pub struct Keyboard {
     /// For each of `extra`, the slot it shares and the half of it it took, or `None` for a badge.
     /// The drawing code squares the corners where the two halves meet.
     pub splits: Vec<Option<(usize, Half)>>,
+    /// For each of `extra`, whether it is a tall key in a column of its own (`ColumnBefore`,
+    /// `ColumnAfter`), drawn like `*`: soft on top, round at the bottom.
+    pub columns: Vec<bool>,
     /// Width and height of the whole keyboard
     pub size: (f32, f32),
 }
@@ -133,14 +136,38 @@ impl Keyboard {
                 OverlayPlacement::SplitKey { slot, .. } => {
                     layout.slot_by_name(slot).filter(|&idx| idx < 23)
                 }
-                OverlayPlacement::Badge => None,
+                _ => None,
             }
         };
+        // The grid column an extra key's own column opens at, or `None` if it has none (not a
+        // column placement, or one naming no finger or star slot, which draws as a badge).
+        let column_edge = |i: usize| -> Option<f32> {
+            let (name, after) = match placement(i) {
+                OverlayPlacement::ColumnBefore(name) => (name, false),
+                OverlayPlacement::ColumnAfter(name) => (name, true),
+                _ => return None,
+            };
+            // Not the `#` bar (it spans every column), not another extra key
+            let slot = layout.slot_by_name(name).filter(|&idx| idx < 22)?;
+            let column = PLACES[slot].0.floor();
+            Some(if after { column + 1.0 } else { column })
+        };
+        // Each column placement opens a new column at its edge (a whole grid column), in the
+        // order the extra keys are declared: later ones sit further right at the same edge.
+        // Every place at or right of the edge moves over by one.
+        let inserts: Vec<(usize, f32)> = (0..extra_keys.len())
+            .filter_map(|i| column_edge(i).map(|edge| (i, edge)))
+            .collect();
+        let shift = |column: f32| -> f32 {
+            column + inserts.iter().filter(|(_, edge)| *edge <= column).count() as f32
+        };
+        let columns = COLUMNS + inserts.len() as f32;
         // The badge row is only there for an extra key that still wants it; one entirely
-        // reassigned onto an existing key (`SplitKey`) needs no space of its own.
-        let needs_badge_row = (0..extra_keys.len()).any(|i| resolved_slot(i).is_none());
+        // reassigned onto an existing key (`SplitKey`) or given a column needs no space of its own.
+        let needs_badge_row =
+            (0..extra_keys.len()).any(|i| resolved_slot(i).is_none() && column_edge(i).is_none());
 
-        let unit = width / GAP.mul_add(COLUMNS - 1.0, COLUMNS);
+        let unit = width / GAP.mul_add(columns - 1.0, columns);
         let gap = unit * GAP;
         let step = unit + gap;
         let key_h = unit * KEY_ASPECT;
@@ -171,7 +198,7 @@ impl Keyboard {
                 Row::Thumb => (thumb, thumb_h),
             };
             Rect {
-                x: column.mul_add(step, x),
+                x: shift(column).mul_add(step, x),
                 y: row_y,
                 w: unit,
                 // A tall key covers both finger rows and the gap between them
@@ -181,6 +208,21 @@ impl Keyboard {
         let mut badge_slots = 0usize;
         let extra = (0..extra_keys.len())
             .map(|i| {
+                if let Some(edge) = column_edge(i) {
+                    // Past every column opened at an earlier edge, and every one opened at the
+                    // same edge before this key
+                    let earlier = inserts
+                        .iter()
+                        .filter(|&&(j, e)| e < edge || (e == edge && j < i))
+                        .count();
+                    return Rect {
+                        x: (edge + earlier as f32).mul_add(step, x),
+                        y: top,
+                        w: unit,
+                        // A tall key covers both finger rows and the gap between them
+                        h: key_h.mul_add(2.0, pair_gap),
+                    };
+                }
                 resolved_slot(i).map_or_else(
                     || {
                         let r = badge_rect(x, y, step, unit, extra_h, badge_slots);
@@ -215,11 +257,15 @@ impl Keyboard {
                 resolved_slot(i).map(|idx| (idx, *half))
             })
             .collect();
+        let tall = (0..extra_keys.len())
+            .map(|i| column_edge(i).is_some())
+            .collect();
         let height = thumb + thumb_h - y;
         Self {
             keys,
             extra,
             splits,
+            columns: tall,
             size: (width, height),
         }
     }
@@ -376,6 +422,150 @@ mod tests {
         let badge = keyboard.extra[0];
         // The badge row sits above the # bar and every other key
         assert!(badge.bottom() <= keyboard.keys[22].y + 0.01, "{badge:?}");
+    }
+
+    fn column_before(slot: &str) -> HashMap<String, OverlayPlacement> {
+        HashMap::from([(
+            "+".to_string(),
+            OverlayPlacement::ColumnBefore(slot.to_string()),
+        )])
+    }
+
+    fn step_of(keyboard: &Keyboard) -> f32 {
+        // One grid column to the next: T- (column 1) to P- (column 2)
+        keyboard.keys[3].x - keyboard.keys[1].x
+    }
+
+    #[test]
+    fn a_column_before_the_star_is_a_tall_key_between_the_left_hand_and_the_star() {
+        let layout = layout_with_join();
+        let plain = Keyboard::new(0.0, 0.0, 250.0, &layout, &HashMap::new());
+        let keyboard = Keyboard::new(0.0, 0.0, 250.0, &layout, &column_before("*"));
+        let join = keyboard.extra[0];
+        let (star, h, r) = (keyboard.keys[9], keyboard.keys[5], keyboard.keys[6]);
+        let step = step_of(&keyboard);
+        // Just left of the star, right of the H- / R- column, a whole column each side
+        assert!((star.x - join.x - step).abs() < 0.01, "{join:?} {star:?}");
+        assert!((join.x - h.x - step).abs() < 0.01, "{h:?} {join:?}");
+        // As tall as the star: both finger rows
+        assert!((join.y - star.y).abs() < 0.01 && (join.h - star.h).abs() < 0.01);
+        assert!((join.w - star.w).abs() < 0.01);
+        assert!((join.y - h.y).abs() < 0.01 && (join.bottom() - r.bottom()).abs() < 0.01);
+        // No badge row: the # bar is still at the top, the diagram as tall as before
+        assert!((keyboard.keys[22].y - 0.0).abs() < 0.01);
+        assert!(keyboard.columns == vec![true] && keyboard.splits == vec![None]);
+        // One column more, so each column is narrower, but the keyboard still fills the width
+        assert!(keyboard.keys[1].w < plain.keys[1].w);
+        let right = keyboard.keys.iter().map(|k| k.x + k.w).fold(0.0, f32::max);
+        assert!((right - 250.0).abs() < 0.01, "{right}");
+        // The left hand does not move (in columns), the star and the right hand move over by one
+        for slot in [0, 1, 2, 3, 4, 5, 6, 7, 8] {
+            let before = plain.keys[slot].x / (plain.keys[1].w * (1.0 + GAP));
+            let after = keyboard.keys[slot].x / (keyboard.keys[1].w * (1.0 + GAP));
+            assert!((before - after).abs() < 0.01, "slot {slot}");
+        }
+        for slot in [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21] {
+            let before = plain.keys[slot].x / (plain.keys[1].w * (1.0 + GAP));
+            let after = keyboard.keys[slot].x / (keyboard.keys[1].w * (1.0 + GAP));
+            assert!((before + 1.0 - after).abs() < 0.01, "slot {slot}");
+        }
+    }
+
+    #[test]
+    fn a_column_never_overlaps_or_leaves_the_panel() {
+        let layout = layout_with_join();
+        for slot in ["S-", "T-", "H-", "*", "-F", "-Z", "A-", "-U", "-D"] {
+            for after in [false, true] {
+                let name = slot.to_string();
+                let placement = if after {
+                    OverlayPlacement::ColumnAfter(name)
+                } else {
+                    OverlayPlacement::ColumnBefore(name)
+                };
+                let overrides = HashMap::from([("+".to_string(), placement)]);
+                let keyboard = Keyboard::new(10.0, 20.0, 248.0, &layout, &overrides);
+                let join = keyboard.extra[0];
+                assert!(join.x >= 10.0 - 0.01 && join.x + join.w <= 258.0 + 0.01);
+                for (i, key) in keyboard.keys[..22].iter().enumerate() {
+                    assert!(!overlaps(&join, key), "{slot} {after}: slot {i}");
+                    assert!(key.x + key.w <= 258.0 + 0.01, "{slot} {after}: slot {i}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_column_after_a_slot_sits_right_of_that_slots_column() {
+        let layout = layout_with_join();
+        let overrides = HashMap::from([(
+            "+".to_string(),
+            OverlayPlacement::ColumnAfter("*".to_string()),
+        )]);
+        let keyboard = Keyboard::new(0.0, 0.0, 250.0, &layout, &overrides);
+        let step = step_of(&keyboard);
+        let (star, join, f) = (keyboard.keys[9], keyboard.extra[0], keyboard.keys[12]);
+        assert!((join.x - star.x - step).abs() < 0.01);
+        assert!((f.x - join.x - step).abs() < 0.01);
+        // Before the same slot is the mirror: the two placements put the key on opposite sides
+        let before = Keyboard::new(0.0, 0.0, 250.0, &layout, &column_before("*"));
+        assert!(before.extra[0].x < before.keys[9].x);
+    }
+
+    #[test]
+    fn several_columns_at_one_edge_line_up_in_declaration_order() {
+        use crate::steno::layout::KeySpec;
+        let layout = layout_with_join()
+            .with_extra(KeySpec::new('^', "caret"))
+            .unwrap();
+        let overrides = HashMap::from([
+            ("+".to_string(), OverlayPlacement::ColumnBefore("*".to_string())),
+            ("^".to_string(), OverlayPlacement::ColumnBefore("*".to_string())),
+        ]);
+        let keyboard = Keyboard::new(0.0, 0.0, 300.0, &layout, &overrides);
+        let step = step_of(&keyboard);
+        assert!((keyboard.extra[1].x - keyboard.extra[0].x - step).abs() < 0.01);
+        assert!((keyboard.keys[9].x - keyboard.extra[1].x - step).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_column_naming_no_finger_or_star_slot_draws_as_a_badge() {
+        let layout = layout_with_join();
+        for slot in ["NOPE", "#", "+"] {
+            let keyboard = Keyboard::new(0.0, 0.0, 250.0, &layout, &column_before(slot));
+            let plain = Keyboard::new(0.0, 0.0, 250.0, &layout, &HashMap::new());
+            assert_eq!(keyboard.extra, plain.extra, "{slot}");
+            assert_eq!(keyboard.keys, plain.keys, "{slot}");
+            assert_eq!(keyboard.columns, vec![false]);
+        }
+    }
+
+    #[test]
+    fn a_column_and_a_badge_can_share_one_keyboard() {
+        use crate::steno::layout::KeySpec;
+        let layout = layout_with_join()
+            .with_extra(KeySpec::new('^', "caret"))
+            .unwrap();
+        let keyboard = Keyboard::new(0.0, 0.0, 300.0, &layout, &column_before("*"));
+        // `^` is a badge, so the row above the # bar is back, and the column is not in it
+        assert!(keyboard.extra[1].bottom() <= keyboard.keys[22].y + 0.01);
+        assert!(keyboard.extra[0].y > keyboard.keys[22].y);
+        assert_eq!(keyboard.columns, vec![true, false]);
+    }
+
+    #[test]
+    fn no_column_leaves_the_keyboard_exactly_as_it_was() {
+        let layout = layout_with_join();
+        let a = Keyboard::new(3.0, 4.0, 250.0, &layout, &HashMap::new());
+        let b = Keyboard::new(
+            3.0,
+            4.0,
+            250.0,
+            &layout,
+            &HashMap::from([("+".to_string(), OverlayPlacement::Badge)]),
+        );
+        assert_eq!(a.keys, b.keys);
+        assert_eq!(a.extra, b.extra);
+        assert_eq!(a.size, b.size);
     }
 
     #[test]

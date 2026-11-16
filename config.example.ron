@@ -371,11 +371,15 @@
             kind: Steno((
                 layout: "qwerty",
                 // Run `keymux steno layout` to see every stroke key and the key that presses it.
-                // Change individual stroke keys, e.g. { "S-": Key(KC_Q) }
+                // Change individual stroke keys, e.g. { "S-": Key(KC_Q) }. An entry written
+                // "SLOT|KEY" gives a stroke key one more physical key besides its own (the
+                // preset's own aliases are written the same way: "S-|Q", "*|G"): a layer's
+                // alias beats the preset's on the same key, two on one key is an error.
                 layout_overrides: {},
                 // Extra stroke keys beyond the standard 23 (a theory's join key, say), by the
                 // character written in stroke notation, e.g. ['+']; give each a physical key in
-                // layout_overrides: { "+": Key(KC_Q) }.
+                // layout_overrides: { "+": Key(KC_T), "+|G": Key(KC_G) } (the join key on both
+                // left index keys; move the star off T with "*": Key(KC_Y)).
                 extra_keys: [],
                 // Which extra keys are join keys: a stroke with one down continues the word
                 // before it (THAS/+EUFG) and is never looked up as a word of its own. Each must
@@ -531,6 +535,12 @@
     //     // name, any number of keys per number. Entries replace that key's group; the
     //     // defaults are the pairs T K, P W, H R, A O, E U, F R, P B, L G, T S, D Z. An extra
     //     // key drawn over a standard key (SplitKey) joins that key's group unless named here.
+    //     extra_keys: [],     // the steno layer's extra_keys, copied: the overlay runs apart from the daemon
+    //     // Where an extra key is drawn, by its character; left out it is a badge above the
+    //     // keyboard. SplitKey(slot: "S-", half: Top) draws it over half of a standard key;
+    //     // ColumnBefore("*") / ColumnAfter("*") give it its own tall key in a new column just
+    //     // left / right of that key's column (the diagram grows one column wider).
+    //     overlay_overrides: {},  // { "+": ColumnBefore("*") }
     //     key_groups: {},     // { "S-": 20, "T-": 20, "K-": 20 } makes S T K a trio
     //     extra_colors: {},   // an extra key's colour by character: Left, Vowel, Right, Misc (default)
     // ),

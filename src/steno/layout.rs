@@ -698,9 +698,38 @@ impl Layout {
         overrides: &HashMap<String, KeyAction>,
     ) -> Result<HashMap<KeyCode, u32>, Vec<String>> {
         let mut errors = Vec::new();
-        let mut assigned: HashMap<String, KeyCode> = preset.clone();
+        // The preset's main keys, and apart from them every alias (`"S-|Q"`): the layer's own,
+        // from `layout_overrides`, and the preset's. An alias the layer writes under the
+        // preset's own name (`"*|G": Key(KC_X)`) replaces that one.
+        let mut assigned: HashMap<String, KeyCode> = preset
+            .iter()
+            .filter(|(name, _)| !name.contains(EXTRA_KEY_SEPARATOR))
+            .map(|(name, &key)| (name.clone(), key))
+            .collect();
+        let mut preset_aliases: HashMap<&String, KeyCode> = preset
+            .iter()
+            .filter(|(name, _)| name.contains(EXTRA_KEY_SEPARATOR))
+            .map(|(name, &key)| (name, key))
+            .collect();
+        let mut own_aliases: Vec<(&String, KeyCode)> = Vec::new();
 
         for (slot, action) in overrides {
+            if slot.contains(EXTRA_KEY_SEPARATOR) {
+                if extra_key_slot(self, slot).is_none() {
+                    errors.push(format!("layout override for unknown steno key \"{slot}\""));
+                    continue;
+                }
+                match key_from_action(action) {
+                    Some(key) => {
+                        preset_aliases.remove(slot);
+                        own_aliases.push((slot, key));
+                    }
+                    None => errors.push(format!(
+                        "layout override for \"{slot}\" must be Key(KC_*), not a layer or macro action"
+                    )),
+                }
+                continue;
+            }
             // A key's own name takes this literally, even one that is itself `+` (an extra
             // key may be named after its own stroke character) - only once that fails is `+`
             // read as joining several keys onto one physical key, e.g. "A-+O-" on V.
@@ -787,13 +816,33 @@ impl Layout {
             keys.insert(key, mask);
         }
 
-        // Extra keys come last and give way to anything already bound, so a user override
-        // that moves a stroke key onto one of them keeps working.
-        let mut extras: Vec<(&String, KeyCode)> = assigned
-            .iter()
-            .filter(|(name, _)| name.contains(EXTRA_KEY_SEPARATOR))
-            .map(|(name, &key)| (name, key))
-            .collect();
+        // Aliases come last. The layer's own are claims: one on a key a stroke key already
+        // holds is an error (unless it is that same stroke key, which is only redundant, e.g.
+        // `"*|Y"` once `"*": Key(KC_Y)` moved the star there), and two of them on one key are
+        // too. Then the preset's give way to anything already bound, so a stroke key moved
+        // onto one of them, or an alias of the layer's, keeps the key.
+        own_aliases.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, key) in own_aliases {
+            let Some(slot) = extra_key_slot(self, name) else {
+                continue;
+            };
+            let bit = 1u32 << slot;
+            match owners.entry(key) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(name.as_str());
+                    keys.insert(key, bit);
+                }
+                std::collections::hash_map::Entry::Occupied(entry) => {
+                    if keys.get(&key) != Some(&bit) {
+                        errors.push(format!(
+                            "{key:?} is used by both \"{}\" and \"{name}\"",
+                            entry.get()
+                        ));
+                    }
+                }
+            }
+        }
+        let mut extras: Vec<(&String, KeyCode)> = preset_aliases.into_iter().collect();
         extras.sort_by(|a, b| a.0.cmp(b.0));
         for (name, key) in extras {
             let Some(slot) = extra_key_slot(self, name) else {
@@ -899,9 +948,11 @@ const fn key_from_action(action: &KeyAction) -> Option<KeyCode> {
 }
 
 /// Separates a stroke key from a label in a preset entry that gives it an extra
-/// physical key: `"S-|Q"` makes Q press S- as well as the key `"S-"` names. An extra
-/// key never replaces the main one, and is skipped if a user override already took it.
-const EXTRA_KEY_SEPARATOR: char = '|';
+/// physical key: `"S-|Q"` makes Q press S- as well as the key `"S-"` names. An alias never
+/// replaces the main key. A preset's alias is skipped if anything else already took its key; an
+/// alias in a layer's `layout_overrides` (any slot, an extra stroke key such as `"+|G"` too) is
+/// bound first, so it beats a preset's, and conflicts with a stroke key's own key are errors.
+pub(crate) const EXTRA_KEY_SEPARATOR: char = '|';
 
 /// The stroke key an extra-key entry such as `"S-|Q"` is for.
 fn extra_key_slot(layout: &Layout, name: &str) -> Option<usize> {
@@ -1254,6 +1305,152 @@ mod tests {
             .iter()
             .any(|e| e.contains("unknown steno key \"NOPE\"")));
         assert!(errors.iter().any(|e| e.contains("used by both")));
+    }
+
+    /// The left-index layout: the join key on T and G, the star only on the right index.
+    fn left_index_join(overrides: &[(&str, KeyCode)]) -> HashMap<String, KeyAction> {
+        overrides
+            .iter()
+            .map(|(name, key)| ((*name).to_string(), KeyAction::Key(*key)))
+            .collect()
+    }
+
+    #[test]
+    fn layout_overrides_can_give_a_stroke_key_a_second_physical_key() {
+        let layout = Layout::plover_with(&['+']).unwrap();
+        let overrides = left_index_join(&[
+            ("*", KeyCode::KC_Y),
+            ("+", KeyCode::KC_T),
+            ("+|G", KeyCode::KC_G),
+        ]);
+        let map = layout
+            .build_key_map(&preset("qwerty").unwrap(), &overrides)
+            .unwrap();
+        let bit = |name: &str| 1u32 << layout.slot_by_name(name).unwrap();
+        // The join key on both left index keys, the star on both right ones, no left star
+        assert_eq!(map[&KeyCode::KC_T], bit("+"));
+        assert_eq!(map[&KeyCode::KC_G], bit("+"));
+        assert_eq!(map[&KeyCode::KC_Y], bit("*"));
+        assert_eq!(map[&KeyCode::KC_H], bit("*"));
+        // Q is a plain S- again, as the preset's own alias says
+        assert_eq!(map[&KeyCode::KC_Q], bit("S-"));
+        // Every other key is exactly the preset's: 23 + Q, H, Y (stars), the number row, the
+        // two join keys, minus the key the star left
+        let plain = layout
+            .build_key_map(&preset("qwerty").unwrap(), &HashMap::new())
+            .unwrap();
+        for (key, bits) in &plain {
+            if ![KeyCode::KC_T, KeyCode::KC_G].contains(key) {
+                assert_eq!(map.get(key), Some(bits), "{key:?}");
+            }
+        }
+        assert_eq!(map.len(), plain.len());
+    }
+
+    #[test]
+    fn a_layers_own_alias_beats_the_presets_for_the_same_key() {
+        // Without the layer's alias G is the star's, as the preset says
+        let layout = Layout::plover_with(&['+']).unwrap();
+        let star = 1u32 << layout.slot_by_name("*").unwrap();
+        let join = 1u32 << layout.slot_by_name("+").unwrap();
+        let plain = layout
+            .build_key_map(&preset("qwerty").unwrap(), &HashMap::new())
+            .unwrap();
+        assert_eq!(plain[&KeyCode::KC_G], star);
+        let overrides = left_index_join(&[("+|G", KeyCode::KC_G)]);
+        let map = layout
+            .build_key_map(&preset("qwerty").unwrap(), &overrides)
+            .unwrap();
+        assert_eq!(map[&KeyCode::KC_G], join);
+        // The star keeps its own key and H and Y
+        assert_eq!(map[&KeyCode::KC_T], star);
+        assert_eq!(map[&KeyCode::KC_H], star);
+    }
+
+    #[test]
+    fn a_layers_alias_under_the_presets_own_name_replaces_it() {
+        let layout = Layout::plover();
+        let overrides = left_index_join(&[("*|G", KeyCode::KC_X)]);
+        let map = layout
+            .build_key_map(&preset("qwerty").unwrap(), &overrides)
+            .unwrap();
+        let star = 1u32 << layout.slot_by_name("*").unwrap();
+        assert_eq!(map[&KeyCode::KC_X], star);
+        assert_eq!(map.get(&KeyCode::KC_G), None, "the preset's *|G is gone");
+    }
+
+    #[test]
+    fn an_alias_on_the_key_its_own_stroke_key_moved_to_is_redundant_not_an_error() {
+        let layout = Layout::plover();
+        let overrides = left_index_join(&[("*", KeyCode::KC_Y), ("*|Y", KeyCode::KC_Y)]);
+        let map = layout
+            .build_key_map(&preset("qwerty").unwrap(), &overrides)
+            .unwrap();
+        assert_eq!(map[&KeyCode::KC_Y], 1 << layout.slot_by_name("*").unwrap());
+    }
+
+    #[test]
+    fn the_presets_alias_on_a_key_a_stroke_key_moved_to_gives_way() {
+        // `"*": Key(KC_Y)` makes the preset's `*|Y` redundant, and `"S-": Key(KC_G)` takes G from `*|G`
+        let layout = Layout::plover();
+        let overrides = left_index_join(&[("*", KeyCode::KC_Y), ("S-", KeyCode::KC_G)]);
+        let map = layout
+            .build_key_map(&preset("qwerty").unwrap(), &overrides)
+            .unwrap();
+        assert_eq!(map[&KeyCode::KC_Y], 1 << layout.slot_by_name("*").unwrap());
+        assert_eq!(map[&KeyCode::KC_G], 1 << layout.slot_by_name("S-").unwrap());
+    }
+
+    #[test]
+    fn two_aliases_of_a_layer_on_one_key_are_an_error() {
+        let layout = Layout::plover_with(&['+']).unwrap();
+        let overrides = left_index_join(&[("+|G", KeyCode::KC_G), ("S-|G", KeyCode::KC_G)]);
+        let errors = layout
+            .build_key_map(&preset("qwerty").unwrap(), &overrides)
+            .unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.contains("KC_G") && e.contains("used by both")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn an_alias_of_a_layer_on_a_key_a_stroke_key_holds_is_an_error() {
+        // T is the star's own key until it moves
+        let layout = Layout::plover_with(&['+']).unwrap();
+        let overrides = left_index_join(&[("+|T", KeyCode::KC_T)]);
+        let errors = layout
+            .build_key_map(&preset("qwerty").unwrap(), &overrides)
+            .unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("used by both")), "{errors:?}");
+    }
+
+    #[test]
+    fn an_alias_for_an_unknown_stroke_key_or_a_non_key_is_an_error() {
+        let layout = Layout::plover();
+        let overrides = left_index_join(&[("NOPE|G", KeyCode::KC_G)]);
+        let errors = layout
+            .build_key_map(&preset("qwerty").unwrap(), &overrides)
+            .unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("unknown steno key \"NOPE|G\"")));
+        let mut overrides = HashMap::new();
+        overrides.insert("*|G".to_string(), KeyAction::TO(crate::config::Layer("nav".to_string())));
+        let errors = layout
+            .build_key_map(&preset("qwerty").unwrap(), &overrides)
+            .unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("must be Key(KC_*)")));
+    }
+
+    #[test]
+    fn a_main_key_override_still_beats_a_layers_own_alias_conflict_by_erroring() {
+        // A layer that puts a main key and an alias on one key said two things for it
+        let layout = Layout::plover();
+        let overrides = left_index_join(&[("T-", KeyCode::KC_G), ("*|G", KeyCode::KC_G)]);
+        assert!(layout
+            .build_key_map(&preset("qwerty").unwrap(), &overrides)
+            .is_err());
     }
 
     #[test]

@@ -11,6 +11,12 @@
 // layer's `layout_overrides` instead:
 //
 //     layout_overrides: { "S-": Key(KC_Q) },
+//
+// A layer can give a stroke key one more physical key the same way, written "SLOT|KEY":
+//
+//     layout_overrides: { "+|G": Key(KC_G) },
+//
+// Its aliases are bound before the ones below, so they win a key both want.
 {
     "S-": Key(KC_A),
     "T-": Key(KC_W),

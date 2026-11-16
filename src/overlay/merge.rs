@@ -697,6 +697,46 @@ mod tests {
         merges.iter().find(|m| m.bits == bits)?.label.clone()
     }
 
+    #[test]
+    fn a_column_of_its_own_changes_no_group_and_is_in_none() {
+        use crate::config::OverlayPlacement;
+        use crate::steno::layout::KeySpec;
+        let layout = Layout::plover().with_extra(KeySpec::new('+', "join")).unwrap();
+        let config = OverlayConfig::default();
+        let mut with_column = config.clone();
+        with_column.overlay_overrides.insert(
+            "+".to_string(),
+            OverlayPlacement::ColumnBefore("*".to_string()),
+        );
+        let plain = Keyboard::new(0.0, 0.0, 1000.0, &layout, &HashMap::new());
+        let widened = Keyboard::new(0.0, 0.0, 1000.0, &layout, &with_column.overlay_overrides);
+        let (without, problems) = resolve(&config, &layout, &plain);
+        assert!(problems.is_empty());
+        let (with, problems) = resolve(&with_column, &layout, &widened);
+        assert!(problems.is_empty(), "{problems:?}");
+        // The same groups, none holding the star (nor the extra key)
+        assert_eq!(without, with);
+        assert!(with.iter().all(|m| !m.slots.contains(&9)));
+        // The star is no neighbour of the left hand once a column sits between them, the
+        // way a column shows no key next to it merging
+        let tol = widened.keys[1].w * NEIGHBOUR_GAP;
+        assert!(adjacent(&plain.keys[5], &plain.keys[9], plain.keys[1].w * NEIGHBOUR_GAP));
+        assert!(!adjacent(&widened.keys[5], &widened.keys[9], tol));
+        assert!(!adjacent(&widened.keys[6], &widened.keys[9], tol));
+        // A group of the user's own naming the star beside the left hand is then an error
+        let mut asks_for_it = with_column.clone();
+        asks_for_it.merges.push(KeyMerge {
+            keys: vec!["R-".into(), "*".into()],
+            label: None,
+            enabled: true,
+            bridge: false,
+        });
+        let (_, problems) = resolve(&asks_for_it, &layout, &widened);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        let (_, problems) = resolve(&asks_for_it, &layout, &plain);
+        assert!(problems.is_empty(), "{problems:?}");
+    }
+
     fn area(corners: &[Corner]) -> f32 {
         let n = corners.len();
         (0..n)

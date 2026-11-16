@@ -452,7 +452,10 @@ impl Renderer {
             k.extra
                 .iter()
                 .zip(&k.splits)
-                .filter_map(|(r, split)| match split {
+                .zip(&k.columns)
+                .filter_map(|((r, split), &column)| match split {
+                    // A tall key of its own, shaped like `*`: soft on top, round at the bottom
+                    None if column => rounded_rect(*r, soft, f32::MAX),
                     // The top half of a key: soft on top, square where it meets the bottom half
                     Some((_, Half::Top)) => rounded_rect(*r, soft, 0.0),
                     // The bottom half keeps its slot's round end
@@ -3252,7 +3255,7 @@ mod tests {
     fn a_lookup_with_the_join_key_lights_it_on_the_continuation_stroke_only() {
         use crate::steno::layout::Layout;
         use crate::config::OverlayPlacement;
-        // The join key as the lyk theory has it: the top half of S-
+        // A join key drawn as the top half of S-
         let mut config = OverlayConfig::default();
         config.overlay_overrides.insert(
             "+".to_string(),
@@ -4163,6 +4166,103 @@ mod tests {
         };
         let (_, apart) = keys_drawn(&off, "AO", true);
         assert!(alpha_at(&apart, mid, bottom - 2.0) < 150);
+    }
+
+    /// The left-index join key: its own tall column between the left hand and the star.
+    fn join_column_config() -> OverlayConfig {
+        let mut config = OverlayConfig {
+            extra_keys: vec!['+'],
+            width: 560,
+            ..OverlayConfig::default()
+        };
+        config.overlay_overrides.insert(
+            "+".to_string(),
+            crate::config::OverlayPlacement::ColumnBefore("*".to_string()),
+        );
+        config
+    }
+
+    fn join_column_drawn(config: &OverlayConfig, stroke: &str) -> (Renderer, Pixmap) {
+        let layout = crate::steno::layout::Layout::plover_with(&config.extra_keys).unwrap();
+        let mut renderer = Renderer::with_layout(config, 1, 900, layout.clone()).unwrap();
+        let (w, h) = renderer.size();
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        let bits = layout.parse_stroke(stroke).unwrap();
+        let snapshot = OverlaySnapshot {
+            layer: Some("steno".into()),
+            held: bits,
+            chord: bits,
+            ..OverlaySnapshot::default()
+        };
+        renderer.draw(&snapshot, &mut pixmap.as_mut());
+        (renderer, pixmap)
+    }
+
+    #[test]
+    fn a_join_key_in_its_own_column_lights_over_its_whole_height_and_nothing_else_does() {
+        let config = join_column_config();
+        let (renderer, lit) = join_column_drawn(&config, "+TEBGS");
+        let (_, dark) = join_column_drawn(&config, "TEBGS");
+        let kb = renderer.keyboard.as_ref().unwrap();
+        let join = kb.extra[0];
+        let star = kb.keys[9];
+        let at = |pixmap: &Pixmap, rect: Rect, fy: f32| {
+            let p = pixmap
+                .pixel((rect.x + rect.w / 2.0) as u32, rect.h.mul_add(fy, rect.y) as u32)
+                .unwrap();
+            (p.red(), p.green(), p.blue())
+        };
+        // Lit at the top, the middle and the bottom of the tall key, and different from unlit
+        for fy in [0.25, 0.5, 0.75] {
+            assert_ne!(at(&lit, join, fy), at(&dark, join, fy), "at {fy}");
+        }
+        // The star is not lit by it, and the same lit or not
+        assert_eq!(at(&lit, star, 0.3), at(&dark, star, 0.3));
+        // Both lit: join and star
+        let (_, both) = join_column_drawn(&config, "+*");
+        assert_ne!(at(&both, join, 0.5), at(&dark, join, 0.5));
+        assert_ne!(at(&both, star, 0.5), at(&dark, star, 0.5));
+        // The tall key is shaped like the star: soft at the top corner, round at the bottom
+        assert!(alpha_at(&lit, join.x + 1.0, join.y) < 128, "soft top corner");
+        assert_eq!(alpha_at(&lit, join.x + 1.0, join.bottom() - 3.0), 0, "round bottom");
+    }
+
+    #[test]
+    fn the_join_column_names_its_stroke_in_the_tape_and_the_keyboard_has_no_badge_row() {
+        let config = join_column_config();
+        let (renderer, _) = join_column_drawn(&config, "TEBGS");
+        let kb = renderer.keyboard.as_ref().unwrap();
+        // The # bar is the top of the diagram: nothing but the keys above the thumbs
+        assert!(kb.extra[0].y > kb.keys[22].y);
+        assert_eq!(renderer.stroke_run(1 << renderer.layout.extra_start()).len(), 1);
+    }
+
+    /// Writes the join column as PPMs to `$OVERLAY_PREVIEW_DIR`:
+    /// `OVERLAY_PREVIEW_DIR=<dir> cargo test --lib preview_join_column -- --ignored`
+    #[test]
+    #[ignore = "writes images for eyeballing"]
+    fn preview_join_column() {
+        let dir = std::env::var("OVERLAY_PREVIEW_DIR").expect("set OVERLAY_PREVIEW_DIR");
+        let config = join_column_config();
+        for (name, stroke) in [
+            ("join", "+TEBGS"),
+            ("join-star", "+*"),
+            ("s-tall", "SAT"),
+            ("idle", "-T"),
+            ("tpr", "+TPHR*EUFPLT"),
+        ] {
+            let (renderer, pixmap) = join_column_drawn(&config, stroke);
+            let (w, h) = renderer.size();
+            let kb = renderer.keyboard.as_ref().unwrap();
+            let top = (kb.keys[22].y - 10.0) as u32;
+            let mut out = format!("P6 {w} {} 255\n", h - top).into_bytes();
+            for px in pixmap.data().as_chunks::<4>().0.iter().skip((top * w) as usize) {
+                for c in &px[..3] {
+                    out.push(c + (60 * (255 - u32::from(px[3])) / 255) as u8);
+                }
+            }
+            std::fs::write(format!("{dir}/{name}.ppm"), out).unwrap();
+        }
     }
 
     /// Writes the merged shapes as PPMs to `$OVERLAY_PREVIEW_DIR`:

@@ -10,12 +10,12 @@ use super::answer::{Ask, EngineSetup, Lookup};
 use super::dict::Dictionary;
 use super::formatter::leaves_attached;
 use super::interactive::{self, Session};
-use super::layout::{extra_keys, parse_stroke, preset, Layout};
+use super::layout::{parse_stroke, Layout};
 use super::setup::{prepare_dir, steno_dir, USER_DICTIONARY};
 use super::tape;
 use super::translate::Translator;
 use crate::keycode::KeyCode;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -119,14 +119,21 @@ pub fn layout(config_path: &Path, config_dir: &Path) -> Result<()> {
     let setup = engine_setup(config_path, config_dir);
     let plover = Layout::plover();
     let keys_by_bit = setup.keys_by_bit()?;
-    let extras: Vec<[String; 3]> = extra_keys(&preset(&setup.preset).map_err(|e| anyhow!(e))?)
+    let extra_start = setup.layout.extra_start();
+    let extras: Vec<[String; 3]> = setup
+        .alias_keys()?
         .into_iter()
-        .map(|(slot, key)| {
-            [
-                plover.key_at(slot).unwrap().name.clone(),
+        .map(|(slot, key)| match plover.key_at(slot) {
+            Some(standard) => [
+                standard.name.clone(),
                 key_label(key),
                 PLOVER_SLOT_SOUNDS[slot].to_string(),
-            ]
+            ],
+            None => [
+                setup.layout.extra_keys()[slot - extra_start].name.clone(),
+                key_label(key),
+                "extra key".to_string(),
+            ],
         })
         .collect();
     // The layer's own stroke keys beyond the standard 23, such as the join key
@@ -644,7 +651,7 @@ fn format_strokes(layout: &Layout, strokes: &[u32]) -> String {
 mod tests {
     use super::*;
     use crate::config::KeyAction;
-    use crate::steno::layout::{build_key_map, without_extra_keys};
+    use crate::steno::layout::{build_key_map, preset, without_extra_keys};
 
     #[test]
     fn following_the_tape_redraws_a_printed_line_a_new_one_took_back() {

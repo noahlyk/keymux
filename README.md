@@ -685,7 +685,7 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
       kind: Steno((
           extra_keys: ['+'],                   // the join key is a stroke key past the standard 23
           join_keys: ['+'],                    // ... and any stroke with it down continues the word before
-          layout_overrides: { "+": Key(KC_Q) },  // the physical key that presses it
+          layout_overrides: { "+": Key(KC_T) },  // the physical key that presses it
       )),
       remaps: { KC_CAPS: TO("base") },
       disabled_in_game_mode: true,
@@ -735,7 +735,26 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
   **What it costs.** Measured in the test process (`cargo test --release unload_gives_back -- --ignored --nocapture`, `KEYMUX_UNLOAD_ENTRIES` sets the size) on a generated dictionary of two-stroke outlines: 1,000,000 entries hold about 130 MB resident loaded and 21 MB after an unload (about 107 MB given back); 300,000 hold 67 MB and 9 MB. The first stroke after an unload took 33 ms at 1,000,000 entries and 10 ms at 300,000 (the cache file makes the reload a map and a merge, not a parse; the very first load of a new file parses and took 1.7 s and 0.4 s). Memory is on the heap (the parsed dictionaries); the cache file's mapped pages are shared file memory that is unmapped with them. A real theory with the plugin and more text per entry scales the same way. Two things can keep a share of it until later: a live-lookup search running at that instant keeps its own copy until it finishes (it is cancelled), and a second layer frees its copy the next time it is polled (a few milliseconds).
 
   **Compatibility.** Plover reads an unknown `{:name:...}` meta as an error, so a dictionary with this entry needs keymux, or a no-op meta plugin in Plover that accepts `{:engine:unload}`; leave the entry out of a dictionary Plover also uses.
-- `keymux steno layout` shows every stroke key and the key that presses it. `layout_overrides` keys are those slot names (`S-`, `A-`, `-E`, `-U`, ...).
+- `keymux steno layout` shows every stroke key and the key that presses it, then the further keys that press a stroke key too (the aliases). `layout_overrides` keys are those slot names (`S-`, `A-`, `-E`, `-U`, ..., and the character of each `extra_keys` entry).
+- **More than one physical key for a stroke key: aliases.** The built-in preset gives some stroke keys a second physical key, written `"SLOT|KEY"` (`"S-|Q"` makes Q press S- as well, `"*|G"`, `"*|H"` and `"*|Y"` make G, H and Y press `*`, the number row presses `#`). `layout_overrides` takes entries of the same form, for any stroke key or extra key: `"+|G": Key(KC_G)` makes G press `+` besides the key `"+"` names. What follows the `|` is only a label. The rules, all checked by `keymux check`:
+  - The key of a stroke key's own entry (`"+": Key(KC_T)`) is its main key; `keymux steno keys` and the lookup show main keys only, `keymux steno layout` lists the aliases after them.
+  - A layer's aliases are bound before the preset's, so one beats the preset's alias on the same physical key (`"+|G"` takes G from the preset's `"*|G"`). A layer's alias written with the preset's own name (`"*|G": Key(KC_X)`) replaces that one.
+  - Two aliases of a layer on one physical key, or a layer's alias on a key another stroke key holds as its main key, is an error (`KC_G is used by both "+|G" and "S-|G"`). The same stroke key twice is not (an alias on the key its own stroke key moved to is only redundant).
+  - A preset alias gives way quietly to anything already bound: if you move `*` to Y (`"*": Key(KC_Y)`) the preset's `*|Y` is redundant, and if a stroke key moves onto G the preset's `*|G` is gone.
+  - Only a stroke key or extra key may be aliased (`"A-+O-|V"` is not a thing); the slot before the `|` must exist.
+
+  **The join key on the left index finger** (the lyk theory's layout): the join key `+` on T and G, the star only on the right index finger (Y and H), and Q a plain S again:
+
+  ```ron
+  extra_keys: ['+'],
+  layout_overrides: {
+      "*": Key(KC_Y),      // the star's own key moves to the right index finger; the preset's *|H stays
+      "+": Key(KC_T),      // the join key on the left index finger ...
+      "+|G": Key(KC_G),    // ... on its lower key too (beats the preset's *|G)
+  },
+  ```
+
+  T and G press `+`; Y and H press `*`; Q presses S- (the preset's `S-|Q`, since `+` no longer holds it). There is no left star.
 - On a steno layer, keys that are neither stroke keys nor remapped are swallowed, so an accidental press types nothing. Delete always passes through.
 - Turn the layer on with `TO("steno")` (stays on, exclusive) or `TG("steno")` (toggle), and leave with `TO("base")`. A keyboard can also start in steno with `default_layer`.
 
@@ -768,7 +787,7 @@ already has it as `PHRUP` and `PHR*UP`, and you can add your own to any dictiona
   outline's text and the others dimmed. A one-stroke outline just stays lit. The overlay does no
   work (no timer, no redraws) unless a several-stroke outline is showing.
 - Outlines that use an extra key such as the `+` join key work everywhere in the
-  lookup: `ED/+-D` is shown with its `+`, the join key's badge (the top half of `S-`) lights on the
+  lookup: `ED/+-D` is shown with its `+`, the join key's key on the overlay lights on the
   `+-D` stroke, and typing `ED/+-D` or just `+-D` (in capitals, no lowercase) resolves it forward.
   The lookup reads and writes notation in the steno layer's own layout (its `extra_keys`).
   The command line does the same: `keymux steno lookup`, `stroke`, `keys` and `add` read your
@@ -927,6 +946,14 @@ overlay: (
     // that key's group; keys left out keep the default pairs T K, P W, H R, A O, E U on the
     // left and F R, P B, L G, T S, D Z on the right (S, * and # are alone).
     key_groups: {},      // { "S-": 20, "T-": 20, "K-": 20 } makes S T K a trio
+    // The overlay's own copy of the steno layer's extra_keys: it runs apart from the daemon
+    extra_keys: [],      // ['+']
+    // Where an extra key is drawn, by its character. Left out, it is a small badge in a row
+    // above the keyboard. The other placements, see below:
+    //   SplitKey(slot: "S-", half: Top)   over the top (or Bottom) half of a standard key
+    //   ColumnBefore("*")                 its own tall key in a new column just left of a key's
+    //   ColumnAfter("*")                  ... or just right of it
+    overlay_overrides: {},  // { "+": ColumnBefore("*") }
     // The colour of an extra key, by its character: Left, Vowel, Right or Misc (the default)
     extra_colors: {},    // { "+": Right }
     // Keys that fuse into one bigger key while all of them are in the stroke (see below)
@@ -935,6 +962,23 @@ overlay: (
     merges: [],            // [(keys: ["T-", "H-"], label: Some("TH"), bridge: true)]
 ),
 ```
+
+**Where an extra key is drawn (`overlay_overrides`).** An extra key (one of `extra_keys`, such as the join key `+`) has no fixed place on a keyboard, so by default each draws as a small badge in a row above the `#` bar. `overlay_overrides` says otherwise, by the key's character:
+
+- `Badge`: the default.
+- `SplitKey(slot: "S-", half: Top)`: over the top or bottom half of a standard key; the key itself shrinks to the other half. For a keyboard where an extra key really shares a key with one half of another.
+- `ColumnBefore("*")`: its own **tall key** (two rows, as tall as `*`) in a **new column** inserted just left of the named key's column. The diagram grows one column wider (every column gets a little narrower, so it still fills the width), and the named key's column and everything right of it move over by one; the `#` bar still spans all of them. `ColumnAfter("*")` puts it just right of the column instead. The slot is the name of a standard finger or star key (`S-`, `T-`, `H-`, `*`, `-F`, ... or a thumb key, which places the column by its column of the finger keys); `#` and another extra key's name draw as a badge, with a warning from `keymux check`. Several extra keys with a column at the same edge line up in the order of `extra_keys`. The key lights when its stroke bit is lit, in its `extra_colors` colour, labelled with its character.
+
+For the join key on the left index finger, between the left hand and the star:
+
+```ron
+overlay: (
+    extra_keys: ['+'],
+    overlay_overrides: { "+": ColumnBefore("*") },
+),
+```
+
+A column is a key of its own: it is in no merged group (merged keys are standard keys only), and since it sits between the left hand and `*`, the star and the H/R column are no longer neighbours, so a group of your own that names both (`merges: [(keys: ["R-", "*"])]`) is an error in `keymux check`; none of the built-in groups includes the star.
 
 **Merged keys.** While every key of a group is in the stroke (held, or let go but still in the
 stroke), the diagram draws them as one larger key in the colour of the group's first key, with the
@@ -1000,7 +1044,7 @@ each draw one wide paddle.
 `keymux overlay --demo` includes several of these strokes.
 
 An extra key drawn over a standard key (`overlay_overrides`, `SplitKey`) is in that key's group
-unless `key_groups` names it; run `keymux check` to see entries that name no key.
+unless `key_groups` names it (one in a column of its own has no group); run `keymux check` to see entries that name no key.
 
 Every field is optional, and edits to the config file apply without restarting the overlay.
 In niri, style it with `layer-rule { match namespace="^keymux-steno$" }`.

@@ -315,7 +315,11 @@ keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches 
   (`reverse::classify_with`), the rows (`Layout::render_strokes`, so `ED/+-D`, not `ED/-D`), and
   the `hint`/`strokes` bits. The join key is a stroke bit after the number key, so the overlay,
   which has its own copy of the layout, lights it on the stroke that carries it (`+-D`), on the
-  top half of `S-` when placed there by `overlay_overrides`. The CLI (`keymux steno lookup`,
+  top half of `S-` when placed there by `overlay_overrides` (`SplitKey`), or on a tall key of its own in a new column
+  (`ColumnBefore("*")` / `ColumnAfter("*")`: `Keyboard::new` inserts the column at that edge, shifts the places
+  at or right of it by one and divides the width by one more column; `Keyboard::columns` says which extra keys
+  are such keys, so the renderer shapes them like `*`). Merged groups (`merge.rs`) are standard keys only, found
+  by neighbours in these rectangles, so a column between two keys makes them non-neighbours. The CLI (`keymux steno lookup`,
   `stroke`, `keys`, `add`) builds the same layout from the config's steno layer
   (`answer::EngineSetup::load`); only with no config or no `extra_keys` is it the plain
   `Layout::plover()` (`reverse::classify`/`display` are that default).
