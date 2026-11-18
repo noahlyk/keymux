@@ -780,8 +780,10 @@ already has it as `PHRUP` and `PHR*UP`, and you can add your own to any dictiona
   What comes out types the word you're after into a query, shown as `LOOKUP` on the
   [overlay](#on-screen-overlay). Nothing you type reaches the application, so your document
   is untouched. (Letters follow `typing_layout`, `us` by default.)
-- The overlay lists the strokes that type the word, fewest strokes first, with words that
-  start with what you've typed after them. The best one is played on the overlay's keyboard:
+- The overlay lists the strokes that type the word, fewest strokes first, then the commands
+  whose text contains it (`tape` finds `{:tape:toggle}`, `control` finds `{#Control_L(v)}`:
+  entries made of `{:...}`, `{PLOVER:...}` and `{#...}` metas, shown without the `{:firstup}`
+  and `{:transparent}` markers), then words that start with what you've typed. The best one is played on the overlay's keyboard:
   its first stroke is lit, and an outline of several strokes (`ED/+-D`) steps through them one
   at a time (about a second each, looping), the stroke being shown at full strength in the
   outline's text and the others dimmed. A one-stroke outline just stays lit. The overlay does no
@@ -863,8 +865,8 @@ difference below. Every command that takes a query (`lookup`, `keys`, `stroke`) 
   - A word's rows: its best outline first (the one that types the phrase right), then every other
     outline that types it properly, fewest strokes first. Only the first row carries the word.
     Outlines that glue to a neighbouring word (`{be^}`, `{^ing}`) are left out.
-  - A single word of two letters or more is followed by words that start with it, dimmed, each
-    with its best outline.
+  - A single word of two letters or more is followed by the commands whose text contains it
+    (`{:tape:toggle}`), then by words that start with it, dimmed, each with its best outline.
   - A word with no entry is **composed** from entries when that takes no more strokes than
     spelling it, with a note under the table: `everybody's was not a whole entry - composed
     (everybody + 's)`. Otherwise it is **fingerspelled**: the word is in quotes and a note says

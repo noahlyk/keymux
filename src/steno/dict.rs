@@ -575,6 +575,31 @@ impl Dictionary {
         kept
     }
 
+    /// The commands whose text contains `query`, ignoring case: entries whose translation is
+    /// made of `{...}` metas that act (`{:tape:toggle}`, `{PLOVER:SUSPEND}`, `{#Control_L(v)}`),
+    /// fewest strokes first, then fewest keys, then in key order, at most `limit`. This is how
+    /// something that has no word, a control or a shortcut, is found by what it is called.
+    ///
+    /// Scans every distinct translation, so keep `query` to a couple of characters or more.
+    #[must_use]
+    pub fn commands_matching(&self, query: &str, limit: usize) -> Vec<(Vec<u32>, String)> {
+        let query = query.to_lowercase();
+        let wanted = |text: &str| is_command(text) && text.to_lowercase().contains(&query);
+        let mut found: Vec<(Vec<u32>, String)> = self
+            .iter_where(&wanted)
+            .map(|(strokes, text)| (strokes.to_vec(), text.to_string()))
+            .collect();
+        found.sort_by_key(|(strokes, _)| {
+            (
+                strokes.len(),
+                strokes.iter().map(|s| s.count_ones()).sum::<u32>(),
+                strokes.clone(),
+            )
+        });
+        found.truncate(limit);
+        found
+    }
+
     /// Like `load`, but each file is restored from its own binary copy in `cache_dir` while its
     /// contents are what they were when the copy was made, and parsed (and the copy renewed)
     /// only otherwise: see [`Parts`].
@@ -878,6 +903,19 @@ pub(super) fn prune_cache(dir: &Path, keep: &[PathBuf], legacy: &Path) {
             let _ = fs::remove_file(path);
         }
     }
+}
+
+/// Whether a translation is one or more `{...}` metas that act on the engine or the keyboard
+/// (`{:...}`, `{PLOVER:...}`, `{#...}`) and carries no text of its own.
+fn is_command(text: &str) -> bool {
+    text.starts_with('{')
+        && text.ends_with('}')
+        && text.split('}').filter(|part| !part.is_empty()).all(|part| {
+            let meta = part.trim_start_matches('{');
+            meta.starts_with(':')
+                || meta.starts_with('#')
+                || meta.get(..7).is_some_and(|head| head.eq_ignore_ascii_case("PLOVER:"))
+        })
 }
 
 #[cfg(test)]

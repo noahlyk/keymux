@@ -351,6 +351,19 @@ fn phrase_row(layout: &Layout, base: &Translator, phrase: &str) -> LookupRow {
     }
 }
 
+/// A command as the lookup shows it: the entry's text without the markers that only say how it
+/// repeats or joins (`{:firstup}`, `{:transparent}`), which are not what it does.
+// The markers are dictionary metas, not format strings.
+#[allow(clippy::literal_string_with_formatting_args)]
+fn command_text(text: &str) -> String {
+    let shown = text.replace("{:firstup}", "").replace("{:transparent}", "");
+    if shown.is_empty() {
+        text.to_string()
+    } else {
+        shown
+    }
+}
+
 /// The existing single-word view: the word's own outlines first, then words that start with it,
 /// each with its best outline — falling back to fingerspelling, marked in quotes, when the exact
 /// query has no dictionary entry at all.
@@ -388,6 +401,18 @@ fn word_rows(
         }
     }
     if query.chars().count() >= MIN_PREFIX {
+        // Commands named by the query (`tape` finds `{:tape:toggle}`): they type nothing, so
+        // they are never words, and "what was that stroke" is asked of them just as often
+        if cancelled() {
+            return None;
+        }
+        let room = MAX_ROWS.saturating_sub(rows.len());
+        for (strokes, text) in base.dictionary().commands_matching(query, room) {
+            rows.push(LookupRow {
+                text: command_text(&text),
+                outline: layout.render_strokes(&strokes),
+            });
+        }
         // Ask for extra: a word with no outline that types it properly is skipped
         if cancelled() {
             return None;
@@ -512,6 +537,38 @@ mod tests {
         assert_eq!(rows.len(), 150, "every completion is a row");
         let rows = typed("many").view(&base).rows;
         assert_eq!(rows.len(), 20, "every outline of the word is a row");
+    }
+
+    // The entries are dictionary metas, not format strings.
+    #[allow(clippy::literal_string_with_formatting_args)]
+    #[test]
+    fn a_command_is_found_by_the_name_in_it() {
+        let layout = Layout::plover();
+        let mut dict = Dictionary::default();
+        dict.merge_json(
+            r#"{
+                "TAEP": "tape",
+                "T*PL": "{:firstup}{:transparent}{:tape:toggle}",
+                "T*PLZ": "{:transparent}{:tape:clear}",
+                "KHR*F": "{#Control_L(v)}",
+                "-T": "the",
+                "SPH-PL": "{^tape}"
+            }"#,
+            &layout,
+        )
+        .unwrap();
+        let base = Translator::new(dict);
+        let rows = typed("tape").view(&base).rows;
+        let shown: Vec<(&str, &str)> =
+            rows.iter().map(|r| (r.text.as_str(), r.outline.as_str())).collect();
+        assert_eq!(shown[0], ("tape", "TAEP"), "the word comes first");
+        assert!(shown.contains(&("{:tape:toggle}", "T*PL")), "{shown:?}");
+        assert!(shown.contains(&("{:tape:clear}", "T*PLZ")), "{shown:?}");
+        assert_eq!(shown.len(), 3, "a suffix with the word in it is not a command: {shown:?}");
+        let rows = typed("CONTROL").view(&base).rows;
+        assert_eq!(rows[0].text, "{#Control_L(v)}");
+        // A word with no command in it adds none
+        assert_eq!(typed("the").view(&base).rows.len(), 1);
     }
 
     /// A dictionary and lookup in a layout with the `+` join key, as the lyk theory has it.
