@@ -406,13 +406,18 @@ fn word_rows(
         if cancelled() {
             return None;
         }
-        let room = MAX_ROWS.saturating_sub(rows.len());
-        for (strokes, text) in base.dictionary().commands_matching(query, room) {
-            rows.push(LookupRow {
+        let commands = base
+            .dictionary()
+            .commands_matching(query, MAX_ROWS)
+            .into_iter()
+            .map(|(strokes, text)| LookupRow {
                 text: command_text(&text),
                 outline: layout.render_strokes(&strokes),
             });
-        }
+        // Right after the word's best outline: a word can have dozens of others, and a command
+        // listed behind them would be off the screen
+        let at = rows.len().min(1);
+        rows.splice(at..at, commands);
         // Ask for extra: a word with no outline that types it properly is skipped
         if cancelled() {
             return None;
@@ -561,10 +566,11 @@ mod tests {
         let rows = typed("tape").view(&base).rows;
         let shown: Vec<(&str, &str)> =
             rows.iter().map(|r| (r.text.as_str(), r.outline.as_str())).collect();
-        assert_eq!(shown[0], ("tape", "TAEP"), "the word comes first");
+        assert_eq!(shown[0], ("tape", "TAEP"), "the word's best outline comes first");
         assert!(shown.contains(&("{:tape:toggle}", "T*PL")), "{shown:?}");
         assert!(shown.contains(&("{:tape:clear}", "T*PLZ")), "{shown:?}");
         assert_eq!(shown.len(), 3, "a suffix with the word in it is not a command: {shown:?}");
+        assert_eq!(shown[1].1, "T*PL", "commands follow the best outline at once: {shown:?}");
         let rows = typed("CONTROL").view(&base).rows;
         assert_eq!(rows[0].text, "{#Control_L(v)}");
         // A word with no command in it adds none
