@@ -780,11 +780,16 @@ already has it as `PHRUP` and `PHR*UP`, and you can add your own to any dictiona
   What comes out types the word you're after into a query, shown as `LOOKUP` on the
   [overlay](#on-screen-overlay). Nothing you type reaches the application, so your document
   is untouched. (Letters follow `typing_layout`, `us` by default.)
-- The overlay lists the strokes that type the word, fewest strokes first, with the commands
-  whose text contains it right after the best one (`tape` finds `{:tape:toggle}`, `control`
-  finds `{#Control_L(v)}`: entries made of `{:...}`, `{PLOVER:...}` and `{#...}` metas, shown
-  without the `{:firstup}` and `{:transparent}` markers), and words that start with what
-  you've typed after them. The best one is played on the overlay's keyboard:
+- The overlay lists the strokes that type the word, fewest strokes first, with the dictionary
+  entries that are not words right after the best one: suffixes, prefixes, punctuation,
+  commands, shortcuts, symbols, anything with a brace or marker in it. They are found by what
+  they are written as: the exact text (`{^ing}`), the text without the markers `{}^~:#*`
+  (`^ing` and `ing` both find `{^ing}`; `tape` finds `{:tape:toggle}`, `control` finds
+  `{#Control_L(v)}`), the entries your query begins, or, from 3 characters, any entry that has
+  it inside; ranked in that order, then fewest strokes, then fewest keys. They are shown without
+  the `{:firstup}` and `{:transparent}` markers. A query that looks like an entry and finds
+  entries (`^ing`, `{.}`) is not fingerspelled. Words that start with what you've typed
+  follow them. The best one is played on the overlay's keyboard:
   its first stroke is lit, and an outline of several strokes (`ED/+-D`) steps through them one
   at a time (about a second each, looping), the stroke being shown at full strength in the
   outline's text and the others dimmed. A one-stroke outline just stays lit. The overlay does no

@@ -575,22 +575,56 @@ impl Dictionary {
         kept
     }
 
-    /// The commands whose text contains `query`, ignoring case: entries whose translation is
-    /// made of `{...}` metas that act (`{:tape:toggle}`, `{PLOVER:SUSPEND}`, `{#Control_L(v)}`),
-    /// fewest strokes first, then fewest keys, then in key order, at most `limit`. This is how
-    /// something that has no word, a control or a shortcut, is found by what it is called.
+    /// The entries that are not words, found by what they are written as: suffixes (`{^ing}`),
+    /// prefixes (`{con^}`), punctuation (`{.}`), commands (`{:tape:toggle}`, `{PLOVER:SUSPEND}`),
+    /// shortcuts (`{#Control_L(v)}`), symbols and anything else with a brace or marker in it. A
+    /// query finds an entry whose text, ignoring case, is it or starts with it (`{^ing}`, `{^in`)
+    /// or whose text with the braces and markers `{}^~:#*` taken off both sides is it or starts
+    /// with it (`^ing` and `ing` find `{^ing}`); from 3 characters it may be anywhere in either,
+    /// so a short query does not find everything. Ranked: the exact text, the exact text without
+    /// markers, the entries the query begins, the rest; in each fewest strokes, then fewest keys,
+    /// then key order. At most `limit`.
     ///
     /// Scans every distinct translation, so keep `query` to a couple of characters or more.
     #[must_use]
-    pub fn commands_matching(&self, query: &str, limit: usize) -> Vec<(Vec<u32>, String)> {
+    pub fn entries_matching(&self, query: &str, limit: usize) -> Vec<(Vec<u32>, String)> {
         let query = query.to_lowercase();
-        let wanted = |text: &str| is_command(text) && text.to_lowercase().contains(&query);
-        let mut found: Vec<(Vec<u32>, String)> = self
+        let bare_query = bare(&query);
+        let anywhere = |text: &str| text.chars().count() >= 3;
+        let (query_anywhere, bare_anywhere) = (anywhere(&query), anywhere(&bare_query));
+        let hit = |text: &str, query: &str, anywhere: bool| {
+            !query.is_empty() && (text.starts_with(query) || (anywhere && text.contains(query)))
+        };
+        let wanted = |text: &str| {
+            if !is_entry(text) {
+                return false;
+            }
+            let lower = text.to_lowercase();
+            hit(&lower, &query, query_anywhere)
+                || hit(&bare(&lower), &bare_query, bare_anywhere)
+        };
+        let tier = |text: &str| {
+            let lower = text.to_lowercase();
+            let bare_text = bare(&lower);
+            if lower == query {
+                0
+            } else if !bare_query.is_empty() && bare_text == bare_query {
+                1
+            } else if lower.starts_with(&query)
+                || (!bare_query.is_empty() && bare_text.starts_with(&bare_query))
+            {
+                2
+            } else {
+                3
+            }
+        };
+        let mut found: Vec<(u8, Vec<u32>, String)> = self
             .iter_where(&wanted)
-            .map(|(strokes, text)| (strokes.to_vec(), text.to_string()))
+            .map(|(strokes, text)| (tier(text), strokes.to_vec(), text.to_string()))
             .collect();
-        found.sort_by_key(|(strokes, _)| {
+        found.sort_by_key(|(tier, strokes, _)| {
             (
+                *tier,
                 strokes.len(),
                 strokes.iter().map(|s| s.count_ones()).sum::<u32>(),
                 strokes.clone(),
@@ -598,6 +632,9 @@ impl Dictionary {
         });
         found.truncate(limit);
         found
+            .into_iter()
+            .map(|(_, strokes, text)| (strokes, text))
+            .collect()
     }
 
     /// Like `load`, but each file is restored from its own binary copy in `cache_dir` while its
@@ -905,17 +942,18 @@ pub(super) fn prune_cache(dir: &Path, keep: &[PathBuf], legacy: &Path) {
     }
 }
 
-/// Whether a translation is one or more `{...}` metas that act on the engine or the keyboard
-/// (`{:...}`, `{PLOVER:...}`, `{#...}`) and carries no text of its own.
-fn is_command(text: &str) -> bool {
-    text.starts_with('{')
-        && text.ends_with('}')
-        && text.split('}').filter(|part| !part.is_empty()).all(|part| {
-            let meta = part.trim_start_matches('{');
-            meta.starts_with(':')
-                || meta.starts_with('#')
-                || meta.get(..7).is_some_and(|head| head.eq_ignore_ascii_case("PLOVER:"))
-        })
+/// Whether a translation is an entry rather than a word: it has a brace in it (a suffix, a
+/// prefix, a command, a shortcut, punctuation, fingerspelling) or no letter or digit at all
+/// (`.`, `$`, `@`). Text such as `hello world` or `a.m.` is a word, found as one.
+fn is_entry(text: &str) -> bool {
+    text.contains('{') || !text.chars().any(char::is_alphanumeric)
+}
+
+/// `text` without the braces and markers a dictionary entry wraps its meaning in.
+fn bare(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(c, '{' | '}' | '^' | '~' | ':' | '#' | '*'))
+        .collect()
 }
 
 #[cfg(test)]

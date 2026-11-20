@@ -1,6 +1,6 @@
 //! Live lookup: "I'm mid-sentence and forgot the stroke for a word."
 //!
-//! A dictionary entry for `{PLOVER:LOOKUP}` opens a lookup. The steno layer stays on, but its
+//! A dictionary entry for `{:lookup}` opens a lookup (`{plover:lookup}` still does, a legacy alias). The steno layer stays on, but its
 //! keys go back to what the layers below it make of them: every key goes through the usual
 //! remaps, mod-taps and layers, and what comes out types into a query that is shown on the
 //! overlay instead of reaching the application. The overlay lists the outlines that type the
@@ -375,8 +375,35 @@ fn word_rows(
 ) -> Option<Vec<LookupRow>> {
     let mut rows = Vec::new();
     let exact = proper_outlines_in(base, query);
+    let plain = query
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '\'' || c == '-');
+    // Entries that are not words (`{^ing}`, `{.}`, `{:tape:toggle}`) are found by what they are
+    // written as, with or without their braces and markers: `^ing`, `{^ing}` and `ing` all find
+    // the suffix. They type nothing as words, and "what was that stroke" is asked of them just
+    // as often. A short plain query is not worth the scan.
+    let entries: Vec<LookupRow> = if query.chars().count() >= MIN_PREFIX || !plain {
+        if cancelled() {
+            return None;
+        }
+        base.dictionary()
+            .entries_matching(query, MAX_ROWS)
+            .into_iter()
+            .map(|(strokes, text)| LookupRow {
+                text: command_text(&text),
+                outline: layout.render_strokes(&strokes),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     if exact.is_empty() {
-        let missing = reverse::missing_word(base, base.dictionary(), query, cancelled);
+        // Written like an entry that was found, it is not a word to fingerspell
+        let missing = if plain || entries.is_empty() {
+            reverse::missing_word(base, base.dictionary(), query, cancelled)
+        } else {
+            None
+        };
         if cancelled() {
             return None;
         }
@@ -400,24 +427,11 @@ fn word_rows(
             });
         }
     }
+    // Right after the word's best outline: a word can have dozens of others, and an entry
+    // listed behind them would be off the screen
+    let at = rows.len().min(1);
+    rows.splice(at..at, entries);
     if query.chars().count() >= MIN_PREFIX {
-        // Commands named by the query (`tape` finds `{:tape:toggle}`): they type nothing, so
-        // they are never words, and "what was that stroke" is asked of them just as often
-        if cancelled() {
-            return None;
-        }
-        let commands = base
-            .dictionary()
-            .commands_matching(query, MAX_ROWS)
-            .into_iter()
-            .map(|(strokes, text)| LookupRow {
-                text: command_text(&text),
-                outline: layout.render_strokes(&strokes),
-            });
-        // Right after the word's best outline: a word can have dozens of others, and a command
-        // listed behind them would be off the screen
-        let at = rows.len().min(1);
-        rows.splice(at..at, commands);
         // Ask for extra: a word with no outline that types it properly is skipped
         if cancelled() {
             return None;
@@ -569,12 +583,67 @@ mod tests {
         assert_eq!(shown[0], ("tape", "TAEP"), "the word's best outline comes first");
         assert!(shown.contains(&("{:tape:toggle}", "T*PL")), "{shown:?}");
         assert!(shown.contains(&("{:tape:clear}", "T*PLZ")), "{shown:?}");
-        assert_eq!(shown.len(), 3, "a suffix with the word in it is not a command: {shown:?}");
-        assert_eq!(shown[1].1, "T*PL", "commands follow the best outline at once: {shown:?}");
+        assert!(shown.contains(&("{^tape}", "SPH-PL")), "{shown:?}");
+        assert_eq!(shown.len(), 4, "{shown:?}");
+        assert_eq!(
+            shown[1].1, "SPH-PL",
+            "entries follow the best outline at once, the nearest first: {shown:?}"
+        );
+        assert_eq!(shown[2].1, "T*PL", "{shown:?}");
         let rows = typed("CONTROL").view(&base).rows;
         assert_eq!(rows[0].text, "{#Control_L(v)}");
         // A word with no command in it adds none
         assert_eq!(typed("the").view(&base).rows.len(), 1);
+    }
+
+    // The entries are dictionary metas, not format strings.
+    #[allow(clippy::literal_string_with_formatting_args)]
+    #[test]
+    fn any_entry_is_found_by_its_text_with_or_without_the_markers() {
+        let mut dict = Dictionary::default();
+        dict.merge_json(
+            r#"{
+                "-G": "{^ing}",
+                "SPEUPBG": "sing",
+                "KPHAOEUPB": "{mine^}",
+                "TP-PL": "{.}",
+                "STKPW": "{:transparent}{PLOVER:SUSPEND}",
+                "KPWH": "hello world",
+                "-T": "the"
+            }"#,
+            &Layout::plover(),
+        )
+        .unwrap();
+        let base = Translator::new(dict);
+        let rows_of = |query: &str| -> Vec<(String, String)> {
+            typed(query)
+                .view(&base)
+                .rows
+                .into_iter()
+                .map(|r| (r.text, r.outline))
+                .collect()
+        };
+        let has = |rows: &[(String, String)], text: &str, outline: &str| {
+            rows.iter().any(|(t, o)| t == text && o == outline)
+        };
+        for query in ["^ing", "{^ing}", "{^ING}", "ing", "{^in"] {
+            let rows = rows_of(query);
+            assert!(has(&rows, "{^ing}", "-G"), "{query}: {rows:?}");
+            assert!(!rows.iter().any(|(t, _)| t.starts_with('"')), "{query}: {rows:?}");
+        }
+        assert_eq!(rows_of("{^ing}")[0].1, "-G", "exact text first");
+        assert_eq!(rows_of("^ing")[0].1, "-G");
+        assert_eq!(rows_of("{mine^}")[0].1, "KPHAOEUPB");
+        assert_eq!(rows_of("mine^")[0].0, "{mine^}");
+        assert_eq!(rows_of("{.}")[0].1, "TP-PL");
+        assert_eq!(rows_of(".")[0].1, "TP-PL");
+        assert_eq!(rows_of("suspend")[0].0, "{PLOVER:SUSPEND}");
+        assert_eq!(rows_of("{PLOVER:SUSPEND}")[0].1, "STKPW");
+        // Under 3 characters a query only finds the entries it begins, not ones it is inside
+        assert!(!has(&rows_of("ng"), "{^ing}", "-G"), "{:?}", rows_of("ng"));
+        assert!(has(&rows_of("^in"), "{^ing}", "-G"));
+        assert!(has(&rows_of("ing"), "{^ing}", "-G"));
+        assert_eq!(rows_of("the").len(), 1, "a word with no entry in it adds none");
     }
 
     /// A dictionary and lookup in a layout with the `+` join key, as the lyk theory has it.
