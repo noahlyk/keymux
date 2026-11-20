@@ -87,6 +87,9 @@ pub struct Refresh {
     pub changed: bool,
     /// What went wrong with each file that couldn't be read or parsed
     pub problems: Vec<String>,
+    /// The files whose contents are new since the last refresh (parsed, or restored from their
+    /// cached copy), in order
+    pub new_files: Vec<PathBuf>,
     pub parsed: usize,
     pub restored: usize,
     pub unchanged: usize,
@@ -147,10 +150,12 @@ impl Parts {
                 Ok(Update::Restored) => {
                     report.restored += 1;
                     report.changed = true;
+                    report.new_files.push(path.clone());
                 }
                 Ok(Update::Parsed) => {
                     report.parsed += 1;
                     report.changed = true;
+                    report.new_files.push(path.clone());
                 }
                 Err(e) => report.problems.push(format!("{e:#}")),
             }

@@ -643,11 +643,16 @@ fn download_dictionary(url: &str, dest: &Path) -> Result<(usize, String)> {
 /// Desktop notification for a user, sent through their session like the daemon does.
 /// Fire and forget: a missing notifier never affects typing.
 pub fn notify_user(uid: u32, title: &str, body: &str) {
+    notify_user_with(uid, title, body, "normal");
+}
+
+/// [`notify_user`] with an urgency: `low`, `normal` or `critical`.
+pub fn notify_user_with(uid: u32, title: &str, body: &str, urgency: &str) {
     let Some(name) = username(uid) else {
         return;
     };
     let _ = Command::new("runuser")
-        .args(["-u", &name, "--", "/usr/bin/notify-send", "-u", "normal"])
+        .args(["-u", &name, "--", "/usr/bin/notify-send", "-u", urgency])
         .args([title, body])
         .spawn();
 }

@@ -14,6 +14,7 @@
 //! A reload that finds a file it can't read, such as one saved half-finished, keeps the
 //! dictionary already in use and tries again on the next change.
 
+use super::dict_notice::{deliver, Candidate, Notices};
 use super::layout::Layout;
 use super::parts::Parts;
 use super::plugin::Chain;
@@ -53,6 +54,9 @@ struct Entry {
     /// Every file parsed on its own, kept between reloads: only a changed file is read again
     parts: Parts,
     subscribers: Vec<Sender<Arc<Chain>>>,
+    /// What was last said to the user about these files, so a flapping save is not a stream of
+    /// notifications
+    notices: Notices,
     /// Unloaded (`{:engine:unload}`): nothing is held and nothing is read again, not even when
     /// the files change, until a layer subscribes to it again
     unloaded: bool,
@@ -349,6 +353,18 @@ fn refresh(key: &Key) {
             report.problems.join("; ")
         );
     }
+    // What a changed file says for itself is checked here, on the worker, never on a stroke's
+    // path. The first load reports only files that do not parse
+    let findings: Vec<_> = if first_time || !report.problems.is_empty() {
+        Vec::new()
+    } else {
+        report
+            .new_files
+            .iter()
+            .flat_map(|file| super::validate::check_file(file, &key.layout))
+            .collect()
+    };
+    let candidate = Candidate::from_reload(&report.problems, &findings, keep_old);
     let dict = (!up_to_date && !keep_old).then(|| {
         Arc::new(Chain::from_parts(
             &files,
@@ -376,7 +392,12 @@ fn refresh(key: &Key) {
         return;
     }
     entry.parts = parts;
+    let notice = entry.notices.admit(candidate, Instant::now());
     let Some(dict) = dict else {
+        drop(state);
+        if let Some(notice) = notice {
+            deliver(&key.roots, &notice);
+        }
         return;
     };
     entry.latest = Some(Arc::clone(&dict));
@@ -385,6 +406,9 @@ fn refresh(key: &Key) {
         .subscribers
         .retain(|subscriber| subscriber.send(Arc::clone(&dict)).is_ok());
     drop(state);
+    if let Some(notice) = notice {
+        deliver(&key.roots, &notice);
+    }
 }
 
 /// Make sure the watcher covers every folder `key`'s files can appear in.

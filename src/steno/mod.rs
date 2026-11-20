@@ -12,6 +12,7 @@ pub mod chord;
 pub mod commands;
 pub mod compose;
 pub mod dict;
+pub mod dict_notice;
 pub mod engine;
 pub mod erasure;
 pub mod formatter;
