@@ -1047,7 +1047,7 @@ mod tests {
         .unwrap();
         assert_eq!(dict.strokes_for("cat"), vec![vec![KAT]]);
         assert_eq!(dict.strokes_for("example"), vec![vec![KPA, TKAOEU]]);
-        assert!(dict.strokes_for("dog").is_empty());
+        assert!(dict.strokes_for("dog").is_empty(), "expected none");
     }
 
     /// A fresh temp directory holding one dictionary file with `json`, plus its cache directory.
@@ -1085,7 +1085,7 @@ mod tests {
         fs::write(&file, r#"{"KAT": "dog"}"#).unwrap();
         let changed = Dictionary::load_cached(&[&file], &cache, &Layout::plover());
         assert_eq!(changed.strokes_for("dog"), vec![vec![KAT]]);
-        assert!(changed.strokes_for("cat").is_empty());
+        assert!(changed.strokes_for("cat").is_empty(), "expected none");
         assert_eq!(
             cache_files(&cache),
             1,

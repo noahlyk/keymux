@@ -348,7 +348,7 @@ impl Renderer {
         let mut words = GlyphCache::new(bold, words_px);
 
         let paper_right = pad_x + paper_width;
-        let words_left = paper_right + stroke_px * 0.6;
+        let words_left = stroke_px.mul_add(0.6, paper_right);
         let words_right = width - pad_x;
 
         let natural_line = (words_px * LINE_SPACING).ceil();
@@ -3320,7 +3320,7 @@ mod tests {
         let pixmap = drawn(&mut renderer, &view);
         assert!(key_lit(&renderer, &pixmap, 1));
         view.hint = 0;
-        assert!(Renderer::lookup_strokes(&view).is_empty());
+        assert!(Renderer::lookup_strokes(&view).is_empty(), "expected none");
     }
 
     /// The brightest ink drawn in the columns `x0..x1`, above the query row (so only the results).

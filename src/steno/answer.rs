@@ -559,7 +559,7 @@ mod tests {
         let stroke = Ask { stroke_mode: true, ..ALL };
         assert_eq!(outlines(&ask("kapbd", stroke))[0].1, "KAPBD");
         let bad = ask("hello world", stroke);
-        assert!(bad.rows.is_empty());
+        assert!(bad.rows.is_empty(), "expected none");
         assert!(bad.problem.unwrap().contains("not stroke notation"));
     }
 
@@ -626,7 +626,7 @@ mod tests {
         let dir = std::env::temp_dir().join("keymux-answer-test-no-such-dir");
         let setup = setup_in(&dir);
         assert_eq!(setup.layer, None);
-        assert!(setup.layout.extra_keys().is_empty());
+        assert!(setup.layout.extra_keys().is_empty(), "expected none");
         assert_eq!(setup.roots, default_dictionaries(&dir));
         assert!(setup.keys_by_bit().unwrap().contains_key(&(1 << 1)));
     }

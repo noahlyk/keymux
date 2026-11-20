@@ -349,7 +349,7 @@ mod tests {
             1,
             "a.json is earlier, so it keeps KAT"
         );
-        assert!(dict.strokes_for("kitten").is_empty());
+        assert!(dict.strokes_for("kitten").is_empty(), "expected none");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -453,7 +453,7 @@ mod tests {
         parts.refresh(&files, &dir.join("cache"), &Layout::plover());
         let dict = parts.layered(&files);
         assert_eq!(dict.lookup(&[KAT]), None);
-        assert!(dict.strokes_for("cat").is_empty());
+        assert!(dict.strokes_for("cat").is_empty(), "expected none");
         assert_eq!(dict.strokes_for("dog").len(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -481,7 +481,7 @@ mod tests {
         let files = files(&dir, &["a.json", "z.rs"]);
         let mut parts = Parts::default();
         let report = parts.refresh(&files, &dir.join("cache"), &Layout::plover());
-        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        assert!(report.problems.is_empty(), "expected none");
         assert_eq!(parts.layered(&files).len(), 1);
         put(&dir.join("z.rs"), "// changed", 4);
         assert!(!parts.is_current(&files));
@@ -535,7 +535,7 @@ mod tests {
         assert!(dict.strokes_for("dog").is_empty(), "deleted outline");
         assert_eq!(dict.strokes_for("cat").len(), 1);
         assert_eq!(dict.completions("ca", 10), ["cat", "catalog"]);
-        assert!(dict.completions("ki", 10).is_empty());
+        assert!(dict.completions("ki", 10).is_empty(), "expected none");
         assert_eq!(dict.len(), 3, "KAT, TKOG (a deletion counts) and KWRAT");
         let mut listed: Vec<&str> = dict.iter().map(|(_, text)| text).collect();
         listed.sort_unstable();

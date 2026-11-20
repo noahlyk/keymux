@@ -478,7 +478,7 @@ mod tests {
         hub.seal();
         assert_eq!(hub.snapshot().generation, before, "nothing to redraw");
         hub.push_stroke(2, "-3 \"\"".into(), false);
-        assert!(hub.snapshot().tape[0].gone.is_empty());
+        assert!(hub.snapshot().tape[0].gone.is_empty(), "expected none");
         hub.clear_tape();
         hub.push_stroke(1, "\"a\"".into(), false);
         hub.push_stroke(2, "-1 \"\"".into(), false);

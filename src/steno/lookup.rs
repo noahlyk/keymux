@@ -670,9 +670,9 @@ mod tests {
         );
         assert_eq!(several.hint, several.strokes[0]);
         // Nothing found, nothing to play
-        assert!(typed("zzzz").view(&translator()).strokes.is_empty());
+        assert!(typed("zzzz").view(&translator()).strokes.is_empty(), "expected none");
         // A phrase's outline is a group per word, not a sequence to step through
-        assert!(typed("candy candy").view(&translator()).strokes.is_empty());
+        assert!(typed("candy candy").view(&translator()).strokes.is_empty(), "expected none");
     }
 
     #[test]

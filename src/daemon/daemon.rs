@@ -257,7 +257,7 @@ impl Daemon {
             );
 
             self.all_keyboards.insert(
-                kbd_id.clone(),
+                kbd_id,
                 KeyboardMeta {
                     name: kbd_name,
                     paths,

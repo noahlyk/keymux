@@ -178,10 +178,10 @@ impl Keyboard {
         } else {
             y
         };
-        let top = number_y + unit * NUMBER_BAR + gap;
+        let top = unit.mul_add(NUMBER_BAR, number_y) + gap;
         let pair_gap = (gap * PAIR_GAP).max(MIN_PAIR_GAP);
         let bottom = top + key_h + pair_gap;
-        let thumb = bottom + key_h + gap + unit * THUMB_DROP;
+        let thumb = unit.mul_add(THUMB_DROP, bottom + key_h + gap);
         let mut keys: [Rect; 23] = std::array::from_fn(|slot| {
             let (column, row, rows) = PLACES[slot];
             let (row_y, height) = match row {

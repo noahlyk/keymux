@@ -530,7 +530,7 @@ mod tests {
             screen.alive(7).to_vec()
         );
         screen.forget_before(8);
-        assert!(screen.alive(7).is_empty());
+        assert!(screen.alive(7).is_empty(), "expected none");
     }
 
     #[test]

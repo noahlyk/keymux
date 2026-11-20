@@ -711,7 +711,7 @@ mod tests {
         let plain = Keyboard::new(0.0, 0.0, 1000.0, &layout, &HashMap::new());
         let widened = Keyboard::new(0.0, 0.0, 1000.0, &layout, &with_column.overlay_overrides);
         let (without, problems) = resolve(&config, &layout, &plain);
-        assert!(problems.is_empty());
+        assert!(problems.is_empty(), "{problems:?}");
         let (with, problems) = resolve(&with_column, &layout, &widened);
         assert!(problems.is_empty(), "{problems:?}");
         // The same groups, none holding the star (nor the extra key)
@@ -932,7 +932,7 @@ mod tests {
         assert_eq!(chosen("TKPH"), [Some("M".to_owned()), Some("D".to_owned())]);
         // TP (F) and PW (B) share P and are the same size: the one listed first, B
         assert_eq!(chosen("TPW"), [Some("B".to_owned())]);
-        assert!(chosen("T").is_empty());
+        assert!(chosen("T").is_empty(), "expected none");
         // Two groups on different keys both show: TK and the right hand -PB
         assert_eq!(chosen("TK-PB").len(), 2);
     }
@@ -1006,7 +1006,7 @@ mod tests {
             merge_defaults: false,
             ..OverlayConfig::default()
         };
-        assert!(resolve(&none, &layout, &keyboard).0.is_empty());
+        assert!(resolve(&none, &layout, &keyboard).0.is_empty(), "expected none");
         let only_custom = OverlayConfig {
             merge_defaults: false,
             merges: vec![KeyMerge {
@@ -1022,7 +1022,7 @@ mod tests {
             merge_keys: false,
             ..only_custom
         };
-        assert!(resolve(&off, &layout, &keyboard).0.is_empty());
+        assert!(resolve(&off, &layout, &keyboard).0.is_empty(), "expected none");
     }
 
     #[test]
@@ -1048,7 +1048,7 @@ mod tests {
         // A thumb and a finger key are not neighbours either
         assert!(bad(&["W-", "A-"])[0].contains("next to each other"));
         // The same keys as a built-in group are fine: they replace it
-        assert!(bad(&["T-", "P-"]).is_empty());
+        assert!(bad(&["T-", "P-"]).is_empty(), "expected none");
     }
 
     fn labels(merges: &[Merge], keys: &str) -> Vec<String> {
@@ -1087,9 +1087,9 @@ mod tests {
     fn a_partial_press_leaves_keys_unmerged_and_ties_go_to_the_earlier_group() {
         let merges = merges(&OverlayConfig::default());
         // Only part of every group: nothing merges
-        assert!(labels(&merges, "S").is_empty());
-        assert!(labels(&merges, "TW").is_empty());
-        assert!(labels(&merges, "-FB").is_empty());
+        assert!(labels(&merges, "S").is_empty(), "expected none");
+        assert!(labels(&merges, "TW").is_empty(), "expected none");
+        assert!(labels(&merges, "-FB").is_empty(), "expected none");
         // S T K P with W missing: T K is D, S and P light on their own
         assert_eq!(labels(&merges, "STKP"), ["D"]);
         // S K R: SR (V) and KR (C) share R and are the same size: the earlier in the list, V
@@ -1110,7 +1110,7 @@ mod tests {
             })
             .collect();
         let chosen = select(&merges, (1 << 20) - 1);
-        assert!(!chosen.is_empty());
+        assert!(!chosen.is_empty(), "nothing chosen");
         let mut seen = 0u32;
         for i in chosen {
             assert_eq!(seen & merges[i].bits, 0, "no shared key");
@@ -1170,7 +1170,7 @@ mod tests {
             problems(&config, &layout)
         };
         assert!(with(false, &["T-", "H-"])[0].contains("bridge: true"));
-        assert!(with(true, &["T-", "H-"]).is_empty());
+        assert!(with(true, &["T-", "H-"]).is_empty(), "expected none");
         assert!(with(true, &["W-", "A-"])[0].contains("cannot be joined"));
         // Dropping a built-in bridged group works like any other
         let config = OverlayConfig {
@@ -1184,7 +1184,7 @@ mod tests {
         };
         let (layout, keyboard) = plover();
         let (merges, problems) = resolve(&config, &layout, &keyboard);
-        assert!(problems.is_empty());
+        assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(label_of(&merges, "SR"), None);
         assert_eq!(label_of(&merges, "KR").as_deref(), Some("C"));
     }

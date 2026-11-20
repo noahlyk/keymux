@@ -188,7 +188,7 @@ impl ConfigDisplay {
                 );
                 for kb in enabled_keyboards {
                     let display = match kb {
-                        EnabledKeyboardEntry::Bare(pattern) => pattern.clone(),
+                        EnabledKeyboardEntry::Bare(pattern) => pattern,
                         EnabledKeyboardEntry::Explicit(pattern, action) => {
                             let action_str = match action {
                                 EnableDisable::Enable => "Enable",

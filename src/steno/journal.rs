@@ -194,7 +194,6 @@ impl History {
                 if !text.is_empty() {
                     self.push_recorded(Origin::Typed(text), machine);
                 }
-                true
             }
             Origin::Erased(mut erased) => {
                 // The character this Backspace removed comes before the ones already erased
@@ -204,7 +203,6 @@ impl History {
                 };
                 erased.insert(0, ch);
                 self.push_recorded(Origin::Erased(erased), machine);
-                true
             }
             Origin::Stroke => {
                 self.state.translations.push(last);
@@ -212,9 +210,9 @@ impl History {
                     return false;
                 };
                 self.push_recorded(Origin::Erased(ch.to_string()), 0);
-                true
             }
         }
+        true
     }
 
     /// Record an entry that is already on screen, with its formatting made for it.

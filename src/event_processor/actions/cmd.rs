@@ -107,7 +107,7 @@ mod tests {
         // SAFETY: getuid has no preconditions and cannot fail
         let uid = unsafe { libc::getuid() };
         let (name, home) = user_info(uid).expect("the current user is in passwd");
-        assert!(!name.is_empty());
+        assert!(!name.is_empty(), "no name");
         assert!(home.is_absolute(), "{}", home.display());
     }
 }

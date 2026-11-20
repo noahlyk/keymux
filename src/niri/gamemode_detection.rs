@@ -238,13 +238,10 @@ fn check_is_game_env(pid: u32) -> bool {
                     return true;
                 }
             }
-            false
         }
-        Err(e) => {
-            debug!("Cannot read environ for PID {pid}: {e}");
-            false
-        }
+        Err(e) => debug!("Cannot read environ for PID {pid}: {e}"),
     }
+    false
 }
 
 /// Get process command line for more specific detection

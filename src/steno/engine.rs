@@ -1323,7 +1323,7 @@ mod tests {
         assert!(tape[0].unmatched);
         assert_eq!(tape[0].gone, [[0, 4]]);
         assert_eq!((tape[1].stroke, tape[1].text.as_str()), (0, "-4 \"kat\""));
-        assert!(tape[1].gone.is_empty());
+        assert!(tape[1].gone.is_empty(), "expected none");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

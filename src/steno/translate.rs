@@ -2745,7 +2745,7 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         let mut t = translator(COMMAND_JSON);
         commands_of(&mut t, "KAT");
         commands_of(&mut t, "PHR*UP");
-        assert!(commands_of(&mut t, "*").is_empty());
+        assert!(commands_of(&mut t, "*").is_empty(), "expected none");
         assert_eq!(t.text(), "");
     }
 
@@ -3172,7 +3172,7 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         assert_eq!(commands_of(&mut t, "-FP"), ["overlay_control:lookup:toggle"]);
         assert_eq!(t.text(), "");
         // A control that is not one runs nothing
-        assert!(commands_of(&mut t, "-B").is_empty());
+        assert!(commands_of(&mut t, "-B").is_empty(), "expected none");
     }
 
     const CONTROL_CLASS_JSON: &str = r#"{
