@@ -391,9 +391,6 @@
                     "~/.config/keymux/steno/user.json",
                     "~/.config/keymux/steno/main.json",
                 ],
-                // A stroke is completed after this long, even if a key is still held down.
-                // Normally strokes complete on release, so this is only a safety net.
-                stroke_timeout_ms: 1000,
                 // `*` stops at a barrier (a cursor key, a Backspace/Delete word operation,
                 // `{:back}`, `{:barrier}`): it does not reach past it to delete text that is
                 // no longer at the cursor, and does what undo does with nothing to undo instead

@@ -335,10 +335,6 @@ pub struct StenoConfig {
     /// `steno` folder in the config directory.
     #[serde(default)]
     pub dictionaries: Vec<String>,
-    /// Safety net for a key that never comes up: the stroke is finished after this
-    /// long. Strokes normally finish when the last key is released, with no delay.
-    #[serde(default = "default_stroke_timeout_ms")]
-    pub stroke_timeout_ms: u32,
     /// How long a stroke waits, in milliseconds, on a plugin's reading of a word that missed
     /// every dictionary. A reading that takes longer never holds up typing: the stroke is typed
     /// without it, and once the reading lands it replaces what the stroke typed, if that is
@@ -422,10 +418,6 @@ const fn default_repeat_rate_ms() -> u32 {
 
 fn default_steno_layout() -> String {
     "qwerty".to_string()
-}
-
-const fn default_stroke_timeout_ms() -> u32 {
-    5000
 }
 
 const fn default_plugin_deadline_ms() -> u32 {
@@ -2241,9 +2233,15 @@ mod tests {
             panic!("expected a steno layer");
         };
         assert_eq!(steno.layout, "qwerty");
-        assert_eq!(steno.stroke_timeout_ms, 5000);
         assert_eq!(steno.translation_timeout_ms, None);
         assert_eq!(steno.dictionaries.len(), 1);
+    }
+
+    #[test]
+    fn a_removed_stroke_timeout_ms_in_an_old_config_is_ignored() {
+        let layer: LayerConfig =
+            ron::from_str(r"(kind: Steno((stroke_timeout_ms: 5000, dictionaries: [])))").unwrap();
+        assert!(matches!(layer.kind, LayerKind::Steno(_)), "an old config still loads");
     }
 
     #[test]

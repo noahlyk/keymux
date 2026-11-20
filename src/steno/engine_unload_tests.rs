@@ -50,7 +50,6 @@ impl Rig {
             join_keys: Vec::new(),
             layout_overrides: HashMap::new(),
             dictionaries: vec![self.dict_dir.to_string_lossy().into_owned()],
-            stroke_timeout_ms: 5000,
             plugin_deadline_ms: 30,
             translation_timeout_ms: None,
             spaces_after: false,

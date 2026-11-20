@@ -139,8 +139,8 @@ impl Pump {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 // With no key to prompt them, timeouts resolve by themselves: a tap-dance
-                // held past its term, a one-shot modifier no key used, a stuck stroke, a held
-                // stroke repeating
+                // held past its term, a one-shot modifier no key used, a held stroke
+                // repeating
                 let tap_dance = keymap.check_dt_timeouts();
                 output::emit_result(sink, &mut self.pacer, tap_dance)?;
                 let one_shot = keymap.check_osm_timeouts();

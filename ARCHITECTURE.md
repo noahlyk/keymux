@@ -455,7 +455,7 @@ keyboard_overrides: {
 Steno is a layer kind: `kind: Steno((...))`. A steno layer captures its stroke keys instead of remapping them, groups them into strokes, and types the Plover dictionary text for each stroke.
 
 **Mechanics:**
-- **Strokes**: a stroke is the set of stroke keys pressed together. It completes when the keys come up. `stroke_timeout_ms` (default 5000) completes a stroke whose key never comes up.
+- **Strokes**: a stroke is the set of stroke keys pressed together. It completes when the keys come up. No clock ends a stroke: it is held as long as its keys are, and `stroke_timeout_ms` is no longer used (an old config that sets it still loads).
 - **Translation**: each completed stroke is translated immediately. A multi-stroke entry such as `KPA/TKAOEU` replaces the text of the earlier strokes when it matches, so text already typed can be rewritten (retro-correction).
 - **Undo**: the stroke `*` reverses the last translation, including any retro-correction. Space and Backspace are swallowed while there is text to undo, and act normally once nothing is left.
 - **Placeholder**: a stroke that matches nothing on its own but starts a longer entry types `_`. The next stroke either completes the entry and replaces the `_`, or doesn't and the `_` is removed. Space and undo also remove it.

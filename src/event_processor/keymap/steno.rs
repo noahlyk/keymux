@@ -25,7 +25,7 @@ fn steno_result(output: Option<StenoOutput>) -> ProcessResult {
 }
 
 impl KeymapProcessor {
-    /// Finish any steno stroke held past its timeout, or send the next repeat of a held one.
+    /// Pick up late steno work, or send the next repeat of a held stroke.
     /// Returns what to type, if anything.
     pub fn check_steno_timeouts(&mut self) -> ProcessResult {
         let now = Instant::now();

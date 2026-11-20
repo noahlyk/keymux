@@ -670,7 +670,6 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
         layout: "qwerty",
         layout_overrides: { "S-": Key(KC_Q) },   // optional: change individual stroke keys
         dictionaries: ["~/work/steno"],          // optional: files or folders, highest priority first
-        stroke_timeout_ms: 5000,                 // completes a stroke whose key never comes up
         plugin_deadline_ms: 30,                  // how long a stroke waits on a plugin's reading
     )),
     remaps: { KC_F10: TO("base") },              // non-stroke keys: remaps still work

@@ -191,7 +191,7 @@ impl StenoEngine {
         Ok(Self {
             keys,
             held_keys: HashSet::new(),
-            chord: ChordState::new(Duration::from_millis(u64::from(config.stroke_timeout_ms))),
+            chord: ChordState::new(),
             timing: Timing {
                 double_tap_window: Duration::from_millis(u64::from(config.double_tap_window_ms)),
                 repeat_delay: Duration::from_millis(u64::from(config.repeat_delay_ms)),
@@ -340,7 +340,7 @@ impl StenoEngine {
             self.wake();
             self.held_keys.insert(key);
             let before = self.chord.held();
-            self.chord.press(bit, now);
+            self.chord.press(bit);
             if self.chord.held() != before {
                 // Another key ends a repeat. It starts a new one only if this is the last
                 // stroke again, pressed soon after it.
@@ -419,11 +419,10 @@ impl StenoEngine {
         .flatten()
     }
 
-    /// When [`Self::tick`] next has something to do without a key event: a stuck stroke to
-    /// flush, a held double tap to start repeating, or the next repeat to send.
+    /// When [`Self::tick`] next has something to do without a key event: a held double tap to
+    /// start repeating, the next repeat to send, or a late plugin reading to look for.
     #[must_use]
     pub fn next_deadline(&self) -> Option<Instant> {
-        let stuck = self.chord.deadline();
         // Armed the same way `repeat_tick` fires, so a deadline is never one it won't act on
         let repeat_starts = self
             .arming
@@ -435,15 +434,16 @@ impl StenoEngine {
             .translator
             .has_late()
             .then(|| Instant::now() + LATE_POLL);
-        [stuck, repeat_starts, next_repeat, late]
+        [repeat_starts, next_repeat, late]
             .into_iter()
             .flatten()
             .min()
     }
 
-    /// Check the stuck-key timeout and pick up finished dictionary loads and plugin readings
-    /// that came too late. Returns output if a stuck stroke was flushed, if strokes queued
-    /// during loading were just translated, or if a late reading replaced what its stroke typed.
+    /// Pick up finished dictionary loads and plugin readings that came too late, and send the
+    /// next repeat of a held stroke. Returns output if strokes queued during loading were just
+    /// translated, if a late reading replaced what its stroke typed, or if a repeat is due.
+    /// A held stroke is never sent by the clock: only its keys coming up (or first-up) sends it.
     pub fn tick(&mut self, now: Instant) -> Option<StenoOutput> {
         self.sync_unload();
         if let Some(output) = self.poll_dictionary() {
@@ -451,12 +451,6 @@ impl StenoEngine {
         }
         if let Some(output) = self.settle_late() {
             return Some(output);
-        }
-        if let Some(stroke) = self.chord.tick(now) {
-            self.arming = None;
-            self.repeating = None;
-            self.last = Some((stroke, now));
-            return self.on_stroke(stroke, false);
         }
         self.repeat_tick(now)
     }
@@ -874,7 +868,7 @@ impl StenoEngine {
         Self {
             keys: build_key_map(&preset("qwerty").unwrap(), overrides).unwrap(),
             held_keys: HashSet::new(),
-            chord: ChordState::new(Duration::from_secs(1)),
+            chord: ChordState::new(),
             timing: Timing::default(),
             last: None,
             arming: None,
@@ -1057,6 +1051,28 @@ mod tests {
     }
 
     #[test]
+    fn a_chord_held_for_hours_is_sent_only_when_a_key_comes_up() {
+        let mut engine = engine_with_dict(r#"{"KAT": "cat"}"#);
+        let now = Instant::now();
+        let keys = [1 << 2, 1 << 7, 1 << 18].map(|bit| key_for(&engine, bit));
+        for key in keys {
+            engine.press(key, now);
+        }
+        // Hours later, still held: no tick sends it, and nothing asks to be woken for it
+        let later = now + Duration::from_hours(6);
+        let ticked = engine.tick(later);
+        assert_eq!(ticked, None, "a held stroke was sent by the clock");
+        assert_eq!(engine.next_deadline(), None, "nothing is due while keys are held");
+        assert_eq!(engine.release_at(keys[1], later), None);
+        assert_eq!(engine.release_at(keys[0], later), None);
+        // It still sends normally when the last key comes up
+        assert_eq!(
+            engine.release_at(keys[2], later),
+            Some(StenoOutput::Type("cat".to_string()))
+        );
+    }
+
+    #[test]
     fn unknown_stroke_types_its_keys() {
         let mut engine = engine_with_dict(r#"{"KAT": "cat"}"#);
         let now = Instant::now();
@@ -1124,7 +1140,6 @@ mod tests {
             join_keys: Vec::new(),
             layout_overrides: HashMap::new(),
             dictionaries: Vec::new(),
-            stroke_timeout_ms: 5000,
             plugin_deadline_ms: 30,
             translation_timeout_ms: None,
             spaces_after: false,
