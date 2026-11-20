@@ -262,7 +262,7 @@ fn an_unload_closes_the_open_lookup_and_a_search_in_flight_keeps_its_own_copy() 
 fn a_stroke_is_what_opens_a_lookup_after_an_unload() {
     let rig = Rig::new("lookup-open");
     let mut dict = fs::read_to_string(rig.dict_dir.join("01.json")).unwrap();
-    dict = dict.replace("\"TKPW\"", "\"-FP\": \"{plover:lookup}\", \"TKPW\"");
+    dict = dict.replace("\"TKPW\"", "\"-FP\": \"{:lookup}\", \"TKPW\"");
     fs::write(rig.dict_dir.join("01.json"), dict).unwrap();
     let mut engine = rig.engine();
     engine.wait_until_loaded();

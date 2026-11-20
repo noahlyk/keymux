@@ -172,6 +172,14 @@ pub fn meta_to_action(meta: &str, ctx: &Context) -> Action {
         // (see `overlay_control`; they type nothing)
         // keymux's own `{:engine:unload}` (see `engine_control`; it types nothing)
         super::engine_control::NAME => super::engine_control::meta_action(ctx, param),
+        // keymux's own `{:lookup}` opens the live lookup, as its legacy alias `{plover:lookup}` does (the same engine
+        // command, so it is the same stroke class and tape line). `{:lookup:open|close|toggle}` are
+        // the overlay controls below.
+        "lookup" if param.trim().is_empty() => {
+            let mut action = ctx.copy_last_action();
+            action.command = Some("lookup".to_owned());
+            action
+        }
         name if super::overlay_control::NAMES.contains(&name) => {
             super::overlay_control::meta_action(ctx, name, param)
         }

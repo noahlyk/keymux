@@ -1,6 +1,9 @@
 //! Runtime overlay controls a dictionary entry can carry: `{:overlay:hide}`, `{:tape:toggle}`,
 //! `{:keyboard:show}`, `{:tape:clear}`, `{:lookup:toggle}`.
 //!
+//! The bare `{:lookup}` is not one of these: it makes the engine command `lookup`
+//! ([`super::meta`]), the same as the legacy alias `{plover:lookup}`.
+//!
 //! They change what the overlay shows right now and nothing else: not the `overlay:` config,
 //! not what it shows when it starts, not any file. The state lives in the running overlay
 //! process ([`ViewState`]), so a restart of it goes back to the configured start, and a config
@@ -49,20 +52,22 @@ pub enum Control {
 }
 
 /// The engine command these metas make, `overlay_control:tape:clear`. It has a name of its own
-/// because `lookup` is also Plover's command `{PLOVER:LOOKUP}`.
+/// because `lookup` is also the engine command `{:lookup}` opens (and its legacy alias `{PLOVER:LOOKUP}`).
 pub const COMMAND: &str = "overlay_control";
 
 /// The names the metas go by, which `Translator::is_command` also uses to tell them from text.
 pub const NAMES: [&str; 4] = ["overlay", "tape", "keyboard", "lookup"];
 
-/// Whether an entry's text carries one of these metas (`{:overlay:`, ...), which like the engine
-/// commands must never repeat when the stroke is held.
+/// Whether an entry's text carries one of these metas (`{:overlay:`, ...) or the bare `{:lookup}`,
+/// which like the engine commands must never repeat when the stroke is held.
 #[must_use]
+#[allow(clippy::literal_string_with_formatting_args)] // a marker, not a format
 pub fn is_in(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    NAMES
-        .iter()
-        .any(|name| lower.contains(&format!("{{:{name}:")))
+    lower.contains("{:lookup}")
+        || NAMES
+            .iter()
+            .any(|name| lower.contains(&format!("{{:{name}:")))
 }
 
 /// The control `name` and `param` mean (`tape`, `clear`), or `None` for anything else.

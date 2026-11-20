@@ -378,7 +378,7 @@ pub struct StenoConfig {
     /// `{:firstup}`. Those then send on the last key up like any other.
     #[serde(default)]
     pub disable_first_up: bool,
-    /// Turn off the stroke classes: entries carrying `{:transparent}` (and `{plover:lookup}`,
+    /// Turn off the stroke classes: entries carrying `{:transparent}` (and `{:lookup}`,
     /// which is transparent without it) become ordinary strokes in the history, and barriers
     /// (cursor keys, `{:barrier}`) no longer end the outline context or stop undo.
     #[serde(default)]

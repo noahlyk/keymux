@@ -82,7 +82,7 @@ pub struct Translation {
     /// What the formatter made of it
     pub formatting: Vec<Action>,
     pub is_retrospective_command: bool,
-    /// Its engine command (`{plover:lookup}`, ...) already ran. A command runs once, when the
+    /// Its engine command (`{:lookup}`, ...) already ran. A command runs once, when the
     /// stroke that wrote it is struck, and never again: not when the translation is put back by
     /// redo, nor when undoing a longer entry puts back the translations it replaced. The
     /// formatter sets this the first time it sends the command and drops the command afterwards.
@@ -253,11 +253,12 @@ fn undo_or_combo(argument: &str) -> String {
 
 /// Whether a dictionary entry makes a transparent stroke: it carries `{:transparent}`, it is an
 /// overlay control (`{:overlay:toggle}`, ...), or it is
-/// nothing but the command that opens the live lookup.
+/// nothing but the command that opens the live lookup (`{:lookup}`; `{plover:lookup}` is its legacy alias).
 #[allow(clippy::literal_string_with_formatting_args)] // a marker, not a format
 fn is_transparent_mapping(text: &str) -> bool {
     text.contains("{:transparent}")
         || text.trim().eq_ignore_ascii_case("{plover:lookup}")
+        || text.trim().eq_ignore_ascii_case("{:lookup}")
         || super::overlay_control::is_in(text)
         || super::engine_control::is_in(text)
 }
@@ -697,7 +698,7 @@ impl Translator {
     /// Translate a finished stroke and say what to do with the keyboard.
     ///
     /// Strokes come in three classes. A *transparent* stroke (an entry carrying
-    /// `{:transparent}`, or one that is just `{plover:lookup}`) runs its commands and key
+    /// `{:transparent}`, or one that is just `{:lookup}`) runs its commands and key
     /// combinations and is otherwise not there: not added to the history, so it flushes nothing,
     /// resets no pending join, spacing or capitalisation, cannot be undone, and does not clear
     /// what undo left to redo. A *barrier* (a key combination that moves the cursor or edits
@@ -2620,6 +2621,7 @@ pub extern "C" fn joins(bits: i64) -> i32 {
     #[test]
     #[allow(clippy::literal_string_with_formatting_args)] // a command, not a format
     fn engine_commands_are_told_from_other_entries() {
+        // `{PLOVER:lookup}` is the legacy alias of `{:lookup}`, kept for other people's dictionaries
         let t =
             translator(r#"{"KAT": "cat", "TKOG": "{plover:toggle}", "H-L": "{PLOVER:lookup}"}"#);
         assert!(!t.is_command(stroke("KAT")));
@@ -2694,7 +2696,7 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         assert_eq!(type_strokes(&json, &["KAT"]), "KA-T");
     }
 
-    /// The commands a stroke made, as written (`LOOKUP` for `{PLOVER:LOOKUP}`).
+    /// The commands a stroke made, as written (`lookup` for `{:lookup}`; a `{PLOVER:...}` command as written).
     fn commands_of(t: &mut Translator, stroke_text: &str) -> Vec<String> {
         t.stroke(stroke(stroke_text))
             .map(StenoOutput::into_ops)
@@ -2708,19 +2710,19 @@ pub extern "C" fn joins(bits: i64) -> i32 {
     }
 
     const COMMAND_JSON: &str =
-        r#"{"KAT": "cat", "TKOG": "dog", "PHR*UP": "{PLOVER:LOOKUP}", "PHR*UP/TKOG": "lookdog"}"#;
+        r#"{"KAT": "cat", "TKOG": "dog", "PHR*UP": "{:lookup}", "PHR*UP/TKOG": "lookdog"}"#;
 
     #[test]
     fn a_command_stroke_runs_when_struck() {
         let mut t = translator(COMMAND_JSON);
-        assert_eq!(commands_of(&mut t, "PHR*UP"), ["LOOKUP"]);
+        assert_eq!(commands_of(&mut t, "PHR*UP"), ["lookup"]);
     }
 
     #[test]
     fn striking_a_command_stroke_again_runs_it_again() {
         let mut t = translator(COMMAND_JSON);
-        assert_eq!(commands_of(&mut t, "PHR*UP"), ["LOOKUP"]);
-        assert_eq!(commands_of(&mut t, "PHR*UP"), ["LOOKUP"]);
+        assert_eq!(commands_of(&mut t, "PHR*UP"), ["lookup"]);
+        assert_eq!(commands_of(&mut t, "PHR*UP"), ["lookup"]);
     }
 
     #[test]
@@ -2764,7 +2766,7 @@ pub extern "C" fn joins(bits: i64) -> i32 {
     #[allow(clippy::literal_string_with_formatting_args)] // markers, not formats
     const CLASS_JSON: &str = r#"{
         "THAS": "thanks", "THAS/+EUFG": "thanksgiving", "TKOG": "dog", "KAT": "cat",
-        "PHRUP": "{plover:lookup}", "STKPW": "{:transparent}{plover:focus}",
+        "PHRUP": "{:lookup}", "STKPW": "{:transparent}{plover:focus}",
         "TKPWA": "{:transparent}ignored text",
         "SP": "{^ ^}", "*": "=undo", "R-R": "{#Return}", "HR-L": "{#Left}", "PWA*RG": "{:barrier}",
         "R*L": "{#Right}{:nobarrier}", "KA*PD": "{#Control_L(c)}", "RA*P": "{:back}"
@@ -2857,7 +2859,7 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         assert!(!t.joins(joined_stroke("+EUFG")));
         // A continuation stroke with no joined outline falls back to its own entry, so a
         // suffix entry attaches with just its stroke - with or without the key declared
-        let suffix = r#"{"KAT": "cat", "+-D": "{^ed}", "THAS": "thanks", "THAS/+-D": "thanked", "PHRUP": "{plover:lookup}"}"#;
+        let suffix = r#"{"KAT": "cat", "+-D": "{^ed}", "THAS": "thanks", "THAS/+-D": "thanked", "PHRUP": "{:lookup}"}"#;
         for (name, keys) in [("suffix-none", &[][..]), ("suffix-decl", &['+'][..])] {
             let mut t = config_join_translator(suffix, name, keys);
             assert_eq!(run(&mut t, &["KAT", "+-D"]), "catted", "{name}");
@@ -2991,7 +2993,7 @@ pub extern "C" fn joins(bits: i64) -> i32 {
 
     #[allow(clippy::literal_string_with_formatting_args)] // markers, not formats
     const UNDO_OR_JSON: &str = r#"{
-        "KAT": "cat", "TKOG": "dog", "PHRUP": "{plover:lookup}", "STKPW": "{:transparent}{plover:focus}",
+        "KAT": "cat", "TKOG": "dog", "PHRUP": "{:lookup}", "STKPW": "{:transparent}{plover:focus}",
         "HR-L": "{#Left}", "PWA*RG": "{:barrier}", "TKEL": "{#Control_L(BackSpace)}",
         "*U": "{:undo_or:Control_L(a)}", "*E": "{:undo_or:ctrl+backspace}",
         "*EU": "{:undo_or_ctrl+backspace}", "*P": "{:undo_or}", "*": "=undo", "R-R": "{:redo}"
@@ -3173,6 +3175,16 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         assert_eq!(t.text(), "");
         // A control that is not one runs nothing
         assert!(commands_of(&mut t, "-B").is_empty(), "expected none");
+    }
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // commands, not formats
+    fn the_bare_lookup_command_opens_the_lookup_like_its_plover_alias() {
+        let mut t = translator(r#"{"-FPL": "{:lookup}", "-FP": "{plover:lookup}", "KAT": "cat"}"#);
+        assert!(t.is_command(stroke("-FPL")));
+        assert_eq!(commands_of(&mut t, "-FPL"), ["lookup"]);
+        assert_eq!(t.text(), "");
+        assert_eq!(commands_of(&mut t, "-FP"), ["lookup"]);
     }
 
     const CONTROL_CLASS_JSON: &str = r#"{

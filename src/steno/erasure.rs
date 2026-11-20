@@ -24,7 +24,7 @@ pub enum Piece {
     Erase(usize),
     /// A quoted text: each character it typed, as the tape writes it (`\n` for a newline)
     Text(Vec<String>),
-    /// An engine command (`{plover:lookup}`): changes no text
+    /// An engine command (`{:lookup}`): changes no text
     Command(String),
     /// A key pressed (`KC_ENT`): seals everything before it
     Keys(String),

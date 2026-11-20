@@ -560,7 +560,7 @@ fn the_lookup_stroke_turns_the_keys_into_qwerty_input_to_a_query_and_nothing_is_
     // KAT opens the lookup through the dictionary, as in Plover
     let mut p = fixture.processor_with(
         CONFIG,
-        r#"{"KAT": "{PLOVER:LOOKUP}", "-T": "the", "KAPB": "can", "KAPBD": "candy", "KAPBL": "candle"}"#,
+        r#"{"KAT": "{:lookup}", "-T": "the", "KAPB": "can", "KAPBD": "candy", "KAPBL": "candle"}"#,
     );
     let hub = private_hub();
     p.set_overlay_hub(hub);
@@ -659,7 +659,7 @@ const LOOKUP_LAYERS_CONFIG: &str = r#"(
 fn open_lookup_with_layers(
     fixture: &Fixture,
 ) -> (KeymapProcessor, &'static crate::steno::overlay::OverlayHub) {
-    let mut p = fixture.processor_with(LOOKUP_LAYERS_CONFIG, r#"{"KAT": "{PLOVER:LOOKUP}"}"#);
+    let mut p = fixture.processor_with(LOOKUP_LAYERS_CONFIG, r#"{"KAT": "{:lookup}"}"#);
     let hub = private_hub();
     p.set_overlay_hub(hub);
     enter_steno(&mut p);
@@ -734,7 +734,7 @@ fn leaving_steno_in_the_middle_of_a_lookup_closes_it_and_does_not_keep_eating_ke
     let fixture = Fixture::new("lookup-leave");
     let mut p = fixture.processor_with(
         CONFIG,
-        r#"{"KAT": "{PLOVER:LOOKUP}", "-T": "the", "KAPB": "can"}"#,
+        r#"{"KAT": "{:lookup}", "-T": "the", "KAPB": "can"}"#,
     );
     let hub = private_hub();
     p.set_overlay_hub(hub);

@@ -274,11 +274,11 @@ surface gone when the process stops.
 
 ## 6. Live lookup — `src/steno/lookup.rs` [done, tested; not yet tried on real hardware]
 
-"Midway through typing, forgot the stroke for a word." A `{PLOVER:LOOKUP}` dictionary entry opens a
+"Midway through typing, forgot the stroke for a word." A `{:lookup}` dictionary entry opens a
 submode **inside the steno engine**: the layer doesn't change, but while it is open the layer's
 keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches the app.
 
-- **Trigger.** An ordinary dictionary entry, as in Plover (`run_command` handles `lookup`).
+- **Trigger.** An ordinary dictionary entry (`run_command` handles `lookup`).
   There is no config setting for it any more. The stroke is *transparent* (see the README's
   "Stroke classes"): it runs the command but never enters the translation history, so a join
   such as `THAS` / lookup / `+EUFG` still joins, and `*` skips it. It is a dimmed line on the
@@ -361,7 +361,7 @@ keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches 
 
 - **Parse and dispatch.** `steno/overlay_control.rs` parses them. `meta.rs` turns each into an
   action with no text and the engine command `overlay_control:<name>:<param>` (a name of its own,
-  because `lookup` is also Plover's command), so they run once, never repeat when held
+  because `lookup` is also the engine command `{:lookup}`), so they run once, never repeat when held
   (`Translator::is_command` knows them), stay off the tape and keep the formatting state around
   them. They are *transparent* strokes (`is_transparent_mapping` recognises them, so no history
   entry and a join passes over them); only the engine keeps them off the tape, where other

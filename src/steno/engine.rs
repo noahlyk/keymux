@@ -1425,7 +1425,7 @@ mod tests {
     #[test]
     #[allow(clippy::literal_string_with_formatting_args)] // a command, not a format
     fn a_command_stroke_never_repeats() {
-        let mut engine = engine_with_dict(r#"{"KAT": "{plover:lookup}"}"#);
+        let mut engine = engine_with_dict(r#"{"KAT": "{:lookup}"}"#);
         let keys = kat_keys(&engine);
         let ms = Duration::from_millis;
         let t0 = Instant::now();
@@ -1468,7 +1468,7 @@ mod tests {
     #[test]
     #[allow(clippy::literal_string_with_formatting_args)] // a command, not a format
     fn the_lookup_stroke_is_a_transparent_line_on_the_tape_and_opens_the_lookup() {
-        let (mut engine, hub) = engine_with_hub(r#"{"PHRUP": "{plover:lookup}", "KAT": "cat"}"#);
+        let (mut engine, hub) = engine_with_hub(r#"{"PHRUP": "{:lookup}", "KAT": "cat"}"#);
         engine.translate(stroke_of("KAT"), false);
         engine.translate(stroke_of("PHRUP"), false);
         assert!(engine.lookup_active());
@@ -1486,7 +1486,7 @@ mod tests {
     #[test]
     #[allow(clippy::literal_string_with_formatting_args)] // a command, not a format
     fn with_the_classes_off_the_lookup_stroke_is_off_the_tape_as_before() {
-        let (mut engine, hub) = engine_with_hub(r#"{"PHRUP": "{plover:lookup}"}"#);
+        let (mut engine, hub) = engine_with_hub(r#"{"PHRUP": "{:lookup}"}"#);
         engine.translator.set_stroke_classes(false);
         engine.translate(stroke_of("PHRUP"), false);
         assert!(engine.lookup_active());
@@ -1537,7 +1537,7 @@ mod tests {
     #[test]
     #[allow(clippy::literal_string_with_formatting_args)] // a command, not a format
     fn keys_typed_into_an_open_lookup_never_reach_the_translator_or_tape() {
-        let (mut engine, hub) = engine_with_hub(r#"{"PHRUP": "{plover:lookup}", "KAT": "cat"}"#);
+        let (mut engine, hub) = engine_with_hub(r#"{"PHRUP": "{:lookup}", "KAT": "cat"}"#);
         engine.translate(stroke_of("PHRUP"), false);
         for c in "kat".chars() {
             engine.lookup_input(LookupKey::Char(c));

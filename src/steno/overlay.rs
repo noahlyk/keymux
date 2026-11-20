@@ -421,10 +421,11 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // a command, not a format
     fn a_transparent_stroke_is_a_marked_line_in_the_same_run() {
         let hub = OverlayHub::default();
         hub.push_stroke(0b1, "\"a\"".into(), false);
-        hub.push_transparent(0b10, "{plover:lookup}".into());
+        hub.push_transparent(0b10, "{:lookup}".into());
         hub.push_stroke(0b100, "\"b\"".into(), false);
         let flags: Vec<bool> = hub.snapshot().tape.iter().map(|e| e.transparent).collect();
         assert_eq!(flags, [false, true, false]);
