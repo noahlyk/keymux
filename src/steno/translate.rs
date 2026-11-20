@@ -667,17 +667,18 @@ impl Translator {
         journal::lock(&self.shared).screen.clone()
     }
 
-    /// Whether the dictionary entry for this stroke alone carries `{:firstup}`: that stroke is
-    /// sent when its first key comes up instead of its last.
+    /// Whether the dictionary entry for this stroke alone carries `{:firstup}` or
+    /// `{:firstup:except=KEYS}`: that stroke is sent when its first key comes up instead of its
+    /// last. `Some(exempt)` if it does, the stroke bits whose coming up does not send it (`0`
+    /// for the plain marker); an exception list that does not parse as one stroke of the layout
+    /// exempts nothing, so the entry is then plain `{:firstup}`.
     #[must_use]
-    #[allow(clippy::literal_string_with_formatting_args)] // a translation marker, not a format
-    pub fn wants_first_up(&self, stroke: u32) -> bool {
+    pub fn first_up_exempt(&self, stroke: u32) -> Option<u32> {
         // The dictionary files alone: a plugin's reading is a guess at a word, never a marker,
         // and this is asked on every key that comes up mid-stroke
-        self.dict
-            .as_dictionary()
-            .lookup(&[stroke])
-            .is_some_and(|text| text.contains("{:firstup}"))
+        let text = self.dict.as_dictionary().lookup(&[stroke])?;
+        let (_, _, keys) = super::meta::first_up_marker(text)?;
+        Some(keys.and_then(|keys| self.dict.layout().parse_stroke(keys.trim())).unwrap_or(0))
     }
 
     /// Whether the stroke makes an engine command (`{plover:...}`), which must never repeat.
@@ -2653,9 +2654,24 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         assert_eq!(type_strokes(json, &["KAT", "-S"]), "cats");
         assert_eq!(type_strokes(json, &["KAT", "H-L", "TKOG"]), "catdog");
         let t = translator(json);
-        assert!(t.wants_first_up(stroke("KAT")));
-        assert!(t.wants_first_up(stroke("TKOG")));
-        assert!(!translator(r#"{"KAT": "cat"}"#).wants_first_up(stroke("KAT")));
+        assert_eq!(t.first_up_exempt(stroke("KAT")), Some(0));
+        assert_eq!(t.first_up_exempt(stroke("TKOG")), Some(0));
+        assert_eq!(translator(r#"{"KAT": "cat"}"#).first_up_exempt(stroke("KAT")), None);
+    }
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // translation markers, not formats
+    fn the_first_up_exception_list_parses_with_or_without_a_hyphen_and_types_nothing() {
+        let json = r#"{"KAT": "{:firstup:except=T}cat{^}", "TKOG": "{:firstup:except=-FRPBLGTS}{^}dog", "-S": "{:firstup:except=}s", "H-L": "{:firstup:except=QQ}hl", "A": "{:firstupx}a"}"#;
+        let t = translator(json);
+        assert_eq!(t.first_up_exempt(stroke("KAT")), Some(stroke("T")));
+        assert_eq!(t.first_up_exempt(stroke("TKOG")), Some(stroke("-FRPBLGTS")));
+        assert_eq!(stroke("-FRPBLGTS"), stroke("FRPBLGTS"));
+        // Malformed lists are plain `{:firstup}`; a near-miss name is no marker
+        assert_eq!(t.first_up_exempt(stroke("-S")), Some(0));
+        assert_eq!(t.first_up_exempt(stroke("H-L")), Some(0));
+        assert_eq!(t.first_up_exempt(stroke("A")), None);
+        assert_eq!(type_strokes(json, &["KAT", "TKOG"]), "catdog");
     }
 
     #[test]

@@ -930,6 +930,12 @@ impl Chain {
             })
     }
 
+    /// The layout strokes are parsed with.
+    #[must_use]
+    pub const fn layout(&self) -> &Layout {
+        &self.layout
+    }
+
     /// Whether the stroke in progress should be sent now, with `held` still down: any plugin
     /// says so through [`Plugin::send_early`]. `false` with no plugin that exports it.
     #[must_use]

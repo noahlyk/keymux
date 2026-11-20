@@ -352,11 +352,11 @@ fn phrase_row(layout: &Layout, base: &Translator, phrase: &str) -> LookupRow {
 }
 
 /// A command as the lookup shows it: the entry's text without the markers that only say how it
-/// repeats or joins (`{:firstup}`, `{:transparent}`), which are not what it does.
+/// repeats or joins (`{:firstup}`, `{:firstup:except=KEYS}`, `{:transparent}`), which are not what it does.
 // The markers are dictionary metas, not format strings.
 #[allow(clippy::literal_string_with_formatting_args)]
 fn command_text(text: &str) -> String {
-    let shown = text.replace("{:firstup}", "").replace("{:transparent}", "");
+    let shown = super::meta::strip_first_up(text).replace("{:transparent}", "");
     if shown.is_empty() {
         text.to_string()
     } else {

@@ -17,6 +17,33 @@ pub(crate) struct Meta<'a> {
     pub param: &'a str,
 }
 
+/// A `{:firstup}` or `{:firstup:except=KEYS}` marker in an entry's text: where it starts and ends
+/// (byte offsets) and the `KEYS` text of the exception form, `None` for the plain one.
+#[must_use]
+pub(crate) fn first_up_marker(text: &str) -> Option<(usize, usize, Option<&str>)> {
+    const HEAD: &str = "{:firstup";
+    text.match_indices(HEAD).find_map(|(start, _)| {
+        let rest = &text[start + HEAD.len()..];
+        if rest.starts_with('}') {
+            return Some((start, start + HEAD.len() + 1, None));
+        }
+        let keys = rest.strip_prefix(":except=")?;
+        let len = keys.find('}')?;
+        let end = start + HEAD.len() + ":except=".len() + len + 1;
+        Some((start, end, Some(&keys[..len])))
+    })
+}
+
+/// `text` without its `{:firstup}` / `{:firstup:except=KEYS}` markers.
+#[must_use]
+pub(crate) fn strip_first_up(text: &str) -> String {
+    let mut rest = text.to_string();
+    while let Some((start, end, _)) = first_up_marker(&rest) {
+        rest.replace_range(start..end, "");
+    }
+    rest
+}
+
 fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
     let head = text.get(..prefix.len())?;
     head.eq_ignore_ascii_case(prefix)
@@ -158,8 +185,9 @@ pub fn meta_to_action(meta: &str, ctx: &Context) -> Action {
         }
         // keymux's own: `{:back}` or `{:back:3}` erases that many characters of what was typed
         "back" => meta_back(ctx, param),
-        // keymux's own: `{:firstup}` marks a stroke the engine sends when its first key comes up.
-        // It types nothing and changes nothing around it.
+        // keymux's own: `{:firstup}` marks a stroke the engine sends when its first key comes up,
+        // `{:firstup:except=KEYS}` one that sends when the first key not in KEYS comes up (read by
+        // `first_up_marker`). It types nothing and changes nothing around it.
         "firstup" => ctx.copy_last_action(),
         // keymux's own stroke classes (see `Translator::stroke`): `{:transparent}` is a stroke the
         // history never sees, `{:barrier}` / `{:nobarrier}` say that a stroke does or does not
@@ -516,6 +544,18 @@ fn meta_retro_currency(ctx: &Context, dict_format: &str) -> Action {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // markers, not formats
+    fn the_first_up_markers_are_found_and_stripped_for_display() {
+        let text = "{:firstup:except=-FRPBLGTS}{^}{#super(1)}{^}";
+        assert_eq!(first_up_marker(text), Some((0, 27, Some("-FRPBLGTS"))));
+        assert_eq!(first_up_marker("x{:firstup}"), Some((1, 11, None)));
+        assert_eq!(first_up_marker("{:firstupx}{:firstup:other}"), None);
+        assert_eq!(strip_first_up(text), "{^}{#super(1)}{^}");
+        assert_eq!(strip_first_up("{:firstup}{:transparent}{:firstup}"), "{:transparent}");
+        assert_eq!(strip_first_up("{:firstup:except=T}"), "");
+    }
+
     use super::*;
 
     fn name_and_param(meta: &str) -> Option<(String, String)> {

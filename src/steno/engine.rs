@@ -400,7 +400,8 @@ impl StenoEngine {
     }
 
     /// A key came up with others still down. A stroke whose dictionary entry carries
-    /// `{:firstup}` is sent now, or one a plugin's `send_early` asks for (a theory's sticky key,
+    /// `{:firstup}` is sent now (with `{:firstup:except=KEYS}`, only when a key outside KEYS came
+    /// up: an exempt key coming up first sends nothing and the chord keeps waiting), or one a plugin's `send_early` asks for (a theory's sticky key,
     /// say), and the keys still down wait for another key to go with them.
     fn sent_early(&mut self, released: u32) -> Option<u32> {
         let (held, stroke) = (self.chord.held(), self.chord.pending());
@@ -408,7 +409,11 @@ impl StenoEngine {
             && released != 0
             && held != 0
             && self.chord.is_fresh()
-            && ((self.timing.first_up && self.translator.wants_first_up(stroke))
+            && ((self.timing.first_up
+                && self
+                    .translator
+                    .first_up_exempt(stroke)
+                    .is_some_and(|exempt| released & !exempt != 0))
                 || self.translator.sends_early(held, stroke)))
         .then(|| self.chord.send_early())
         .flatten()
@@ -1244,6 +1249,60 @@ mod tests {
         }
         assert_eq!(engine.release(a), None);
         assert_eq!(engine.release(k), None);
+    }
+
+    const EXCEPT_DICT: &str = r#"{"KAT": "cat{:firstup:except=-T}"}"#;
+
+    #[test]
+    fn lifting_an_exempt_key_first_sends_nothing_and_the_first_other_key_up_sends_the_whole_stroke() {
+        let mut engine = engine_with_dict(EXCEPT_DICT);
+        let [k, a, t] = kat_keys(&engine);
+        let now = Instant::now();
+        for key in [k, a, t] {
+            engine.press(key, now);
+        }
+        assert_eq!(engine.release(t), None);
+        // Pressing the exempt key again changes nothing: it is still part of the stroke
+        engine.press(t, now);
+        assert_eq!(engine.release(t), None);
+        assert!(typed(engine.release(a)).contains("cat"));
+        // Held keys now wait as with plain `{:firstup}`
+        assert_eq!(engine.release(k), None);
+    }
+
+    #[test]
+    fn an_exception_list_sends_on_the_first_other_key_while_the_exempt_key_is_still_down() {
+        let mut engine = engine_with_dict(EXCEPT_DICT);
+        let [k, a, t] = kat_keys(&engine);
+        let now = Instant::now();
+        for key in [k, a, t] {
+            engine.press(key, now);
+        }
+        assert!(typed(engine.release(k)).contains("cat"));
+        assert_eq!(engine.release(a), None);
+        assert_eq!(engine.release(t), None);
+    }
+
+    #[test]
+    fn a_chord_of_only_exempt_keys_is_sent_on_the_last_key_up() {
+        let mut engine = engine_with_dict(r#"{"T": "tee{:firstup:except=T}"}"#);
+        let t = key_for(&engine, 1 << crate::steno::layout::slot_by_name("T-").unwrap());
+        engine.press(t, Instant::now());
+        assert!(typed(engine.release(t)).contains("tee"));
+    }
+
+    #[test]
+    fn an_exception_list_is_ignored_when_first_up_is_disabled() {
+        let mut engine = engine_with_dict(EXCEPT_DICT);
+        engine.timing.first_up = false;
+        let [k, a, t] = kat_keys(&engine);
+        let now = Instant::now();
+        for key in [k, a, t] {
+            engine.press(key, now);
+        }
+        assert_eq!(engine.release(k), None);
+        assert_eq!(engine.release(a), None);
+        assert!(typed(engine.release(t)).contains("cat"));
     }
 
     #[test]
