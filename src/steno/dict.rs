@@ -217,7 +217,7 @@ pub struct MergeStats {
 }
 
 /// Read bytes as text the way Plover reads a dictionary: UTF-8, or failing that Latin-1.
-fn decode_text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+pub(crate) fn decode_text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
     std::str::from_utf8(bytes).map_or_else(
         |_| {
             bytes
@@ -232,7 +232,7 @@ fn decode_text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
 
 /// Call `each` with every key of a JSON object and its value if that is a string, in order,
 /// without building the object: the strings are borrowed from `json` unless they have escapes.
-fn read_entries(json: &str, each: impl FnMut(&str, Option<&str>)) -> serde_json::Result<()> {
+pub(crate) fn read_entries(json: &str, each: impl FnMut(&str, Option<&str>)) -> serde_json::Result<()> {
     use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
     use std::borrow::Cow;
     use std::fmt;

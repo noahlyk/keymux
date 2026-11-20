@@ -40,6 +40,7 @@ pub mod strokes;
 pub mod tape;
 pub mod translate;
 pub mod typing;
+pub mod validate;
 pub mod view;
 pub(crate) mod worker;
 
