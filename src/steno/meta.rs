@@ -6,6 +6,7 @@
 
 use super::action::{apply_case, has_word_boundary, is_space, rightmost_word, Action, Case, SPACE};
 use super::formatter::Context;
+use super::layout::Layout;
 
 const ATTACH: char = '^';
 const CARRY: &str = "~|";
@@ -53,7 +54,7 @@ fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> 
 /// Which meta `meta` (the text between the braces) is, and its argument. `None` when it is
 /// nothing Plover knows, which does nothing.
 #[must_use]
-fn parse_meta(meta: &str) -> Option<Meta<'_>> {
+pub(crate) fn parse_meta(meta: &str) -> Option<Meta<'_>> {
     let found = |name: &str, param: &'static str| {
         Some(Meta {
             name: name.to_string(),
@@ -157,65 +158,202 @@ pub fn meta_to_action(meta: &str, ctx: &Context) -> Action {
     let Some(Meta { name, param }) = parse_meta(meta) else {
         return ctx.new_action();
     };
-    match name.to_lowercase().as_str() {
-        "attach" => meta_attach(ctx, param),
-        "carry_capitalize" => meta_carry_capitalize(ctx, param),
-        "case" => meta_case(ctx, param),
-        "retro_case" => meta_retro_case(ctx, param),
-        "comma" => meta_comma(ctx, param),
-        "stop" => meta_stop(ctx, param),
-        "command" => {
-            let mut action = ctx.copy_last_action();
-            action.command = Some(param.to_string());
-            action
-        }
-        "glue" => meta_glue(ctx, param),
-        "if_next_matches" => meta_if_next_matches(ctx, param),
-        "key_combo" => {
-            let mut action = ctx.copy_last_action();
-            action.combo = Some(param.to_string());
-            action
-        }
-        "mode" => meta_mode(ctx, param),
-        "retro_currency" => meta_retro_currency(ctx, param),
-        "word_end" => {
-            let mut action = ctx.copy_last_action();
-            action.word_is_finished = true;
-            action
-        }
-        // keymux's own: `{:back}` or `{:back:3}` erases that many characters of what was typed
-        "back" => meta_back(ctx, param),
-        // keymux's own: `{:firstup}` marks a stroke the engine sends when its first key comes up,
-        // `{:firstup:except=KEYS}` one that sends when the first key not in KEYS comes up (read by
-        // `first_up_marker`). It types nothing and changes nothing around it.
-        "firstup" => ctx.copy_last_action(),
-        // keymux's own stroke classes (see `Translator::stroke`): `{:transparent}` is a stroke the
-        // history never sees, `{:barrier}` / `{:nobarrier}` say that a stroke does or does not
-        // end the outline context. Like `firstup` they type nothing and change nothing around them.
-        "transparent" | "barrier" | "nobarrier" => ctx.copy_last_action(),
-        // Lapwing's stitching: `{:stitch:A}` is a fingerspelled letter that joins with a dash
-        "stitch" => meta_stitch(ctx, param),
-        "stitch_last_word" => meta_stitch_last_word(ctx, param),
-        // keymux's own runtime overlay controls: `{:overlay:hide}`, `{:tape:clear}`, ...
-        // (see `overlay_control`; they type nothing)
-        // keymux's own `{:engine:unload}` (see `engine_control`; it types nothing)
-        super::engine_control::NAME => super::engine_control::meta_action(ctx, param),
-        // keymux's own `{:outline:last}` and `{:outline:next}` (see `outline_control`; they type
-        // their text through the engine, not here)
-        super::outline_control::NAME => super::outline_control::meta_action(ctx, param),
-        // keymux's own `{:lookup}` opens the live lookup, as its legacy alias `{plover:lookup}` does (the same engine
-        // command, so it is the same stroke class and tape line). `{:lookup:open|close|toggle}` are
-        // the overlay controls below.
-        "lookup" if param.trim().is_empty() => {
-            let mut action = ctx.copy_last_action();
-            action.command = Some("lookup".to_owned());
-            action
-        }
-        name if super::overlay_control::NAMES.contains(&name) => {
-            super::overlay_control::meta_action(ctx, name, param)
-        }
-        _ => ctx.new_action(),
+    find_meta(&name).map_or_else(|| ctx.new_action(), |known| (known.run)(ctx, param))
+}
+
+/// One meta the engine knows by name, as `{:name:param}` writes it (every meta can be written
+/// that way, whatever its short form: `{^ing}` is `{:attach:^ing}`).
+///
+/// [`KNOWN`] is the one table of them: [`meta_to_action`] runs the entry it finds there, and
+/// the dictionary validator ([`super::validate`]) reads the same table for the names to accept,
+/// the verbs to check an argument against and the names to suggest, so neither can drift from
+/// the other.
+pub(crate) struct KnownMeta {
+    pub name: &'static str,
+    /// What the meta does, given its argument
+    pub run: fn(&Context, &str) -> Action,
+    /// The words its argument must be one of, empty when it takes anything. `{:tape:togle}` is
+    /// no verb of `tape`, so it does nothing
+    pub verbs: &'static [&'static str],
+    /// Whether the argument may be left out although there are verbs (`{:lookup}`)
+    pub bare_ok: bool,
+    /// Whether it only works as an entry's whole text (the history macros, which the translator
+    /// runs, not the formatter): written inside other text they do nothing
+    pub whole_entry: bool,
+    /// What is wrong with an argument the verbs don't cover, if anything
+    pub check: fn(&str, &Layout) -> Option<String>,
+}
+
+const VIEW_VERBS: &[&str] = &["show", "hide", "toggle"];
+
+const fn fine(_: &str, _: &Layout) -> Option<String> {
+    None
+}
+
+fn nothing(ctx: &Context, _: &str) -> Action {
+    ctx.new_action()
+}
+
+fn marker(ctx: &Context, _: &str) -> Action {
+    ctx.copy_last_action()
+}
+
+fn run_command(ctx: &Context, param: &str) -> Action {
+    let mut action = ctx.copy_last_action();
+    action.command = Some(param.to_string());
+    action
+}
+
+fn run_key_combo(ctx: &Context, param: &str) -> Action {
+    let mut action = ctx.copy_last_action();
+    action.combo = Some(param.to_string());
+    action
+}
+
+fn run_word_end(ctx: &Context, _: &str) -> Action {
+    let mut action = ctx.copy_last_action();
+    action.word_is_finished = true;
+    action
+}
+
+/// `{:lookup}` opens the live lookup, as its legacy alias `{plover:lookup}` does (the same
+/// engine command, so it is the same stroke class and tape line); `{:lookup:open|close|toggle}`
+/// are the overlay controls.
+fn run_lookup(ctx: &Context, param: &str) -> Action {
+    if param.trim().is_empty() {
+        let mut action = ctx.copy_last_action();
+        action.command = Some("lookup".to_owned());
+        return action;
     }
+    super::overlay_control::meta_action(ctx, "lookup", param)
+}
+
+fn check_command(param: &str, _: &Layout) -> Option<String> {
+    let name = param.split(':').next().unwrap_or_default().trim().to_lowercase();
+    (!ENGINE_COMMANDS.contains(&name.as_str())).then(|| format!("`{name}` is not an engine command"))
+}
+
+fn check_key_combo(param: &str, _: &Layout) -> Option<String> {
+    super::keycombo::key_events(param).err()
+}
+
+fn check_case(param: &str, _: &Layout) -> Option<String> {
+    Case::parse(param).is_none().then(|| format!("`{param}` is not a case"))
+}
+
+fn check_back(param: &str, _: &Layout) -> Option<String> {
+    let count = param.trim();
+    (!count.is_empty() && !count.parse::<usize>().is_ok_and(|count| count > 0))
+        .then(|| format!("`{count}` is not a count of characters"))
+}
+
+/// `{:firstup}` or `{:firstup:except=KEYS}`; `KEYS` one stroke of the layout. Anything else is
+/// plain `{:firstup}` to the engine (see [`first_up_marker`]).
+#[allow(clippy::literal_string_with_formatting_args)] // markers, not formats
+fn check_first_up(param: &str, layout: &Layout) -> Option<String> {
+    if param.is_empty() {
+        return None;
+    }
+    let Some(keys) = param.strip_prefix("except=") else {
+        return Some(format!("`{param}` is not an argument of firstup (only `except=KEYS`)"));
+    };
+    let keys = keys.trim();
+    if keys.is_empty() {
+        return Some("the exempt key list is empty, so the entry is plain {:firstup}".to_string());
+    }
+    layout.parse_stroke(keys).is_none().then(|| {
+        format!("`{keys}` is not one stroke of the layout, so the entry is plain {{:firstup}}")
+    })
+}
+
+fn check_no_argument(param: &str, _: &Layout) -> Option<String> {
+    (!param.trim().is_empty()).then(|| format!("takes no argument, but has `{param}`"))
+}
+
+fn check_undo_count(param: &str, _: &Layout) -> Option<String> {
+    check_back(param, &Layout::plover())
+}
+
+fn check_undo_or(param: &str, _: &Layout) -> Option<String> {
+    let combo = super::translate::undo_or_combo(param);
+    if combo.is_empty() {
+        return None;
+    }
+    super::keycombo::key_events(&combo).err()
+}
+
+/// Plover's engine commands, as written after `{plover:`, with the keymux ones the metas make.
+/// Which have a counterpart in keymux is [`StenoEngine`](super::StenoEngine)'s to say.
+pub(crate) const ENGINE_COMMANDS: [&str; 12] = [
+    "suspend",
+    "toggle",
+    "resume",
+    "lookup",
+    "set_config",
+    "add_translation",
+    "suggestions",
+    "configure",
+    "focus",
+    "quit",
+    super::engine_control::COMMAND,
+    super::overlay_control::COMMAND,
+];
+
+/// Every meta by name. Names are matched without regard to case.
+pub(crate) static KNOWN: &[KnownMeta] = &[
+    KnownMeta { name: "attach", run: meta_attach, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
+    KnownMeta { name: "carry_capitalize", run: meta_carry_capitalize, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
+    KnownMeta { name: "case", run: meta_case, verbs: &[], bare_ok: true, whole_entry: false, check: check_case },
+    KnownMeta { name: "retro_case", run: meta_retro_case, verbs: &[], bare_ok: true, whole_entry: false, check: check_case },
+    KnownMeta { name: "comma", run: meta_comma, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
+    KnownMeta { name: "stop", run: meta_stop, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
+    KnownMeta { name: "command", run: run_command, verbs: &[], bare_ok: true, whole_entry: false, check: check_command },
+    KnownMeta { name: "glue", run: meta_glue, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
+    KnownMeta { name: "if_next_matches", run: meta_if_next_matches, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
+    KnownMeta { name: "key_combo", run: run_key_combo, verbs: &[], bare_ok: true, whole_entry: false, check: check_key_combo },
+    KnownMeta { name: "mode", run: meta_mode, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
+    KnownMeta { name: "retro_currency", run: meta_retro_currency, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
+    KnownMeta { name: "word_end", run: run_word_end, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
+    // keymux's own: `{:back}` or `{:back:3}` erases that many characters of what was typed
+    KnownMeta { name: "back", run: meta_back, verbs: &[], bare_ok: true, whole_entry: false, check: check_back },
+    // keymux's own: `{:firstup}` marks a stroke the engine sends when its first key comes up,
+    // `{:firstup:except=KEYS}` one that sends when the first key not in KEYS comes up (read by
+    // `first_up_marker`). It types nothing and changes nothing around it.
+    KnownMeta { name: "firstup", run: marker, verbs: &[], bare_ok: true, whole_entry: false, check: check_first_up },
+    // keymux's own stroke classes (see `Translator::stroke`): `{:transparent}` is a stroke the
+    // history never sees, `{:barrier}` / `{:nobarrier}` say that a stroke does or does not
+    // end the outline context. Like `firstup` they type nothing and change nothing around them.
+    KnownMeta { name: "transparent", run: marker, verbs: &[], bare_ok: true, whole_entry: false, check: check_no_argument },
+    KnownMeta { name: "barrier", run: marker, verbs: &[], bare_ok: true, whole_entry: false, check: check_no_argument },
+    KnownMeta { name: "nobarrier", run: marker, verbs: &[], bare_ok: true, whole_entry: false, check: check_no_argument },
+    // Lapwing's stitching: `{:stitch:A}` is a fingerspelled letter that joins with a dash
+    KnownMeta { name: "stitch", run: meta_stitch, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
+    KnownMeta { name: "stitch_last_word", run: meta_stitch_last_word, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
+    // keymux's own `{:engine:unload}` (see `engine_control`; it types nothing)
+    KnownMeta { name: super::engine_control::NAME, run: super::engine_control::meta_action, verbs: &["unload"], bare_ok: false, whole_entry: false, check: fine },
+    // keymux's own `{:outline:last}` and `{:outline:next}` (see `outline_control`; they type
+    // their text through the engine, not here)
+    KnownMeta { name: super::outline_control::NAME, run: super::outline_control::meta_action, verbs: &["last", "next"], bare_ok: false, whole_entry: false, check: fine },
+    KnownMeta { name: "lookup", run: run_lookup, verbs: &["open", "close", "toggle"], bare_ok: true, whole_entry: false, check: fine },
+    // keymux's own runtime overlay controls: `{:overlay:hide}`, `{:tape:clear}`, ...
+    // (see `overlay_control`; they type nothing)
+    KnownMeta { name: "overlay", run: |ctx, param| super::overlay_control::meta_action(ctx, "overlay", param), verbs: VIEW_VERBS, bare_ok: false, whole_entry: false, check: fine },
+    KnownMeta { name: "keyboard", run: |ctx, param| super::overlay_control::meta_action(ctx, "keyboard", param), verbs: VIEW_VERBS, bare_ok: false, whole_entry: false, check: fine },
+    KnownMeta { name: "tape", run: |ctx, param| super::overlay_control::meta_action(ctx, "tape", param), verbs: &["show", "hide", "toggle", "clear"], bare_ok: false, whole_entry: false, check: fine },
+    // The history macros are run by the translator when they are an entry's whole text (see
+    // `mapping_to_macro`); anywhere else they do nothing
+    KnownMeta { name: "undo", run: nothing, verbs: &[], bare_ok: true, whole_entry: true, check: check_undo_count },
+    KnownMeta { name: "undo_word", run: nothing, verbs: &[], bare_ok: true, whole_entry: true, check: fine },
+    KnownMeta { name: "undo_or", run: nothing, verbs: &[], bare_ok: true, whole_entry: true, check: check_undo_or },
+    KnownMeta { name: "redo", run: nothing, verbs: &[], bare_ok: true, whole_entry: true, check: check_undo_count },
+    KnownMeta { name: "again", run: nothing, verbs: &[], bare_ok: true, whole_entry: true, check: fine },
+    KnownMeta { name: "swap", run: nothing, verbs: &[], bare_ok: true, whole_entry: true, check: fine },
+];
+
+/// The known meta called `name`, in any letter case.
+pub(crate) fn find_meta(name: &str) -> Option<&'static KnownMeta> {
+    let name = name.to_lowercase();
+    KNOWN.iter().find(|known| known.name == name)
 }
 
 /// `{:stitch:word}` or `{:stitch:word:delimiter}`: glued like fingerspelling, and after another

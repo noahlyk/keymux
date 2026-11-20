@@ -215,15 +215,11 @@ impl StenoOutput {
     }
 }
 
-/// The macros keymux adds to Plover's, which work on the history as a whole: undo some or a
-/// word, redo, say it again, swap the last two.
-const HISTORY_MACROS: [&str; 6] = ["undo", "undo_word", "undo_or", "redo", "again", "swap"];
-
 /// The key combination `{:undo_or:...}` falls back to, in Plover's key-name syntax. The
 /// canonical form is `Control_L(BackSpace)`; `ctrl+backspace` style (names joined by `+`,
 /// the last one pressed while the others are held) is accepted as a shorthand, with `ctrl`,
 /// `shift`, `alt` and `super` standing for their left-hand keys.
-fn undo_or_combo(argument: &str) -> String {
+pub(crate) fn undo_or_combo(argument: &str) -> String {
     let argument = argument.trim();
     if !argument.contains('+') || argument.contains(['(', ' ']) || argument == "+" {
         return argument.to_string();
@@ -255,7 +251,7 @@ fn undo_or_combo(argument: &str) -> String {
 /// overlay control (`{:overlay:toggle}`, ...), or it is
 /// nothing but the command that opens the live lookup (`{:lookup}`; `{plover:lookup}` is its legacy alias).
 #[allow(clippy::literal_string_with_formatting_args)] // a marker, not a format
-fn is_transparent_mapping(text: &str) -> bool {
+pub(crate) fn is_transparent_mapping(text: &str) -> bool {
     text.contains("{:transparent}")
         || text.trim().eq_ignore_ascii_case("{plover:lookup}")
         || text.trim().eq_ignore_ascii_case("{:lookup}")
@@ -319,16 +315,48 @@ fn is_separator(translation: &Translation) -> bool {
     typed
 }
 
+/// The names of the macros a dictionary entry can run (`=undo`, `{:redo}`, `{*}`'s
+/// `retro_toggle_asterisk`): defined once here, so `translate_macro` can only match names that
+/// are in [`macro_name::ALL`], which the dictionary validator reads to tell a macro from a typo.
+macro_rules! macro_names {
+    ($($id:ident = $name:literal),* $(,)?) => {
+        pub(crate) mod macro_name {
+            $(pub const $id: &str = $name;)*
+            pub const ALL: &[&str] = &[$($name),*];
+        }
+    };
+}
+
+macro_names! {
+    UNDO = "undo",
+    UNDO_WORD = "undo_word",
+    UNDO_OR = "undo_or",
+    REDO = "redo",
+    AGAIN = "again",
+    SWAP = "swap",
+    REPEAT_LAST_STROKE = "repeat_last_stroke",
+    RETRO_TOGGLE_ASTERISK = "retro_toggle_asterisk",
+    REPEAT_LAST_TRANSLATION = "repeat_last_translation",
+    REPEAT_LAST_WORD = "repeat_last_word",
+    REPEAT_LAST_FRAGMENT = "repeat_last_fragment",
+    REPEAT_LAST_CHARACTER = "repeat_last_character",
+    RETRO_DELETE_SPACE = "retro_delete_space",
+    RETROSPECTIVE_DELETE_SPACE = "retrospective_delete_space",
+    RETRO_INSERT_SPACE = "retro_insert_space",
+    RETROSPECTIVE_INSERT_SPACE = "retrospective_insert_space",
+    RETROSPECTIVE_TOGGLE_ASTERISK = "retrospective_toggle_asterisk",
+}
+
 /// Plover's `Macro`: a translation that is an action on the translator, not text.
-struct Macro {
-    name: String,
-    stroke: u32,
-    cmdline: String,
+pub(crate) struct Macro {
+    pub name: String,
+    pub stroke: u32,
+    pub cmdline: String,
 }
 
 /// The macro a mapping stands for. Nothing mapped is the undo stroke's macro when the stroke is
 /// the undo stroke.
-fn mapping_to_macro(mapping: Option<&str>, stroke: u32) -> Option<Macro> {
+pub(crate) fn mapping_to_macro(mapping: Option<&str>, stroke: u32) -> Option<Macro> {
     let Some(mapping) = mapping else {
         return (stroke == UNDO_STROKE).then(|| Macro {
             name: "undo".into(),
@@ -361,7 +389,9 @@ fn mapping_to_macro(mapping: Option<&str>, stroke: u32) -> Option<Macro> {
             Some(combo) if cmdline.is_empty() => ("undo_or", combo),
             _ => (name, cmdline),
         };
-        if HISTORY_MACROS.contains(&name) {
+        // The macros keymux adds to Plover's, which work on the history as a whole: undo some or a
+        // word, redo, say it again, swap the last two
+        if super::meta::find_meta(name).is_some_and(|known| known.whole_entry) {
             return Some(Macro {
                 name: name.to_string(),
                 stroke,
@@ -972,16 +1002,16 @@ impl Translator {
 
     fn translate_macro(&mut self, found: &Macro, ops: &mut Vec<Op>) {
         match found.name.as_str() {
-            "undo" => {
+            macro_name::UNDO => {
                 let count = Self::repeat_count(&found.cmdline).max(1);
                 self.macro_undo(found.stroke, count, ops);
             }
-            "undo_word" => self.macro_undo_word(found.stroke, ops),
-            "undo_or" => self.macro_undo_or(found.stroke, &found.cmdline, ops),
-            "redo" => self.macro_redo(Self::repeat_count(&found.cmdline).max(1)),
-            "again" => self.macro_again(),
-            "swap" => self.macro_swap(),
-            "repeat_last_stroke" => {
+            macro_name::UNDO_WORD => self.macro_undo_word(found.stroke, ops),
+            macro_name::UNDO_OR => self.macro_undo_or(found.stroke, &found.cmdline, ops),
+            macro_name::REDO => self.macro_redo(Self::repeat_count(&found.cmdline).max(1)),
+            macro_name::AGAIN => self.macro_again(),
+            macro_name::SWAP => self.macro_swap(),
+            macro_name::REPEAT_LAST_STROKE => {
                 let Some(last) = self
                     .hist
                     .state
@@ -994,7 +1024,7 @@ impl Translator {
                 let stroke = *last;
                 self.translate_stroke(stroke, ops);
             }
-            "retro_toggle_asterisk" => {
+            macro_name::RETRO_TOGGLE_ASTERISK => {
                 let Some(last) = self.hist.state.translations.last().cloned() else {
                     return;
                 };
@@ -1008,17 +1038,17 @@ impl Translator {
                 self.translate_stroke(stroke ^ STAR, ops);
             }
             // Lapwing's repeat macros, from its last-translation plugin
-            "repeat_last_translation" => self.macro_repeat_translations(&found.cmdline),
-            "repeat_last_word" | "repeat_last_fragment" | "repeat_last_character" => {
+            macro_name::REPEAT_LAST_TRANSLATION => self.macro_repeat_translations(&found.cmdline),
+            macro_name::REPEAT_LAST_WORD | macro_name::REPEAT_LAST_FRAGMENT | macro_name::REPEAT_LAST_CHARACTER => {
                 self.macro_repeat_text(&found.name, &found.cmdline, found.stroke);
             }
-            "retro_delete_space" | "retrospective_delete_space" => {
+            macro_name::RETRO_DELETE_SPACE | macro_name::RETROSPECTIVE_DELETE_SPACE => {
                 self.macro_delete_space(found.stroke);
             }
-            "retro_insert_space" | "retrospective_insert_space" => {
+            macro_name::RETRO_INSERT_SPACE | macro_name::RETROSPECTIVE_INSERT_SPACE => {
                 self.macro_insert_space(found.stroke);
             }
-            "retrospective_toggle_asterisk" => {
+            macro_name::RETROSPECTIVE_TOGGLE_ASTERISK => {
                 let Some(last) = self.hist.state.translations.last().cloned() else {
                     return;
                 };
