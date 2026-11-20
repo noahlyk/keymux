@@ -611,7 +611,8 @@ lapwing/                a theory: plain too, so it comes down here
 changes (saved, added, renamed, removed), it rebuilds the dictionary on a background thread and
 swaps it in between two strokes, without leaving steno mode. Watching costs no CPU while
 nothing changes. If a file is saved half-finished and doesn't parse, the dictionary in use
-stays until the next save fixes it.
+stays until the next save fixes it, and a desktop notification says which file and why (see
+[Checking dictionaries](#checking-dictionaries)).
 
 **Per file.** Each file is parsed on its own and kept, so a reload parses only the files that
 changed and layers them again with the ones that did not. Whether a file changed is its size and
@@ -626,6 +627,83 @@ that only renames folders, so switching is instant and never deletes anything. I
 older layout (`main.json` and a `theory` file at the top, or a theory folder called just
 `lapwing`), it keeps working, and `main.json` is moved into this layout the first time keymux
 starts.
+
+### Checking dictionaries
+
+A dictionary that does not parse is skipped, and an entry the engine cannot use is read as a
+no-op: a misspelled `{:tape:togle}` types nothing and says nothing. `keymux steno validate`
+reads the files a steno layer loads, in the same order and with the layer's own stroke notation,
+and reports what is wrong. It needs no daemon and no root.
+
+```
+keymux steno validate                  # every dictionary the config's steno layers load
+keymux steno validate a.json folder/   # only these files or folders, against the steno layer's layout
+keymux steno validate --strict         # warnings fail too
+keymux steno validate --json           # findings as JSON, for scripts
+keymux validate                        # the config checks, then the same dictionary checks
+```
+
+Output is grouped by file: severity, kind, outline, message, then a suggestion when there is one
+(`{:tape:togle}` gets `{:tape:toggle}`). Each file's findings of one kind are capped at 100, with
+a count of the rest. A 70,000-entry dictionary with a 3.8-million-entry backup file takes a few
+seconds.
+
+| Kind | Severity | Finding |
+|---|---|---|
+| `unreadable_file` | error | The file cannot be read |
+| `unparsable_file` | error | Not a JSON object (or RTF/CRE dictionary); line and column when the parser has them |
+| `bad_outline` | error | An outline key the layer's layout does not parse; the loader skips the entry |
+| `bad_value` | error | The value is not a string; the loader skips the entry |
+| `unbalanced_braces` | error | A `{` never closed, a stray `}`, or a `{` inside `{...}`; escape a literal brace as `\{` |
+| `unknown_meta` | warning | A `{...}` the engine does not know (`{:tpae:toggle}`, `{firstup}`, `{!'}`, `=undoo`), so it does nothing. Suggests the nearest known name |
+| `bad_meta_argument` | warning | A known meta with an argument it cannot use: a verb the meta lacks (`{:tape:togle}`, `{:outline:foo}`, `{:lookup:bar}`), a `{:firstup:except=...}` list that is empty or is not one stroke of the layout (the entry is then plain `{:firstup}`), a `{#...}` or `{:undo_or:...}` key combination with an unknown key name, a bad `{:back:N}` count, an unknown `{plover:...}` command |
+| `misplaced_meta` | warning | A history macro (`{:undo}`, `{:redo}`, `{:undo_or}`, ...) inside other text, where it does nothing; it works as an entry's whole text |
+| `duplicate_outline` | warning | The same outline twice in one file; the last wins |
+| `unreachable_outline` | warning | A multi-stroke outline holding a stroke whose entry is transparent (`{:transparent}`, `{:lookup}`, an overlay control): a transparent stroke never enters the history, so the outline can never match |
+| `shadowed_outline` | info | Outlines also defined in an earlier file, which wins. This is the normal override by priority, shown as one count per pair of files |
+
+The known metas and their verbs come from the same table the formatter runs, so a meta added to
+the engine is accepted here without a second list. Outlines are compared by a 64-bit hash, so
+`shadowed_outline` and `duplicate_outline` are as good as certain, not proved.
+
+**Exit codes of `keymux steno validate`:** `0` no errors (warnings and notes do not count, unless
+`--strict` makes warnings count), `1` errors found (or warnings with `--strict`), `2` it could
+not run (a path given does not exist; the message is on stderr). `keymux validate` exits `1`
+the same way, and `--strict` there applies to its warnings too.
+
+**`--json`** prints one object:
+
+```
+{
+  "ok": true,            // the exit code is 0
+  "strict": false,
+  "errors": 0, "warnings": 0, "info": 0,
+  "sets": [ { "layers": ["steno"], "files": ["/path/01.json", ...] } ],  // files in load order
+  "files": 3,            // distinct dictionary files read
+  "entries": 71234,      // entries with a valid outline and a string value
+  "findings": [ {
+    "file": "/path/01.json",
+    "outline": "KAT",    // as written in the file; null for a whole-file finding
+    "severity": "error" | "warning" | "info",
+    "kind": "bad_outline",   // one of the kinds above
+    "message": "...",
+    "suggestion": "{:tape:toggle}",  // or null
+    "line": 3, "column": 5,          // or null
+    "count": 25,                     // entries a finding stands for, or null
+    "layers": ["steno"]              // layers that load the file; [] for files given by hand
+  } ]
+}
+```
+
+**Notifications.** When the daemon reloads after a file changed, it checks the files that changed
+(on the reload thread, never on a stroke's path) and sends a desktop notification, the same way
+config reloads do: a file that fails to parse names the file and the first problem and says the
+previous dictionary is still in use; errors in a file that did load (bad outlines, unbalanced
+braces) name the first one and say those entries are skipped; warnings alone make one `low`
+urgency notification with the count and "Run: keymux steno validate". A clean reload sends
+nothing. The same text is held back for ten minutes and a different one for 30 seconds, per set
+of dictionaries, so a flapping save does not repeat itself. The first load after the daemon
+starts reports only files that fail to parse.
 
 ### Plover compatibility
 
@@ -848,6 +926,7 @@ same lookup live in a terminal: see [Interactive lookup](#interactive-lookup).
 | `keymux steno stroke` | The interactive lookup with every query read as stroke notation, lowercase allowed |
 | `keymux steno stroke "KPA/TKAOEU"` | Print what a stroke types and the entries nearest to it. Use `/` between strokes of one word |
 | `keymux steno add KAT "cat"` | Add or replace an entry in `00-user.json`, which beats every other dictionary. It writes a file, so it needs both arguments and has no interactive form |
+| `keymux steno validate [FILE...]` | Check the dictionaries without running them: parse errors, bad outlines, unbalanced braces, unknown metas with a suggestion, bad meta arguments, unreachable entries. `--strict`, `--json`; see [Checking dictionaries](#checking-dictionaries) |
 | `keymux steno tape` | Show what each recent stroke typed. `-f` keeps printing new strokes, `-n N` sets how many lines to start with. On a terminal, `-N` counts and what a later stroke took back are dimmed (and redrawn dimmed as you follow) |
 
 #### Interactive lookup
@@ -1113,7 +1192,8 @@ keymux enable --multi
 keymux disable --multi
 
 # Validate your config: the same checks the daemon runs when it reloads, including
-# per-keyboard override layers, steno layouts and the overlay's own keys
+# per-keyboard override layers, steno layouts and the overlay's own keys, then the steno
+# dictionaries (see "Checking dictionaries"); --strict makes warnings fail
 keymux validate
 
 # Reload config (automatic on file save, but manual trigger available)
