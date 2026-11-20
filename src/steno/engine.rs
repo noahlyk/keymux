@@ -90,6 +90,9 @@ pub struct StenoEngine {
     lookup_search: Option<LookupSearch>,
     /// The layout stroke notation is read and written in, extra keys included, for the lookup
     layout: Layout,
+    /// `{:outline:next}` is armed: the next stroke types its own notation (see
+    /// [`super::outline_control`])
+    outline_armed: bool,
     /// A stroke wrote `{plover:toggle}` or `{plover:suspend}`: the layer should be left
     leave_requested: bool,
     fresh_on_enter: bool,
@@ -211,6 +214,7 @@ impl StenoEngine {
             lookup: None,
             lookup_search: (!cfg!(test)).then(|| LookupSearch::new(OverlayHub::global())),
             layout,
+            outline_armed: false,
             leave_requested: false,
             fresh_on_enter: config.fresh_on_enter,
             label: label.to_string(),
@@ -226,6 +230,7 @@ impl StenoEngine {
     pub fn enter(&mut self) {
         // A lookup left open before leaving the layer isn't carried over
         self.lookup = None;
+        self.outline_armed = false;
         if self.fresh_on_enter {
             self.start_fresh();
         }
@@ -639,7 +644,15 @@ impl StenoEngine {
 
     /// Translate a stroke. A repeat counts on the stroke's tape line instead of adding lines.
     fn translate(&mut self, stroke: u32, repeated: bool) -> Option<StenoOutput> {
-        let output = self.translator.stroke(stroke);
+        // Armed by `{:outline:next}`: the stroke types its notation instead of translating, unless
+        // it is the arming stroke itself, which goes on to disarm
+        let output = if self.outline_armed && !self.translator.arms_outline(stroke) {
+            self.outline_armed = false;
+            let notation = self.layout.render_strokes(&[stroke]);
+            self.translator.type_text(&notation)
+        } else {
+            self.translator.stroke(stroke)
+        };
         // A transparent stroke is on the tape (dimmed, marked `~` in the file) but not part of
         // the text: its line says what it ran, so describe it before the commands are consumed
         let transparent = self.translator.was_transparent();
@@ -697,11 +710,41 @@ impl StenoEngine {
         let mut rest = Vec::new();
         for op in ops {
             match op {
-                OutputOp::Command(command) => self.run_command(&command),
+                OutputOp::Command(command) => {
+                    let outline = command
+                        .strip_prefix(super::outline_control::COMMAND)
+                        .and_then(|args| args.strip_prefix(':'));
+                    match outline {
+                        Some(args) => {
+                            let typed = self.run_outline_control(args);
+                            rest.extend(typed.map(StenoOutput::into_ops).unwrap_or_default());
+                        }
+                        None => self.run_command(&command),
+                    }
+                }
                 other => rest.push(other),
             }
         }
         StenoOutput::from_ops(rest)
+    }
+
+    /// `{:outline:last}` and `{:outline:next}` (see [`super::outline_control`]), as the engine
+    /// command `outline:last` or `outline:next`: `next` arms or disarms the mode, `last` returns
+    /// what typing the last outline made.
+    fn run_outline_control(&mut self, args: &str) -> Option<StenoOutput> {
+        use super::outline_control::{verb_of, Verb};
+        match verb_of(args) {
+            Some(Verb::Next) => self.outline_armed = !self.outline_armed,
+            Some(Verb::Last) => {
+                let strokes = self.translator.last_outline();
+                if !strokes.is_empty() {
+                    let notation = self.layout.render_strokes(&strokes);
+                    return self.translator.type_text(&notation);
+                }
+            }
+            None => warn!("unknown outline control `{args}`"),
+        }
+        None
     }
 
     /// Run one of Plover's engine commands, as it is written after `{plover:`. What has a
@@ -842,6 +885,7 @@ impl StenoEngine {
             lookup: None,
             lookup_search: None,
             layout: Layout::plover(),
+            outline_armed: false,
             leave_requested: false,
             fresh_on_enter: false,
             label: String::new(),
@@ -1627,6 +1671,80 @@ mod tests {
         engine.run_overlay_control("lookup", "close");
         engine.run_overlay_control("lookup", "close");
         assert!(!engine.lookup_active());
+    }
+
+    const OUTLINE_DICT: &str = r#"{"KAT": "cat", "TKOG": "dog", "KAT/TKOG": "catdog", "-L": "{:outline:last}",
+        "-B": "{:outline:next}", "-T": "{:overlay:toggle}", "SKWRO*EUBGS": "joy", "*": "=undo"}"#;
+
+    #[test]
+    fn outline_last_types_the_outline_of_the_last_translation() {
+        let (mut engine, hub) = engine_with_hub(OUTLINE_DICT);
+        strike(&mut engine, "SKWRO*EUBGS");
+        strike(&mut engine, "-L");
+        assert_eq!(engine.translator.text(), "joy SKWRO*EUBGS");
+        // The typed notation is never the last outline, and the control stroke is transparent
+        strike(&mut engine, "-L");
+        assert_eq!(engine.translator.text(), "joy SKWRO*EUBGS SKWRO*EUBGS");
+        assert_eq!(hub.snapshot().tape.len(), 3);
+    }
+
+    #[test]
+    fn outline_last_of_a_multi_stroke_entry_is_every_stroke() {
+        let (mut engine, _hub) = engine_with_hub(OUTLINE_DICT);
+        strike(&mut engine, "KAT");
+        strike(&mut engine, "TKOG");
+        assert_eq!(engine.translator.text(), "catdog");
+        strike(&mut engine, "-L");
+        assert_eq!(engine.translator.text(), "catdog KAT/TKOG");
+    }
+
+    #[test]
+    fn outline_last_with_nothing_typed_types_nothing_and_undo_takes_it_back() {
+        let (mut engine, _hub) = engine_with_hub(OUTLINE_DICT);
+        assert_eq!(strike(&mut engine, "-L"), None);
+        strike(&mut engine, "KAT");
+        strike(&mut engine, "-L");
+        assert_eq!(engine.translator.text(), "cat KAT");
+        strike(&mut engine, "*");
+        assert_eq!(engine.translator.text(), "cat");
+        strike(&mut engine, "*");
+        assert_eq!(engine.translator.text(), "");
+    }
+
+    #[test]
+    fn outline_next_types_the_next_strokes_notation_once() {
+        let (mut engine, _hub) = engine_with_hub(OUTLINE_DICT);
+        strike(&mut engine, "TKOG");
+        assert_eq!(strike(&mut engine, "-B"), None);
+        strike(&mut engine, "KAT");
+        assert_eq!(engine.translator.text(), "dog KAT");
+        strike(&mut engine, "KAT");
+        assert_eq!(engine.translator.text(), "dog KAT cat");
+    }
+
+    #[test]
+    fn outline_next_pressed_again_disarms_it() {
+        let (mut engine, _hub) = engine_with_hub(OUTLINE_DICT);
+        strike(&mut engine, "-B");
+        strike(&mut engine, "-B");
+        strike(&mut engine, "KAT");
+        assert_eq!(engine.translator.text(), "cat");
+    }
+
+    #[test]
+    fn outline_next_does_not_run_commands_or_undo() {
+        let (mut engine, hub) = engine_with_hub(OUTLINE_DICT);
+        strike(&mut engine, "KAT");
+        strike(&mut engine, "-B");
+        strike(&mut engine, "-T");
+        assert_eq!(hub.snapshot().control_seq, 0, "the overlay control did not run");
+        assert_eq!(engine.translator.text(), "cat -T");
+        strike(&mut engine, "-B");
+        strike(&mut engine, "*");
+        assert_eq!(engine.translator.text(), "cat -T *");
+        // The typed notation is undone like a word
+        strike(&mut engine, "*");
+        assert_eq!(engine.translator.text(), "cat -T");
     }
 
     #[test]

@@ -172,6 +172,9 @@ pub fn meta_to_action(meta: &str, ctx: &Context) -> Action {
         // (see `overlay_control`; they type nothing)
         // keymux's own `{:engine:unload}` (see `engine_control`; it types nothing)
         super::engine_control::NAME => super::engine_control::meta_action(ctx, param),
+        // keymux's own `{:outline:last}` and `{:outline:next}` (see `outline_control`; they type
+        // their text through the engine, not here)
+        super::outline_control::NAME => super::outline_control::meta_action(ctx, param),
         // keymux's own `{:lookup}` opens the live lookup, as its legacy alias `{plover:lookup}` does (the same engine
         // command, so it is the same stroke class and tape line). `{:lookup:open|close|toggle}` are
         // the overlay controls below.

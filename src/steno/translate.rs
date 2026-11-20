@@ -261,6 +261,7 @@ fn is_transparent_mapping(text: &str) -> bool {
         || text.trim().eq_ignore_ascii_case("{:lookup}")
         || super::overlay_control::is_in(text)
         || super::engine_control::is_in(text)
+        || super::outline_control::is_in(text)
 }
 
 /// The keys of Plover's key-name set that move the cursor or delete text around it. A key
@@ -692,7 +693,46 @@ impl Translator {
                     || (self.classes_enabled && is_transparent_mapping(text))
                     || super::overlay_control::is_in(text)
                     || super::engine_control::is_in(text)
+                    || super::outline_control::is_in(text)
             })
+    }
+
+    /// Whether the stroke alone arms `{:outline:next}`: striking it again disarms the mode.
+    #[must_use]
+    pub fn arms_outline(&self, stroke: u32) -> bool {
+        self.dict
+            .as_dictionary()
+            .lookup(&[stroke])
+            .is_some_and(super::outline_control::is_next)
+    }
+
+    /// The strokes of the last translation that strokes made (`{:outline:last}`): not text typed
+    /// by hand, and not the notation `{:outline:...}` typed. Empty with none.
+    #[must_use]
+    pub fn last_outline(&self) -> Vec<u32> {
+        let shared = journal::lock(&self.shared);
+        shared
+            .state
+            .translations
+            .iter()
+            .rev()
+            .find(|t| t.origin.is_stroke() && !t.strokes.is_empty())
+            .map(|t| t.strokes.clone())
+            .unwrap_or_default()
+    }
+
+    /// Type `text` as a translation of its own, with no strokes: spaced and capitalised like a
+    /// word, and taken back by undo like one. This is the notation `{:outline:...}` types.
+    pub fn type_text(&mut self, text: &str) -> Option<StenoOutput> {
+        self.begin_stroke();
+        self.check_out();
+        self.stroke_start = self.hist.screen.len();
+        self.hist.redo.clear();
+        self.translate_translation(Translation::new(Vec::new(), Some(text.to_string())));
+        let ops = self.flush(None);
+        let output = self.finish(ops);
+        self.check_in();
+        output
     }
 
     /// Translate a finished stroke and say what to do with the keyboard.
@@ -1385,7 +1425,7 @@ impl Translator {
         for t in translations.iter().rev() {
             // Outlines are written for one set of dictionaries: strokes made by another, or text
             // typed by hand, end the run
-            if !t.origin.is_stroke() || t.machine != self.machine {
+            if !t.origin.is_stroke() || t.strokes.is_empty() || t.machine != self.machine {
                 break;
             }
             // A barrier moved the cursor or edited earlier text, so nothing reaches across it;
