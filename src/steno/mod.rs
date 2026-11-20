@@ -41,6 +41,7 @@ pub mod tape;
 pub mod translate;
 pub mod typing;
 pub mod validate;
+pub mod validate_cli;
 pub mod view;
 pub(crate) mod worker;
 

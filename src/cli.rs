@@ -244,6 +244,9 @@ pub enum Commands {
         /// Path to config file (default: ~/.config/keymux/config.ron)
         #[arg(short = 'f', long = "file", aliases = ["config", "c"])]
         config: Option<std::path::PathBuf>,
+        /// Treat dictionary warnings as failures
+        #[arg(long)]
+        strict: bool,
     },
 
     /// Show debugging information
@@ -325,6 +328,20 @@ pub enum StenoAction {
         stroke: String,
         /// The text the stroke types
         text: String,
+    },
+    /// Check the dictionaries without running them: files that do not parse, outlines the layout
+    /// rejects, unbalanced braces, metas that look like commands but are none (with a suggestion),
+    /// metas with arguments they cannot use, shadowed or unreachable entries. With no FILE, reads
+    /// what the config's steno layers load. Exits 1 on errors (and on warnings with `--strict`).
+    Validate {
+        /// Dictionary files or folders to check instead of the config's steno layers
+        files: Vec<std::path::PathBuf>,
+        /// Treat warnings as failures
+        #[arg(long)]
+        strict: bool,
+        /// Print the findings as JSON for scripts
+        #[arg(long)]
+        json: bool,
     },
     /// Show the steno tape: what each stroke typed, and strokes that matched nothing as `?`
     Tape {

@@ -216,6 +216,23 @@ fn main() -> Result<()> {
                 cli::StenoAction::Add { stroke, text } => {
                     keymux::steno::commands::add(&config_path, config_dir, stroke, text)?;
                 }
+                cli::StenoAction::Validate { files, strict, json } => {
+                    let code = match keymux::steno::validate_cli::command(
+                        &config_path,
+                        config_dir,
+                        session_home().as_deref(),
+                        files,
+                        *strict,
+                        *json,
+                    ) {
+                        Ok(code) => code,
+                        Err(e) => {
+                            eprintln!("keymux steno validate: {e:#}");
+                            2
+                        }
+                    };
+                    std::process::exit(code);
+                }
                 cli::StenoAction::Tape { follow, lines } => {
                     let (uid, _) = keymux::get_actual_user_uid();
                     let home = keymux::get_user_home_dir(uid)?;
@@ -223,8 +240,8 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Some(cli::Commands::Validate { config }) => {
-            keymux::config::validate_config(config.as_deref())?;
+        Some(cli::Commands::Validate { config, strict }) => {
+            keymux::config::validate_config(config.as_deref(), *strict)?;
         }
         Some(cli::Commands::Debug) => {
             debug::run_debug(None)?;
@@ -521,4 +538,10 @@ set -e COMPLETE
 
     let ifs = std::env::var("COMPLETE_IFS").unwrap_or_else(|_| "\n".to_string());
     println!("{}", completions.join(&ifs));
+}
+
+/// The session user's home directory, for the `~/` in a layer's `dictionaries`.
+fn session_home() -> Option<std::path::PathBuf> {
+    let (uid, _) = keymux::get_actual_user_uid();
+    keymux::get_user_home_dir(uid).ok()
 }

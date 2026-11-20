@@ -6,7 +6,8 @@ use anyhow::Result;
 use colored::Colorize;
 use std::path::Path;
 
-pub fn validate_config(config_path: Option<&Path>) -> Result<()> {
+/// With `strict`, warnings (the config's and the dictionaries') fail the validation too.
+pub fn validate_config(config_path: Option<&Path>, strict: bool) -> Result<()> {
     let rule = "═══════════════════════════════════════".bright_cyan();
     println!();
     println!("{rule}");
@@ -58,8 +59,42 @@ pub fn validate_config(config_path: Option<&Path>) -> Result<()> {
         }
     }
 
-    let errors: Vec<&str> = report.errors().collect();
-    let warnings: Vec<&str> = report.warnings().collect();
+    let mut errors: Vec<String> = report.errors().map(str::to_string).collect();
+    let mut warnings: Vec<String> = report.warnings().map(str::to_string).collect();
+
+    print!("  {} Checking steno dictionaries... ", "→".bright_blue());
+    let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let targets = crate::steno::validate::targets_from_config(&config, config_dir, home.as_deref());
+    if targets.is_empty() {
+        println!("{}", "✓".bright_green().bold());
+    } else {
+        use crate::steno::validate::Severity;
+        let found = crate::steno::validate_cli::run(&targets, config_dir);
+        let bad = found.count(Severity::Error);
+        let summary = format!("{} files, {} entries", found.files, found.entries);
+        if bad > 0 {
+            println!("{}", "✗".bright_red().bold());
+        } else {
+            println!("{} {summary}", "✓".bright_green().bold());
+        }
+        for finding in &found.findings {
+            let line = format!(
+                "dictionary {}{}: {}{}",
+                finding.file,
+                finding.outline.as_ref().map_or_else(String::new, |outline| format!(" \"{outline}\"")),
+                finding.message,
+                finding.suggestion.as_ref().map_or_else(String::new, |s| format!(" (suggestion: {s})")),
+            );
+            match finding.severity {
+                Severity::Error => errors.push(line),
+                Severity::Warning => warnings.push(line),
+                Severity::Info => {}
+            }
+        }
+    }
+    if strict {
+        errors.append(&mut warnings);
+    }
     println!();
     println!("{rule}");
     if errors.is_empty() && warnings.is_empty() {
