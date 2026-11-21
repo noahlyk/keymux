@@ -32,7 +32,7 @@ jobs:
           mkdir -p keymux-linux-${ARCH_NAME}
           mv target/release/keymux keymux-linux-${ARCH_NAME}/
           cp keymux.service keymux-niri.service keymux-linux-${ARCH_NAME}/ 2>/dev/null || true
-          cp README.md LICENSE config.example.ron keymux-linux-${ARCH_NAME}/ 2>/dev/null || true
+          cp README.md LICENSE NOTICE config.example.ron keymux-linux-${ARCH_NAME}/ 2>/dev/null || true
           tar -czf keymux-linux-${ARCH_NAME}.tar.gz -C keymux-linux-${ARCH_NAME} .
       - name: Generate checksum
         run: |

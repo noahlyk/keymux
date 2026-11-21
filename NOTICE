@@ -1,0 +1,112 @@
+keymux: third-party and derived material
+========================================
+
+keymux is licensed under the GNU General Public License, version 3 or (at your
+option) any later version (GPL-3.0-or-later); see LICENSE. This file lists what
+in this repository, or what keymux downloads or installs for you, comes from
+other projects, and the terms it is under. It is a record kept by the
+maintainer, not legal advice. Releases before the move to the GPL were
+published under the MIT License.
+
+1. Plover (derived code, test generators, golden data)
+------------------------------------------------------
+
+Upstream:  Plover, the Open Steno Project, https://github.com/openstenoproject/plover
+Copyright: Plover's contributors. The file headers read were:
+           "Copyright (c) 2010-2011 Joshua Harlan Lifton" (plover/orthography.py)
+           and "Copyright (c) 2013 Hesky Fisher" (plover/translation.py),
+           each "See LICENSE.txt for details." Other files carry other holders.
+License:   GNU GPL version 2 or later. Checked: Plover's LICENSE.txt is the GPL
+           version 2 text, and its setup.cfg states `license = GPL-2.0-or-later`
+           (both read from the master branch on GitHub). GPL-2.0-or-later code
+           may be used under the terms of GPL version 3 or later.
+
+Derived in keymux (ports of Plover's behavior and, for the orthography, of its
+rule table; each file's header says what it ports):
+
+  src/steno/translate.rs    plover/translation.py and macros
+  src/steno/formatter.rs    plover/formatting.py
+  src/steno/action.rs       plover/formatting.py (actions)
+  src/steno/meta.rs         plover/meta/*.py and the {...} parser
+  src/steno/orthography.rs  plover/orthography.py and ORTHOGRAPHY_RULES of
+                            plover/system/english_stenotype.py (the ordered
+                            regular-expression rules are Plover's)
+  src/steno/rtf.rs          plover/dictionary/rtfcre_parse.py and its tokenizer
+  src/steno/keycombo.rs     plover/key_combo.py
+  src/steno/numbers.rs, src/steno/layout.rs, src/steno/layouts/qwerty.ron
+                            Plover's stroke notation, number keys and its
+                            built-in "Keyboard" machine key mapping
+  tools/plover-golden/      scripts that import and run Plover to record its
+                            output (not needed to build or test keymux)
+  src/steno/testdata/*golden*.json, orthography_words.txt,
+  plover_golden_words.txt   Plover's outputs recorded by those scripts, and the
+                            part of Plover's word list they looked at (see 2)
+
+Plover is run only by the generator scripts, never linked into keymux.
+
+2. american_english_words.txt (Plover's orthography word list)
+--------------------------------------------------------------
+
+Upstream:  plover/assets/american_english_words.txt in the Plover repository.
+           keymux does not ship it: `keymux steno theory` downloads it from
+           Plover's repository into your steno folder. Only a 570-line excerpt
+           is committed, as src/steno/testdata/orthography_words.txt.
+License:   It lives in Plover's repository, which is GPL-2.0-or-later (see 1).
+           The directory has no separate README or license file, and where the
+           list was originally compiled from is NOT verified here.
+
+3. Lapwing (test rows, and dictionaries downloaded on request)
+--------------------------------------------------------------
+
+Upstream:  Lapwing, by Aerick: the book at https://lapwing.aerick.ca and the
+           dictionaries in https://github.com/aerickt/plover-lapwing-aio
+Used:      src/steno/testdata/lapwing_examples.tsv and lapwing_vectors.tsv hold
+           single-stroke rows (outline, word, chapter) taken from the book,
+           with each text from Lapwing's dictionaries. keymux does not ship the
+           dictionaries; `keymux steno theory lapwing` downloads them.
+License:   plover-lapwing-aio's LICENSE is the MIT License, "Copyright (c) 2024
+           Aerick" (read from the repository; GitHub reports it as MIT). The
+           book's own license was NOT found, so the book-derived rows are
+           unverified. MIT is compatible with the GPL. The MIT notice for the
+           dictionary-derived rows follows.
+
+    MIT License
+
+    Copyright (c) 2024 Aerick
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+4. Atkinson Hyperlegible Bold (embedded font)
+---------------------------------------------
+
+File:      assets/fonts/AtkinsonHyperlegible-Bold.ttf, embedded into the binary
+Copyright: 2020 Braille Institute of America, Inc.
+License:   SIL Open Font License, Version 1.1; the license text is in
+           assets/fonts/OFL.txt and must stay with the font. The font is not
+           modified here. The OFL allows bundling the font with software under
+           another license, as long as the font itself is not sold alone.
+
+5. Rust crates
+--------------
+
+keymux is built from crates.io dependencies under their own licenses
+(permissive ones such as MIT, Apache-2.0, BSD, ISC, Zlib, plus MPL-2.0 for
+`colored` and `option-ext`). They are not copied into this repository; see
+`cargo metadata` for the list. At the time of the switch every license
+expression found was checked to allow use in a GPL-3.0-or-later program.

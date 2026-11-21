@@ -1338,7 +1338,11 @@ KEYMUX_SOAK_RUNS=100000 cargo test --release --lib soak -- --ignored --nocapture
 
 ## 📄 License
 
-MIT License - See [LICENSE](LICENSE) for details.
+keymux is licensed under the GNU General Public License, version 3 or (at your option) any later version (GPL-3.0-or-later): you may use, study, share and change it, and a modified version you distribute must be free software under the same terms, with its source. See [LICENSE](LICENSE) for the text.
+
+Its translator, formatter and orthography are ports of [Plover](https://github.com/openstenoproject/plover)'s, and some test data and dictionaries come from Lapwing: see [NOTICE](NOTICE) for what is derived from what, and under which license.
+
+Releases before the change to the GPL were published under the MIT License. Copies of keymux you already received under the MIT License stay under it; the repository history is unchanged.
 
 ## 🙏 Acknowledgments
 

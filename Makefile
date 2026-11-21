@@ -16,10 +16,13 @@ build:
 
 install: build
 	install -Dm755 $(BIN) $(DESTDIR)$(PREFIX)/bin/keymux
+	install -Dm644 LICENSE $(DESTDIR)$(PREFIX)/share/licenses/keymux/LICENSE
+	install -Dm644 NOTICE $(DESTDIR)$(PREFIX)/share/licenses/keymux/NOTICE
 	@echo "installed keymux $$($(DESTDIR)$(PREFIX)/bin/keymux --version | cut -d' ' -f2) to $(DESTDIR)$(PREFIX)/bin/keymux"
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/keymux
+	rm -rf $(DESTDIR)$(PREFIX)/share/licenses/keymux
 
 version: build
 	@$(BIN) --version

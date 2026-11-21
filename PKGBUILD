@@ -5,7 +5,7 @@ pkgrel=1
 pkgdesc="Keyboard middleware for gaming with low-level input interception"
 arch=('x86_64' 'aarch64')
 url="https://github.com/noahlyk/keymux"
-license=('MIT')
+license=('GPL-3.0-or-later')
 depends=('udev' 'libevdev')
 makedepends=('rust' 'cargo')
 optdepends=('systemd: for systemd service files (or use OpenRC/runit scripts)'
@@ -132,7 +132,8 @@ package() {
 
     install -Dm644 "config.example.ron" "$pkgdir/usr/share/doc/keymux/config.example.ron"
     install -Dm644 "README.md" "$pkgdir/usr/share/doc/keymux/README.md"
-    install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/keymux/LICENSE"
+    install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 "NOTICE" "$pkgdir/usr/share/licenses/$pkgname/NOTICE"
     
     # Static shell completions generated at build time
     local _keymux="$startdir/target/release/keymux"

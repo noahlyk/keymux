@@ -117,7 +117,7 @@ jobs:
           mkdir -p keymux-${VERSION}-${ARCH_NAME}/
           mv target/release/keymux keymux-${VERSION}-${ARCH_NAME}/
           cp keymux.service keymux-niri.service keymux-${VERSION}-${ARCH_NAME}/ 2>/dev/null || true
-          cp README.md LICENSE config.example.ron keymux-${VERSION}-${ARCH_NAME}/ 2>/dev/null || true
+          cp README.md LICENSE NOTICE config.example.ron keymux-${VERSION}-${ARCH_NAME}/ 2>/dev/null || true
           tar -czf keymux-${VERSION}-${ARCH_NAME}.tar.gz -C keymux-${VERSION}-${ARCH_NAME} .
           sha256sum keymux-${VERSION}-${ARCH_NAME}.tar.gz > keymux-${VERSION}-${ARCH_NAME}.sha256
       - name: Upload build artifacts
