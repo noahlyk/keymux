@@ -71,6 +71,39 @@ fn parse_key_combo<K: PartialEq + Clone>(
     }
 }
 
+/// The media, brightness and launcher keys, by the X11 keysym names Plover takes (`AudioPlay`, or
+/// `XF86AudioPlay`) and by their Linux names without the `KEY_` (`playpause`).
+fn media_key(name: &str) -> Option<KeyCode> {
+    use KeyCode as K;
+    Some(match name.strip_prefix("xf86").unwrap_or(name) {
+        "audioraisevolume" | "volumeup" => K::KC_VOLU,
+        "audiolowervolume" | "volumedown" => K::KC_VOLD,
+        "audiomute" | "mute" => K::KC_MUTE,
+        "audioplay" | "playpause" => K::KC_PLAYPAUSE,
+        "audiopause" | "pausecd" => K::KC_PAUSECD,
+        "audioprev" | "previoussong" => K::KC_PREVIOUSSONG,
+        "audionext" | "nextsong" => K::KC_NEXTSONG,
+        "audiostop" | "stopcd" => K::KC_STOPCD,
+        "audiorecord" | "record" => K::KC_RECORD,
+        "audiorewind" | "rewind" => K::KC_REWIND,
+        "audioforward" | "fastforward" => K::KC_FASTFORWARD,
+        "audiomedia" | "media" => K::KC_MEDIA,
+        "audiomicmute" | "micmute" => K::KC_MICMUTE,
+        "play" => K::KC_PLAY,
+        "eject" | "ejectcd" => K::KC_EJECTCD,
+        "monbrightnessup" | "brightnessup" => K::KC_BRIU,
+        "monbrightnessdown" | "brightnessdown" => K::KC_BRID,
+        "www" => K::KC_WWW,
+        "mail" | "email" => K::KC_MAIL,
+        "back" => K::KC_BACK,
+        "forward" => K::KC_FORWARD,
+        "homepage" => K::KC_HOMEPAGE,
+        "refresh" | "reload" => K::KC_REFRESH,
+        "search" => K::KC_SEARCH,
+        _ => return None,
+    })
+}
+
 /// The key a name stands for on a US keyboard, if keymux can press it.
 #[must_use]
 fn key_for_name(name: &str) -> Option<KeyCode> {
@@ -207,11 +240,7 @@ fn key_for_name(name: &str) -> Option<KeyCode> {
         "asterisk" => K::KC_8,
         "parenleft" => K::KC_9,
         "parenright" => K::KC_0,
-        // Media keys
-        "audioraisevolume" | "xf86audioraisevolume" => K::KC_VOLU,
-        "audiolowervolume" | "xf86audiolowervolume" => K::KC_VOLD,
-        "audiomute" | "xf86audiomute" => K::KC_MUTE,
-        _ => return None,
+        _ => return media_key(name),
     })
 }
 
@@ -279,6 +308,32 @@ mod tests {
         assert_eq!(key_events("F5").unwrap()[0].0, KeyCode::KC_F5);
         assert_eq!(key_events("super(l)").unwrap()[0].0, KeyCode::KC_LGUI);
         assert!(key_events("eacute").is_err());
+    }
+
+    #[test]
+    fn media_keys_are_the_linux_codes_in_both_spellings() {
+        let code = |combo: &str| key_events(combo).unwrap()[0].0.code();
+        // KEY_PLAYPAUSE, KEY_NEXTSONG, KEY_PREVIOUSSONG, KEY_STOPCD, KEY_MUTE, KEY_VOLUMEUP
+        assert_eq!(code("AudioPlay"), 164);
+        assert_eq!(code("XF86AudioPlay"), 164);
+        assert_eq!(code("audionext"), 163);
+        assert_eq!(code("AudioPrev"), 165);
+        assert_eq!(code("AudioStop"), 166);
+        assert_eq!(code("AudioMute"), 113);
+        assert_eq!(code("XF86AudioRaiseVolume"), 115);
+        assert_eq!(code("MonBrightnessUp"), 225);
+        assert_eq!(code("MonBrightnessDown"), 224);
+        let held = key_events("control(AudioNext)").unwrap();
+        assert_eq!(
+            held,
+            [
+                (KeyCode::KC_LCTL, true),
+                (KeyCode::KC_NEXTSONG, true),
+                (KeyCode::KC_NEXTSONG, false),
+                (KeyCode::KC_LCTL, false),
+            ]
+        );
+        assert!(key_events("audiobogus").is_err());
         assert!(key_events("shift_l(shift(a))").is_err());
     }
 }

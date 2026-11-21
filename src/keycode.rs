@@ -56,6 +56,9 @@ macro_rules! define_keycodes {
         }
 
         impl KeyCode {
+            /// Every key keymux knows
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)*];
+
             /// Create a KeyCode from an evdev numeric code value
             /// Returns None if the code is not supported/mapped
             #[must_use]
@@ -210,8 +213,8 @@ define_keycodes! {
     KC_F8 = 66, function,
     KC_F9 = 67, function,
     KC_F10 = 68, function,
-    KC_F11 = 69, function,
-    KC_F12 = 70, function,
+    KC_F11 = 87, function,
+    KC_F12 = 88, function,
 
     // Special function keys
     KC_F13 = 183, function,
@@ -228,9 +231,9 @@ define_keycodes! {
     KC_F24 = 194, function,
 
     // Lock keys
-    KC_SLCK = 214, lock,
-    KC_NLCK = 215, lock,
-    KC_PAUS = 216, special,
+    KC_SLCK = 70, lock,
+    KC_NLCK = 69, lock,
+    KC_PAUS = 119, special,
 
     // Navigation
     KC_INS = 110, navigation,
@@ -241,38 +244,62 @@ define_keycodes! {
 
     // Numpad
     KC_NUBS = 86, numpad,
-    KC_PSLS = 200, numpad,
-    KC_PAST = 201, numpad,
-    KC_PMNS = 82, numpad,
-    KC_PPLS = 87, numpad,
-    KC_PENT = 202, numpad,
-    KC_P1 = 203, numpad,
-    KC_P2 = 204, numpad,
-    KC_P3 = 205, numpad,
-    KC_P4 = 206, numpad,
-    KC_P5 = 207, numpad,
-    KC_P6 = 208, numpad,
-    KC_P7 = 209, numpad,
-    KC_P8 = 210, numpad,
-    KC_P9 = 211, numpad,
-    KC_P0 = 212, numpad,
-    KC_PDOT = 213, numpad,
+    KC_PSLS = 98, numpad,
+    KC_PAST = 55, numpad,
+    KC_PMNS = 74, numpad,
+    KC_PPLS = 78, numpad,
+    KC_PENT = 96, numpad,
+    KC_P1 = 79, numpad,
+    KC_P2 = 80, numpad,
+    KC_P3 = 81, numpad,
+    KC_P4 = 75, numpad,
+    KC_P5 = 76, numpad,
+    KC_P6 = 77, numpad,
+    KC_P7 = 71, numpad,
+    KC_P8 = 72, numpad,
+    KC_P9 = 73, numpad,
+    KC_P0 = 82, numpad,
+    KC_PDOT = 83, numpad,
 
     // Media keys
-    KC_MUTE = 217, media,
-    KC_VOLD = 218, media,
-    KC_VOLU = 219, media,
+    KC_MUTE = 113, media,
+    KC_VOLD = 114, media,
+    KC_VOLU = 115, media,
+    KC_NEXTSONG = 163, media,
+    KC_PLAYPAUSE = 164, media,
+    KC_PREVIOUSSONG = 165, media,
+    KC_STOPCD = 166, media,
+    KC_RECORD = 167, media,
+    KC_REWIND = 168, media,
+    KC_PAUSECD = 201, media,
+    KC_PLAY = 207, media,
+    KC_FASTFORWARD = 208, media,
+    KC_MEDIA = 226, media,
+    KC_MICMUTE = 248, media,
+    KC_EJECTCD = 161, media,
+
+    // Brightness keys
+    KC_BRID = 224, media,
+    KC_BRIU = 225, media,
+
+    // Browser and launcher keys
+    KC_WWW = 150, media,
+    KC_MAIL = 155, media,
+    KC_BACK = 158, media,
+    KC_FORWARD = 159, media,
+    KC_HOMEPAGE = 172, media,
+    KC_REFRESH = 173, media,
+    KC_SEARCH = 217, media,
 
     // Application keys
-    KC_APP = 220, special,
+    KC_APP = 127, special,
     KC_HELP = 221, special,
     KC_SCRL = 222, lock,
-    KC_ASST = 226, special,
 
     // Power management
-    KC_PWR = 223, special,
-    KC_SLEP = 224, special,
-    KC_WAKE = 225, special,
+    KC_PWR = 116, special,
+    KC_SLEP = 142, special,
+    KC_WAKE = 143, special,
 
     // International keys (Japanese)
     KC_INT1 = 121, international,

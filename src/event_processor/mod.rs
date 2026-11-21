@@ -119,6 +119,13 @@ fn create_virtual_device(physical_device: &Device, keyboard_name: &str) -> Resul
         }
     }
 
+    // Media keys too, for `{#AudioPlay}` and the like: a device only sends the keys it advertises
+    for key in crate::keycode::KeyCode::ALL {
+        if key.category() == crate::keycode::KeyCategory::Media {
+            keys.insert(Key::new(key.code()));
+        }
+    }
+
     let try_build = |name: &str| -> Result<VirtualDevice> {
         Ok(VirtualDeviceBuilder::new()?
             .name(name)

@@ -964,7 +964,7 @@ mod tests {
         assert_eq!(one("{:back:x}").kind, Kind::BadMetaArgument);
         assert_eq!(one("{:transparent:yes}").kind, Kind::BadMetaArgument);
         assert_eq!(one("{:case:shouting}").kind, Kind::BadMetaArgument);
-        for text in ["{#Super_L(1)}", "{#control(z shift(z))}", "{:undo_or:ctrl+backspace}", "{:undo_or_ctrl+backspace}"] {
+        for text in ["{#Super_L(1)}", "{#control(z shift(z))}", "{#AudioPlay}", "{#control(AudioNext)}", "{#XF86AudioStop}", "{:undo_or:ctrl+backspace}", "{:undo_or_ctrl+backspace}"] {
             assert!(check_text(text, &plover()).is_empty(), "{text}");
         }
     }
