@@ -127,12 +127,10 @@ fn finding_text(finding: &Finding, indent: &str) -> String {
     if let Some(outline) = &finding.outline {
         line.push_str(&format!(" {}", format!("\"{outline}\"").cyan()));
     }
+    // `file:line:column`, which editors and terminals can jump to
     if let Some(at) = finding.line {
-        line.push_str(&format!(" (line {at}"));
-        if let Some(column) = finding.column {
-            line.push_str(&format!(", column {column}"));
-        }
-        line.push(')');
+        let column = finding.column.map_or_else(String::new, |column| format!(":{column}"));
+        line.push_str(&format!(" {}", format!("({}:{at}{column})", finding.file).dimmed()));
     }
     line.push_str(&format!(": {}\n", finding.message));
     if let Some(suggestion) = &finding.suggestion {
@@ -246,7 +244,10 @@ mod tests {
         let nowhere = Path::new("/nonexistent/keymux/config.ron");
         let targets = targets(nowhere, nowhere, None, std::slice::from_ref(&file)).unwrap();
         let text = to_text(&run(&targets, &dir.join("cache")), "");
-        assert_eq!(text.matches(&file.display().to_string()).count(), 1, "{text}");
+        // Once as the heading, and once in the `file:line:column` an editor can jump to
+        let at = format!("{}:1:2", file.display());
+        assert_eq!(text.matches(&file.display().to_string()).count(), 2, "{text}");
+        assert!(text.contains(&at), "{text}");
         assert!(text.contains("bad_meta_argument") && text.contains("{:tape:toggle}"), "{text}");
         assert!(text.contains("1 files, 1 entries: 0 error(s), 1 warning(s), 0 note(s)"), "{text}");
     }

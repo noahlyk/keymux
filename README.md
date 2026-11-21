@@ -643,8 +643,10 @@ keymux steno validate --json           # findings as JSON, for scripts
 keymux validate                        # the config checks, then the same dictionary checks
 ```
 
-Output is grouped by file: severity, kind, outline, message, then a suggestion when there is one
-(`{:tape:togle}` gets `{:tape:toggle}`). Each file's findings of one kind are capped at 100, with
+Output is grouped by file: severity, kind, outline, `(file:line:column)`, message, then a
+suggestion when there is one (`{:tape:togle}` gets `{:tape:toggle}`). The `file:line:column` is where the entry's
+key is written, for editors and terminals that jump to it; it is found by a second scan of only
+the files that have findings (a JSON file; RTF has no positions). Each file's findings of one kind are capped at 100, with
 a count of the rest. A 70,000-entry dictionary with a 3.8-million-entry backup file takes a few
 seconds.
 
@@ -688,7 +690,7 @@ the same way, and `--strict` there applies to its warnings too.
     "kind": "bad_outline",   // one of the kinds above
     "message": "...",
     "suggestion": "{:tape:toggle}",  // or null
-    "line": 3, "column": 5,          // or null
+    "line": 3, "column": 5,          // where the entry's key is written in a JSON file (1-based), or where a file fails to parse; or null
     "count": 25,                     // entries a finding stands for, or null
     "layers": ["steno"]              // layers that load the file; [] for files given by hand
   } ]

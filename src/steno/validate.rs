@@ -116,7 +116,8 @@ pub struct Finding {
     pub message: String,
     /// What to write instead, when there is a likely candidate
     pub suggestion: Option<String>,
-    /// Where a file fails to parse, when the parser says
+    /// Where the entry is in a JSON file (the key's opening quote, 1-based), or where a file
+    /// fails to parse, when known
     pub line: Option<usize>,
     pub column: Option<usize>,
     /// How many entries this finding stands for, when it stands for several
@@ -378,6 +379,11 @@ pub fn validate_files(files: &[PathBuf], layout: &Layout) -> (Vec<Finding>, usiz
         );
         finding.outline = Some(example);
         finding.count = Some(count);
+        if !is_rtf(file) {
+            if let Ok(bytes) = std::fs::read(file) {
+                locate(&decode_text(&bytes), std::slice::from_mut(&mut finding));
+            }
+        }
         findings.push(finding);
     }
     (findings, entries)
@@ -394,6 +400,84 @@ pub fn check_file(file: &Path, layout: &Layout) -> Vec<Finding> {
 
 fn is_dictionary(file: &Path) -> bool {
     !is_plugin_file(file) && file.file_name().and_then(|name| name.to_str()) != Some(WORDLIST_FILE)
+}
+
+fn is_rtf(file: &Path) -> bool {
+    file.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("rtf"))
+}
+
+/// Fill in `line` and `column` of the findings that name an outline, from the JSON text of their
+/// file: the first place the outline is written as a key (a string followed by a colon,
+/// escapes decoded). The streaming reader keeps no positions, so this is a second, cheap pass
+/// that only files with findings pay for, and it stops as soon as every outline is found.
+fn locate(text: &str, findings: &mut [Finding]) {
+    let mut wanted: HashMap<String, Option<(usize, usize)>> = findings
+        .iter()
+        .filter(|finding| finding.line.is_none())
+        .filter_map(|finding| finding.outline.clone())
+        .map(|outline| (outline, None))
+        .collect();
+    let mut remaining = wanted.len();
+    let bytes = text.as_bytes();
+    let (mut at, mut line, mut line_start) = (0, 1, 0);
+    while at < bytes.len() && remaining > 0 {
+        match bytes[at] {
+            b'\n' => {
+                line += 1;
+                line_start = at + 1;
+                at += 1;
+            }
+            b'"' => {
+                let start = at;
+                let (start_line, start_line_start) = (line, line_start);
+                at += 1;
+                let mut escaped = false;
+                while at < bytes.len() && bytes[at] != b'"' {
+                    match bytes[at] {
+                        b'\\' => {
+                            escaped = true;
+                            at += 1;
+                        }
+                        b'\n' => {
+                            line += 1;
+                            line_start = at + 1;
+                        }
+                        _ => {}
+                    }
+                    at += 1;
+                }
+                if at >= bytes.len() {
+                    break;
+                }
+                at += 1;
+                let after = bytes[at..].iter().position(|b| !b.is_ascii_whitespace());
+                if after.is_none_or(|skip| bytes[at + skip] != b':') {
+                    continue;
+                }
+                let raw = &text[start..at];
+                let key = if escaped {
+                    serde_json::from_str::<String>(raw).ok()
+                } else {
+                    Some(raw[1..raw.len() - 1].to_string())
+                };
+                if let Some(slot) = key.and_then(|key| wanted.get_mut(&key)) {
+                    if slot.is_none() {
+                        let column = text[start_line_start..start].chars().count() + 1;
+                        *slot = Some((start_line, column));
+                        remaining -= 1;
+                    }
+                }
+            }
+            _ => at += 1,
+        }
+    }
+    for finding in findings.iter_mut().filter(|finding| finding.line.is_none()) {
+        let place = finding.outline.as_ref().and_then(|outline| wanted.get(outline).copied().flatten());
+        if let Some((line, column)) = place {
+            finding.line = Some(line);
+            finding.column = Some(column);
+        }
+    }
 }
 
 /// Every entry of a dictionary file as (outline text, value if it is a string), in order. JSON,
@@ -454,6 +538,7 @@ fn check_file_into(
             return 0;
         }
     };
+    let first_new = out.len();
     let mut entries = 0;
     let mut kept: HashMap<(Kind, Severity), usize> = HashMap::new();
     let mut capped = Capped::default();
@@ -548,6 +633,9 @@ fn check_file_into(
         finding.column = e.column;
         finding.suggestion = Some("the previous dictionary stays in use until this parses".into());
         out.push(finding);
+    }
+    if out.len() > first_new && !is_rtf(file) {
+        locate(&decode_text(&bytes), &mut out[first_new..]);
     }
     let mut over: Vec<_> = capped.0.into_iter().collect();
     over.sort_by_key(|((kind, severity), _)| (kind.code(), *severity));
@@ -842,6 +930,22 @@ mod tests {
     fn a_clean_dictionary_has_no_findings() {
         let found = findings_of("clean", CLEAN);
         assert!(found.is_empty(), "clean dictionary was flagged: {found:#?}");
+    }
+
+    #[test]
+    fn entry_findings_carry_the_line_and_column_of_their_key() {
+        let json = "{\n  \"KAT\": \"cat\",\n  \"TKOG\": \"{:tape:togle}\",\n\n    \"A\\\"B\": \"x\",\n  \"v\": \"TKOG\",\n  \"TKOG\": \"{:tape:togle}\"\n}";
+        let found = findings_of("lines", json);
+        let at = |outline: &str| {
+            let hit = found.iter().find(|f| f.outline.as_deref() == Some(outline));
+            hit.map(|f| (f.line, f.column))
+        };
+        // The first key of that name, not a value that spells the same, and 1-based columns
+        assert_eq!(at("TKOG"), Some((Some(3), Some(3))), "{found:#?}");
+        // A key with an escaped quote is found by its decoded text
+        assert_eq!(at("A\"B"), Some((Some(5), Some(5))), "{found:#?}");
+        // Whole-file findings have no outline and no invented place
+        assert!(found.iter().all(|f| f.outline.is_none() || f.line.is_some()), "{found:#?}");
     }
 
     #[test]
