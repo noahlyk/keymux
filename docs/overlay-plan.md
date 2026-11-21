@@ -102,6 +102,10 @@ started first; it takes over on its first key.
 - `OverlayFrame = OverlaySnapshot` for now. The tape holds up to 160 lines (enough for a
   tall screen), so a full frame is a few KB: still cheap to serialize on every key event.
   If that ever matters, send only `tape_since(seq)` instead.
+- bincode has no field names, so a field added to `TapeEntry` (`read`: a plugin read the
+  line's text) changes the frame, and the stream has no version. The daemon and the overlay are
+  built and installed together; an overlay of another build fails to decode a frame, which ends
+  its stream, and it exits to be restarted with the daemon (see `overlay::client`).
 
 ## 3. Overlay process — `src/overlay/` [done; checked live on niri with `--demo`]
 

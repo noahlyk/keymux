@@ -828,6 +828,11 @@ pub struct OverlayConfig {
     /// Show transparent strokes (a lookup, ...) on the tape, dimmed, since they are not part of
     /// the text. Off leaves them out of the overlay's tape.
     pub tape_transparent: bool,
+    /// Drawn before a tape line whose text a plugin read (not a dictionary entry), so a guess can
+    /// be told from an entry. Empty draws no marker.
+    pub tape_read_marker: String,
+    /// The colour (RGBA) of a plugin-read line's text; `None` leaves it in the usual colour
+    pub tape_read_color: Option<[u8; 4]>,
     /// A .ttf/.otf to use instead of the embedded Atkinson Hyperlegible
     pub font: Option<String>,
     /// Steno layers that show the overlay. Empty means every steno layer.
@@ -907,6 +912,8 @@ impl Default for OverlayConfig {
             tape_fade: 0.15,
             tape_fade_lines: 5,
             tape_transparent: true,
+            tape_read_marker: "~".to_owned(),
+            tape_read_color: Some([150, 205, 235, 255]),
             extra_keys: Vec::new(),
             overlay_overrides: HashMap::new(),
             key_groups: HashMap::new(),

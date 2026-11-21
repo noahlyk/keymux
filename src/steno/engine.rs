@@ -679,7 +679,7 @@ impl StenoEngine {
         let unmatched = self.translator.was_unmatched();
         let description = tape::describe(output.as_ref(), unmatched);
         if let Some(tape) = &mut self.tape {
-            // The tape file says which plugin read the word, and as what; the overlay does not
+            // The tape file says which plugin read the word, and as what; the overlay only flags that one did
             let read = self.translator.plugin_read();
             let marked = tape::mark_plugin(
                 &description,
@@ -693,8 +693,11 @@ impl StenoEngine {
             }
         }
         // Same description as the tape file, so the overlay and `keymux steno tape` agree
+        let read = self.translator.plugin_read().is_some();
         if repeated {
-            self.hub.push_repeat(stroke, description, unmatched);
+            self.hub.push_repeat_of(stroke, description, unmatched, read);
+        } else if read {
+            self.hub.push_read_stroke(stroke, description, unmatched);
         } else {
             self.hub.push_stroke(stroke, description, unmatched);
         }
@@ -1442,7 +1445,29 @@ mod tests {
         assert_eq!(tape[0].gone, [[0, 4]]);
         assert_eq!((tape[1].stroke, tape[1].text.as_str()), (0, "-4 \"kat\""));
         assert!(tape[1].gone.is_empty(), "expected none");
+        assert!(!tape[0].read && tape[1].read, "only the plugin's line is a reading: {tape:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stroke_a_plugin_read_is_flagged_on_the_overlay_tape_and_a_dictionary_entry_is_not() {
+        let mut dict = Dictionary::default();
+        dict.merge_json(r#"{"TKOG": "dog"}"#, &Layout::plover()).unwrap();
+        let chain = Chain::test_with_reader(
+            dict,
+            Layout::plover(),
+            Box::new(|outline: &str, _: &str, _: Option<&crate::steno::strokes::Window>| Some(outline.to_lowercase())),
+        );
+        let mut engine = engine_with_dict("{}");
+        engine.translator = Translator::with_shared(Arc::new(chain), super::super::formatter::Options::default());
+        let hub: &'static OverlayHub = Box::leak(Box::default());
+        engine.set_hub(hub);
+        let t0 = Instant::now();
+        let keys = kat_keys(&engine);
+        let _ = tap(&mut engine, keys, t0, t0 + Duration::from_millis(30));
+        let tape = hub.snapshot().tape;
+        assert_eq!(tape.len(), 1, "{tape:?}");
+        assert!(tape[0].read && tape[0].output().contains("kat"), "{tape:?}");
     }
 
     #[test]

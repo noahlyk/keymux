@@ -40,6 +40,10 @@ pub struct TapeEntry {
     /// through, for a repeated line); the overlay draws them grey. See [`super::erasure`].
     #[serde(default)]
     pub gone: Vec<[u32; 2]>,
+    /// The text is a plugin's reading of the strokes, not a dictionary entry: the overlay draws
+    /// the line in a style of its own (`tape_read_marker`, `tape_read_color`)
+    #[serde(default)]
+    pub read: bool,
 }
 
 impl TapeEntry {
@@ -234,7 +238,7 @@ impl OverlayHub {
     /// replacement, described as on the tape): a line of its own, with no stroke, under the line
     /// it greys.
     pub fn push_late(&self, text: String, unmatched: bool) {
-        self.push_entry(0, text, unmatched, false);
+        self.push_entry(0, text, unmatched, false, true);
     }
 
     /// A stroke finished that belongs on no tape (an engine command): clear the lit keys without
@@ -250,16 +254,21 @@ impl OverlayHub {
 
     /// A stroke finished and was translated. Clears the lit keys.
     pub fn push_stroke(&self, stroke: u32, text: String, unmatched: bool) {
-        self.push_entry(stroke, text, unmatched, false);
+        self.push_entry(stroke, text, unmatched, false, false);
+    }
+
+    /// [`Self::push_stroke`] for a stroke whose text a plugin read (`read` on the line).
+    pub fn push_read_stroke(&self, stroke: u32, text: String, unmatched: bool) {
+        self.push_entry(stroke, text, unmatched, false, true);
     }
 
     /// A transparent stroke finished (see `Translator::stroke`): a tape line that is not part of
     /// the text, which the overlay draws dimmed, or leaves out.
     pub fn push_transparent(&self, stroke: u32, text: String) {
-        self.push_entry(stroke, text, false, true);
+        self.push_entry(stroke, text, false, true, false);
     }
 
-    fn push_entry(&self, stroke: u32, text: String, unmatched: bool, transparent: bool) {
+    fn push_entry(&self, stroke: u32, text: String, unmatched: bool, transparent: bool, read: bool) {
         self.update(|state| {
             // The tape only drops its oldest entry, so the newest one always holds the last seq
             let seq = state.tape.back().map_or(1, |last| last.seq + 1);
@@ -274,6 +283,7 @@ impl OverlayHub {
                 repeats: 0,
                 transparent,
                 gone: Vec::new(),
+                read,
             };
             let screen = Arc::make_mut(&mut state.screen);
             if let Some(first) = state.tape.front() {
@@ -292,6 +302,11 @@ impl OverlayHub {
     /// A stroke was typed again by holding it. It counts on its line, if that is the newest one,
     /// instead of adding a line for every repeat.
     pub fn push_repeat(&self, stroke: u32, text: String, unmatched: bool) {
+        self.push_repeat_of(stroke, text, unmatched, false);
+    }
+
+    /// [`Self::push_repeat`], with whether a plugin read the text (for the line it may add).
+    pub fn push_repeat_of(&self, stroke: u32, text: String, unmatched: bool, read: bool) {
         let counted = self.update(|state| {
             let Some(last) = state.tape.back_mut().filter(|last| last.stroke == stroke) else {
                 return false;
@@ -305,7 +320,7 @@ impl OverlayHub {
             true
         });
         if !counted {
-            self.push_stroke(stroke, text, unmatched);
+            self.push_entry(stroke, text, unmatched, false, read);
         }
     }
 
@@ -571,6 +586,7 @@ mod tests {
             repeats: 0,
             transparent: false,
             gone,
+            read: false,
         };
         let sent = OverlaySnapshot {
             generation: 7,
@@ -580,6 +596,20 @@ mod tests {
         let bytes = bincode::serialize(&sent).unwrap();
         let got: OverlaySnapshot = bincode::deserialize(&bytes).unwrap();
         assert_eq!(got, sent);
+    }
+
+    #[test]
+    fn a_plugin_read_stroke_is_flagged_and_a_plain_one_is_not() {
+        let hub = OverlayHub::default();
+        hub.push_stroke(1, "\"a\"".into(), false);
+        hub.push_read_stroke(2, "\"b\"".into(), false);
+        hub.push_repeat_of(4, "\"c\"".into(), false, true);
+        hub.push_late("-1 \"d\"".into(), false);
+        let read: Vec<bool> = hub.snapshot().tape.iter().map(|line| line.read).collect();
+        assert_eq!(read, [false, true, true, true]);
+        // A repeat counts on the line it repeats and leaves its flag alone
+        hub.push_repeat_of(4, "\"c\"".into(), false, false);
+        assert!(hub.snapshot().tape.iter().all(|line| line.repeats == 0 || line.read));
     }
 
     #[test]

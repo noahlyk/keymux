@@ -526,6 +526,8 @@
     //     tape_fade: 0.15,    // the oldest (top) line's strength; 1.0 = no fade
     //     tape_fade_lines: 5, // how many lines at the top fade; the rest are at full strength; 0 = no fade
     //     tape_transparent: true, // transparent strokes (a lookup, ...) show dimmed on the tape; false = left out
+    //     tape_read_marker: "~",  // drawn before a line a plugin read (not a dictionary entry); "" = none
+    //     tape_read_color: Some([150, 205, 235, 255]), // that line's text colour (RGBA); None = the usual colour
     //     font: None,         // None = bundled Atkinson Hyperlegible
     //     layers: [],         // empty = every steno layer
     //     // Keys one finger plays together, underlined as one on the tape: a number per key

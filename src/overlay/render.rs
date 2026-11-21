@@ -951,6 +951,7 @@ impl Renderer {
             repeats: 0,
             transparent: false,
             gone: Vec::new(),
+            read: false,
         });
 
         let room = self.words_right - self.words_left;
@@ -966,7 +967,7 @@ impl Renderer {
             .rev()
             .filter(|entry| self.config.tape_transparent || !entry.transparent);
         for entry in live.iter().chain(shown) {
-            let text = Self::tape_entry_text(entry);
+            let text = Self::tape_entry_text(entry, &self.config.tape_read_marker);
             let text_lines = wrap_text(&mut self.words, &text, room).len().max(1);
             if used + text_lines > budget {
                 break;
@@ -1004,8 +1005,8 @@ impl Renderer {
 
     /// The text a tape entry's own line shows: "?" for a stroke that matched nothing, its
     /// translated text otherwise, after a count (`x3`) for a stroke held down to repeat.
-    fn tape_entry_text(entry: &TapeEntry) -> String {
-        Self::tape_entry_runs(entry)
+    fn tape_entry_text(entry: &TapeEntry, marker: &str) -> String {
+        Self::tape_entry_runs(entry, marker)
             .into_iter()
             .map(|(text, _)| text)
             .collect()
@@ -1014,7 +1015,7 @@ impl Renderer {
     /// [`Self::tape_entry_text`] as runs in their ink: the `-N` counts grey, and what later
     /// strokes took back (an undo, a correction, a late reading) grey, so the text in full
     /// colour is what is on screen. A miss's `?` goes grey once all it typed was taken back.
-    fn tape_entry_runs(entry: &TapeEntry) -> Vec<(String, Ink)> {
+    fn tape_entry_runs(entry: &TapeEntry, marker: &str) -> Vec<(String, Ink)> {
         let pieces = erasure::pieces(entry.output());
         let typed = erasure::typed_len(&pieces);
         let alive = erasure::alive_from_gone(&entry.gone, typed);
@@ -1027,6 +1028,10 @@ impl Renderer {
         // A stroke held down repeats: one line with a count, not a line for each
         if entry.repeats > 0 {
             runs.insert(0, (format!("x{} ", entry.repeats + 1), Ink::Normal));
+        }
+        // A plugin's reading carries the marker first, so it shows even in the usual colour
+        if entry.read && !marker.is_empty() {
+            runs.insert(0, (format!("{marker} "), Ink::Normal));
         }
         runs
     }
@@ -1463,10 +1468,18 @@ impl Renderer {
         } else {
             self.theme.words
         };
+        // A plugin's reading, not an entry: its own colour, if the config gives one
+        let color = match self.config.tape_read_color {
+            Some(read) if entry.read && !entry.unmatched => {
+                let [r, g, b, a] = read;
+                [r, g, b, (f32::from(a) * self.config.text_opacity.clamp(0.0, 1.0)).round() as u8]
+            }
+            _ => color,
+        };
         let (normal, gone) = (fade_color(color, fade), fade_color(self.theme.gone, fade));
         let mut text = String::new();
         let mut colors = Vec::new();
-        for (run, ink) in Self::tape_entry_runs(entry) {
+        for (run, ink) in Self::tape_entry_runs(entry, &self.config.tape_read_marker) {
             let color = if ink == Ink::Gone { gone } else { normal };
             colors.extend(run.chars().map(|_| color));
             text.push_str(&run);
@@ -1874,6 +1887,7 @@ mod tests {
             repeats: 0,
             transparent: false,
             gone: Vec::new(),
+            read: false,
         }
     }
 
@@ -2467,6 +2481,7 @@ mod tests {
             repeats: 0,
             transparent: false,
             gone: Vec::new(),
+            read: false,
         };
         let baseline = 100.0;
         renderer.draw_tape_line(&mut pixmap.as_mut(), &entry, baseline, 1.0);
@@ -2547,6 +2562,7 @@ mod tests {
             repeats: 0,
             transparent,
             gone: Vec::new(),
+            read: false,
         };
         let draw = |config: &OverlayConfig, entries: Vec<TapeEntry>| {
             let mut renderer = Renderer::new(config, 1, 900).unwrap();
@@ -2574,6 +2590,42 @@ mod tests {
         assert_ne!(draw(&config, vec![entry(1, false), entry(2, true)]), ordinary);
     }
 
+    #[test]
+    fn a_plugin_read_line_is_drawn_with_a_marker_and_its_own_colour() {
+        let entry = |read: bool| TapeEntry {
+            seq: 1,
+            stroke: 1 << 7,
+            text: "\"x\"".into(),
+            unmatched: false,
+            repeats: 0,
+            transparent: false,
+            gone: Vec::new(),
+            read,
+        };
+        let draw = |config: &OverlayConfig, read: bool| {
+            let mut renderer = Renderer::new(config, 1, 900).unwrap();
+            let (w, h) = renderer.size();
+            let mut pixmap = Pixmap::new(w, h).unwrap();
+            let snapshot = OverlaySnapshot {
+                layer: Some("steno".into()),
+                tape: [entry(read)].into(),
+                ..OverlaySnapshot::default()
+            };
+            renderer.draw(&snapshot, &mut pixmap.as_mut());
+            pixmap.data().to_vec()
+        };
+        let plain = OverlayConfig { tape_read_marker: String::new(), tape_read_color: None, ..OverlayConfig::default() };
+        let marked = OverlayConfig { tape_read_color: None, ..OverlayConfig::default() };
+        let tinted = OverlayConfig { tape_read_marker: String::new(), ..OverlayConfig::default() };
+        let ordinary = draw(&OverlayConfig::default(), false);
+        // Turned off, a reading is drawn as any entry; a flag alone changes nothing then
+        assert_eq!(draw(&plain, true), draw(&plain, false));
+        // The default draws it differently from an entry, by marker alone and by colour alone
+        assert_ne!(draw(&OverlayConfig::default(), true), ordinary);
+        assert_ne!(draw(&marked, true), draw(&marked, false), "the marker");
+        assert_ne!(draw(&tinted, true), draw(&tinted, false), "the colour");
+    }
+
     /// The ink colours of a drawn tape line: how many opaque-ish pixels sit near each colour.
     fn tape_ink(stroke_keys: &[usize], fade: f32) -> [usize; 4] {
         let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
@@ -2587,6 +2639,7 @@ mod tests {
             repeats: 0,
             transparent: false,
             gone: Vec::new(),
+            read: false,
         };
         renderer.draw_tape_line(&mut pixmap.as_mut(), &entry, 100.0, fade);
         let theme = renderer.theme;
@@ -2663,6 +2716,7 @@ mod tests {
                 repeats: 0,
                 transparent: false,
                 gone: Vec::new(),
+                read: false,
             };
             let baseline = 100.0;
             renderer.draw_tape_line(&mut pixmap.as_mut(), &entry, baseline, 1.0);
@@ -3135,6 +3189,7 @@ mod tests {
                 repeats: 0,
                 transparent: false,
                 gone: Vec::new(),
+                read: false,
             });
         }
         let write = |name: &str, renderer: &mut Renderer, snapshot: &OverlaySnapshot| {
@@ -3870,7 +3925,7 @@ mod tests {
 
     #[test]
     fn translations_drop_the_tape_quotes() {
-        let text = |text: &str| Renderer::tape_entry_text(&tape_entry(1, "T", text));
+        let text = |text: &str| Renderer::tape_entry_text(&tape_entry(1, "T", text), "~");
         assert_eq!(text("\"the\""), "the");
         assert_eq!(text("-3 \"the\""), "-3 the");
         assert_eq!(text("KC_A KC_B"), "KC_A KC_B");
@@ -3884,7 +3939,7 @@ mod tests {
         hub.push_stroke(4, "? \" KAT\"".into(), true);
         hub.push_stroke(8, "-4 \"\"".into(), false);
         let tape = hub.snapshot().tape;
-        let runs = |i: usize| Renderer::tape_entry_runs(&tape[i]);
+        let runs = |i: usize| Renderer::tape_entry_runs(&tape[i], "~");
         let (n, g) = (Ink::Normal, Ink::Gone);
         assert_eq!(runs(0), [(" cit".to_owned(), n), ("y".to_owned(), g)]);
         assert_eq!(runs(1), [("-1".to_owned(), g), (" ies".to_owned(), n)]);
