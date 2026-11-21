@@ -895,7 +895,11 @@ already has it as `PHRUP` and `PHR*UP`, and you can add your own to any dictiona
   `everybody's (composed: everybody + 's)`, and `keymux steno lookup` prints a note under the
   table (`everybody's was not a whole entry - composed (everybody + 's)`). A
   real entry always beats a composition. Without a join key the composed strokes are typed
-  through the engine to prove they produce the word. Every piece is an indexed lookup (never a
+  through the engine to prove they produce the word. With one, the dictionary cannot read the
+  join key, so when a plugin is loaded it is asked, the way typing asks it (a reading that misses
+  the deadline is waited for, up to 2 s, off the key path in the lookup worker), and the row is
+  dropped if the plugin reads anything but the word; with no plugin there is nobody to ask and
+  the composition stands. Every piece is an indexed lookup (never a
   scan), so a miss stays instant on a million entries, and a key press cancels it like the
   rest of the lookup.
 - Backspace edits the query, Shift capitalizes (lookups are case-sensitive), and **Esc or

@@ -719,7 +719,7 @@ mod tests {
         assert_eq!(found.rows.iter().filter(|r| r.mark == Mark::Entry).count(), 2);
     }
 
-    /// A plugin that only declares a join key (bit 23), compiled for real.
+    /// A plugin that declares a join key (bit 23) and reads any two-stroke outline as "nomy", compiled for real.
     const JOIN_PLUGIN: &str = r#"
 #[no_mangle]
 pub extern "C" fn alloc(len: i32) -> i32 {
@@ -728,8 +728,13 @@ pub extern "C" fn alloc(len: i32) -> i32 {
     std::mem::forget(v);
     ptr as i32
 }
+static READING: [u8; 4] = *b"nomy";
 #[no_mangle]
-pub extern "C" fn fallback(_ptr: i32, _len: i32) -> i64 { -1 }
+pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
+    let input = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    if !input.contains(&b'/') { return -1; }
+    (i64::from(READING.as_ptr() as i32) << 32) | 4
+}
 #[no_mangle]
 pub extern "C" fn joins(bits: i64) -> i32 { i32::from(bits & (1 << 23) != 0) }
 "#;

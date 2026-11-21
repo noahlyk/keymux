@@ -672,6 +672,12 @@ impl Translator {
         self.dict.as_dictionary()
     }
 
+    /// Whether a plugin is loaded: something besides the dictionary that can read a stroke.
+    #[must_use]
+    pub fn has_plugin(&self) -> bool {
+        self.dict.plugin_count() > 0
+    }
+
     /// The dictionary, to look things up on another thread. `None` when nothing loaded.
     #[must_use]
     pub fn dictionary_handle(&self) -> Option<Arc<Dictionary>> {

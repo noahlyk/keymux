@@ -210,17 +210,40 @@ pub fn compose(base: &Translator, word: &str, cancelled: &dyn Fn() -> bool) -> O
         cancelled,
     )?;
     // Without a join key the dictionary alone decides what the strokes type (orthography can
-    // change a joint: `{^ing}` after `make`), so prove it. A join key's reading is the plugin's.
-    if !found.joined && !types_exactly(base, &found.strokes, word) {
-        return None;
-    }
-    Some(found)
+    // change a joint: `{^ing}` after `make`), so prove it. A join key's reading is a plugin's:
+    // with one loaded, ask it the way typing does; with none there is nobody to ask, and the
+    // composition stands as the dictionary's join key promises it.
+    let proven = if found.joined {
+        !base.has_plugin() || types_exactly(base, &found.strokes, word, cancelled)
+    } else {
+        types_exactly(base, &found.strokes, word, cancelled)
+    };
+    proven.then_some(found)
 }
 
-fn types_exactly(base: &Translator, strokes: &[u32], word: &str) -> bool {
+/// How long the proof waits for a plugin's reading that missed its deadline, so a slow plugin
+/// drops the row instead of holding the lookup.
+const READING_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether `strokes`, typed on a fresh translator over `base`'s dictionary and plugins, give
+/// exactly `word`. A plugin's reading that comes late is waited for (up to [`READING_WAIT`], and
+/// never past `cancelled`), as the engine settles it on a tick, so the proof sees what typing
+/// ends up with.
+fn types_exactly(base: &Translator, strokes: &[u32], word: &str, cancelled: &dyn Fn() -> bool) -> bool {
     let mut typed = base.fresh();
+    let started = std::time::Instant::now();
     for &stroke in strokes {
         typed.stroke(stroke);
+        while typed.has_late() {
+            if cancelled() || started.elapsed() > READING_WAIT {
+                return false;
+            }
+            if typed.late_ready() {
+                typed.settle_late();
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
         if typed.was_unmatched() {
             return false;
         }
@@ -399,7 +422,7 @@ mod tests {
         assert_eq!(compose(&t.fresh(), "everybody's", &|| true), None);
     }
 
-    /// A real plugin that only declares a join key (bit 23), compiled for real.
+    /// A real plugin that declares a join key (bit 23) and reads any two-stroke outline as "nomy", compiled for real.
     const JOIN_PLUGIN: &str = r#"
 #[no_mangle]
 pub extern "C" fn alloc(len: i32) -> i32 {
@@ -408,8 +431,13 @@ pub extern "C" fn alloc(len: i32) -> i32 {
     std::mem::forget(v);
     ptr as i32
 }
+static READING: [u8; 4] = *b"nomy";
 #[no_mangle]
-pub extern "C" fn fallback(_ptr: i32, _len: i32) -> i64 { -1 }
+pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
+    let input = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    if !input.contains(&b'/') { return -1; }
+    (i64::from(READING.as_ptr() as i32) << 32) | 4
+}
 #[no_mangle]
 pub extern "C" fn joins(bits: i64) -> i32 { i32::from(bits & (1 << 23) != 0) }
 "#;
@@ -468,6 +496,57 @@ pub extern "C" fn joins(bits: i64) -> i32 { i32::from(bits & (1 << 23) != 0) }
         assert!(found.joined);
         // without join_keys the join bit is not offered
         assert_ne!(glue_for(&translator(DICT)), Glue::JoinBit(1 << 23));
+    }
+
+    /// A dictionary and a fake plugin (the `+` join key, read as the outline lower-cased without
+    /// its join mark and slashes, except that `answer` overrides what the plugin says for
+    /// the outline it is asked) for the join-key proof.
+    fn with_reader(read: impl Fn(&str) -> Option<String> + Send + 'static) -> Translator {
+        let layout = Layout::plover_with_joins(&['+'], &['+']).unwrap();
+        let mut dict = crate::steno::dict::Dictionary::default();
+        dict.merge_json(DICT, &layout).unwrap();
+        let chain = Chain::test_with_reader(
+            dict,
+            layout,
+            Box::new(move |outline: &str, _: &str, _: Option<&crate::steno::strokes::Window>| read(outline)),
+        );
+        Translator::with_shared(Arc::new(chain), Options { start_attached: true, ..Options::default() })
+    }
+
+    #[test]
+    fn a_join_key_composition_is_kept_when_the_plugin_reads_it_as_the_word() {
+        let t = with_reader(|outline| {
+            let plus = outline.contains('+');
+            plus.then(|| "nomy".to_owned())
+        });
+        assert!(t.has_plugin());
+        let found = compose_in(&t, "nomy").expect("the plugin reads it as the word");
+        assert!(found.joined);
+    }
+
+    #[test]
+    fn a_join_key_composition_the_plugin_reads_as_something_else_is_dropped() {
+        let t = with_reader(|outline| outline.contains('+').then(|| "nome".to_owned()));
+        assert_eq!(compose_in(&t, "nomy"), None);
+        // Nothing read at all (the plugin declines): the strokes type no word either
+        let t = with_reader(|_| None);
+        assert_eq!(compose_in(&t, "nomy"), None);
+    }
+
+    #[test]
+    fn a_plugin_that_answers_after_its_deadline_is_waited_for() {
+        let mut t = with_reader(|outline| {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            outline.contains('+').then(|| "nomy".to_owned())
+        });
+        t.set_plugin_deadline(std::time::Duration::from_millis(5));
+        assert!(compose_in(&t, "nomy").is_some(), "a late reading still proves it");
+    }
+
+    #[test]
+    fn a_dictionary_composition_is_still_proven_by_the_dictionary_with_a_plugin_loaded() {
+        let t = with_reader(|_| None);
+        assert_eq!(compose_in(&t, "everybody's").unwrap().strokes, vec![s("EFB"), s("-Z")]);
     }
 
     #[test]
