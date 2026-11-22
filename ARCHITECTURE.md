@@ -569,6 +569,19 @@ Keyboard "Built-in Laptop"
 - Parallel processing for complex keyboards
 - Prevents one device from blocking another
 
+#### Keyboard Groups: One Thread For Several Keyboards
+
+A `keyboard_groups` entry makes several physical keyboards ONE logical keyboard, so a steno chord, a layer, a one-shot or a held modifier can span them. A group gets **one thread, one keymap and one virtual keyboard** for all its devices (every event file of every member):
+
+```
+group "desk"  ── ONE thread ── Pump ── KeymapProcessor ── virtual keyboard
+  Merge (src/event_processor/merge.rs): polls every member fd + the doorbell
+    ├─ Glove80   event5, event6   (per-device debounce)
+    └─ Keyboard2 event12          (per-device debounce)
+```
+
+`Merge` is a `Source` for the same `Pump` a single keyboard uses: it reads every ready device, filters switch bounce per physical device, sorts the batch by the kernel's timestamps, then applies the key state rule (a code is held while ANY member holds it: press on 0 to 1, release on 1 to 0) and hands the pump one ordered stream. Members join and leave through an `Arrival` channel plus the doorbell; a leaving member releases its keys by the same rule. A keyboard in no group still gets one thread per event file, unchanged. In the daemon, `sync_groups` (daemon.rs) reconciles each group's devices with what is connected on every resync; a group's thread ends when its last device is gone.
+
 #### Thread Lifecycle
 
 1. **Spawn**: Daemon creates thread when keyboard assigned to user

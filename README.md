@@ -225,6 +225,8 @@ that from being retried. OpenRC and runit have no steno service script.
   - Tuple style: `("pattern", "Enable")`, `("pattern", "Disable")`
   - Bare string: `"1234"` = enable keyboard matching 1234
 
+- **keyboard_groups** - Several keyboards used as one: `{ "desk": ["16c0:27db", "046d:c52b"] }`. See "Keyboard groups".
+
 - **mt_config** - Configuration for Mod-Tap (MT) keys
   - **permissive_hold** (default: true): When another key is pressed while MT is held, resolve immediately to hold
   - **enable_roll_detection** (default: true): Fast same-hand rolls favor tap (prevents accidental holds during typing)
@@ -1326,6 +1328,43 @@ keymux clear-stats
 keymux debug
 ```
 
+### Keyboard groups
+
+Two physical keyboards (a Glove80 and a second board, a split pair that connects as two devices, a numpad) can be used as ONE logical keyboard. Everything modal then spans them: a steno chord with keys from both, a layer held on one and used on the other, a one-shot or mod-tap crossing over, one steno engine, one overlay, one lookup, one tape.
+
+```ron
+(
+    keyboard_groups: {
+        // the name is yours; members are patterns, exactly as in enabled_keyboards
+        "desk": ["16c0:27db:0111:0003", "046d:c52b"],   // Glove80 + a second keyboard
+    },
+    // a group name works where a keyboard id works in per-keyboard settings
+    per_keyboard_overrides: {
+        "desk": (default_layer: Some("steno")),
+    },
+)
+```
+
+- **Members** match like `enabled_keyboards` entries: a hardware id or a prefix of one (`046d:c52b`), `id@port` (the full id with the port) for one USB port, an event file (`event17`), part of the keyboard's name (`"Planck"`), or `"*"`. `keymux list` shows the ids. A keyboard belongs to at most one group: `keymux validate` reports groups whose patterns can name the same keyboard (equal, or one inside the other) as an error. A member nothing connected matches is a warning only, since keyboards come and go.
+- **Enabled implicitly.** A member needs no entry in `enabled_keyboards`, and `enabled_keyboards: None` or a list that leaves it out does not turn it off. A member that `enabled_keyboards` names `Disable` (an entry that names it, not `"*"`) stays out of the group and is not used at all; `keymux disable <id>` does that.
+- **Whichever members are connected.** One connected member behaves as that keyboard alone, with the group's config, on the group's processor. Members plugged in or out while the group runs join or leave it without restarting it (see Hot-plug below).
+- **Config precedence.** A `per_keyboard_overrides` entry named after the group wins. Without one, the first connected member (in id order) that has an override of its own supplies it, so a config that already had `per_keyboard_overrides: { "16c0:27db:0111:0003": ... }` (an override is keyed by a keyboard's full id, as always) keeps working when the keyboard is put in a group. Without either, the global config. The group's config is chosen when the group starts and again on every reload. `keyboard_groups` does not change anything for keyboards that are in no group: with no `keyboard_groups` keymux works as before.
+- **One layout.** The group has one keymap, so both members share one physical layout: a key code means the same on either keyboard. If the second board's keys differ (a different code for the same stroke key), map them in `layout_overrides` of the steno layer or remap them under `remaps`, by key code. Per-member layouts are not supported.
+
+**When two members press the same key.** The group's state of a key code is whether ANY member holds it down: every (member, key) that is down is a holder. A press goes on to the keymap only when the key had no holder (0 to 1); a release goes on only when its last holder lets go (1 to 0). So with a spacebar on each keyboard: A down, B down, A up, B up is exactly one space press (at A's down) and one release (at B's up), and releasing one of two held spacebars sends nothing. Order does not matter: B up first, then A up, is still one press and one release, at the last up. A member that is unplugged while holding keys releases them by the same rule: a key another member also holds stays down. Different keys on different members are just different keys; two keys that map to the same stroke key set the same steno bit. Kernel auto-repeat is dropped as always.
+
+**Time order.** Members' events are merged by the kernel's own timestamps, so a chord pressed across two keyboards is seen in the order your fingers did it, and every key reaches the keymap at the moment its keyboard reported it. Switch-bounce filtering runs per physical key before the merge, so a release on one member followed by a press on another is two real events, never chatter. A chord whose keys all go up before the other member's first key goes down is two strokes, exactly as if one keyboard had sent it.
+
+**Hot-plug.** The daemon checks the members after each plug event: a member that appears is grabbed and added to the group's one processor, and a member that goes away is released through the rule above (a chord, a held modifier or a layer hold that depended on its keys ends cleanly), while the group keeps running on the others. When the last member goes the group's processor stops, as a single keyboard's does; when a member returns, it starts again. `keymux reload`, `toggle`, `enable`, `disable`, game mode and the overlay treat the group as one keyboard. `keymux disable <group name>` stops the whole group.
+
+**Alt+F12** (the very first key press after attaching, on any member) releases every member of the group. Replug one to use keymux again.
+
+**`keymux list`** marks each member with its group (`In group "desk"`) and a `Group:` line.
+
+**Limits.** Kernel timestamps are when the host received the event, so a Bluetooth or wireless member and a wired one have the usual radio skew between them; if chords that span them split, measure with `keymux steno skew` and set `skew` (see "Split keyboards and radio lag"): it works on the merged stream, and a `keys:` list may name physical keys of either member. The merge puts events from several members in time order within one read of the devices, a few milliseconds at most, so an event a device delivered late can still come out after one stamped a little later. At most 64 devices per group. The group's virtual keyboard offers the keys its members had when it started (plus media keys); a member that joins later with keys none of them had cannot type those. Mice and other pointing devices are not keyboards to keymux and cannot be members.
+
+**Try it.** Add `keyboard_groups` as above, run `keymux validate`, then `keymux reload` (or save with `hot_config_reload: true`). `keymux list` should show both keyboards `In group "desk"`. Press a key on each and chord across them with the steno layer on; hold the same key on both and release one, and nothing should happen until the second lets go; unplug one member and the other keeps working.
+
 ### Shell Completions
 
 ```bash
@@ -1341,7 +1380,7 @@ keymux completion fish > ~/.config/fish/completions/keymux.fish
 
 ## 🚪 Releasing a keyboard from keymux
 
-Press **Alt+F12** as the very first key after a keyboard attaches to release it. keymux stops handling that keyboard, and you get a notification. Replug the keyboard to use keymux with it again.
+Press **Alt+F12** as the very first key after a keyboard attaches to release it (for a keyboard group, on any member: every member is released). keymux stops handling that keyboard, and you get a notification. Replug the keyboard to use keymux with it again.
 
 Only the first key press counts. If any other key is pressed first, the chord no longer works until the keyboard is replugged. This keeps a stray Alt+F12 in the middle of typing from releasing the keyboard.
 

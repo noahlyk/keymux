@@ -136,6 +136,18 @@
         // ("6789", "Disable"),     // disable this partial ID (tuple syntax)
     ],
     
+    // Keyboard groups: several physical keyboards used as ONE logical keyboard (one steno
+    // chord, one layer stack, one key state), by group name. Members are patterns exactly as in
+    // enabled_keyboards (hardware id or prefix, "id@port", "eventN", part of the name, "*").
+    // - A keyboard belongs to at most one group (`keymux validate` reports overlaps).
+    // - Members are enabled implicitly; one named Disable in enabled_keyboards stays out.
+    // - A group name works as a key of per_keyboard_overrides (it beats a member's own entry).
+    // - Two members holding the same key: pressed on the first, released on the last release.
+    // - Works with whichever members are connected; plug or unplug while it runs.
+    // keyboard_groups: {
+    //     "desk": ["16c0:27db:0111:0003", "046d:c52b"],   // Glove80 + a second keyboard
+    // },
+
     // Escape hatch: pressing Alt+F12 as the very first key after a keyboard attaches
     // releases it from keymux (you get a notification). Replug it to use keymux again.
     //
