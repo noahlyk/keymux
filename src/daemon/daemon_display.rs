@@ -81,6 +81,9 @@ impl DaemonDisplay {
 
     fn status_str(kbd: &crate::ipc::KeyboardInfo) -> String {
         match (&kbd.enabled, &kbd.matched_rule) {
+            (true, None) if kbd.group.is_some() => {
+                format!("✓ In group \"{}\"", kbd.group.as_deref().unwrap_or_default())
+            }
             (true, Some(rule)) => format!("✓ Enabled by \"{}\"", rule),
             (true, None) => "✓ Enabled implicitly".to_string(),
             (false, Some(rule)) => format!("○ Disabled by \"{}\"", rule),
@@ -113,11 +116,10 @@ impl DaemonDisplay {
 
         // Data rows
         for kbd in keyboards {
-            let status = match (&kbd.enabled, &kbd.matched_rule) {
-                (true, Some(rule)) => format!("✓ Enabled by \"{}\"", rule).bright_green(),
-                (true, None) => "✓ Enabled implicitly".bright_green(),
-                (false, Some(rule)) => format!("○ Disabled by \"{}\"", rule).dimmed(),
-                (false, None) => "○ Disabled implicitly".dimmed(),
+            let status = if kbd.enabled {
+                Self::status_str(kbd).bright_green()
+            } else {
+                Self::status_str(kbd).dimmed()
             };
 
             println!(
@@ -133,16 +135,18 @@ impl DaemonDisplay {
 
     fn print_keyboard_list_paragraph(&self, keyboards: &[crate::ipc::KeyboardInfo]) {
         for kbd in keyboards {
-            let status = match (&kbd.enabled, &kbd.matched_rule) {
-                (true, Some(rule)) => format!("✓ Enabled by \"{}\"", rule).bright_green(),
-                (true, None) => "✓ Enabled implicitly".bright_green(),
-                (false, Some(rule)) => format!("○ Disabled by \"{}\"", rule).dimmed(),
-                (false, None) => "○ Disabled implicitly".dimmed(),
+            let status = if kbd.enabled {
+                Self::status_str(kbd).bright_green()
+            } else {
+                Self::status_str(kbd).dimmed()
             };
 
             println!("    - {} ({})", kbd.name.bright_white(), status);
             println!("      HW ID: {}", kbd.hardware_id.dimmed());
             println!("      Path: {}", kbd.device_path.dimmed());
+            if let Some(group) = &kbd.group {
+                println!("      Group: {}", group.bright_white());
+            }
         }
     }
 
@@ -150,5 +154,41 @@ impl DaemonDisplay {
         println!("  Status: {}", "✗ Not running".bright_red());
         println!("  Error: {}", e.to_string().dimmed());
         println!("  Start: {}", "sudo systemctl start keymux".bright_white());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::KeyboardInfo;
+
+    fn info(enabled: bool, rule: Option<&str>, group: Option<&str>) -> KeyboardInfo {
+        KeyboardInfo {
+            hardware_id: "16c0:27db:0111:0003".into(),
+            name: "Glove80".into(),
+            device_path: "/dev/input/event5".into(),
+            enabled,
+            connected: true,
+            enabled_by_portless: false,
+            group: group.map(str::to_string),
+            matched_rule: rule.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_group_member_is_listed_with_its_group() {
+        assert_eq!(
+            DaemonDisplay::status_str(&info(true, None, Some("desk"))),
+            "✓ In group \"desk\""
+        );
+        assert_eq!(DaemonDisplay::status_str(&info(true, None, None)), "✓ Enabled implicitly");
+        assert_eq!(
+            DaemonDisplay::status_str(&info(true, Some("*"), None)),
+            "✓ Enabled by \"*\""
+        );
+        assert_eq!(
+            DaemonDisplay::status_str(&info(false, Some("16c0"), None)),
+            "○ Disabled by \"16c0\""
+        );
     }
 }

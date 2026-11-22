@@ -2,6 +2,7 @@
 /// session changes, each arriving from a thread of its own, while every keyboard's event
 /// processor runs on its own thread and never waits on any of it.
 use crate::config::ConfigManager;
+use crate::event_processor::merge::Arrival;
 use crate::event_processor::{self, control};
 use crate::gamemode_state::{GlobalOverride, WindowOverride};
 use crate::ipc::{get_root_socket_path, IpcRequest, IpcResponse};
@@ -13,7 +14,7 @@ use anyhow::{Context, Result};
 use control::{Control, Signal};
 use crossbeam_channel::{at, never, select, tick, unbounded, Receiver, Sender};
 use evdev::Device;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -35,6 +36,26 @@ struct KeyboardMeta {
 struct ProcessorHandle {
     control: Control,
     thread_handle: Option<thread::JoinHandle<()>>,
+}
+
+/// A running keyboard group: ONE thread reads every device of every member.
+struct GroupRun {
+    uid: u32,
+    control: Control,
+    arrivals: Sender<Arrival<Device>>,
+    thread_handle: Option<thread::JoinHandle<()>>,
+    /// The event paths the thread reads right now (it drops a device that vanishes by itself)
+    roster: Arc<Mutex<HashSet<PathBuf>>>,
+    /// The keyboards that were connected when it last looked
+    members: Vec<KeyboardId>,
+}
+
+/// What a dying processor thread tells the daemon.
+enum Dead {
+    /// The thread of one keyboard's event file
+    Processor(PathBuf),
+    /// The thread of a keyboard group, by name
+    Group(String),
 }
 
 /// A thread feeding the daemon's loop, named so a dead one can be taken out of the select
@@ -62,14 +83,18 @@ pub struct Daemon {
     all_keyboards: HashMap<KeyboardId, KeyboardMeta>,
     /// Active event processors - ONE THREAD PER EVENT FILE (event_path -> (keyboard_id, uid, handle))
     active_processors: HashMap<PathBuf, (KeyboardId, u32, ProcessorHandle)>,
+    /// Running keyboard groups (name -> run): ONE THREAD PER GROUP
+    groups: HashMap<String, GroupRun>,
+    /// The group each keyboard that is working as a member belongs to
+    keyboard_group: HashMap<KeyboardId, String>,
     /// Keyboard ownership (keyboard_id -> uid)
     keyboard_owners: HashMap<KeyboardId, u32>,
     /// Current game mode state (preserved across thread restarts)
     game_mode_active: bool,
     /// Receiver for processor thread death notifications (path of the dead processor)
-    processor_dead_rx: Receiver<PathBuf>,
+    processor_dead_rx: Receiver<Dead>,
     /// Sender side kept on the daemon to clone into each new ProcessorHandle
-    processor_dead_tx: Sender<PathBuf>,
+    processor_dead_tx: Sender<Dead>,
 
     /// System-wide game mode override (`keymux gamemode global`). Ignores
     /// per-window heuristics/overrides entirely when not `Auto`. Session-only
@@ -118,6 +143,8 @@ impl Daemon {
             session_manager,
             all_keyboards: HashMap::new(),
             active_processors: HashMap::new(),
+            groups: HashMap::new(),
+            keyboard_group: HashMap::new(),
             keyboard_owners: HashMap::new(),
             game_mode_active: false,
             processor_dead_rx,
@@ -207,8 +234,10 @@ impl Daemon {
                     self.sync_keyboards_to_users();
                 }
                 recv(processor_dead_rx) -> dead => {
-                    if let Ok(dead_path) = dead {
-                        self.processor_died(&dead_path);
+                    match dead {
+                        Ok(Dead::Processor(path)) => self.processor_died(&path),
+                        Ok(Dead::Group(name)) => self.group_died(&name),
+                        Err(_) => {}
                     }
                 }
             }
@@ -279,6 +308,9 @@ impl Daemon {
         // Load configs for active users (if not already loaded)
         self.load_user_configs();
 
+        // Keyboard groups first: their members are theirs, not each a keyboard of its own
+        let claimed = self.sync_groups();
+
         // First, stop processors for disconnected keyboards
         let disconnected_keyboards: Vec<_> = self
             .all_keyboards
@@ -297,7 +329,7 @@ impl Daemon {
         let keyboards: Vec<_> = self
             .all_keyboards
             .iter()
-            .filter(|(_, meta)| meta.connected) // Only process connected keyboards
+            .filter(|(id, meta)| meta.connected && !claimed.contains(*id)) // Only connected keyboards no group works
             .map(|(id, meta)| (id.clone(), meta.clone()))
             .collect();
 
@@ -621,7 +653,7 @@ impl Daemon {
                     controlled,
                 );
                 // Notify daemon that this processor is gone
-                let _ = dead_tx.send(event_path_clone);
+                let _ = dead_tx.send(Dead::Processor(event_path_clone));
             });
 
             // Send current game mode state to the new thread to preserve state across restarts
@@ -704,6 +736,232 @@ impl Daemon {
             }
             info!("Stopped processor for: {}", path_str);
         }
+    }
+
+    /// Bring the running keyboard groups in line with the configs and the keyboards connected:
+    /// start a group that has a member, hand a running one its members' arrivals and departures,
+    /// stop one with none left. Returns the keyboards groups work, which no processor of their
+    /// own may take.
+    fn sync_groups(&mut self) -> HashSet<KeyboardId> {
+        // A user who owns a running group keeps it, then users in order
+        let mut uids: Vec<u32> = self
+            .user_configs
+            .keys()
+            .copied()
+            .filter(|&uid| self.session_manager.is_user_active(uid))
+            .collect();
+        uids.sort_by_key(|&uid| (!self.groups.values().any(|run| run.uid == uid), uid));
+
+        let mut connected: Vec<(KeyboardId, KeyboardMeta)> = self
+            .all_keyboards
+            .iter()
+            .filter(|(_, meta)| meta.connected)
+            .map(|(id, meta)| (id.clone(), meta.clone()))
+            .collect();
+        connected.sort_by_key(|(id, _)| id.to_string());
+
+        // group name -> (user, members)
+        let mut wanted: BTreeMap<String, (u32, Vec<(KeyboardId, KeyboardMeta)>)> = BTreeMap::new();
+        let mut claimed: HashSet<KeyboardId> = HashSet::new();
+        for uid in uids {
+            let Some(config_mgr) = self.user_configs.get(&uid) else {
+                continue;
+            };
+            let config = config_mgr.get_config();
+            for (id, meta) in &connected {
+                if claimed.contains(id) {
+                    continue;
+                }
+                let event_path = meta
+                    .paths
+                    .first()
+                    .and_then(|p| p.file_name().and_then(|n| n.to_str()));
+                let Some(group) = config.active_group_of(&id.to_string(), Some(&meta.name), event_path)
+                else {
+                    continue;
+                };
+                let entry = wanted
+                    .entry(group.to_string())
+                    .or_insert_with(|| (uid, Vec::new()));
+                if entry.0 == uid {
+                    entry.1.push((id.clone(), meta.clone()));
+                    claimed.insert(id.clone());
+                }
+            }
+        }
+
+        // A group nobody wants any more, or no member of is connected, stops
+        let running: Vec<String> = self.groups.keys().cloned().collect();
+        for name in running {
+            if !wanted.contains_key(&name) {
+                info!("Group {name} has no keyboard to work with, stopping it");
+                self.stop_group(&name);
+            }
+        }
+
+        for (name, (uid, members)) in wanted {
+            let paths: HashSet<PathBuf> = members
+                .iter()
+                .flat_map(|(_, meta)| meta.paths.iter().cloned())
+                .collect();
+            let owned_by_this_user = self.groups.get(&name).is_some_and(|run| run.uid == uid);
+            if !owned_by_this_user {
+                self.stop_group(&name);
+                for (id, _) in &members {
+                    self.stop_processors_for_keyboard(id);
+                }
+                match self.start_group(&name, uid, &members, &paths) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!("Failed to start group {name} for user {uid}: {e:#}");
+                        for (id, _) in &members {
+                            claimed.remove(id);
+                        }
+                        continue;
+                    }
+                }
+            } else if let Some(run) = self.groups.get_mut(&name) {
+                // The thread drops a device that vanishes by itself; the daemon brings the new
+                let current = crate::lock(&run.roster).clone();
+                for path in paths.difference(&current) {
+                    match event_processor::open_member_device(path) {
+                        Ok(device) => {
+                            info!("Group {name} takes {}", path.display());
+                            crate::lock(&run.roster).insert(path.clone());
+                            let _ = run.arrivals.send(Arrival::Join {
+                                path: path.clone(),
+                                member: device,
+                            });
+                        }
+                        Err(e) => warn!("Group {name} cannot take {}: {e:#}", path.display()),
+                    }
+                }
+                for path in current.difference(&paths) {
+                    let _ = run.arrivals.send(Arrival::Leave(path.clone()));
+                }
+                run.control.wake();
+                run.members = members.iter().map(|(id, _)| id.clone()).collect();
+            }
+            for (id, _) in &members {
+                self.keyboard_owners.insert(id.clone(), uid);
+                self.keyboard_group.insert(id.clone(), name.clone());
+            }
+        }
+        self.keyboard_group.retain(|id, _| claimed.contains(id));
+        claimed
+    }
+
+    /// Start the one thread of a group, with the devices of `paths` open and given to it.
+    fn start_group(
+        &mut self,
+        name: &str,
+        uid: u32,
+        members: &[(KeyboardId, KeyboardMeta)],
+        paths: &HashSet<PathBuf>,
+    ) -> Result<()> {
+        let config_mgr = self.user_configs.get(&uid).context("User config not loaded")?;
+        let base_config = config_mgr.get_config();
+        let config_path = config_mgr.get_config_path();
+        let ids: Vec<String> = members.iter().map(|(id, _)| id.to_string()).collect();
+        let config = base_config.for_group(name, &ids);
+
+        let mut devices: Vec<(PathBuf, Device)> = Vec::new();
+        let mut sorted: Vec<&PathBuf> = paths.iter().collect();
+        sorted.sort();
+        for path in sorted {
+            match Device::open(path) {
+                Ok(device) => devices.push((path.clone(), device)),
+                Err(e) => warn!("Group {name} cannot open {}: {e}", path.display()),
+            }
+        }
+        if devices.is_empty() {
+            anyhow::bail!("no device of group {name} could be opened");
+        }
+        info!(
+            "Starting group {name} with {} device(s) of {} keyboard(s) (user: {uid})",
+            devices.len(),
+            members.len()
+        );
+
+        // ONE keymap for the whole group: one chord, layer stack and key state
+        let mut keymap = event_processor::KeymapProcessor::new(&config, config_path, uid);
+        let _ = keymap.load_adaptive_stats(uid);
+        let shared_keymap = Arc::new(Mutex::new(keymap));
+
+        let (control, controlled) =
+            control::channel().context("Failed to create a processor's control line")?;
+        let (arrivals, arrivals_rx) = unbounded();
+        let roster: Arc<Mutex<HashSet<PathBuf>>> =
+            Arc::new(Mutex::new(devices.iter().map(|(path, _)| path.clone()).collect()));
+        let dead_tx = self.processor_dead_tx.clone();
+        let group_name = name.to_string();
+        let thread_roster = Arc::clone(&roster);
+        let handle = thread::spawn(move || {
+            event_processor::run_group(
+                &group_name,
+                devices,
+                arrivals_rx,
+                thread_roster,
+                &shared_keymap,
+                uid,
+                controlled,
+            );
+            let _ = dead_tx.send(Dead::Group(group_name));
+        });
+        control.send(Signal::GameMode(self.game_mode_active));
+        self.groups.insert(
+            name.to_string(),
+            GroupRun {
+                uid,
+                control,
+                arrivals,
+                thread_handle: Some(handle),
+                roster,
+                members: members.iter().map(|(id, _)| id.clone()).collect(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Stop a group's thread, which gives every one of its devices back, and wait for it.
+    fn stop_group(&mut self, name: &str) {
+        let Some(mut run) = self.groups.remove(name) else {
+            return;
+        };
+        info!("Stopping group {name}");
+        run.control.send(Signal::Shutdown);
+        if let Some(handle) = run.thread_handle.take() {
+            if handle.join().is_err() {
+                warn!("Group thread panicked: {name}");
+            }
+        }
+        for id in &run.members {
+            self.keyboard_owners.remove(id);
+            self.keyboard_group.remove(id);
+        }
+    }
+
+    /// A group's thread ended by itself: the last of its devices went, or Alt+F12 released it.
+    fn group_died(&mut self, name: &str) {
+        let Some(mut run) = self.groups.remove(name) else {
+            return;
+        };
+        info!("Group {name} ended");
+        if let Some(handle) = run.thread_handle.take() {
+            let _ = handle.join();
+        }
+        for id in &run.members {
+            if let Some(meta) = self.all_keyboards.get_mut(id) {
+                meta.connected = false;
+            }
+            self.keyboard_owners.remove(id);
+            self.keyboard_group.remove(id);
+        }
+    }
+
+    /// How many processor threads run: one per event file of a keyboard, one per group.
+    fn thread_count(&self) -> usize {
+        self.active_processors.len() + self.groups.len()
     }
 
     /// Start hotplug monitor (udev)
@@ -1137,6 +1395,10 @@ impl Daemon {
         for kbd_id in all_kbd_ids {
             self.stop_processors_for_keyboard(&kbd_id);
         }
+        let group_names: Vec<String> = self.groups.keys().cloned().collect();
+        for name in group_names {
+            self.stop_group(&name);
+        }
         self.keyboard_owners.clear();
 
         // Step 3: Clear and reload configs
@@ -1222,7 +1484,11 @@ impl Daemon {
     /// Stop every active processor thread. Used for graceful shutdown.
     fn stop_all_processors(&mut self) {
         let paths: Vec<PathBuf> = self.active_processors.keys().cloned().collect();
-        info!("Stopping {} processor thread(s) for shutdown", paths.len());
+        info!("Stopping {} processor thread(s) for shutdown", self.thread_count());
+        let group_names: Vec<String> = self.groups.keys().cloned().collect();
+        for name in group_names {
+            self.stop_group(&name);
+        }
 
         let mut join_tasks = Vec::new();
         for path in paths {
@@ -1345,11 +1611,17 @@ impl Daemon {
                             .map(|p| p.display().to_string())
                             .unwrap_or_default();
 
+                        // The group it works in, and every group member is enabled while the
+                        // group's thread reads any of its event files
+                        let group = self.keyboard_group.get(id).cloned();
                         // Keyboard is enabled if ANY of its event paths have active processors
-                        let enabled = meta
-                            .paths
-                            .iter()
-                            .any(|path| self.active_processors.contains_key(path));
+                        let enabled = meta.paths.iter().any(|path| {
+                            self.active_processors.contains_key(path)
+                                || group
+                                    .as_ref()
+                                    .and_then(|name| self.groups.get(name))
+                                    .is_some_and(|run| crate::lock(&run.roster).contains(path))
+                        });
 
                         // Check if any matching config entry is portless (no '@')
                         // so the display can annotate the full id@port appropriately
@@ -1410,6 +1682,7 @@ impl Daemon {
                             connected: meta.connected,
                             enabled_by_portless,
                             matched_rule,
+                            group,
                         }
                     })
                     .collect();
@@ -1430,7 +1703,7 @@ impl Daemon {
                 // Create KeyboardId from string
                 let kbd_id = crate::keyboard_id::KeyboardId::new(hardware_id.clone());
                 // Check if keyboard exists
-                if self.all_keyboards.contains_key(&kbd_id) {
+                if self.all_keyboards.contains_key(&kbd_id) || self.groups.contains_key(&hardware_id) {
                     // Find the first active user to assign to
                     // In multi-user mode, we need to know which user's config to update
                     // For now, we'll trigger a resync which will check all user configs
@@ -1443,7 +1716,25 @@ impl Daemon {
             }
             IpcRequest::DisableKeyboard(hardware_id) => {
                 info!("Disable keyboard requested via IPC: {}", hardware_id);
+                // A group's name stops the whole group; a member's id takes just it out
+                if self.groups.contains_key(&hardware_id) {
+                    self.stop_group(&hardware_id);
+                    return IpcResponse::Ok;
+                }
                 let kbd_id = crate::keyboard_id::KeyboardId::new(hardware_id);
+                if let Some(run) = self
+                    .keyboard_group
+                    .get(&kbd_id)
+                    .and_then(|name| self.groups.get(name))
+                {
+                    if let Some(meta) = self.all_keyboards.get(&kbd_id) {
+                        for path in &meta.paths {
+                            let _ = run.arrivals.send(Arrival::Leave(path.clone()));
+                        }
+                        run.control.wake();
+                    }
+                    return IpcResponse::Ok;
+                }
                 self.stop_processors_for_keyboard(&kbd_id);
                 self.keyboard_owners.remove(&kbd_id);
                 IpcResponse::Ok
@@ -1508,7 +1799,7 @@ impl Daemon {
         info!(
             "Setting game mode to: {} ({} active threads)",
             enabled,
-            self.active_processors.len()
+            self.thread_count()
         );
 
         // Store the new state so new threads will get it
@@ -1518,18 +1809,24 @@ impl Daemon {
         for (_, _, handle) in self.active_processors.values() {
             handle.control.send(Signal::GameMode(enabled));
         }
+        for run in self.groups.values() {
+            run.control.send(Signal::GameMode(enabled));
+        }
     }
 
     /// Trigger adaptive stats save for all active processors
     fn save_adaptive_stats_all(&self) {
         info!(
             "Triggering adaptive stats save for {} active threads",
-            self.active_processors.len()
+            self.thread_count()
         );
 
         // Send save signal to all active threads
         for (_, _, handle) in self.active_processors.values() {
             handle.control.send(Signal::SaveStats);
+        }
+        for run in self.groups.values() {
+            run.control.send(Signal::SaveStats);
         }
     }
 

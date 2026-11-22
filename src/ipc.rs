@@ -102,6 +102,8 @@ pub struct KeyboardInfo {
     /// rather than an explicit port entry (e.g. "362d:0210:0111:0003@3-4.2").
     /// Used by the display layer to annotate the ID with a hint.
     pub enabled_by_portless: bool,
+    /// The keyboard group this keyboard works in, if any (all its members share one processor)
+    pub group: Option<String>,
     /// The config rule pattern that matched (e.g., "*", "1234", "Keychron")
     /// None if implicitly enabled/disabled (no explicit rule matched)
     pub matched_rule: Option<String>,
