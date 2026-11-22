@@ -52,10 +52,11 @@ jobs:
 
           COMMITS=$(git log ${LAST_TAG}..HEAD --pretty=%s 2>/dev/null || git log HEAD --pretty=%s)
 
-          if echo "$COMMITS" | grep -q "^feat:"; then
+          # Conventional commits, with or without a scope: feat: and feat(steno): both count
+          if echo "$COMMITS" | grep -Eq "^feat(\([^)]*\))?:"; then
             MINOR=$((MINOR + 1))
             PATCH=0
-          elif echo "$COMMITS" | grep -q "^chore:\|^fix:\|^docs:"; then
+          elif echo "$COMMITS" | grep -Eq "^(chore|fix|docs)(\([^)]*\))?:"; then
             PATCH=$((PATCH + 1))
           else
             # No conventional-commit prefix matched anything since the last
