@@ -27,7 +27,7 @@
 ### System Integration
 - **Systemd Service**: Runs as user service with automatic startup
 - **Desktop Notifications**: Config reload success/error notifications
-- **IPC Architecture**: Manage keyboards without restarting daemon
+- **IPC Architecture**: Manage keyboards without restarting daemon; after upgrading keymux, restart the daemon (`systemctl restart keymux`), because a running daemon stays the old binary and a newer command it does not know fails with a message saying so
 - **RON Configuration**: Human-readable config with extensive comments
 
 ## 🔧 Installation

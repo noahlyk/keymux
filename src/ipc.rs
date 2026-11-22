@@ -130,12 +130,23 @@ pub(crate) fn get_socket_path() -> PathBuf {
     }
 }
 
+/// Shown when the daemon cannot make sense of a request: it is older than this binary.
+const OLD_DAEMON: &str = "the keymux daemon did not understand this request: it is probably older than this binary. Restart it (systemctl restart keymux; or your init system) and try again.";
+
 /// Send an IPC request and receive response
 pub fn send_request(request: &IpcRequest) -> Result<IpcResponse> {
     let socket_path = get_socket_path();
-    let mut stream =
+    let stream =
         UnixStream::connect(&socket_path).context("Failed to connect to daemon. Is it running?")?;
+    exchange(stream, request)
+}
 
+/// One request/response round trip on a connected socket.
+///
+/// A daemon from before an upgrade drops the connection (or answers with something this binary
+/// cannot decode) when it gets a request it does not know, so a failure to read the reply is
+/// reported as that, with the low-level error kept as the cause.
+fn exchange(mut stream: UnixStream, request: &IpcRequest) -> Result<IpcResponse> {
     // Serialize and send request
     let encoded = bincode::serialize(request)?;
     let len = (encoded.len() as u32).to_le_bytes();
@@ -143,6 +154,10 @@ pub fn send_request(request: &IpcRequest) -> Result<IpcResponse> {
     stream.write_all(&encoded)?;
     stream.flush()?;
 
+    read_reply(&mut stream).map_err(|e| e.context(OLD_DAEMON))
+}
+
+fn read_reply(stream: &mut UnixStream) -> Result<IpcResponse> {
     // Read response length
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
@@ -151,9 +166,7 @@ pub fn send_request(request: &IpcRequest) -> Result<IpcResponse> {
     // Read response
     let mut response_buf = vec![0u8; len];
     stream.read_exact(&mut response_buf)?;
-    let response: IpcResponse = bincode::deserialize(&response_buf)?;
-
-    Ok(response)
+    Ok(bincode::deserialize(&response_buf)?)
 }
 
 /// Write one length-prefixed bincode frame, the same framing as requests and responses.
@@ -355,6 +368,35 @@ fn read_frame<T: serde::de::DeserializeOwned>(stream: &mut impl Read) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reply_with(bytes: Vec<u8>) -> Result<IpcResponse> {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let fake = std::thread::spawn(move || {
+            let mut len = [0u8; 4];
+            server.read_exact(&mut len).unwrap();
+            let mut body = vec![0u8; u32::from_le_bytes(len) as usize];
+            server.read_exact(&mut body).unwrap();
+            server.write_all(&bytes).unwrap();
+        });
+        let result = exchange(client, &IpcRequest::Ping);
+        fake.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn a_daemon_that_closes_early_is_reported_as_older() {
+        let err = reply_with(Vec::new()).unwrap_err();
+        assert_eq!(err.to_string(), OLD_DAEMON);
+        assert!(format!("{err:?}").contains("failed to fill whole buffer"));
+    }
+
+    #[test]
+    fn a_daemon_that_sends_garbage_is_reported_as_older() {
+        let mut bytes = 3u32.to_le_bytes().to_vec();
+        bytes.extend([0xff, 0xff, 0xff]);
+        let err = reply_with(bytes).unwrap_err();
+        assert_eq!(err.to_string(), OLD_DAEMON);
+    }
 
     #[test]
     fn a_subscriber_gets_the_current_state_then_each_change() {
