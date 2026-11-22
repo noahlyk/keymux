@@ -61,7 +61,7 @@ impl KeymapProcessor {
             }
             let result = match self.held_keys.remove(&keycode)? {
                 HeldAction::StenoManaged(layer) => {
-                    let output = self.steno_engines.get_mut(&layer)?.release_at(keycode, at);
+                    let output = self.steno_engines.get_mut(&layer)?.key_event(keycode, false, at);
                     self.leave_if_asked(&layer);
                     steno_result(output)
                 }
@@ -74,6 +74,14 @@ impl KeymapProcessor {
         let top = self.layer_stack.layers().last();
         // Entering a steno layer carries on from what was typed, unless the layer asks to start over
         if self.steno_active.as_ref() != top {
+            // Held-back events of the layer being left are replayed at once, so no key stays down
+            if let Some(engine) = self
+                .steno_active
+                .as_ref()
+                .and_then(|active| self.steno_engines.get_mut(active))
+            {
+                engine.flush_skew(at);
+            }
             if let Some(engine) = top.and_then(|top| self.steno_engines.get_mut(top)) {
                 engine.enter();
             }
@@ -89,10 +97,10 @@ impl KeymapProcessor {
         }
 
         if engine.owns(keycode) {
-            engine.press(keycode, at);
+            let output = engine.key_event(keycode, true, at);
             self.held_keys
                 .insert(keycode, HeldAction::StenoManaged(top.clone()));
-            return Some(ProcessResult::None);
+            return Some(steno_result(output));
         }
 
         let has_remap = self

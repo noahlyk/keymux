@@ -60,6 +60,8 @@ pub enum IpcRequest {
     /// Keep the connection open and stream [`OverlaySnapshot`] frames on every change.
     /// Handled by the IPC thread itself, never reaches the daemon's main loop.
     SubscribeOverlay,
+    /// The split-keyboard skew measurements (`keymux steno skew`), cleared afterwards when `reset`
+    SkewStats { reset: bool },
 }
 
 /// IPC response from daemon to client
@@ -79,6 +81,8 @@ pub enum IpcResponse {
     WindowOverrides(Vec<(String, WindowOverride)>),
     /// Current global override
     GlobalOverrideStatus(GlobalOverride),
+    /// The skew measurements: counts and millisecond differences, no keys
+    SkewStats(Box<crate::steno::skew::Stats>),
 }
 
 /// Information about a detected keyboard

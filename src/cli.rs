@@ -352,6 +352,15 @@ pub enum StenoAction {
         #[arg(short = 'n', long, default_value_t = 30)]
         lines: usize,
     },
+    /// Split keyboards: measure how far one half's key events lag the other's, from your normal
+    /// typing in the running daemon, and suggest a `skew` setting with what it would cost in
+    /// latency. Needs a few hundred two-hand strokes. Only counts and millisecond differences
+    /// are kept, never what you type.
+    Skew {
+        /// Clear the measurements and start again
+        #[arg(long)]
+        reset: bool,
+    },
 }
 
 pub fn print_help() {
