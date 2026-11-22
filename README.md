@@ -1359,7 +1359,7 @@ Two physical keyboards (a Glove80 and a second board, a split pair that connects
 
 **Alt+F12** (the very first key press after attaching, on any member) releases every member of the group. Replug one to use keymux again.
 
-**`keymux list`** marks each member with its group (`In group "desk"`) and a `Group:` line.
+**`keymux list`** marks each member with its group (`In group "desk"`) and counts the group in the summary (`2 enabled (1 group of 2 keyboards)`); a member counts as enabled without an `enabled_keyboards` entry.
 
 **Limits.** Kernel timestamps are when the host received the event, so a Bluetooth or wireless member and a wired one have the usual radio skew between them; if chords that span them split, measure with `keymux steno skew` and set `skew` (see "Split keyboards and radio lag"): it works on the merged stream, and a `keys:` list may name physical keys of either member. The merge puts events from several members in time order within one read of the devices, a few milliseconds at most, so an event a device delivered late can still come out after one stamped a little later. At most 64 devices per group. The group's virtual keyboard offers the keys its members had when it started (plus media keys); a member that joins later with keys none of them had cannot type those. Mice and other pointing devices are not keyboards to keymux and cannot be members.
 
