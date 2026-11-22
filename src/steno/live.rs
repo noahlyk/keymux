@@ -377,7 +377,7 @@ fn refresh(key: &Key) {
             .iter()
             .flat_map(|file| super::validate::check_file(file, &key.layout, &rules))
             // Ignored inline commands are logged once per file below, not notified
-            .filter(|finding| !matches!(finding.kind, super::validate::Kind::UntrustedShell | super::validate::Kind::ShellCommand))
+            .filter(|finding| !matches!(finding.kind, super::validate::Kind::UntrustedShell | super::validate::Kind::ShellCommand | super::validate::Kind::LegacyAlias | super::validate::Kind::LegacyNoEffect))
             .collect()
     };
     let ignored = parts.ignored_shells(&files, &key.trust);

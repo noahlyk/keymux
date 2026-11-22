@@ -6,6 +6,9 @@
 //! nothing had happened. The translation history stays, so undo and joins carry on across it.
 //! To pick up an edited dictionary, unload and then stroke anything.
 //!
+//! `{:engine:suspend}` and `{:engine:toggle}` leave the steno layer (the legacy `{PLOVER:SUSPEND}`
+//! and `{PLOVER:TOGGLE}` do the same); the layer's own keys turn steno on again.
+//!
 //! Like the overlay controls it is a transparent stroke that types nothing and stays off the
 //! tape: the meta makes an engine command (`engine_control:engine:unload`) and no text.
 
@@ -25,20 +28,30 @@ pub fn is_in(text: &str) -> bool {
     text.to_ascii_lowercase().contains("{:engine:")
 }
 
-/// Whether `param` is the one verb this meta has.
+/// Whether `param` is the `unload` verb.
 #[must_use]
 pub fn is_unload(param: &str) -> bool {
     param.trim().eq_ignore_ascii_case("unload")
 }
 
+/// Whether an entry's text unloads the dictionaries, which makes its stroke transparent. The
+/// leave-the-layer verbs are plain commands, as their legacy spellings are.
+#[must_use]
+pub fn is_transparent(text: &str) -> bool {
+    text.to_ascii_lowercase().contains("{:engine:unload")
+}
+
 /// The action for `{:engine:param}`: no text and the engine command to run, or nothing at all
-/// for a verb that isn't `unload`.
+/// for a verb that isn't `unload`, `suspend` or `toggle`.
 #[must_use]
 pub fn meta_action(ctx: &Context, param: &str) -> Action {
-    if !is_unload(param) {
-        return ctx.new_action();
-    }
+    let verb = param.trim().to_ascii_lowercase();
+    let command = match verb.as_str() {
+        "unload" => format!("{COMMAND}:{NAME}:unload"),
+        "suspend" | "toggle" => verb,
+        _ => return ctx.new_action(),
+    };
     let mut action = ctx.copy_last_action();
-    action.command = Some(format!("{COMMAND}:{NAME}:unload"));
+    action.command = Some(command);
     action
 }

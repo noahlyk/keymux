@@ -59,7 +59,7 @@ struct TapeEntry { seq: u64, stroke: u32, text: String, unmatched: bool }
   that build one don't need a new parameter. With no subscriber it still keeps state,
   so a newly started overlay gets the full current picture on its first frame.
 
-Bits are Plover slot order (`steno::layout::SLOTS`), so the overlay needs no dictionary
+Bits are in the standard slot order (`steno::layout::SLOTS`), so the overlay needs no dictionary
 or layout knowledge, only the 23-slot geometry.
 
 ### Publish points — `steno/engine.rs`, `event_processor/keymap.rs` [done, tested]
@@ -395,8 +395,8 @@ keys are plain QWERTY input to a query buffer, all swallowed so nothing reaches 
 - `undo_stops_at_barrier` (steno layer setting) now defaults to true: `*` stops at the last barrier
   (`Translator::take_back`). Blocked, it behaves as undo with nothing to take back: the barrier
   is used up, the history before it is forgotten, and the default fallback (Control+BackSpace)
-  is sent. `false` is Plover's behaviour; `plover_tests.rs` and the Lapwing chapter 26 test set
-  it false (and the stroke classes off) so they keep checking Plover parity.
+  is sent. `false` is a plain steno engine's behaviour; `plover_tests.rs` and the Lapwing chapter 26 test set
+  it false (and the stroke classes off) so they keep checking parity with the reference engine.
 - `{:undo_or:KEYS}` is a history macro (`HISTORY_MACROS`, `Translator::macro_undo_or`): `take_back`
   and, if nothing was taken back, the key combination `KEYS` through the same path as the word
   delete fallback. `{:undo_or_ctrl+backspace}` and `{:undo_or:ctrl+backspace}` are shorthands

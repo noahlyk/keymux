@@ -45,7 +45,7 @@ pub(crate) fn strip_first_up(text: &str) -> String {
     rest
 }
 
-fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+pub(crate) fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
     let head = text.get(..prefix.len())?;
     head.eq_ignore_ascii_case(prefix)
         .then(|| &text[prefix.len()..])
@@ -216,7 +216,7 @@ fn run_word_end(ctx: &Context, _: &str) -> Action {
     action
 }
 
-/// `{:lookup}` opens the live lookup, as its legacy alias `{plover:lookup}` does (the same
+/// `{:lookup}` opens the live lookup, as its legacy alias `{PLOVER:lookup}` does (the same
 /// engine command, so it is the same stroke class and tape line); `{:lookup:open|close|toggle}`
 /// are the overlay controls.
 fn run_lookup(ctx: &Context, param: &str) -> Action {
@@ -282,9 +282,10 @@ fn check_undo_or(param: &str, _: &Layout) -> Option<String> {
     super::keycombo::key_events(&combo).err()
 }
 
-/// Plover's engine commands, as written after `{plover:`, with the keymux ones the metas make.
-/// Which have a counterpart in keymux is [`StenoEngine`](super::StenoEngine)'s to say.
-pub(crate) const ENGINE_COMMANDS: [&str; 14] = [
+/// The engine commands, as written after the legacy `{PLOVER:` and with the ones the native metas
+/// make. Which have a counterpart in keymux is [`StenoEngine`](super::StenoEngine)'s to say, and
+/// [`native_spelling`] gives the native name of those that do.
+pub(crate) const ENGINE_COMMANDS: [&str; 15] = [
     "suspend",
     "toggle",
     "resume",
@@ -295,11 +296,46 @@ pub(crate) const ENGINE_COMMANDS: [&str; 14] = [
     "configure",
     "focus",
     "quit",
+    "deleted",
     super::engine_control::COMMAND,
     super::overlay_control::COMMAND,
     super::run_control::RUN,
     super::run_control::SHELL,
 ];
+
+/// The legacy commands keymux has no counterpart for: written through the legacy spelling they
+/// are accepted and do nothing (`set_config` is the one other legacy-only command, and it does
+/// set the options of a session).
+pub(crate) const NO_EFFECT: [&str; 6] = ["resume", "add_translation", "suggestions", "configure", "focus", "quit"];
+
+/// The native spelling of an engine command (the text an action carries, or what follows the
+/// legacy `{PLOVER:`), or `None` for a command keymux has no native name for.
+#[must_use]
+#[allow(clippy::literal_string_with_formatting_args)] // spellings, not formats
+pub(crate) fn native_spelling(command: &str) -> Option<String> {
+    let (name, args) = command.split_once(':').unwrap_or((command, ""));
+    let name = name.trim().to_lowercase();
+    match name.as_str() {
+        "suspend" | "toggle" => Some(format!("{{:engine:{name}}}")),
+        "lookup" => Some("{:lookup}".to_string()),
+        "deleted" => Some("{:deleted}".to_string()),
+        "run" | "shell" => Some(format!("{{:{name}:{args}}}")),
+        super::engine_control::COMMAND | super::overlay_control::COMMAND => Some(format!("{{:{args}}}")),
+        _ => None,
+    }
+}
+
+/// How the tape and the overlay write an engine command: its native spelling, a shell command
+/// without its command line (it may hold a secret), and a command with no native name as the
+/// generic `{:command:NAME}`.
+#[must_use]
+#[allow(clippy::literal_string_with_formatting_args)] // spellings, not formats
+pub(crate) fn display_command(command: &str) -> String {
+    if strip_prefix_ignore_case(command, "shell:").is_some() {
+        return "{:shell}".to_string();
+    }
+    native_spelling(command).unwrap_or_else(|| format!("{{:command:{command}}}"))
+}
 
 /// Every meta by name. Names are matched without regard to case.
 pub(crate) static KNOWN: &[KnownMeta] = &[
@@ -332,7 +368,9 @@ pub(crate) static KNOWN: &[KnownMeta] = &[
     KnownMeta { name: "stitch", run: meta_stitch, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
     KnownMeta { name: "stitch_last_word", run: meta_stitch_last_word, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
     // keymux's own `{:engine:unload}` (see `engine_control`; it types nothing)
-    KnownMeta { name: super::engine_control::NAME, run: super::engine_control::meta_action, verbs: &["unload"], bare_ok: false, whole_entry: false, check: fine },
+    KnownMeta { name: super::engine_control::NAME, run: super::engine_control::meta_action, verbs: &["unload", "suspend", "toggle"], bare_ok: false, whole_entry: false, check: fine },
+    // `{:deleted}` as an entry's whole text hides the outline in every later dictionary (see `dict`)
+    KnownMeta { name: "deleted", run: marker, verbs: &[], bare_ok: true, whole_entry: false, check: check_no_argument },
     // keymux's own `{:outline:last}` and `{:outline:next}` (see `outline_control`; they type
     // their text through the engine, not here)
     KnownMeta { name: super::outline_control::NAME, run: super::outline_control::meta_action, verbs: &["last", "next"], bare_ok: false, whole_entry: false, check: fine },

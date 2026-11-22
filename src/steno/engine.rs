@@ -94,7 +94,7 @@ pub struct StenoEngine {
     /// `{:outline:next}` is armed: the next stroke types its own notation (see
     /// [`super::outline_control`])
     outline_armed: bool,
-    /// A stroke wrote `{plover:toggle}` or `{plover:suspend}`: the layer should be left
+    /// A stroke wrote `{:engine:toggle}` or `{:engine:suspend}` (or their legacy spellings): the layer should be left
     leave_requested: bool,
     fresh_on_enter: bool,
     label: String,
@@ -485,7 +485,7 @@ impl StenoEngine {
             let held_long = now.saturating_duration_since(since) >= self.timing.repeat_delay;
             if held_long && self.chord.is_fresh() && self.chord.pending() == stroke {
                 self.arming = None;
-                // A command (`{plover:...}`) is sent once, on release, as usual
+                // A command (`{:engine:toggle}`, `{:run:NAME}`, ...) is sent once, on release, as usual
                 if self.translator.is_command(stroke) {
                     return None;
                 }
@@ -728,7 +728,7 @@ impl StenoEngine {
         output
     }
 
-    /// Run the engine commands (`{plover:...}`) in an output, and return the rest of it.
+    /// Run the engine commands in an output, and return the rest of it.
     fn run_commands(&mut self, output: Option<StenoOutput>) -> Option<StenoOutput> {
         let Some(StenoOutput::Ops(ops)) = output else {
             return output;
@@ -773,16 +773,19 @@ impl StenoEngine {
         None
     }
 
-    /// Run one of Plover's engine commands, as it is written after `{plover:`. What has a
+    /// Run one engine command, as an action carries it (`toggle` for `{:engine:toggle}` or the legacy
+    /// `{PLOVER:TOGGLE}`; see [`super::meta::native_spelling`]). What has a
     /// counterpart in keymux is done: `suspend` and `toggle` leave the steno layer (see
     /// [`Self::take_leave_request`]), `lookup` opens the live lookup, `set_config` sets how a
-    /// session starts. The rest belong to Plover's windows and do nothing here.
+    /// session starts. The rest are legacy commands of Plover's windows and do nothing here.
     fn run_command(&mut self, command: &str) {
         let (name, args) = command.split_once(':').unwrap_or((command, ""));
         match name.trim().to_lowercase().as_str() {
             "suspend" | "toggle" => self.leave_requested = true,
             // The layer's own keys turn steno on again, so there is nothing to resume
             "resume" => {}
+            // An entry's whole value hides an outline at load; as text of a stroke it does nothing
+            "deleted" => {}
             "lookup" if self.lookup.is_none() => self.open_lookup(),
             "lookup" => {}
             "run" => self.launcher.run_named(args),
@@ -822,7 +825,7 @@ impl StenoEngine {
         }
     }
 
-    /// `{plover:set_config:'start_attached':True,...}`: the options of a session that keymux has.
+    /// `{PLOVER:set_config:'start_attached':True,...}`: the options of a session that keymux has.
     fn set_config(&mut self, args: &str) {
         let mut options = self.translator.options();
         for (key, value) in config_pairs(args) {
@@ -1661,6 +1664,24 @@ mod tests {
         engine.translate(stroke_of("PHRUP"), false);
         assert!(engine.lookup_active());
         assert!(hub.snapshot().tape.is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // commands, not formats
+    fn native_and_legacy_commands_leave_the_layer_and_the_tape_shows_the_native_name() {
+        let (mut engine, hub) = engine_with_hub(
+            r#"{"A": "{:engine:toggle}", "E": "{PLOVER:SUSPEND}", "O": "{:engine:suspend}", "PHRUP": "{:lookup}", "KAT": "cat"}"#,
+        );
+        for outline in ["A", "E", "O"] {
+            assert!(!engine.take_leave_request(), "{outline}");
+            engine.translate(stroke_of(outline), false);
+            assert!(engine.take_leave_request(), "{outline} asks to leave the layer");
+        }
+        engine.translate(stroke_of("PHRUP"), false);
+        assert!(engine.lookup_active());
+        let lines: Vec<String> = hub.snapshot().tape.iter().map(|line| line.text.clone()).collect();
+        assert!(lines.iter().all(|line| !line.to_lowercase().contains("plover")), "{lines:?}");
+        assert!(lines.iter().any(|line| line.contains("{:lookup}")), "{lines:?}");
     }
 
     #[test]

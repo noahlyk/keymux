@@ -114,7 +114,7 @@ impl KeymapProcessor {
         Some(ProcessResult::None)
     }
 
-    /// A stroke that wrote `{plover:toggle}` or `{plover:suspend}` leaves the steno layer, so the
+    /// A stroke that wrote `{:engine:toggle}` or `{:engine:suspend}` leaves the steno layer, so the
     /// keys type normally again.
     pub(super) fn leave_if_asked(&mut self, layer: &Layer) {
         if self

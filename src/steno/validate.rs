@@ -19,6 +19,8 @@
 //! | `unknown_command` | warning | `{:run:NAME}` with a name the config's `commands` doesn't define (only checked with a config) |
 //! | `untrusted_shell` | warning | an inline shell command in a file that is not trusted: ignored |
 //! | `shell_command` | info | an inline shell command in a trusted file: it runs as the user |
+//! | `legacy_alias` | info | a legacy `{PLOVER:...}` spelling of a native command; once per file, with a count |
+//! | `legacy_no_effect` | info | a legacy command keymux has no counterpart for: it does nothing; once per file, with a count |
 //! | `duplicate_outline` | warning | the same outline twice in one file; the last wins |
 //! | `unreachable_outline` | warning | a multi-stroke outline holding a transparent stroke, which never enters the history |
 //! | `shadowed_outline` | info | outlines also defined in an earlier file, which wins (the normal override) |
@@ -86,6 +88,8 @@ pub enum Kind {
     UnknownCommand,
     UntrustedShell,
     ShellCommand,
+    LegacyAlias,
+    LegacyNoEffect,
     DuplicateOutline,
     UnreachableOutline,
     ShadowedOutline,
@@ -107,6 +111,8 @@ impl Kind {
             Self::UnknownCommand => "unknown_command",
             Self::UntrustedShell => "untrusted_shell",
             Self::ShellCommand => "shell_command",
+            Self::LegacyAlias => "legacy_alias",
+            Self::LegacyNoEffect => "legacy_no_effect",
             Self::DuplicateOutline => "duplicate_outline",
             Self::UnreachableOutline => "unreachable_outline",
             Self::ShadowedOutline => "shadowed_outline",
@@ -593,6 +599,8 @@ fn check_file_into(
     let mut entries = 0;
     let mut kept: HashMap<(Kind, Severity), usize> = HashMap::new();
     let mut capped = Capped::default();
+    // The legacy-spelling notes are one finding per kind and file: how many, and the first
+    let mut legacy: Vec<(Kind, usize, String, String, Option<String>)> = Vec::new();
     let mut push = |finding: Finding, out: &mut Vec<Finding>| {
         let slot = kept.entry((finding.kind, finding.severity)).or_default();
         if *slot < CAP {
@@ -670,6 +678,13 @@ fn check_file_into(
         }
         if text.contains('{') || text.starts_with('=') {
             for problem in check_text_in(text, layout, &here) {
+                if matches!(problem.kind, Kind::LegacyAlias | Kind::LegacyNoEffect) {
+                    match legacy.iter_mut().find(|note| note.0 == problem.kind) {
+                        Some(note) => note.1 += 1,
+                        None => legacy.push((problem.kind, 1, key.to_string(), problem.message, problem.suggestion)),
+                    }
+                    continue;
+                }
                 let mut finding =
                     Finding::new(file, problem.severity, problem.kind, problem.message);
                 finding.outline = Some(key.to_string());
@@ -683,6 +698,19 @@ fn check_file_into(
         finding.line = e.line;
         finding.column = e.column;
         finding.suggestion = Some("the previous dictionary stays in use until this parses".into());
+        out.push(finding);
+    }
+    for (kind, count, outline, message, suggestion) in legacy {
+        let (what, rest) = if kind == Kind::LegacyAlias {
+            ("legacy spellings of native commands", "write the native name")
+        } else {
+            ("legacy commands that have no effect in keymux", "they can be dropped")
+        };
+        let more = if count == 1 { String::new() } else { format!("{count} entries are {what} ({rest}); the first: ") };
+        let mut finding = Finding::new(file, Severity::Info, kind, format!("{more}{message}"));
+        finding.outline = Some(outline);
+        finding.suggestion = suggestion;
+        finding.count = Some(count);
         out.push(finding);
     }
     if out.len() > first_new && !is_rtf(file) {
@@ -810,6 +838,7 @@ fn check_atom(atom: &str, whole: bool, layout: &Layout, here: &Where, problems: 
         ));
         return;
     };
+    legacy_notes(&unescaped, &shown, &found, problems);
     if let Some((kind, arg)) = run_control::classify(&found.name, found.param) {
         check_command(kind, &arg, &shown, here, problems);
         return;
@@ -855,7 +884,10 @@ fn check_atom(atom: &str, whole: bool, layout: &Layout, here: &Where, problems: 
                 .then(|| {
                     let command = param.split(':').next().unwrap_or_default().trim();
                     closest(command, meta::ENGINE_COMMANDS)
-                        .map(|better| format!("{{plover:{}}}", param.replacen(command, better, 1)))
+                        .map(|better| {
+                            let fixed = param.replacen(command, better, 1);
+                            meta::native_spelling(&fixed).unwrap_or_else(|| format!("{{:command:{fixed}}}"))
+                        })
                 })
                 .flatten();
             problems.push(problem(
@@ -891,6 +923,27 @@ fn check_atom(atom: &str, whole: bool, layout: &Layout, here: &Where, problems: 
             ),
             suggestion,
         ));
+    }
+}
+
+/// The notes on a legacy spelling: `{PLOVER:X}` that has a native name says which, and a legacy
+/// command keymux has no counterpart for (also as `{:command:X}`) says it does nothing.
+fn legacy_notes(text: &str, shown: &str, found: &meta::Meta, problems: &mut Vec<Problem>) {
+    if !found.name.eq_ignore_ascii_case("command") {
+        return;
+    }
+    let name = found.param.split(':').next().unwrap_or_default().trim().to_lowercase();
+    if meta::NO_EFFECT.contains(&name.as_str()) {
+        problems.push(problem(
+            Severity::Info,
+            Kind::LegacyNoEffect,
+            format!("`{shown}` has no effect in keymux (legacy Plover command)"),
+            None,
+        ));
+    } else if meta::strip_prefix_ignore_case(text, "PLOVER:").is_some() {
+        if let Some(native) = meta::native_spelling(found.param) {
+            problems.push(problem(Severity::Info, Kind::LegacyAlias, format!("`{shown}` is a legacy alias of {native}"), Some(native)));
+        }
     }
 }
 
@@ -1022,7 +1075,7 @@ mod tests {
         "TA*PL": "{:tape:clear}", "KWR*PL": "{:overlay:hide}", "KPWR*PL": "{:keyboard:show}",
         "PHRO*RPB": "{:outline:last}", "*": "=undo", "*U": "{:undo_or:ctrl+backspace}",
         "*E": "{:undo_or:Control_L(BackSpace)}", "*EU": "{:undo_or_ctrl+backspace}", "*P": "{:undo_or}",
-        "R-RB": "{:redo}", "-RB": "{:undo:2}", "SKP": "{plover:toggle}", "SKPR": "{PLOVER:SUSPEND}",
+        "R-RB": "{:redo}", "-RB": "{:undo:2}", "SKP": "{:engine:toggle}", "SKPR": "{:engine:suspend}", "SKPRA": "{:deleted}",
         "TPH": "{:engine:unload}", "TPHO": "{:back:2}", "SH": "{*}", "SHA": "{*?}",
         "TKA": "{#Return}", "TKAO": "{#Control_L(a)}", "TKAOE": "{&a}", "TKAOEU": "{:case:cap_first_word}",
         "P": "{=[aeiou]/an/a}", "PH": "{:stitch:A}", "KW": "\\{literal\\}", "KWR": "", "TK": "{:barrier}"
@@ -1136,7 +1189,53 @@ mod tests {
         for text in ["{:outline:foo}", "{:lookup:bar}", "{:tape}", "{:overlay:clear}", "{:keyboard:}", "{:engine:}"] {
             assert_eq!(one(text).kind, Kind::BadMetaArgument, "{text}");
         }
-        assert_eq!(one("{PLOVER:SUSPND}").suggestion.as_deref(), Some("{plover:suspend}"));
+        assert_eq!(one("{PLOVER:SUSPND}").suggestion.as_deref(), Some("{:engine:suspend}"));
+        assert_eq!(one("{PLOVER:FOKUS}").suggestion.as_deref(), Some("{:command:focus}"));
+        assert_eq!(one("{:engine:togle}").suggestion.as_deref(), Some("{:engine:toggle}"));
+    }
+
+    #[test]
+    fn legacy_spellings_name_their_native_command() {
+        for (text, native) in [
+            ("{PLOVER:TOGGLE}", "{:engine:toggle}"),
+            ("{plover:suspend}", "{:engine:suspend}"),
+            ("{PLOVER:LOOKUP}", "{:lookup}"),
+            ("{PLOVER:RUN:pw}", "{:run:pw}"),
+            ("{plover:deleted}", "{:deleted}"),
+        ] {
+            let problem = one(text);
+            assert_eq!((problem.kind, problem.severity), (Kind::LegacyAlias, Severity::Info), "{text}");
+            assert_eq!(problem.suggestion.as_deref(), Some(native), "{text}");
+            assert!(problem.message.contains(&format!("legacy alias of {native}")), "{}", problem.message);
+        }
+        for native in ["{:engine:toggle}", "{:engine:suspend}", "{:lookup}", "{:run:pw}", "{:deleted}", "{:command:toggle}"] {
+            assert!(check_text(native, &plover()).is_empty(), "{native}");
+        }
+    }
+
+    #[test]
+    fn legacy_commands_with_no_counterpart_have_no_effect() {
+        for text in ["{PLOVER:FOCUS}", "{plover:quit}", "{PLOVER:ADD_TRANSLATION}", "{:command:resume}"] {
+            let problem = one(text);
+            assert_eq!((problem.kind, problem.severity), (Kind::LegacyNoEffect, Severity::Info), "{text}");
+            assert!(problem.message.contains("has no effect in keymux (legacy Plover command)"), "{}", problem.message);
+        }
+        // set_config sets session options, so it is no no-op; a command nobody has is an unknown one
+        assert!(check_text("{PLOVER:SET_CONFIG:'start_attached':True}", &plover()).is_empty(), "set_config is a real command");
+        assert_eq!(one("{PLOVER:BOGUS}").kind, Kind::BadMetaArgument);
+    }
+
+    #[test]
+    fn legacy_notes_are_one_finding_per_kind_and_file_with_a_count() {
+        let json = r#"{"A": "{PLOVER:TOGGLE}", "E": "{plover:suspend}", "O": "{PLOVER:FOCUS}", "U": "{PLOVER:QUIT}", "AO": "{:engine:toggle}"}"#;
+        let found = findings_of("legacy", json);
+        assert_eq!(found.len(), 2, "{found:#?}");
+        let alias = found.iter().find(|f| f.kind == Kind::LegacyAlias).unwrap();
+        assert_eq!((alias.count, alias.outline.as_deref(), alias.severity), (Some(2), Some("A"), Severity::Info));
+        assert!(alias.message.contains("2 entries") && alias.message.contains("legacy alias of {:engine:toggle}"), "{}", alias.message);
+        let none = found.iter().find(|f| f.kind == Kind::LegacyNoEffect).unwrap();
+        assert_eq!((none.count, none.line), (Some(2), Some(1)));
+        assert_eq!(found.iter().filter(|f| f.severity > Severity::Info).count(), 0);
     }
 
     #[test]
@@ -1324,11 +1423,12 @@ mod tests {
     fn inline_shell_is_a_warning_in_an_untrusted_file_and_info_in_a_trusted_one() {
         let rules = rules(&["00-user.json"], None);
         for text in ["{:shell:ls}", "{PLOVER:SHELL:ls}", "{:command:shell:ls}", "{plover:shell:ls}"] {
-            let bad = found(text, "/s/lyk/a.json", &rules);
+            let not_legacy = |all: Vec<Problem>| all.into_iter().filter(|p| p.kind != Kind::LegacyAlias).collect::<Vec<_>>();
+            let bad = not_legacy(found(text, "/s/lyk/a.json", &rules));
             assert_eq!(bad.len(), 1, "{text}: {bad:?}");
             assert_eq!((bad[0].kind, bad[0].severity), (Kind::UntrustedShell, Severity::Warning), "{text}");
             assert!(bad[0].message.contains("ignored: not a trusted dictionary; trusted: 00-user.json"), "{}", bad[0].message);
-            let good = found(text, "/s/00-user.json", &rules);
+            let good = not_legacy(found(text, "/s/00-user.json", &rules));
             assert_eq!((good[0].kind, good[0].severity), (Kind::ShellCommand, Severity::Info), "{text}");
         }
         let empty = found("{:shell:}", "/s/00-user.json", &rules);

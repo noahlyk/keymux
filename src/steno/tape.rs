@@ -55,9 +55,8 @@ pub fn describe(output: Option<&StenoOutput>, unmatched: bool) -> String {
                     .map(|(key, _)| format!("{key:?}"))
                     .collect::<Vec<_>>()
                     .join(" "),
-                // The command line of a shell command is not for the tape file: it may hold a secret
-                OutputOp::Command(command) if command.get(..6).is_some_and(|head| head.eq_ignore_ascii_case("shell:")) => "{plover:shell}".to_string(),
-                OutputOp::Command(command) => format!("{{plover:{command}}}"),
+                // Native names; a shell command's line is not for the tape file: it may hold a secret
+                OutputOp::Command(command) => super::meta::display_command(command),
             })
             .collect::<Vec<_>>()
             .join(" "),
@@ -566,6 +565,27 @@ fn clock(secs: u64) -> String {
 mod tests {
     use super::*;
     use crate::steno::layout::Layout;
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // commands, not formats
+    fn commands_are_written_with_their_native_names() {
+        let tape = |command: &str| describe(Some(&StenoOutput::Ops(vec![OutputOp::Command(command.into())])), false);
+        for (command, shown) in [
+            ("toggle", "{:engine:toggle}"),
+            ("SUSPEND", "{:engine:suspend}"),
+            ("lookup", "{:lookup}"),
+            ("run:password", "{:run:password}"),
+            ("engine_control:engine:unload", "{:engine:unload}"),
+            ("overlay_control:tape:clear", "{:tape:clear}"),
+            ("overlay_control:lookup:toggle", "{:lookup:toggle}"),
+            ("focus", "{:command:focus}"),
+        ] {
+            assert_eq!(tape(command), shown, "{command}");
+        }
+        // A shell command's line may hold a secret
+        assert_eq!(tape("shell:echo secret"), "{:shell}");
+        assert_eq!(tape("SHELL:x"), "{:shell}");
+    }
 
     #[test]
     fn describes_each_kind_of_output() {

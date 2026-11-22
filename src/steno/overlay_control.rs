@@ -2,7 +2,7 @@
 //! `{:keyboard:show}`, `{:tape:clear}`, `{:lookup:toggle}`.
 //!
 //! The bare `{:lookup}` is not one of these: it makes the engine command `lookup`
-//! ([`super::meta`]), the same as the legacy alias `{plover:lookup}`.
+//! ([`super::meta`]), the same as the legacy alias `{PLOVER:lookup}`.
 //!
 //! They change what the overlay shows right now and nothing else: not the `overlay:` config,
 //! not what it shows when it starts, not any file. The state lives in the running overlay

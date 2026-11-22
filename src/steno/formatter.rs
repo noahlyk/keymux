@@ -24,7 +24,7 @@ pub enum Op {
     Text(String),
     /// Press a key combination, in Plover's key combination language (`Control_L(a)`)
     Combo(String),
-    /// Run a command of the steno engine (`toggle`), as written after `{plover:`
+    /// Run a command of the steno engine (`toggle`), `{:engine:toggle}` makes `toggle`
     Command(String),
 }
 

@@ -4,7 +4,7 @@
 //! (`1-9`) and a leading slash for a word boundary (`/S`). Values are Plover's translation
 //! language and are kept as written: they are formatted when a stroke is typed, because what
 //! one means depends on what came before it (see [`super::formatter`]). A value of
-//! `{plover:deleted}` hides the same outline in every dictionary after this one.
+//! `{:deleted}` (legacy `{PLOVER:deleted}`) hides the same outline in every dictionary after this one.
 //!
 //! Besides `.json`, a dictionary can be an `.rtf` file (RTF/CRE, see [`super::rtf`]), and the
 //! word list that orthography needs (`american_english_words.txt`) is read from the same place.
@@ -27,11 +27,14 @@ use tracing::warn;
 const CACHE_LAYOUT: u32 = 7;
 
 /// The value that deletes an entry of a dictionary after this one.
-pub const DELETED: &str = "{plover:deleted}";
+pub const DELETED: &str = "{:deleted}";
+
+/// The legacy spelling of [`DELETED`].
+const DELETED_LEGACY: &str = "{plover:deleted}";
 
 /// Whether a translation is the deletion marker, in any letter case.
 const fn is_deleted(translation: &str) -> bool {
-    translation.eq_ignore_ascii_case(DELETED)
+    translation.eq_ignore_ascii_case(DELETED) || translation.eq_ignore_ascii_case(DELETED_LEGACY)
 }
 
 /// What one file holds, parsed: the unit that is cached and shared.

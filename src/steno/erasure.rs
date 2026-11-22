@@ -403,11 +403,11 @@ mod tests {
     #[test]
     fn reads_each_kind_of_piece() {
         assert_eq!(
-            pieces(r#"-2 "a\nb" {plover:set config} KC_ENT"#),
+            pieces(r#"-2 "a\nb" {:command:set config} KC_ENT"#),
             [
                 Piece::Erase(2),
                 Piece::Text(vec!["a".into(), "\\n".into(), "b".into()]),
-                Piece::Command("{plover:set config}".into()),
+                Piece::Command("{:command:set config}".into()),
                 Piece::Keys("KC_ENT".into()),
             ]
         );

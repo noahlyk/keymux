@@ -1,6 +1,6 @@
 //! Live lookup: "I'm mid-sentence and forgot the stroke for a word."
 //!
-//! A dictionary entry for `{:lookup}` opens a lookup (`{plover:lookup}` still does, a legacy alias). The steno layer stays on, but its
+//! A dictionary entry for `{:lookup}` opens a lookup (`{PLOVER:lookup}` still does, a legacy alias). The steno layer stays on, but its
 //! keys go back to what the layers below it make of them: every key goes through the usual
 //! remaps, mod-taps and layers, and what comes out types into a query that is shown on the
 //! overlay instead of reaching the application. The overlay lists the outlines that type the

@@ -62,7 +62,7 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 { /* ... */ }
 
 `alloc` is asked for `len` bytes of memory and returns where they start (as an address inside
 the plugin's own sandboxed memory, not a real pointer keymux can read directly), or `0` to
-decline. keymux writes one word's outline there, in Plover notation (`KAT`, `KOPB`, `KAT/+-G`),
+decline. keymux writes one word's outline there, in steno notation (`KAT`, `KOPB`, `KAT/+-G`),
 encoded as UTF-8 — one stroke, or several where every one after the first continues the word
 before it on purpose (see `joins` below), declaring itself a continuation of the same word. It
 never writes a run of otherwise-unrelated strokes: the engine's own search for the longest

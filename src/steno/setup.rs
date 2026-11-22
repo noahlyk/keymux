@@ -507,7 +507,7 @@ fn switch_theory(
     Ok(())
 }
 
-/// Plover's own commands (`*` is undo, and the `{plover:...}` entries), which Plover loads
+/// Plover's own commands (`*` is undo, and the `{PLOVER:...}` entries), which Plover loads
 /// before its main dictionary.
 const COMMANDS_DICT_URL: &str =
     "https://raw.githubusercontent.com/openstenoproject/plover/master/plover/assets/commands.json";

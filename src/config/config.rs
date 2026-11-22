@@ -329,7 +329,7 @@ pub struct StenoConfig {
     /// was moved onto just gives way.
     #[serde(default)]
     pub layout_overrides: HashMap<String, KeyAction>,
-    /// Plover-format dictionaries, highest priority first. Each is a file, or a folder whose
+    /// Steno JSON dictionaries, highest priority first. Each is a file, or a folder whose
     /// `.json` files (at any depth) are all used. `~/` expands to the session user's home;
     /// relative paths resolve against the config directory. Leave it out to use the whole
     /// `steno` folder in the config directory.
@@ -745,7 +745,7 @@ pub struct Config {
     #[serde(default)]
     pub commands: HashMap<String, String>,
 
-    /// The dictionaries allowed to run inline shell commands (`{:shell:...}`, `{PLOVER:SHELL:...}`):
+    /// The dictionaries allowed to run inline shell commands (`{:shell:...}`):
     /// file or folder names in the steno folder. Unset means [`DEFAULT_TRUSTED_DICTIONARIES`];
     /// a set list replaces them, so an empty one trusts nothing.
     #[serde(default)]

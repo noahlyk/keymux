@@ -272,7 +272,7 @@ pub enum Commands {
 
 #[derive(clap::Subcommand, Debug, Clone)]
 pub enum StenoAction {
-    /// Install Plover's dictionary (same as `theory plover`) and show how to turn steno on
+    /// Install the standard dictionary (same as `theory plover`) and show how to turn steno on
     Setup,
     /// Install and switch the steno theory: `plover` or `lapwing`. The first time downloads it
     /// into ~/.config/keymux/steno/<theory>/. The other theory's folder is renamed
@@ -318,13 +318,13 @@ pub enum StenoAction {
     /// With no stroke, opens the interactive lookup in stroke mode: type strokes, and what they
     /// type follows.
     Stroke {
-        /// Stroke in Plover notation; use `/` between strokes of one word
+        /// Stroke in steno notation; use `/` between strokes of one word
         stroke: Option<String>,
     },
     /// Add a translation to your own dictionary (00-user.json), replacing any existing one.
     /// Needs both the stroke and the text (it writes a file, so there is no interactive form)
     Add {
-        /// Stroke in Plover notation, e.g. `KAT` or `KPA/TKAOEU`
+        /// Stroke in steno notation, e.g. `KAT` or `KPA/TKAOEU`
         stroke: String,
         /// The text the stroke types
         text: String,

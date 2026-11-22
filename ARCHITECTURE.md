@@ -450,9 +450,9 @@ keyboard_overrides: {
 
 ---
 
-### Steno (Plover-compatible)
+### Steno
 
-Steno is a layer kind: `kind: Steno((...))`. A steno layer captures its stroke keys instead of remapping them, groups them into strokes, and types the Plover dictionary text for each stroke.
+Steno is a layer kind: `kind: Steno((...))`. A steno layer captures its stroke keys instead of remapping them, groups them into strokes, and types the dictionary text for each stroke.
 
 **Mechanics:**
 - **Strokes**: a stroke is the set of stroke keys pressed together. It completes when the keys come up. No clock ends a stroke: it is held as long as its keys are, and `stroke_timeout_ms` is no longer used (an old config that sets it still loads).
@@ -461,7 +461,7 @@ Steno is a layer kind: `kind: Steno((...))`. A steno layer captures its stroke k
 - **Placeholder**: a stroke that matches nothing on its own but starts a longer entry types `_`. The next stroke either completes the entry and replaces the `_`, or doesn't and the `_` is removed. Space and undo also remove it.
 - **Unmatched strokes**: are typed as their keys, and appear on the tape as `?` followed by what they typed.
 - **Delete** always reaches the screen, even on a steno layer.
-- **Dictionaries**: Plover JSON files, highest priority first. They are parsed once and cached as a binary file in `steno/cache`, keyed by the sha256 of each source file, so a changed dictionary is re-parsed automatically.
+- **Dictionaries**: steno JSON files (the format Plover uses), highest priority first. They are parsed once and cached as a binary file in `steno/cache`, keyed by the sha256 of each source file, so a changed dictionary is re-parsed automatically.
 - **Tape**: every stroke is logged to `~/.local/state/keymux/steno-tape.txt`. `keymux steno tape -f` follows it live. `steno/erasure.rs` replays the tape's descriptions (`-N "text"`) to know which characters of each line are still on screen; the overlay hub keeps that per line (`TapeEntry::gone`) and the overlay and `keymux steno tape` draw what a later line took back, and the `-N` counts, grey. Generic: it reads only backspace counts and text, never a theory's rules.
 
 ---

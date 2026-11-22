@@ -149,7 +149,7 @@ pub enum OutputOp {
     Text(String),
     /// Press and release keys: `(key, true)` is a press and `(key, false)` a release
     Keys(Vec<(KeyCode, bool)>),
-    /// A command for the steno engine, as written after `{plover:`
+    /// A command for the steno engine (`toggle` for `{:engine:toggle}`)
     Command(String),
 }
 
@@ -249,14 +249,14 @@ pub(crate) fn undo_or_combo(argument: &str) -> String {
 
 /// Whether a dictionary entry makes a transparent stroke: it carries `{:transparent}`, it is an
 /// overlay control (`{:overlay:toggle}`, ...), or it is
-/// nothing but the command that opens the live lookup (`{:lookup}`; `{plover:lookup}` is its legacy alias).
+/// nothing but the command that opens the live lookup (`{:lookup}`; `{PLOVER:lookup}` is its legacy alias).
 #[allow(clippy::literal_string_with_formatting_args)] // a marker, not a format
 pub(crate) fn is_transparent_mapping(text: &str) -> bool {
     text.contains("{:transparent}")
         || text.trim().eq_ignore_ascii_case("{plover:lookup}")
         || text.trim().eq_ignore_ascii_case("{:lookup}")
         || super::overlay_control::is_in(text)
-        || super::engine_control::is_in(text)
+        || super::engine_control::is_transparent(text)
         || super::outline_control::is_in(text)
         || super::run_control::is_only_commands(text)
 }
@@ -718,7 +718,7 @@ impl Translator {
         Some(keys.and_then(|keys| self.dict.layout().parse_stroke(keys.trim())).unwrap_or(0))
     }
 
-    /// Whether the stroke makes an engine command (`{plover:...}`), which must never repeat.
+    /// Whether the stroke makes an engine command (`{:engine:toggle}`, `{:run:NAME}`, ... or the legacy `{PLOVER:...}`), which must never repeat.
     #[must_use]
     pub fn is_command(&self, stroke: u32) -> bool {
         self.dict
@@ -2721,6 +2721,27 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         assert!(!t.is_command(stroke("KAT")));
         assert!(t.is_command(stroke("TKOG")));
         assert!(t.is_command(stroke("H-L")));
+    }
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // commands, not formats
+    fn native_and_legacy_spellings_make_the_same_command() {
+        let mut t = translator(
+            r#"{"A": "{:engine:toggle}", "E": "{PLOVER:TOGGLE}", "O": "{:engine:suspend}", "U": "{plover:suspend}",
+                "AU": "{:run:pw}", "AE": "{PLOVER:RUN:pw}", "AO": "{:command:toggle}", "EU": "{:engine:sideways}"}"#,
+        );
+        for (native, legacy) in [("A", "E"), ("O", "U")] {
+            assert!(t.is_command(stroke(native)) && t.is_command(stroke(legacy)), "{native} {legacy}");
+            let (native, legacy) = (commands_of(&mut t, native), commands_of(&mut t, legacy));
+            assert_eq!(native[0].to_lowercase(), legacy[0].to_lowercase());
+        }
+        assert_eq!(commands_of(&mut t, "A"), ["toggle"]);
+        assert_eq!(commands_of(&mut t, "O"), ["suspend"]);
+        assert_eq!(commands_of(&mut t, "AU"), ["run:pw"]);
+        assert_eq!(commands_of(&mut t, "AE")[0].to_lowercase(), "run:pw");
+        assert_eq!(commands_of(&mut t, "AO"), ["toggle"]);
+        // An engine verb that does not exist makes no command
+        assert!(commands_of(&mut t, "EU").is_empty(), "expected none");
     }
 
     #[test]
