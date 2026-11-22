@@ -22,6 +22,7 @@ use crate::keycode::KeyCode;
 use crate::steno::formatter::Formatter;
 use crate::steno::journal::{self, SharedHistory};
 use crate::steno::overlay::OverlayHub;
+use crate::steno::run_control::Runtime;
 use crate::steno::setup::{self, Cooldown};
 use crate::steno::typing::{TypingLayout, Typist};
 use crate::steno::{tape, StenoEngine};
@@ -105,13 +106,15 @@ impl KeymapProcessor {
             if typist.is_none() && !steno.disable_typing_history {
                 typist = layout.map(Typist::new);
             }
-            match StenoEngine::from_config(
+            let runtime = Runtime::for_user(config, &config_dir, user_id);
+            match StenoEngine::from_config_with(
                 steno,
                 layer_config.disabled_in_game_mode,
                 &config_dir,
                 home.as_deref(),
                 &history,
                 &layer.0,
+                runtime,
             ) {
                 Ok(engine) => {
                     steno_engines.insert(layer.clone(), engine);

@@ -23,6 +23,7 @@ use super::dict::{
     Dictionary, Source, StampKey,
 };
 use super::layout::Layout;
+use super::run_control::Trust;
 use super::source::is_plugin_file;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -77,6 +78,8 @@ struct Part {
     /// The file parsed on its own. `None` for a plugin, which is not a dictionary: it is tracked
     /// so a change to it is noticed, and compiled elsewhere.
     dict: Option<Arc<Dictionary>>,
+    /// How many entries of the file hold an inline shell command, counted when first asked
+    shells: std::sync::OnceLock<usize>,
 }
 
 /// How a [`Parts::refresh`] went.
@@ -218,6 +221,7 @@ impl Parts {
                         digest,
                         racy,
                         dict: Some(Arc::new(dict)),
+                        shells: std::sync::OnceLock::new(),
                     },
                 );
                 return Ok(Update::Restored);
@@ -264,6 +268,7 @@ impl Parts {
                 digest,
                 racy,
                 dict,
+                shells: std::sync::OnceLock::new(),
             },
         );
         Ok(if restored {
@@ -277,11 +282,31 @@ impl Parts {
     /// that failed to load) is left out, as a skipped file always was.
     #[must_use]
     pub fn layered(&self, files: &[PathBuf]) -> Dictionary {
-        Dictionary::layered(
-            files
-                .iter()
-                .filter_map(|path| self.by_path.get(path)?.dict.as_deref()),
-        )
+        self.layered_trusting(files, &Trust::default())
+    }
+
+    /// Like [`Self::layered`], with each file's entries allowed to run inline shell commands
+    /// only if `trust` names the file.
+    #[must_use]
+    pub fn layered_trusting(&self, files: &[PathBuf], trust: &Trust) -> Dictionary {
+        Dictionary::layered_trusting(files.iter().filter_map(|path| {
+            Some((self.by_path.get(path)?.dict.as_deref()?, trust.is_trusted(path)))
+        }))
+    }
+
+    /// The files among `files` that are not trusted but hold inline shell commands, with how
+    /// many entries do: those commands are ignored.
+    #[must_use]
+    pub fn ignored_shells(&self, files: &[PathBuf], trust: &Trust) -> Vec<(PathBuf, usize)> {
+        files
+            .iter()
+            .filter(|path| !trust.is_trusted(path))
+            .filter_map(|path| {
+                let part = self.by_path.get(path)?;
+                let count = *part.shells.get_or_init(|| part.dict.as_deref().map_or(0, Dictionary::shell_entries));
+                (count > 0).then(|| (path.clone(), count))
+            })
+            .collect()
     }
 }
 

@@ -9,6 +9,7 @@ use super::live;
 use super::lookup::{Lookup, LookupKey, LookupSearch};
 use super::overlay::OverlayHub;
 use super::plugin::Chain;
+use super::run_control::{Launcher, Runtime, Trust};
 use super::setup::default_dictionaries;
 use super::tape;
 use super::translate::{OutputOp, StenoOutput, Translator};
@@ -105,6 +106,8 @@ pub struct StenoEngine {
     scope: live::Scope,
     /// The scope's unload count as this layer last saw it
     epoch: u64,
+    /// Runs the commands `{:run:NAME}` and `{:shell:CMD}` ask for (see [`super::run_control`])
+    launcher: Launcher,
 }
 
 /// What a layer's dictionaries are loaded from.
@@ -112,6 +115,7 @@ pub struct StenoEngine {
 struct Source {
     roots: Vec<PathBuf>,
     cache_dir: PathBuf,
+    trust: Trust,
 }
 
 /// Which set of dictionaries a layer stands for: the places they are loaded from, in order.
@@ -140,6 +144,22 @@ impl StenoEngine {
         history: &SharedHistory,
         label: &str,
     ) -> Result<Self> {
+        let runtime = Runtime::standard(config_dir);
+        Self::from_config_with(config, disabled_in_game_mode, config_dir, home, history, label, runtime)
+    }
+
+    /// Like [`Self::from_config`], with the commands the config defines and the dictionaries it
+    /// trusts to run inline shell commands.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_config_with(
+        config: &StenoConfig,
+        disabled_in_game_mode: bool,
+        config_dir: &Path,
+        home: Option<&Path>,
+        history: &SharedHistory,
+        label: &str,
+        runtime: Runtime,
+    ) -> Result<Self> {
         let layout =
             Layout::plover_with_joins(&config.extra_keys, &config.join_keys).map_err(|errors| anyhow!(errors.join("; ")))?;
         let preset = preset(&config.layout).map_err(|e| anyhow!(e))?;
@@ -167,12 +187,14 @@ impl StenoEngine {
         let source = Source {
             roots,
             cache_dir,
+            trust: runtime.trust,
         };
         let updates = (!unloaded).then(|| {
-            live::subscribe(
+            live::subscribe_trusting(
                 source.roots.clone(),
                 source.cache_dir.clone(),
                 layout.clone(),
+                source.trust.clone(),
             )
         });
 
@@ -222,6 +244,7 @@ impl StenoEngine {
             scope,
             unloaded,
             source: Some(source),
+            launcher: runtime.launcher,
         })
     }
 
@@ -575,10 +598,11 @@ impl StenoEngine {
         let Some(source) = &self.source else {
             return;
         };
-        self.updates = Some(live::subscribe(
+        self.updates = Some(live::subscribe_trusting(
             source.roots.clone(),
             source.cache_dir.clone(),
             self.layout.clone(),
+            source.trust.clone(),
         ));
         self.loading = true;
         self.unloaded = false;
@@ -761,6 +785,8 @@ impl StenoEngine {
             "resume" => {}
             "lookup" if self.lookup.is_none() => self.open_lookup(),
             "lookup" => {}
+            "run" => self.launcher.run_named(args),
+            "shell" => self.launcher.run_shell(args),
             "set_config" => self.set_config(args),
             super::engine_control::COMMAND => {
                 if super::engine_control::is_unload(args.split_once(':').map_or("", |(_, p)| p)) {
@@ -895,6 +921,7 @@ impl StenoEngine {
             unloaded: false,
             scope: live::Scope::default(),
             epoch: 0,
+            launcher: Launcher::new(HashMap::new(), std::sync::Arc::new(super::run_control::UserRunner { config_dir: PathBuf::new(), uid: None })),
         }
     }
 
@@ -1863,3 +1890,7 @@ mod unload_tests;
 #[cfg(test)]
 #[path = "send_early_tests.rs"]
 mod send_early_tests;
+
+#[cfg(test)]
+#[path = "run_tests.rs"]
+mod run_tests;

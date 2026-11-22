@@ -738,7 +738,23 @@ pub struct Config {
     /// Read by the overlay process; the daemon ignores it.
     #[serde(default)]
     pub overlay: OverlayConfig,
+
+    /// Named commands, run as the user the daemon serves (never as root) by name: from steno
+    /// with `{:run:NAME}` in a dictionary entry. Example: `{ "password": "~/.config/keymux/password.sh" }`.
+    /// A name is looked up when the stroke is made, so a reload picks up changes.
+    #[serde(default)]
+    pub commands: HashMap<String, String>,
+
+    /// The dictionaries allowed to run inline shell commands (`{:shell:...}`, `{PLOVER:SHELL:...}`):
+    /// file or folder names in the steno folder. Unset means [`DEFAULT_TRUSTED_DICTIONARIES`];
+    /// a set list replaces them, so an empty one trusts nothing.
+    #[serde(default)]
+    pub trusted_dictionaries: Option<Vec<String>>,
 }
+
+/// The dictionaries trusted to run inline shell commands when `trusted_dictionaries` is unset:
+/// the user's own file and the folder `user`.
+pub const DEFAULT_TRUSTED_DICTIONARIES: [&str; 2] = ["00-user.json", "user"];
 
 /// Which part of the keyboard's colours an extra key is drawn in on the overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1319,6 +1335,8 @@ impl Config {
                     per_keyboard_inherits_global_layout: self.per_keyboard_inherits_global_layout, // Keep global setting
                     default_layer: override_cfg.default_layer.clone(),
                     overlay: self.overlay.clone(), // The overlay is one per screen, not per keyboard
+                    commands: self.commands.clone(), // Named commands and trust are global
+                    trusted_dictionaries: self.trusted_dictionaries.clone(),
                 }
             }
         } else {

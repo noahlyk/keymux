@@ -139,6 +139,7 @@
 use super::dict::Dictionary;
 use super::layout::Layout;
 use super::parts::Parts;
+use super::run_control::Trust;
 use super::source::is_plugin_file;
 use super::strokes::{StrokeLog, Window};
 use super::worker::{Asked, Budget, Read, Worker};
@@ -723,20 +724,20 @@ impl Chain {
     pub fn load_cached(files: &[PathBuf], cache_dir: &Path, layout: &Layout) -> Self {
         let mut parts = Parts::default();
         parts.refresh(files, cache_dir, layout);
-        Self::from_parts(files, &parts, cache_dir, layout)
+        Self::from_parts(files, &parts, cache_dir, layout, &Trust::default())
     }
 
     /// The chain `files` make, out of `parts` already brought up to date with them: layered
     /// dictionaries in the order given, with a plugin at its own place among them. Nothing is
     /// read or parsed here, only merged, so it is what a reload costs when a file changed.
     #[must_use]
-    pub fn from_parts(files: &[PathBuf], parts: &Parts, cache_dir: &Path, layout: &Layout) -> Self {
+    pub fn from_parts(files: &[PathBuf], parts: &Parts, cache_dir: &Path, layout: &Layout, trust: &Trust) -> Self {
         let dict_only: Vec<PathBuf> = files
             .iter()
             .filter(|p| !is_plugin_file(p))
             .cloned()
             .collect();
-        let dict = Arc::new(parts.layered(&dict_only));
+        let dict = Arc::new(parts.layered_trusting(&dict_only, trust));
         // No plugin at all: the common case, and the one every keymux without one already
         // has, needs nothing further, the merged dictionary standing as the only step.
         if dict_only.len() == files.len() {
@@ -752,7 +753,7 @@ impl Chain {
         for path in files {
             if is_plugin_file(path) {
                 if !pending.is_empty() {
-                    steps.push(Step::Dict(Arc::new(parts.layered(&pending))));
+                    steps.push(Step::Dict(Arc::new(parts.layered_trusting(&pending, trust))));
                     pending.clear();
                 }
                 match load_one(path, &plugin_cache) {
@@ -764,7 +765,7 @@ impl Chain {
             }
         }
         if !pending.is_empty() {
-            steps.push(Step::Dict(Arc::new(parts.layered(&pending))));
+            steps.push(Step::Dict(Arc::new(parts.layered_trusting(&pending, trust))));
         }
         // Each plugin makes its reader on its own thread, `init` and all, side by side with the
         // others. The chain is wanted ready to read, so the first stroke after a load or a
@@ -881,7 +882,7 @@ impl Chain {
     ) -> Option<String> {
         for step in &self.steps {
             let found = match step {
-                Step::Dict(dict) => dict.lookup(strokes).map(str::to_owned),
+                Step::Dict(dict) => dict.lookup_for_use(strokes),
                 Step::Plugin(plugin) => match &plugin.reader {
                     Some(reader) if self.is_one_word(strokes) => ask(
                         plugin,
@@ -889,7 +890,9 @@ impl Chain {
                         &self.layout.render_strokes(strokes),
                         plugin.before(before.text),
                         plugin.window(&before).as_ref(),
-                    ),
+                    )
+                    // A plugin's reading is a guess at a word: it never runs a command line
+                    .map(|text| super::run_control::strip_shells(&text).unwrap_or(text)),
                     _ => None,
                 },
             };

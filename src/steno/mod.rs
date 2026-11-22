@@ -34,6 +34,7 @@ pub mod parts;
 pub mod plugin;
 pub mod reverse;
 pub mod rtf;
+pub mod run_control;
 pub mod setup;
 pub mod shortest;
 pub mod source;

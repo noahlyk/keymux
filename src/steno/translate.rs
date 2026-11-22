@@ -258,6 +258,7 @@ pub(crate) fn is_transparent_mapping(text: &str) -> bool {
         || super::overlay_control::is_in(text)
         || super::engine_control::is_in(text)
         || super::outline_control::is_in(text)
+        || super::run_control::is_only_commands(text)
 }
 
 /// The keys of Plover's key-name set that move the cursor or delete text around it. A key
@@ -731,6 +732,7 @@ impl Translator {
                     || super::overlay_control::is_in(text)
                     || super::engine_control::is_in(text)
                     || super::outline_control::is_in(text)
+                    || super::run_control::is_in(text)
             })
     }
 

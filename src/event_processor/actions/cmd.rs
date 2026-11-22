@@ -27,7 +27,7 @@ fn user_info(uid: u32) -> Option<(String, PathBuf)> {
 }
 
 /// The command to run: as `user` when one is known, through a shell when it needs one.
-fn command(cmd: &str, config_dir: &Path, user: Option<&str>) -> Command {
+pub(crate) fn command(cmd: &str, config_dir: &Path, user: Option<&str>) -> Command {
     let mut argv: Vec<&str> = Vec::new();
     if let Some(user) = user {
         argv.extend(["runuser", "-u", user, "--"]);
@@ -48,18 +48,42 @@ fn command(cmd: &str, config_dir: &Path, user: Option<&str>) -> Command {
 /// Look the user up, expand a leading `~` to their home, run, and wait for the process so
 /// it is reaped rather than left a zombie for as long as the daemon runs.
 fn run(cmd: &str, config_dir: &Path, uid: u32) {
-    let user = user_info(uid);
-    let cmd = match (&user, cmd.strip_prefix('~')) {
+    launch(cmd, config_dir, user_info(uid));
+}
+
+/// The command to start for `cmd` as `user` (name and home): a leading `~` is the user's home.
+fn prepared(cmd: &str, config_dir: &Path, user: Option<&(String, PathBuf)>) -> (String, Command) {
+    let cmd = match (user, cmd.strip_prefix('~')) {
         (Some((_, home)), Some(rest)) => format!("{}{rest}", home.to_string_lossy()),
         _ => cmd.to_string(),
     };
-    let name = user.as_ref().map(|(name, _)| name.as_str());
-    match command(&cmd, config_dir, name).spawn() {
+    let built = command(&cmd, config_dir, user.map(|(name, _)| name.as_str()));
+    (cmd, built)
+}
+
+fn launch(cmd: &str, config_dir: &Path, user: Option<(String, PathBuf)>) {
+    let (cmd, mut command) = prepared(cmd, config_dir, user.as_ref());
+    match command.spawn() {
         Ok(mut child) => {
             let _ = child.wait();
         }
         Err(e) => tracing::error!("Failed to execute command '{cmd}': {e}"),
     }
+}
+
+/// Like [`run`] for callers that must never act as root: with no uid, or a user that is root or
+/// cannot be looked up, nothing runs and the reason comes back.
+pub(crate) fn run_as_user(cmd: &str, config_dir: &Path, uid: Option<u32>) -> Result<(), String> {
+    let Some(uid) = uid.filter(|uid| *uid != 0) else {
+        return Err("no non-root user id to run it as".to_string());
+    };
+    user_info(uid).filter(|(name, _)| name != "root").map_or_else(
+        || Err(format!("user id {uid} has no non-root passwd entry to run it as")),
+        |user| {
+            launch(cmd, config_dir, Some(user));
+            Ok(())
+        },
+    )
 }
 
 pub fn emit_cmd(cmd: &str, ctx: &HandleContext<'_>) -> (EmitResult, Option<HeldAction>) {
@@ -100,6 +124,27 @@ mod tests {
             argv(&command("firefox", Path::new("/"), Some("fib"))),
             ["runuser", "-u", "fib", "--", "firefox"]
         );
+    }
+
+    #[test]
+    fn every_caller_builds_the_same_runuser_command_and_none_runs_as_root_by_default() {
+        // `CMD` and the steno commands both start what `prepared` builds
+        let user = ("fib".to_string(), PathBuf::from("/home/fib"));
+        let (cmd, built) = prepared("~/bin/pw.sh x", Path::new("/c"), Some(&user));
+        assert_eq!(cmd, "/home/fib/bin/pw.sh x");
+        assert_eq!(
+            argv(&built),
+            ["runuser", "-u", "fib", "--", "/bin/bash", "-c", "/home/fib/bin/pw.sh x"]
+        );
+        assert_eq!(built.get_current_dir(), Some(Path::new("/c")));
+    }
+
+    #[test]
+    fn running_as_the_user_is_refused_without_a_non_root_user() {
+        let why = |uid| run_as_user("true", Path::new("/"), uid).unwrap_err();
+        assert!(why(None).contains("no non-root user id"), "{}", why(None));
+        assert!(why(Some(0)).contains("no non-root user id"), "{}", why(Some(0)));
+        assert!(why(Some(u32::MAX - 1)).contains("no non-root passwd entry"), "{}", why(Some(u32::MAX - 1)));
     }
 
     #[test]

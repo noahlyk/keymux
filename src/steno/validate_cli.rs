@@ -9,7 +9,7 @@
 use super::answer::EngineSetup;
 use super::layout::Layout;
 use super::setup::{cache_dir, default_dictionaries};
-use super::validate::{targets_from_config, validate, Finding, Report, Severity, Target};
+use super::validate::{targets_from_config, validate, Finding, Report, Rules, Severity, Target};
 use anyhow::Result;
 use colored::Colorize;
 use serde::Serialize;
@@ -43,16 +43,21 @@ pub fn targets(
     if let Some(missing) = given.iter().find(|path| !path.exists()) {
         anyhow::bail!("{} does not exist", missing.display());
     }
+    // Without a config (or one that does not load), the standard trust and no names to check
+    let config = crate::config::Config::load_or_hint(config_path).ok();
+    let rules = config.as_ref().map_or_else(|| Rules::standard(config_dir), |config| Rules::of_config(config, config_dir));
     if !given.is_empty() {
         let setup = EngineSetup::load(config_path, config_dir, home);
         return Ok(vec![Target {
             layers: Vec::new(),
             roots: given.to_vec(),
             layout: setup.layout,
+            rules,
         }]);
     }
-    let from_config = crate::config::Config::load_or_hint(config_path)
-        .map(|config| targets_from_config(&config, config_dir, home))
+    let from_config = config
+        .as_ref()
+        .map(|config| targets_from_config(config, config_dir, home))
         .unwrap_or_default();
     if !from_config.is_empty() {
         return Ok(from_config);
@@ -61,6 +66,7 @@ pub fn targets(
         layers: vec!["(default)".to_string()],
         roots: default_dictionaries(config_dir),
         layout: Layout::plover(),
+        rules,
     }])
 }
 

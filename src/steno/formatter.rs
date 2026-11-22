@@ -52,7 +52,7 @@ impl Default for Options {
     }
 }
 
-fn atom_regex() -> &'static Regex {
+pub(crate) fn atom_regex() -> &'static Regex {
     static ATOM: OnceLock<Regex> = OnceLock::new();
     // One or more of anything but an unescaped brace, or `{...}` with no unescaped brace inside
     ATOM.get_or_init(|| {
@@ -136,11 +136,11 @@ impl<'a> Context<'a> {
     }
 }
 
-fn unescape_atom(atom: &str) -> String {
+pub(crate) fn unescape_atom(atom: &str) -> String {
     atom.replace("\\{", "{").replace("\\}", "}")
 }
 
-fn get_meta(atom: &str) -> Option<&str> {
+pub(crate) fn get_meta(atom: &str) -> Option<&str> {
     atom.strip_prefix('{')
         .and_then(|rest| rest.strip_suffix('}'))
 }

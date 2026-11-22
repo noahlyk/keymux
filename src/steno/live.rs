@@ -18,6 +18,7 @@ use super::dict_notice::{deliver, Candidate, Notices};
 use super::layout::Layout;
 use super::parts::Parts;
 use super::plugin::Chain;
+use super::run_control::Trust;
 use super::source::expand;
 use crate::lock;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -44,6 +45,9 @@ struct Key {
     roots: Vec<PathBuf>,
     cache_dir: PathBuf,
     layout: Layout,
+    /// Which files may run inline shell commands: two layers with different trust must not
+    /// share a layered dictionary
+    trust: Trust,
 }
 
 #[derive(Default)]
@@ -57,6 +61,8 @@ struct Entry {
     /// What was last said to the user about these files, so a flapping save is not a stream of
     /// notifications
     notices: Notices,
+    /// The files whose ignored inline shell commands have been logged, with the count logged
+    shells_logged: HashMap<PathBuf, usize>,
     /// Unloaded (`{:engine:unload}`): nothing is held and nothing is read again, not even when
     /// the files change, until a layer subscribes to it again
     unloaded: bool,
@@ -237,11 +243,18 @@ fn hub() -> &'static Hub {
 /// Layers with the same `roots` share one copy.
 #[must_use]
 pub fn subscribe(roots: Vec<PathBuf>, cache_dir: PathBuf, layout: Layout) -> Receiver<Arc<Chain>> {
+    subscribe_trusting(roots, cache_dir, layout, Trust::default())
+}
+
+/// Like [`subscribe`], with the files `trust` names allowed to run inline shell commands.
+#[must_use]
+pub fn subscribe_trusting(roots: Vec<PathBuf>, cache_dir: PathBuf, layout: Layout, trust: Trust) -> Receiver<Arc<Chain>> {
     let hub = hub();
     let key = Key {
         roots,
         cache_dir,
         layout,
+        trust,
     };
     let (sender, receiver) = mpsc::channel();
     // Asking for the dictionaries again is what loads them again
@@ -355,15 +368,19 @@ fn refresh(key: &Key) {
     }
     // What a changed file says for itself is checked here, on the worker, never on a stroke's
     // path. The first load reports only files that do not parse
+    let rules = super::validate::Rules { trust: key.trust.clone(), commands: None };
     let findings: Vec<_> = if first_time || !report.problems.is_empty() {
         Vec::new()
     } else {
         report
             .new_files
             .iter()
-            .flat_map(|file| super::validate::check_file(file, &key.layout))
+            .flat_map(|file| super::validate::check_file(file, &key.layout, &rules))
+            // Ignored inline commands are logged once per file below, not notified
+            .filter(|finding| !matches!(finding.kind, super::validate::Kind::UntrustedShell | super::validate::Kind::ShellCommand))
             .collect()
     };
+    let ignored = parts.ignored_shells(&files, &key.trust);
     let candidate = Candidate::from_reload(&report.problems, &findings, keep_old);
     let dict = (!up_to_date && !keep_old).then(|| {
         Arc::new(Chain::from_parts(
@@ -371,6 +388,7 @@ fn refresh(key: &Key) {
             &parts,
             &key.cache_dir,
             &key.layout,
+            &key.trust,
         ))
     });
     if let Some(dict) = &dict {
@@ -392,6 +410,17 @@ fn refresh(key: &Key) {
         return;
     }
     entry.parts = parts;
+    // One line per file, again only when its count changes
+    for (file, count) in &ignored {
+        if entry.shells_logged.insert(file.clone(), *count) != Some(*count) {
+            warn!(
+                "steno dictionary {} is not trusted: {count} entries with inline shell commands are ignored (trusted: {})",
+                file.display(),
+                key.trust.describe()
+            );
+        }
+    }
+    entry.shells_logged.retain(|file, _| ignored.iter().any(|(f, _)| f == file));
     let notice = entry.notices.admit(candidate, Instant::now());
     let Some(dict) = dict else {
         drop(state);

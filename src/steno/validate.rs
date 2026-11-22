@@ -16,6 +16,9 @@
 //! | `unknown_meta` | warning | a `{...}` that looks like a command but is none: the engine does nothing |
 //! | `bad_meta_argument` | warning | a known meta with an argument it cannot use, so it does nothing (or less) |
 //! | `misplaced_meta` | warning | a macro (`{:undo}`) that only works as an entry's whole text |
+//! | `unknown_command` | warning | `{:run:NAME}` with a name the config's `commands` doesn't define (only checked with a config) |
+//! | `untrusted_shell` | warning | an inline shell command in a file that is not trusted: ignored |
+//! | `shell_command` | info | an inline shell command in a trusted file: it runs as the user |
 //! | `duplicate_outline` | warning | the same outline twice in one file; the last wins |
 //! | `unreachable_outline` | warning | a multi-stroke outline holding a transparent stroke, which never enters the history |
 //! | `shadowed_outline` | info | outlines also defined in an earlier file, which wins (the normal override) |
@@ -33,6 +36,7 @@ use super::dict::{decode_text, read_entries};
 use super::layout::Layout;
 use super::meta::{self, KNOWN};
 use super::orthography::WORDLIST_FILE;
+use super::run_control::{self, Trust};
 use super::source::{expand, is_plugin_file};
 use super::translate::{is_transparent_mapping, macro_name, mapping_to_macro};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -79,6 +83,9 @@ pub enum Kind {
     UnknownMeta,
     BadMetaArgument,
     MisplacedMeta,
+    UnknownCommand,
+    UntrustedShell,
+    ShellCommand,
     DuplicateOutline,
     UnreachableOutline,
     ShadowedOutline,
@@ -97,6 +104,9 @@ impl Kind {
             Self::UnknownMeta => "unknown_meta",
             Self::BadMetaArgument => "bad_meta_argument",
             Self::MisplacedMeta => "misplaced_meta",
+            Self::UnknownCommand => "unknown_command",
+            Self::UntrustedShell => "untrusted_shell",
+            Self::ShellCommand => "shell_command",
             Self::DuplicateOutline => "duplicate_outline",
             Self::UnreachableOutline => "unreachable_outline",
             Self::ShadowedOutline => "shadowed_outline",
@@ -153,6 +163,38 @@ pub struct Target {
     pub roots: Vec<PathBuf>,
     /// The layer's stroke notation, extra keys and join keys included
     pub layout: Layout,
+    /// What the config says about running commands
+    pub rules: Rules,
+}
+
+/// What the config says about commands, for checking entries that run them.
+#[derive(Debug, Clone, Default)]
+pub struct Rules {
+    /// The files trusted to run inline shell commands
+    pub trust: Trust,
+    /// The config's `commands`, when a config is loaded; `{:run:NAME}` is only checked against it then
+    pub commands: Option<HashMap<String, String>>,
+}
+
+impl Rules {
+    /// What `config` says, for the steno folder in `config_dir`.
+    #[must_use]
+    pub fn of_config(config: &crate::config::Config, config_dir: &Path) -> Self {
+        Self { trust: Trust::of_config(config, config_dir), commands: Some(config.commands.clone()) }
+    }
+
+    /// With no config: the standard trust, and no names to check against.
+    #[must_use]
+    pub fn standard(config_dir: &Path) -> Self {
+        Self { trust: Trust::standard(&super::setup::steno_dir(config_dir)), commands: None }
+    }
+}
+
+/// Where an entry is, for the checks that depend on it.
+struct Where<'a> {
+    rules: &'a Rules,
+    /// Whether its file is trusted to run inline shell commands
+    trusted: bool,
 }
 
 /// The dictionaries of every steno layer in `config`, as the daemon builds them.
@@ -206,6 +248,7 @@ pub fn targets_from_config(
                 layers: vec![name],
                 roots,
                 layout,
+                rules: Rules::of_config(config, config_dir),
             }),
         }
     }
@@ -259,7 +302,7 @@ pub fn validate(targets: &[Target], skip: &Path) -> Report {
     for target in targets {
         let mut files = expand(&target.roots, skip);
         files.retain(|file| is_dictionary(file));
-        let (findings, entries) = validate_files(&files, &target.layout);
+        let (findings, entries) = validate_files_with(&files, &target.layout, &target.rules);
         // The same file under two layouts is checked twice, and reported once with both layers
         for mut finding in findings {
             finding.layers.clone_from(&target.layers);
@@ -327,6 +370,12 @@ struct Cross {
 /// Returns the findings and how many entries were valid.
 #[must_use]
 pub fn validate_files(files: &[PathBuf], layout: &Layout) -> (Vec<Finding>, usize) {
+    validate_files_with(files, layout, &Rules::default())
+}
+
+/// Like [`validate_files`], knowing what the config says about commands.
+#[must_use]
+pub fn validate_files_with(files: &[PathBuf], layout: &Layout, rules: &Rules) -> (Vec<Finding>, usize) {
     let dictionaries: Vec<&PathBuf> = files.iter().filter(|file| is_dictionary(file)).collect();
     let mut cross = Cross::default();
     // Pass one: which single strokes end up transparent. A stroke is what its first file says,
@@ -356,7 +405,7 @@ pub fn validate_files(files: &[PathBuf], layout: &Layout) -> (Vec<Finding>, usiz
     let mut entries = 0;
     for (index, file) in dictionaries.iter().enumerate() {
         let index = u32::try_from(index).unwrap_or(u32::MAX);
-        entries += check_file_into(file, layout, Some((&mut cross, index)), &mut findings);
+        entries += check_file_into(file, layout, rules, Some((&mut cross, index)), &mut findings);
     }
     let mut shadows: Vec<_> = cross.shadows.into_iter().collect();
     shadows.sort_by_key(|((shadowed, winner), _)| (*shadowed, *winner));
@@ -392,9 +441,9 @@ pub fn validate_files(files: &[PathBuf], layout: &Layout) -> (Vec<Finding>, usiz
 /// The findings of one file alone: what a reload of just that file can say, without comparing
 /// it to the others. Used by the daemon when a file changes.
 #[must_use]
-pub fn check_file(file: &Path, layout: &Layout) -> Vec<Finding> {
+pub fn check_file(file: &Path, layout: &Layout, rules: &Rules) -> Vec<Finding> {
     let mut findings = Vec::new();
-    check_file_into(file, layout, None, &mut findings);
+    check_file_into(file, layout, rules, None, &mut findings);
     findings
 }
 
@@ -523,6 +572,7 @@ struct Capped(HashMap<(Kind, Severity), usize>);
 fn check_file_into(
     file: &Path,
     layout: &Layout,
+    rules: &Rules,
     mut cross: Option<(&mut Cross, u32)>,
     out: &mut Vec<Finding>,
 ) -> usize {
@@ -539,6 +589,7 @@ fn check_file_into(
         }
     };
     let first_new = out.len();
+    let here = Where { rules, trusted: rules.trust.is_trusted(file) };
     let mut entries = 0;
     let mut kept: HashMap<(Kind, Severity), usize> = HashMap::new();
     let mut capped = Capped::default();
@@ -618,7 +669,7 @@ fn check_file_into(
             }
         }
         if text.contains('{') || text.starts_with('=') {
-            for problem in check_text(text, layout) {
+            for problem in check_text_in(text, layout, &here) {
                 let mut finding =
                     Finding::new(file, problem.severity, problem.kind, problem.message);
                 finding.outline = Some(key.to_string());
@@ -704,6 +755,10 @@ fn brace_atoms(text: &str) -> Result<Vec<&str>, String> {
 /// and arguments a meta can't use. Nothing for text that is fine.
 #[must_use]
 pub fn check_text(text: &str, layout: &Layout) -> Vec<Problem> {
+    check_text_in(text, layout, &Where { rules: &Rules::default(), trusted: false })
+}
+
+fn check_text_in(text: &str, layout: &Layout, here: &Where) -> Vec<Problem> {
     let mut problems = Vec::new();
     let atoms = match brace_atoms(text) {
         Ok(atoms) => atoms,
@@ -732,12 +787,12 @@ pub fn check_text(text: &str, layout: &Layout) -> Vec<Problem> {
         }
     }
     for atom in atoms {
-        check_atom(atom, whole.is_some(), layout, &mut problems);
+        check_atom(atom, whole.is_some(), layout, here, &mut problems);
     }
     problems
 }
 
-fn check_atom(atom: &str, whole: bool, layout: &Layout, problems: &mut Vec<Problem>) {
+fn check_atom(atom: &str, whole: bool, layout: &Layout, here: &Where, problems: &mut Vec<Problem>) {
     let unescaped = atom.replace("\\{", "{").replace("\\}", "}");
     let shown = format!("{{{atom}}}");
     let Some(found) = meta::parse_meta(&unescaped) else {
@@ -755,6 +810,10 @@ fn check_atom(atom: &str, whole: bool, layout: &Layout, problems: &mut Vec<Probl
         ));
         return;
     };
+    if let Some((kind, arg)) = run_control::classify(&found.name, found.param) {
+        check_command(kind, &arg, &shown, here, problems);
+        return;
+    }
     let mut name = found.name.to_lowercase();
     let mut param = found.param;
     // `{:undo_or_ctrl+backspace}`: the combination written into the name of a whole entry
@@ -833,6 +892,49 @@ fn check_atom(atom: &str, whole: bool, layout: &Layout, problems: &mut Vec<Probl
             suggestion,
         ));
     }
+}
+
+/// `{:run:NAME}` and the inline shell forms: an argument is needed, a name must be one the config
+/// defines (with a config), and a shell command runs only from a trusted file.
+fn check_command(kind: run_control::Kind, arg: &str, shown: &str, here: &Where, problems: &mut Vec<Problem>) {
+    if arg.trim().is_empty() {
+        let what = if kind == run_control::Kind::Run { "a command name" } else { "a command line" };
+        problems.push(problem(Severity::Warning, Kind::BadMetaArgument, format!("`{shown}` needs {what}, so it does nothing"), None));
+        return;
+    }
+    match kind {
+        run_control::Kind::Run => {
+            let Some(commands) = here.rules.commands.as_ref().filter(|commands| !commands.contains_key(arg)) else {
+                return;
+            };
+            let suggestion = closest(arg, commands.keys().map(String::as_str)).map(|name| format!("{{:run:{name}}}"));
+            let known = if commands.is_empty() { "none are defined".to_string() } else { format!("defined: {}", sorted_names(commands)) };
+            problems.push(problem(
+                Severity::Warning,
+                Kind::UnknownCommand,
+                format!("`{shown}`: no command `{arg}` in the config's commands ({known}), so it does nothing"),
+                suggestion,
+            ));
+        }
+        run_control::Kind::Shell if here.trusted => problems.push(problem(
+            Severity::Info,
+            Kind::ShellCommand,
+            format!("`{shown}` runs a shell command as the user (this file is trusted)"),
+            None,
+        )),
+        run_control::Kind::Shell => problems.push(problem(
+            Severity::Warning,
+            Kind::UntrustedShell,
+            format!("`{shown}` is ignored: not a trusted dictionary; trusted: {}", here.rules.trust.describe()),
+            Some("name the command in the config's `commands` and use {:run:NAME}, or trust this file with trusted_dictionaries".to_string()),
+        )),
+    }
+}
+
+fn sorted_names(commands: &HashMap<String, String>) -> String {
+    let mut names: Vec<&str> = commands.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    names.join(", ")
 }
 
 /// The candidate nearest to `word` by edit distance, if it is near enough to be a typo.
@@ -1152,6 +1254,7 @@ mod tests {
             layers: vec!["steno".into()],
             roots: vec![dir.clone()],
             layout: plover(),
+            rules: Rules::default(),
         };
         let report = validate(&[target], &dir.join("cache"));
         assert!(report.findings.is_empty(), "{:#?}", report.findings);
@@ -1166,6 +1269,7 @@ mod tests {
             layers: vec![name.to_string()],
             roots: vec![dir.clone()],
             layout: plover(),
+            rules: Rules::default(),
         };
         let with_plus = Target {
             layout: Layout::plover_with_joins(&['+'], &['+']).unwrap(),
@@ -1187,6 +1291,84 @@ mod tests {
         assert_eq!(closest("TOGGLE", ["toggle"]), Some("toggle"));
         assert_eq!(closest("xyz", ["toggle", "show"]), None);
         assert_eq!(closest("ab", ["xy"]), None, "short words allow one edit only");
+    }
+
+    fn rules(trusted: &[&str], commands: Option<&[&str]>) -> Rules {
+        let names: Vec<String> = trusted.iter().map(|name| (*name).to_string()).collect();
+        Rules {
+            trust: Trust::new(Path::new("/s"), &names),
+            commands: commands.map(|names| names.iter().map(|name| ((*name).to_string(), "x".to_string())).collect()),
+        }
+    }
+
+    fn found(text: &str, file: &str, rules: &Rules) -> Vec<Problem> {
+        check_text_in(text, &plover(), &Where { rules, trusted: rules.trust.is_trusted(Path::new(file)) })
+    }
+
+    #[test]
+    fn run_names_are_checked_against_the_config_when_there_is_one() {
+        let with = rules(&[], Some(&["password", "lock"]));
+        assert_eq!(found("{:run:password}", "/s/a.json", &with), Vec::new());
+        let wrong = found("{:run:pasword}", "/s/a.json", &with);
+        assert_eq!(wrong.len(), 1, "{wrong:?}");
+        assert_eq!(wrong[0].kind, Kind::UnknownCommand);
+        assert_eq!(wrong[0].suggestion.as_deref(), Some("{:run:password}"));
+        let none = found("{:run:x}", "/s/a.json", &rules(&[], Some(&[])));
+        assert!(none[0].message.contains("none are defined"), "{none:?}");
+        assert!(found("{:run:pasword}", "/s/a.json", &rules(&[], None)).is_empty(), "no config: nothing to check against");
+        let empty = found("{:run:}", "/s/a.json", &with);
+        assert_eq!((empty.len(), empty[0].kind), (1, Kind::BadMetaArgument));
+    }
+
+    #[test]
+    fn inline_shell_is_a_warning_in_an_untrusted_file_and_info_in_a_trusted_one() {
+        let rules = rules(&["00-user.json"], None);
+        for text in ["{:shell:ls}", "{PLOVER:SHELL:ls}", "{:command:shell:ls}", "{plover:shell:ls}"] {
+            let bad = found(text, "/s/lyk/a.json", &rules);
+            assert_eq!(bad.len(), 1, "{text}: {bad:?}");
+            assert_eq!((bad[0].kind, bad[0].severity), (Kind::UntrustedShell, Severity::Warning), "{text}");
+            assert!(bad[0].message.contains("ignored: not a trusted dictionary; trusted: 00-user.json"), "{}", bad[0].message);
+            let good = found(text, "/s/00-user.json", &rules);
+            assert_eq!((good[0].kind, good[0].severity), (Kind::ShellCommand, Severity::Info), "{text}");
+        }
+        let empty = found("{:shell:}", "/s/00-user.json", &rules);
+        assert_eq!(empty[0].kind, Kind::BadMetaArgument);
+    }
+
+    #[test]
+    fn brace_and_escape_mistakes_in_an_inline_command_are_findings() {
+        let rules = rules(&["a.json"], None);
+        let nested = found("{:shell:echo ${HOME}}", "/s/a.json", &rules);
+        assert_eq!((nested.len(), nested[0].kind), (1, Kind::UnbalancedBraces), "{nested:?}");
+        assert!(found(r"{:shell:echo $\{HOME\}}", "/s/a.json", &rules).iter().all(|p| p.kind == Kind::ShellCommand));
+        let open = found("{:shell:echo", "/s/a.json", &rules);
+        assert_eq!(open[0].kind, Kind::UnbalancedBraces);
+    }
+
+    #[test]
+    fn a_file_is_judged_by_where_it_is_in_a_whole_validation() {
+        let dir = folder("trust-files");
+        let steno = dir.join("steno");
+        fs::create_dir_all(steno.join("lyk")).unwrap();
+        let mine = put(&steno, "00-user.json", r#"{"PWR": "{:run:password}", "SKWR": "{:shell:notify-send hi}"}"#);
+        let theirs = put(&steno.join("lyk"), "01.json", r#"{"TKOG": "{:shell:rm x}", "KAT": "{:run:missing}"}"#);
+        let rules = Rules { trust: Trust::standard(&steno), commands: Some(HashMap::from([("password".to_string(), "x".to_string())])) };
+        let (findings, _) = validate_files_with(&[mine, theirs], &plover(), &rules);
+        let kinds: Vec<(String, Kind)> = findings.iter().map(|f| (f.file.rsplit('/').next().unwrap().to_string(), f.kind)).collect();
+        assert!(kinds.contains(&("00-user.json".to_string(), Kind::ShellCommand)), "{kinds:?}");
+        assert!(kinds.contains(&("01.json".to_string(), Kind::UntrustedShell)), "{kinds:?}");
+        assert!(kinds.contains(&("01.json".to_string(), Kind::UnknownCommand)), "{kinds:?}");
+        assert_eq!(kinds.len(), 3, "{kinds:?}");
+    }
+
+    #[test]
+    fn steno_validate_works_with_no_config_and_trusts_the_default_files() {
+        let dir = folder("no-config");
+        let targets = super::super::validate_cli::targets(&dir.join("absent.ron"), &dir, None, &[]).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert!(targets[0].rules.commands.is_none());
+        assert!(targets[0].rules.trust.is_trusted(&dir.join("steno/00-user.json")));
+        assert!(!targets[0].rules.trust.is_trusted(&dir.join("steno/lyk/x.json")));
     }
 
     #[test]

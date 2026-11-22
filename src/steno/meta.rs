@@ -284,7 +284,7 @@ fn check_undo_or(param: &str, _: &Layout) -> Option<String> {
 
 /// Plover's engine commands, as written after `{plover:`, with the keymux ones the metas make.
 /// Which have a counterpart in keymux is [`StenoEngine`](super::StenoEngine)'s to say.
-pub(crate) const ENGINE_COMMANDS: [&str; 12] = [
+pub(crate) const ENGINE_COMMANDS: [&str; 14] = [
     "suspend",
     "toggle",
     "resume",
@@ -297,6 +297,8 @@ pub(crate) const ENGINE_COMMANDS: [&str; 12] = [
     "quit",
     super::engine_control::COMMAND,
     super::overlay_control::COMMAND,
+    super::run_control::RUN,
+    super::run_control::SHELL,
 ];
 
 /// Every meta by name. Names are matched without regard to case.
@@ -334,6 +336,10 @@ pub(crate) static KNOWN: &[KnownMeta] = &[
     // keymux's own `{:outline:last}` and `{:outline:next}` (see `outline_control`; they type
     // their text through the engine, not here)
     KnownMeta { name: super::outline_control::NAME, run: super::outline_control::meta_action, verbs: &["last", "next"], bare_ok: false, whole_entry: false, check: fine },
+    // keymux's own `{:run:NAME}` (a command from the config) and `{:shell:CMD}` (a command line, only
+    // run from a trusted dictionary): see `run_control`. They type nothing.
+    KnownMeta { name: super::run_control::RUN, run: super::run_control::meta_run, verbs: &[], bare_ok: true, whole_entry: false, check: super::run_control::check_argument },
+    KnownMeta { name: super::run_control::SHELL, run: super::run_control::meta_shell, verbs: &[], bare_ok: true, whole_entry: false, check: super::run_control::check_argument },
     KnownMeta { name: "lookup", run: run_lookup, verbs: &["open", "close", "toggle"], bare_ok: true, whole_entry: false, check: fine },
     // keymux's own runtime overlay controls: `{:overlay:hide}`, `{:tape:clear}`, ...
     // (see `overlay_control`; they type nothing)

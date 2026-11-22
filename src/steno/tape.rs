@@ -55,6 +55,8 @@ pub fn describe(output: Option<&StenoOutput>, unmatched: bool) -> String {
                     .map(|(key, _)| format!("{key:?}"))
                     .collect::<Vec<_>>()
                     .join(" "),
+                // The command line of a shell command is not for the tape file: it may hold a secret
+                OutputOp::Command(command) if command.get(..6).is_some_and(|head| head.eq_ignore_ascii_case("shell:")) => "{plover:shell}".to_string(),
                 OutputOp::Command(command) => format!("{{plover:{command}}}"),
             })
             .collect::<Vec<_>>()

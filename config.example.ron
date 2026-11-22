@@ -459,6 +459,19 @@
     // GLOBAL DAEMON SETTINGS
     // ============================================================================
     
+    // Named commands, run as your user (never root) from steno: a dictionary entry
+    // "{:run:password}" runs the command called "password". Only these names can be run by a
+    // dictionary; write the entry in ~/.config/keymux/steno/00-user.json.
+    // commands: {
+    //     "password": "~/.config/keymux/password.sh",
+    //     "lock": "loginctl lock-session",
+    // },
+
+    // Dictionaries allowed to run inline shell commands ({:shell:cmd}, {PLOVER:SHELL:cmd}):
+    // files or folders directly in ~/.config/keymux/steno. Unset: ["00-user.json", "user"].
+    // A set list replaces that; [] trusts nothing.
+    // trusted_dictionaries: ["00-user.json", "user"],
+
     // Hot config reload: automatically reload config when file changes (default: false)
     // When enabled, changes to config.ron are immediately applied without restarting daemon
     // Useful for: Testing configs, live tuning, rapid iteration

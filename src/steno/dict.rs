@@ -163,12 +163,16 @@ impl Table {
 #[derive(Debug, Clone)]
 pub struct Dictionary {
     tables: Vec<Arc<Table>>,
+    /// Whether each table's file may run inline shell commands (see [`super::run_control`]);
+    /// a table past the end of this is not trusted
+    trusted: Vec<bool>,
 }
 
 impl Default for Dictionary {
     fn default() -> Self {
         Self {
             tables: vec![Arc::new(Table::default())],
+            trusted: Vec::new(),
         }
     }
 }
@@ -433,12 +437,51 @@ impl Dictionary {
     /// so a folder reloaded after one file changed costs that file, not all of them.
     #[must_use]
     pub fn layered<'a>(parts: impl IntoIterator<Item = &'a Self>) -> Self {
-        Self {
-            tables: parts
-                .into_iter()
-                .flat_map(|part| part.tables.iter().cloned())
-                .collect(),
+        Self::layered_trusting(parts.into_iter().map(|part| (part, false)))
+    }
+
+    /// Like [`Self::layered`], each part with whether its file is trusted to run inline shell
+    /// commands: what an entry may do is decided by the table that wins the outline.
+    #[must_use]
+    pub fn layered_trusting<'a>(parts: impl IntoIterator<Item = (&'a Self, bool)>) -> Self {
+        let (mut tables, mut trusted) = (Vec::new(), Vec::new());
+        for (part, is_trusted) in parts {
+            tables.extend(part.tables.iter().cloned());
+            trusted.extend(part.tables.iter().map(|_| is_trusted));
         }
+        Self { tables, trusted }
+    }
+
+    /// This dictionary with every table trusted, for tests of what a trusted file does.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn trusted(mut self) -> Self {
+        self.trusted = vec![true; self.tables.len()];
+        self
+    }
+
+    /// The translation of an exact outline as a stroke may use it: as [`Self::lookup`], but with
+    /// inline shell commands cut out unless the table it comes from is trusted.
+    #[must_use]
+    pub fn lookup_for_use(&self, strokes: &[u32]) -> Option<String> {
+        let (at, text) = self
+            .tables
+            .iter()
+            .enumerate()
+            .find_map(|(at, table)| table.get(strokes).map(|text| (at, text)))?;
+        if is_deleted(text) {
+            return None;
+        }
+        if self.trusted.get(at).copied().unwrap_or(false) {
+            return Some(text.to_owned());
+        }
+        Some(super::run_control::strip_shells(text).unwrap_or_else(|| text.to_owned()))
+    }
+
+    /// How many entries hold an inline shell command.
+    #[must_use]
+    pub fn shell_entries(&self) -> usize {
+        self.iter_where(&|text| super::run_control::strip_shells(text).is_some()).count()
     }
 
     /// The table new entries go into: the last, which is the only one a dictionary built entry
@@ -814,6 +857,7 @@ fn open_cache(file: &Path, layout: &Layout) -> Option<(CacheIn, Table, std::sync
 pub(super) fn read_cache(file: &Path, sources: &[Source], layout: &Layout) -> Option<Dictionary> {
     let (cache, table, _) = open_cache(file, layout)?;
     (cache.sources == sources).then(|| Dictionary {
+        trusted: Vec::new(),
         tables: vec![Arc::new(table)],
     })
 }
@@ -837,6 +881,7 @@ pub(super) fn read_cache_by_stamp(
     (*path == source.display().to_string()).then(|| {
         (
             Dictionary {
+                trusted: Vec::new(),
                 tables: vec![Arc::new(table)],
             },
             digest.clone(),

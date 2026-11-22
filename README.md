@@ -359,6 +359,7 @@ Execute arbitrary shell commands on key press.
 KC_F1: CMD("/usr/bin/notify-send 'Hello from keyboard!'"),
 KC_F2: CMD("/usr/bin/playerctl play-pause"),
 ```
+A steno stroke can run a command too, by name: see [Running your own commands from steno](#running-your-own-commands-from-steno).
 
 ### Example Configurations
 
@@ -659,6 +660,9 @@ seconds.
 | `unbalanced_braces` | error | A `{` never closed, a stray `}`, or a `{` inside `{...}`; escape a literal brace as `\{` |
 | `unknown_meta` | warning | A `{...}` the engine does not know (`{:tpae:toggle}`, `{firstup}`, `{!'}`, `=undoo`), so it does nothing. Suggests the nearest known name |
 | `bad_meta_argument` | warning | A known meta with an argument it cannot use: a verb the meta lacks (`{:tape:togle}`, `{:outline:foo}`, `{:lookup:bar}`), a `{:firstup:except=...}` list that is empty or is not one stroke of the layout (the entry is then plain `{:firstup}`), a `{#...}` or `{:undo_or:...}` key combination with an unknown key name, a bad `{:back:N}` count, an unknown `{plover:...}` command |
+| `unknown_command` | warning | `{:run:NAME}` with a name the config's `commands` does not define (checked only when a config is loaded); suggests the nearest name |
+| `untrusted_shell` | warning | An inline shell command (`{:shell:...}`, `{PLOVER:SHELL:...}`) in a file that is not trusted: ignored. See [Running your own commands from steno](#running-your-own-commands-from-steno) |
+| `shell_command` | info | An inline shell command in a trusted file: it runs as the user |
 | `misplaced_meta` | warning | A history macro (`{:undo}`, `{:redo}`, `{:undo_or}`, ...) inside other text, where it does nothing; it works as an entry's whole text |
 | `duplicate_outline` | warning | The same outline twice in one file; the last wins |
 | `unreachable_outline` | warning | A multi-stroke outline holding a stroke whose entry is transparent (`{:transparent}`, `{:lookup}`, an overlay control): a transparent stroke never enters the history, so the outline can never match |
@@ -734,7 +738,7 @@ Outlines use Plover's notation, with number keys written as digits (`1-9`, `12K`
 - Media, brightness and launcher keys in key combinations, by X11 keysym name (case-insensitive, with or without `XF86`) or Linux name: `{#AudioPlay}` (play/pause), `AudioPause`, `AudioPrev`, `AudioNext`, `AudioStop`, `AudioRecord`, `AudioRewind`, `AudioForward`, `AudioMedia`, `AudioMute`, `AudioMicMute`, `AudioRaiseVolume`, `AudioLowerVolume`, `MonBrightnessUp`, `MonBrightnessDown`, `Eject`, `WWW`, `Mail`, `HomePage`, `Back`, `Forward`, `Refresh`, `Search`, and `Play`, `PlayPause`, `PreviousSong`, `NextSong`, `StopCD`, `Record`, `Rewind`, `FastForward`, `Media`, `MicMute`, `VolumeUp`, `VolumeDown`, `Mute`, `BrightnessUp`, `BrightnessDown`, `Reload`, `Email`: they work inside holds too (`{#control(AudioNext)}`). The virtual keyboard advertises every media key, so the events are not dropped even when the physical keyboard has none
 - Actions: `=undo`, `{*+}` and `=repeat_last_stroke`, `{*}` and `=retro_toggle_asterisk`, `{}` and `{#}` (nothing), `{$}` and `{:word_end}`
 - Translator behaviour: the longest match over recent strokes, `*` undoing a translation and bringing back what it replaced, and the suffix keys `-Z -D -S -G` folded into a stroke that has no entry of its own
-- Commands: `{plover:suspend}` and `{plover:toggle}` leave the steno layer, `{:lookup}` opens keymux's lookup (`{plover:lookup}` is its legacy alias), `{plover:set_config:'start_attached':True}` sets how a session starts; the commands that open Plover's windows (`add_translation`, `suggestions`, `configure`, `focus`, `quit`) have nothing to open here and do nothing
+- Commands: `{PLOVER:SHELL:cmd}` (the `plover-run-shell` plugin) runs in a trusted dictionary only, see [Running your own commands from steno](#running-your-own-commands-from-steno); `{plover:suspend}` and `{plover:toggle}` leave the steno layer, `{:lookup}` opens keymux's lookup (`{plover:lookup}` is its legacy alias), `{plover:set_config:'start_attached':True}` sets how a session starts; the commands that open Plover's windows (`add_translation`, `suggestions`, `configure`, `focus`, `quit`) have nothing to open here and do nothing
 - Lapwing's plugins, which its dictionaries use: `{:stitch:A}`, `{:stitch_last_word:...}`, `=repeat_last_translation`, `=repeat_last_word`, `=repeat_last_fragment`, `=repeat_last_character`
 
 A stroke with no translation types its keys (`STPHA-UBGS`), not Plover's `STPHAUBGS`, and a first word attaches to what is already written unless `start_attached: false`. A key combination can only press keys of a US keyboard: Plover's names for accented letters (`eacute`) aren't sent.
@@ -1001,6 +1005,69 @@ difference below. Every command that takes a query (`lookup`, `keys`, `stroke`) 
   `lyk`, `plover` and `lapwing` columns side by side (and its own `keys (shared vocabulary only…)`
   totals); keymux has the one engine setup, so there is one `outline` column and one total.
 | `keymux steno tape` | Show what each recent stroke typed. `-f` keeps printing new strokes, `-n N` sets how many lines to start with. On a terminal, `-N` counts and what a later stroke took back are dimmed (and redrawn dimmed as you follow) |
+
+### Running your own commands from steno
+
+A stroke can run a command, as `CMD("...")` does for a key. There are two ways to write one, and
+they differ in who decides what runs.
+
+**Named commands** (any dictionary). The config defines commands by name; an entry runs one by
+name. The dictionary only chooses a name, so a downloaded dictionary can't run anything the config
+doesn't offer.
+
+```ron
+// config.ron, top level
+commands: {
+    "password": "~/.config/keymux/password.sh",
+    "lock": "loginctl lock-session",
+},
+```
+
+```json
+"<STROKE>": "{:run:password}"
+```
+
+Put that line in `~/.config/keymux/steno/00-user.json`, which loads first and wins over any
+theory. A command line is run as `CMD` runs it (`~` expands to the user's home; through `/bin/bash -c`
+when it needs a shell). An unknown name does nothing and is logged once.
+
+**Inline shell** (trusted dictionaries only). `{:shell:COMMAND}`, or Plover's spelling
+`{PLOVER:SHELL:COMMAND}` (the `plover-run-shell` plugin), carries the command line in the entry. A
+literal brace in it is written `\{` or `\}`; an unescaped one is an `unbalanced_braces` finding.
+It runs only when the file that supplied the entry is trusted. Anywhere else it is cut out of the
+entry when the stroke is looked up: the rest of the entry (if any) still types, an entry of nothing
+else does nothing, and the daemon logs one line per file with the number of entries ignored.
+
+Trusted by default: `00-user.json` and the folder `user/`, both directly inside the steno folder.
+Set `trusted_dictionaries` to change it; a set list replaces the default (an empty one trusts
+nothing). Names are files or folders directly inside the steno folder, so a theory can't carry a
+trusted name in with it.
+
+```ron
+trusted_dictionaries: ["00-user.json", "user", "work.json"],
+```
+
+The entry that wins an outline decides: a trusted file's entry hidden under an untrusted file's is
+not run, and an untrusted file's never becomes trusted by being under a trusted one.
+
+**Behaviour.** Both run as the user the daemon serves, through the same `runuser -u USER --` path as
+`CMD`, off the typing thread, with the config folder as the working directory and no stdin. The
+daemon never runs them as root: if it cannot tell a non-root user id, nothing runs and the log says
+why. A stroke whose entry is only these commands (with `{:firstup}` or `{:transparent}` allowed) types
+nothing, is not in the translation history and does not repeat when held. Written beside text, the
+text types and the commands run, and the stroke is an ordinary one. On the tape it is a `~` line
+(`{plover:run:password}`); the command line of a shell command is not written to the tape.
+
+| Written | Plover | keymux |
+|---|---|---|
+| `{PLOVER:SHELL:cmd}` | works with `plover-run-shell` | runs in a trusted dictionary, ignored in any other |
+| `{:shell:cmd}` | no | the same, keymux's own spelling |
+| `{:run:NAME}` | no | a command from the config; needs keymux like the other `{:...}` metas |
+
+`keymux steno validate` and `keymux validate` check them: a `{:run:NAME}` whose name the config
+lacks is a warning with the nearest name, an inline shell command in an untrusted file is a
+warning (`ignored: not a trusted dictionary; trusted: ...`) and in a trusted file a note. Without a
+config, names are not checked and the default trust is used.
 
 ### On-screen overlay
 
