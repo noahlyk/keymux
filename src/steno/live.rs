@@ -158,10 +158,9 @@ pub fn unload(cache_dir: &Path) -> Receiver<()> {
 /// Whether the hub holds a loaded dictionary or parsed files for the sets cached in `dir`.
 #[cfg(test)]
 pub(crate) fn holds(dir: &Path) -> bool {
-    lock(&hub().state)
-        .entries
-        .iter()
-        .any(|(key, entry)| key.cache_dir == dir && (entry.latest.is_some() || !entry.parts.is_empty()))
+    lock(&hub().state).entries.iter().any(|(key, entry)| {
+        key.cache_dir == dir && (entry.latest.is_some() || !entry.parts.is_empty())
+    })
 }
 
 /// The resident memory of this process in kilobytes, or 0 where `/proc` can't say.
@@ -248,7 +247,12 @@ pub fn subscribe(roots: Vec<PathBuf>, cache_dir: PathBuf, layout: Layout) -> Rec
 
 /// Like [`subscribe`], with the files `trust` names allowed to run inline shell commands.
 #[must_use]
-pub fn subscribe_trusting(roots: Vec<PathBuf>, cache_dir: PathBuf, layout: Layout, trust: Trust) -> Receiver<Arc<Chain>> {
+pub fn subscribe_trusting(
+    roots: Vec<PathBuf>,
+    cache_dir: PathBuf,
+    layout: Layout,
+    trust: Trust,
+) -> Receiver<Arc<Chain>> {
     let hub = hub();
     let key = Key {
         roots,
@@ -258,7 +262,10 @@ pub fn subscribe_trusting(roots: Vec<PathBuf>, cache_dir: PathBuf, layout: Layou
     };
     let (sender, receiver) = mpsc::channel();
     // Asking for the dictionaries again is what loads them again
-    scope(&key.cache_dir).0.unloaded.store(false, Ordering::Release);
+    scope(&key.cache_dir)
+        .0
+        .unloaded
+        .store(false, Ordering::Release);
     {
         let mut interest = lock(&hub.interest);
         for root in &key.roots {
@@ -368,7 +375,10 @@ fn refresh(key: &Key) {
     }
     // What a changed file says for itself is checked here, on the worker, never on a stroke's
     // path. The first load reports only files that do not parse
-    let rules = super::validate::Rules { trust: key.trust.clone(), commands: None };
+    let rules = super::validate::Rules {
+        trust: key.trust.clone(),
+        commands: None,
+    };
     let findings: Vec<_> = if first_time || !report.problems.is_empty() {
         Vec::new()
     } else {
@@ -377,7 +387,15 @@ fn refresh(key: &Key) {
             .iter()
             .flat_map(|file| super::validate::check_file(file, &key.layout, &rules))
             // Ignored inline commands are logged once per file below, not notified
-            .filter(|finding| !matches!(finding.kind, super::validate::Kind::UntrustedShell | super::validate::Kind::ShellCommand | super::validate::Kind::LegacyAlias | super::validate::Kind::LegacyNoEffect))
+            .filter(|finding| {
+                !matches!(
+                    finding.kind,
+                    super::validate::Kind::UntrustedShell
+                        | super::validate::Kind::ShellCommand
+                        | super::validate::Kind::LegacyAlias
+                        | super::validate::Kind::LegacyNoEffect
+                )
+            })
             .collect()
     };
     let ignored = parts.ignored_shells(&files, &key.trust);
@@ -420,7 +438,9 @@ fn refresh(key: &Key) {
             );
         }
     }
-    entry.shells_logged.retain(|file, _| ignored.iter().any(|(f, _)| f == file));
+    entry
+        .shells_logged
+        .retain(|file, _| ignored.iter().any(|(f, _)| f == file));
     let notice = entry.notices.admit(candidate, Instant::now());
     let Some(dict) = dict else {
         drop(state);

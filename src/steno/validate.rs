@@ -186,13 +186,19 @@ impl Rules {
     /// What `config` says, for the steno folder in `config_dir`.
     #[must_use]
     pub fn of_config(config: &crate::config::Config, config_dir: &Path) -> Self {
-        Self { trust: Trust::of_config(config, config_dir), commands: Some(config.commands.clone()) }
+        Self {
+            trust: Trust::of_config(config, config_dir),
+            commands: Some(config.commands.clone()),
+        }
     }
 
     /// With no config: the standard trust, and no names to check against.
     #[must_use]
     pub fn standard(config_dir: &Path) -> Self {
-        Self { trust: Trust::standard(&super::setup::steno_dir(config_dir)), commands: None }
+        Self {
+            trust: Trust::standard(&super::setup::steno_dir(config_dir)),
+            commands: None,
+        }
     }
 }
 
@@ -215,9 +221,15 @@ pub fn targets_from_config(
     home: Option<&Path>,
 ) -> Vec<Target> {
     use crate::config::LayerKind;
-    let own = config.per_keyboard_overrides.iter().filter_map(|(id, keyboard)| {
-        keyboard.layers.as_ref().map(|layers| (Some(id.as_str()), layers))
-    });
+    let own = config
+        .per_keyboard_overrides
+        .iter()
+        .filter_map(|(id, keyboard)| {
+            keyboard
+                .layers
+                .as_ref()
+                .map(|layers| (Some(id.as_str()), layers))
+        });
     let mut targets: Vec<Target> = Vec::new();
     let mut groups: Vec<(Option<&str>, &str, &crate::config::StenoConfig)> = Vec::new();
     for (keyboard, layers) in std::iter::once((None, &config.layers)).chain(own) {
@@ -335,7 +347,10 @@ pub fn validate(targets: &[Target], skip: &Path) -> Report {
         }
         report.sets.push(Set {
             layers: target.layers.clone(),
-            files: files.iter().map(|file| file.display().to_string()).collect(),
+            files: files
+                .iter()
+                .map(|file| file.display().to_string())
+                .collect(),
         });
     }
     report.files = seen_files.len();
@@ -350,7 +365,10 @@ pub fn validate(targets: &[Target], skip: &Path) -> Report {
     let mut findings = std::mem::take(&mut report.findings);
     findings.sort_by_key(|finding| {
         (
-            order.get(finding.file.as_str()).copied().unwrap_or(usize::MAX),
+            order
+                .get(finding.file.as_str())
+                .copied()
+                .unwrap_or(usize::MAX),
             std::cmp::Reverse(finding.severity),
         )
     });
@@ -381,7 +399,11 @@ pub fn validate_files(files: &[PathBuf], layout: &Layout) -> (Vec<Finding>, usiz
 
 /// Like [`validate_files`], knowing what the config says about commands.
 #[must_use]
-pub fn validate_files_with(files: &[PathBuf], layout: &Layout, rules: &Rules) -> (Vec<Finding>, usize) {
+pub fn validate_files_with(
+    files: &[PathBuf],
+    layout: &Layout,
+    rules: &Rules,
+) -> (Vec<Finding>, usize) {
     let dictionaries: Vec<&PathBuf> = files.iter().filter(|file| is_dictionary(file)).collect();
     let mut cross = Cross::default();
     // Pass one: which single strokes end up transparent. A stroke is what its first file says,
@@ -396,22 +418,31 @@ pub fn validate_files_with(files: &[PathBuf], layout: &Layout, rules: &Rules) ->
                 return;
             }
             if let Some(stroke) = layout.parse_stroke(key) {
-                let transparent = value.is_some_and(is_transparent_mapping)
-                    && stroke & layout.join_mask() == 0;
+                let transparent =
+                    value.is_some_and(is_transparent_mapping) && stroke & layout.join_mask() == 0;
                 winners.entry(stroke).or_insert(transparent);
             }
         });
     }
-    cross
-        .transparent
-        .extend(winners.iter().filter(|(_, transparent)| **transparent).map(|(stroke, _)| *stroke));
+    cross.transparent.extend(
+        winners
+            .iter()
+            .filter(|(_, transparent)| **transparent)
+            .map(|(stroke, _)| *stroke),
+    );
     drop(winners);
 
     let mut findings = Vec::new();
     let mut entries = 0;
     for (index, file) in dictionaries.iter().enumerate() {
         let index = u32::try_from(index).unwrap_or(u32::MAX);
-        entries += check_file_into(file, layout, rules, Some((&mut cross, index)), &mut findings);
+        entries += check_file_into(
+            file,
+            layout,
+            rules,
+            Some((&mut cross, index)),
+            &mut findings,
+        );
     }
     let mut shadows: Vec<_> = cross.shadows.into_iter().collect();
     shadows.sort_by_key(|((shadowed, winner), _)| (*shadowed, *winner));
@@ -458,7 +489,8 @@ fn is_dictionary(file: &Path) -> bool {
 }
 
 fn is_rtf(file: &Path) -> bool {
-    file.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("rtf"))
+    file.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("rtf"))
 }
 
 /// Fill in `line` and `column` of the findings that name an outline, from the JSON text of their
@@ -527,7 +559,10 @@ fn locate(text: &str, findings: &mut [Finding]) {
         }
     }
     for finding in findings.iter_mut().filter(|finding| finding.line.is_none()) {
-        let place = finding.outline.as_ref().and_then(|outline| wanted.get(outline).copied().flatten());
+        let place = finding
+            .outline
+            .as_ref()
+            .and_then(|outline| wanted.get(outline).copied().flatten());
         if let Some((line, column)) = place {
             finding.line = Some(line);
             finding.column = Some(column);
@@ -595,7 +630,10 @@ fn check_file_into(
         }
     };
     let first_new = out.len();
-    let here = Where { rules, trusted: rules.trust.is_trusted(file) };
+    let here = Where {
+        rules,
+        trusted: rules.trust.is_trusted(file),
+    };
     let mut entries = 0;
     let mut kept: HashMap<(Kind, Severity), usize> = HashMap::new();
     let mut capped = Capped::default();
@@ -607,7 +645,10 @@ fn check_file_into(
             *slot += 1;
             out.push(finding);
         } else {
-            *capped.0.entry((finding.kind, finding.severity)).or_default() += 1;
+            *capped
+                .0
+                .entry((finding.kind, finding.severity))
+                .or_default() += 1;
         }
     };
     let result = scan(file, &bytes, |key, value| {
@@ -681,7 +722,13 @@ fn check_file_into(
                 if matches!(problem.kind, Kind::LegacyAlias | Kind::LegacyNoEffect) {
                     match legacy.iter_mut().find(|note| note.0 == problem.kind) {
                         Some(note) => note.1 += 1,
-                        None => legacy.push((problem.kind, 1, key.to_string(), problem.message, problem.suggestion)),
+                        None => legacy.push((
+                            problem.kind,
+                            1,
+                            key.to_string(),
+                            problem.message,
+                            problem.suggestion,
+                        )),
                     }
                     continue;
                 }
@@ -702,11 +749,21 @@ fn check_file_into(
     }
     for (kind, count, outline, message, suggestion) in legacy {
         let (what, rest) = if kind == Kind::LegacyAlias {
-            ("legacy spellings of native commands", "write the native name")
+            (
+                "legacy spellings of native commands",
+                "write the native name",
+            )
         } else {
-            ("legacy commands that have no effect in keymux", "they can be dropped")
+            (
+                "legacy commands that have no effect in keymux",
+                "they can be dropped",
+            )
         };
-        let more = if count == 1 { String::new() } else { format!("{count} entries are {what} ({rest}); the first: ") };
+        let more = if count == 1 {
+            String::new()
+        } else {
+            format!("{count} entries are {what} ({rest}); the first: ")
+        };
         let mut finding = Finding::new(file, Severity::Info, kind, format!("{more}{message}"));
         finding.outline = Some(outline);
         finding.suggestion = suggestion;
@@ -740,7 +797,12 @@ pub struct Problem {
     pub suggestion: Option<String>,
 }
 
-const fn problem(severity: Severity, kind: Kind, message: String, suggestion: Option<String>) -> Problem {
+const fn problem(
+    severity: Severity,
+    kind: Kind,
+    message: String,
+    suggestion: Option<String>,
+) -> Problem {
     Problem {
         severity,
         kind,
@@ -762,13 +824,17 @@ fn brace_atoms(text: &str) -> Result<Vec<&str>, String> {
             }
             '{' => {
                 if open.is_some() {
-                    return Err("a `{` inside another `{...}`; escape a literal brace as \\{".into());
+                    return Err(
+                        "a `{` inside another `{...}`; escape a literal brace as \\{".into(),
+                    );
                 }
                 open = Some(at);
             }
             '}' => match open.take() {
                 Some(start) => atoms.push(&text[start + 1..at]),
-                None => return Err("a `}` with no `{` before it; escape a literal brace as \\}".into()),
+                None => {
+                    return Err("a `}` with no `{` before it; escape a literal brace as \\}".into())
+                }
             },
             _ => {}
         }
@@ -783,7 +849,14 @@ fn brace_atoms(text: &str) -> Result<Vec<&str>, String> {
 /// and arguments a meta can't use. Nothing for text that is fine.
 #[must_use]
 pub fn check_text(text: &str, layout: &Layout) -> Vec<Problem> {
-    check_text_in(text, layout, &Where { rules: &Rules::default(), trusted: false })
+    check_text_in(
+        text,
+        layout,
+        &Where {
+            rules: &Rules::default(),
+            trusted: false,
+        },
+    )
 }
 
 fn check_text_in(text: &str, layout: &Layout, here: &Where) -> Vec<Problem> {
@@ -871,7 +944,9 @@ fn check_atom(atom: &str, whole: bool, layout: &Layout, here: &Where, problems: 
         problems.push(problem(
             Severity::Warning,
             Kind::MisplacedMeta,
-            format!("`{shown}` only works as an entry's whole text; inside other text it does nothing"),
+            format!(
+                "`{shown}` only works as an entry's whole text; inside other text it does nothing"
+            ),
             None,
         ));
         return;
@@ -883,11 +958,11 @@ fn check_atom(atom: &str, whole: bool, layout: &Layout, here: &Where, problems: 
             let suggestion = (known.name == "command")
                 .then(|| {
                     let command = param.split(':').next().unwrap_or_default().trim();
-                    closest(command, meta::ENGINE_COMMANDS)
-                        .map(|better| {
-                            let fixed = param.replacen(command, better, 1);
-                            meta::native_spelling(&fixed).unwrap_or_else(|| format!("{{:command:{fixed}}}"))
-                        })
+                    closest(command, meta::ENGINE_COMMANDS).map(|better| {
+                        let fixed = param.replacen(command, better, 1);
+                        meta::native_spelling(&fixed)
+                            .unwrap_or_else(|| format!("{{:command:{fixed}}}"))
+                    })
                 })
                 .flatten();
             problems.push(problem(
@@ -904,7 +979,10 @@ fn check_atom(atom: &str, whole: bool, layout: &Layout, here: &Where, problems: 
             problems.push(problem(
                 Severity::Warning,
                 Kind::BadMetaArgument,
-                format!("`{shown}` needs one of: {}; as it is it does nothing", known.verbs.join(", ")),
+                format!(
+                    "`{shown}` needs one of: {}; as it is it does nothing",
+                    known.verbs.join(", ")
+                ),
                 None,
             ));
         }
@@ -932,7 +1010,13 @@ fn legacy_notes(text: &str, shown: &str, found: &meta::Meta, problems: &mut Vec<
     if !found.name.eq_ignore_ascii_case("command") {
         return;
     }
-    let name = found.param.split(':').next().unwrap_or_default().trim().to_lowercase();
+    let name = found
+        .param
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
     if meta::NO_EFFECT.contains(&name.as_str()) {
         problems.push(problem(
             Severity::Info,
@@ -942,17 +1026,37 @@ fn legacy_notes(text: &str, shown: &str, found: &meta::Meta, problems: &mut Vec<
         ));
     } else if meta::strip_prefix_ignore_case(text, "PLOVER:").is_some() {
         if let Some(native) = meta::native_spelling(found.param) {
-            problems.push(problem(Severity::Info, Kind::LegacyAlias, format!("`{shown}` is a legacy alias of {native}"), Some(native)));
+            problems.push(problem(
+                Severity::Info,
+                Kind::LegacyAlias,
+                format!("`{shown}` is a legacy alias of {native}"),
+                Some(native),
+            ));
         }
     }
 }
 
 /// `{:run:NAME}` and the inline shell forms: an argument is needed, a name must be one the config
 /// defines (with a config), and a shell command runs only from a trusted file.
-fn check_command(kind: run_control::Kind, arg: &str, shown: &str, here: &Where, problems: &mut Vec<Problem>) {
+fn check_command(
+    kind: run_control::Kind,
+    arg: &str,
+    shown: &str,
+    here: &Where,
+    problems: &mut Vec<Problem>,
+) {
     if arg.trim().is_empty() {
-        let what = if kind == run_control::Kind::Run { "a command name" } else { "a command line" };
-        problems.push(problem(Severity::Warning, Kind::BadMetaArgument, format!("`{shown}` needs {what}, so it does nothing"), None));
+        let what = if kind == run_control::Kind::Run {
+            "a command name"
+        } else {
+            "a command line"
+        };
+        problems.push(problem(
+            Severity::Warning,
+            Kind::BadMetaArgument,
+            format!("`{shown}` needs {what}, so it does nothing"),
+            None,
+        ));
         return;
     }
     match kind {
@@ -1036,7 +1140,8 @@ mod tests {
     use std::fs;
 
     fn folder(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("keymux-validate-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("keymux-validate-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -1100,20 +1205,34 @@ mod tests {
         // A key with an escaped quote is found by its decoded text
         assert_eq!(at("A\"B"), Some((Some(5), Some(5))), "{found:#?}");
         // Whole-file findings have no outline and no invented place
-        assert!(found.iter().all(|f| f.outline.is_none() || f.line.is_some()), "{found:#?}");
+        assert!(
+            found
+                .iter()
+                .all(|f| f.outline.is_none() || f.line.is_some()),
+            "{found:#?}"
+        );
     }
 
     #[test]
     fn a_file_that_does_not_parse_is_an_error_with_its_place() {
-        let found = findings_of("unparsable", "{\n  \"KAT\": \"cat\"\n  \"TKOG\": \"dog\"\n}");
+        let found = findings_of(
+            "unparsable",
+            "{\n  \"KAT\": \"cat\"\n  \"TKOG\": \"dog\"\n}",
+        );
         assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!((found[0].kind, found[0].severity), (Kind::UnparsableFile, Severity::Error));
+        assert_eq!(
+            (found[0].kind, found[0].severity),
+            (Kind::UnparsableFile, Severity::Error)
+        );
         assert_eq!(found[0].line, Some(3));
         assert!(found[0].column.is_some());
         // Not an object, truncated, binary and empty files do not panic either
         for text in ["[1, 2]", "{\"KAT\": \"cat\"", "", "\u{0}\u{1}garbage"] {
             let found = findings_of("garbage", text);
-            assert!(found.iter().any(|f| f.kind == Kind::UnparsableFile), "{text:?}: {found:?}");
+            assert!(
+                found.iter().any(|f| f.kind == Kind::UnparsableFile),
+                "{text:?}: {found:?}"
+            );
         }
         let dir = folder("rtf");
         let file = put(&dir, "a.rtf", "this is not rtf");
@@ -1130,8 +1249,14 @@ mod tests {
 
     #[test]
     fn outlines_and_values_the_loader_skips_are_errors() {
-        let found = findings_of("outlines", r#"{"KATZ9": "cat", "KAT": 5, "TKOG": "dog", "": "x"}"#);
-        let kinds: Vec<_> = found.iter().map(|f| (f.kind, f.outline.as_deref())).collect();
+        let found = findings_of(
+            "outlines",
+            r#"{"KATZ9": "cat", "KAT": 5, "TKOG": "dog", "": "x"}"#,
+        );
+        let kinds: Vec<_> = found
+            .iter()
+            .map(|f| (f.kind, f.outline.as_deref()))
+            .collect();
         assert_eq!(
             kinds,
             [
@@ -1162,36 +1287,76 @@ mod tests {
     #[test]
     fn an_unknown_meta_is_a_warning_with_a_suggestion() {
         let wrong = one("{:tpae:toggle}");
-        assert_eq!((wrong.kind, wrong.severity), (Kind::UnknownMeta, Severity::Warning));
+        assert_eq!(
+            (wrong.kind, wrong.severity),
+            (Kind::UnknownMeta, Severity::Warning)
+        );
         assert_eq!(wrong.suggestion.as_deref(), Some("{:tape:toggle}"));
         assert_eq!(one("{:firstupp}").suggestion.as_deref(), Some("{:firstup}"));
-        assert_eq!(one("{:transparnt}").suggestion.as_deref(), Some("{:transparent}"));
+        assert_eq!(
+            one("{:transparnt}").suggestion.as_deref(),
+            Some("{:transparent}")
+        );
         // Not close to anything: still reported, nothing suggested
         let far = one("{:zzzzzzzz}");
         assert_eq!((far.kind, far.suggestion), (Kind::UnknownMeta, None));
         // Not a meta at all, so it types nothing
         let bare = one("{firstup}");
-        assert_eq!((bare.kind, bare.suggestion.as_deref()), (Kind::UnknownMeta, Some("{:firstup}")));
+        assert_eq!(
+            (bare.kind, bare.suggestion.as_deref()),
+            (Kind::UnknownMeta, Some("{:firstup}"))
+        );
         assert_eq!(one("{!'}").kind, Kind::UnknownMeta);
         // A macro name that does not exist
         let macro_typo = one("=undoo");
-        assert_eq!((macro_typo.kind, macro_typo.suggestion.as_deref()), (Kind::UnknownMeta, Some("=undo")));
+        assert_eq!(
+            (macro_typo.kind, macro_typo.suggestion.as_deref()),
+            (Kind::UnknownMeta, Some("=undo"))
+        );
     }
 
     #[test]
     fn a_known_meta_with_a_bad_verb_is_a_warning_with_a_suggestion() {
         let togle = one("{:tape:togle}");
-        assert_eq!((togle.kind, togle.severity), (Kind::BadMetaArgument, Severity::Warning));
+        assert_eq!(
+            (togle.kind, togle.severity),
+            (Kind::BadMetaArgument, Severity::Warning)
+        );
         assert_eq!(togle.suggestion.as_deref(), Some("{:tape:toggle}"));
-        assert_eq!(one("{:outline:lst}").suggestion.as_deref(), Some("{:outline:last}"));
-        assert_eq!(one("{:lookup:opn}").suggestion.as_deref(), Some("{:lookup:open}"));
-        assert_eq!(one("{:engine:unlaod}").suggestion.as_deref(), Some("{:engine:unload}"));
-        for text in ["{:outline:foo}", "{:lookup:bar}", "{:tape}", "{:overlay:clear}", "{:keyboard:}", "{:engine:}"] {
+        assert_eq!(
+            one("{:outline:lst}").suggestion.as_deref(),
+            Some("{:outline:last}")
+        );
+        assert_eq!(
+            one("{:lookup:opn}").suggestion.as_deref(),
+            Some("{:lookup:open}")
+        );
+        assert_eq!(
+            one("{:engine:unlaod}").suggestion.as_deref(),
+            Some("{:engine:unload}")
+        );
+        for text in [
+            "{:outline:foo}",
+            "{:lookup:bar}",
+            "{:tape}",
+            "{:overlay:clear}",
+            "{:keyboard:}",
+            "{:engine:}",
+        ] {
             assert_eq!(one(text).kind, Kind::BadMetaArgument, "{text}");
         }
-        assert_eq!(one("{PLOVER:SUSPND}").suggestion.as_deref(), Some("{:engine:suspend}"));
-        assert_eq!(one("{PLOVER:FOKUS}").suggestion.as_deref(), Some("{:command:focus}"));
-        assert_eq!(one("{:engine:togle}").suggestion.as_deref(), Some("{:engine:toggle}"));
+        assert_eq!(
+            one("{PLOVER:SUSPND}").suggestion.as_deref(),
+            Some("{:engine:suspend}")
+        );
+        assert_eq!(
+            one("{PLOVER:FOKUS}").suggestion.as_deref(),
+            Some("{:command:focus}")
+        );
+        assert_eq!(
+            one("{:engine:togle}").suggestion.as_deref(),
+            Some("{:engine:toggle}")
+        );
     }
 
     #[test]
@@ -1204,24 +1369,59 @@ mod tests {
             ("{plover:deleted}", "{:deleted}"),
         ] {
             let problem = one(text);
-            assert_eq!((problem.kind, problem.severity), (Kind::LegacyAlias, Severity::Info), "{text}");
+            assert_eq!(
+                (problem.kind, problem.severity),
+                (Kind::LegacyAlias, Severity::Info),
+                "{text}"
+            );
             assert_eq!(problem.suggestion.as_deref(), Some(native), "{text}");
-            assert!(problem.message.contains(&format!("legacy alias of {native}")), "{}", problem.message);
+            assert!(
+                problem
+                    .message
+                    .contains(&format!("legacy alias of {native}")),
+                "{}",
+                problem.message
+            );
         }
-        for native in ["{:engine:toggle}", "{:engine:suspend}", "{:lookup}", "{:run:pw}", "{:deleted}", "{:command:toggle}"] {
+        for native in [
+            "{:engine:toggle}",
+            "{:engine:suspend}",
+            "{:lookup}",
+            "{:run:pw}",
+            "{:deleted}",
+            "{:command:toggle}",
+        ] {
             assert!(check_text(native, &plover()).is_empty(), "{native}");
         }
     }
 
     #[test]
     fn legacy_commands_with_no_counterpart_have_no_effect() {
-        for text in ["{PLOVER:FOCUS}", "{plover:quit}", "{PLOVER:ADD_TRANSLATION}", "{:command:resume}"] {
+        for text in [
+            "{PLOVER:FOCUS}",
+            "{plover:quit}",
+            "{PLOVER:ADD_TRANSLATION}",
+            "{:command:resume}",
+        ] {
             let problem = one(text);
-            assert_eq!((problem.kind, problem.severity), (Kind::LegacyNoEffect, Severity::Info), "{text}");
-            assert!(problem.message.contains("has no effect in keymux (legacy Plover command)"), "{}", problem.message);
+            assert_eq!(
+                (problem.kind, problem.severity),
+                (Kind::LegacyNoEffect, Severity::Info),
+                "{text}"
+            );
+            assert!(
+                problem
+                    .message
+                    .contains("has no effect in keymux (legacy Plover command)"),
+                "{}",
+                problem.message
+            );
         }
         // set_config sets session options, so it is no no-op; a command nobody has is an unknown one
-        assert!(check_text("{PLOVER:SET_CONFIG:'start_attached':True}", &plover()).is_empty(), "set_config is a real command");
+        assert!(
+            check_text("{PLOVER:SET_CONFIG:'start_attached':True}", &plover()).is_empty(),
+            "set_config is a real command"
+        );
         assert_eq!(one("{PLOVER:BOGUS}").kind, Kind::BadMetaArgument);
     }
 
@@ -1231,11 +1431,25 @@ mod tests {
         let found = findings_of("legacy", json);
         assert_eq!(found.len(), 2, "{found:#?}");
         let alias = found.iter().find(|f| f.kind == Kind::LegacyAlias).unwrap();
-        assert_eq!((alias.count, alias.outline.as_deref(), alias.severity), (Some(2), Some("A"), Severity::Info));
-        assert!(alias.message.contains("2 entries") && alias.message.contains("legacy alias of {:engine:toggle}"), "{}", alias.message);
-        let none = found.iter().find(|f| f.kind == Kind::LegacyNoEffect).unwrap();
+        assert_eq!(
+            (alias.count, alias.outline.as_deref(), alias.severity),
+            (Some(2), Some("A"), Severity::Info)
+        );
+        assert!(
+            alias.message.contains("2 entries")
+                && alias.message.contains("legacy alias of {:engine:toggle}"),
+            "{}",
+            alias.message
+        );
+        let none = found
+            .iter()
+            .find(|f| f.kind == Kind::LegacyNoEffect)
+            .unwrap();
         assert_eq!((none.count, none.line), (Some(2), Some(1)));
-        assert_eq!(found.iter().filter(|f| f.severity > Severity::Info).count(), 0);
+        assert_eq!(
+            found.iter().filter(|f| f.severity > Severity::Info).count(),
+            0
+        );
     }
 
     #[test]
@@ -1249,13 +1463,21 @@ mod tests {
         ] {
             assert_eq!(one(text).kind, Kind::BadMetaArgument, "{text}");
         }
-        for text in ["{:firstup}", "{:firstup:except=-FRPBLGTS}", "{:firstup:except=STPH*}", "{:FirstUp}"] {
+        for text in [
+            "{:firstup}",
+            "{:firstup:except=-FRPBLGTS}",
+            "{:firstup:except=STPH*}",
+            "{:FirstUp}",
+        ] {
             assert!(check_text(text, &plover()).is_empty(), "{text}");
         }
         // An extra key the layout has is a key; one it lacks is not
         let with_plus = Layout::plover_with_joins(&['+'], &['+']).unwrap();
         let found = check_text("{:firstup:except=+T}", &with_plus);
-        assert!(found.is_empty(), "an extra key of the layout is a key: {found:?}");
+        assert!(
+            found.is_empty(),
+            "an extra key of the layout is a key: {found:?}"
+        );
         assert_eq!(check_text("{:firstup:except=+T}", &plover()).len(), 1);
     }
 
@@ -1269,7 +1491,15 @@ mod tests {
         assert_eq!(one("{:back:x}").kind, Kind::BadMetaArgument);
         assert_eq!(one("{:transparent:yes}").kind, Kind::BadMetaArgument);
         assert_eq!(one("{:case:shouting}").kind, Kind::BadMetaArgument);
-        for text in ["{#Super_L(1)}", "{#control(z shift(z))}", "{#AudioPlay}", "{#control(AudioNext)}", "{#XF86AudioStop}", "{:undo_or:ctrl+backspace}", "{:undo_or_ctrl+backspace}"] {
+        for text in [
+            "{#Super_L(1)}",
+            "{#control(z shift(z))}",
+            "{#AudioPlay}",
+            "{#control(AudioNext)}",
+            "{#XF86AudioStop}",
+            "{:undo_or:ctrl+backspace}",
+            "{:undo_or_ctrl+backspace}",
+        ] {
             assert!(check_text(text, &plover()).is_empty(), "{text}");
         }
     }
@@ -1277,9 +1507,15 @@ mod tests {
     #[test]
     fn a_macro_inside_other_text_does_nothing() {
         let inside = one("word{:undo}");
-        assert_eq!((inside.kind, inside.severity), (Kind::MisplacedMeta, Severity::Warning));
+        assert_eq!(
+            (inside.kind, inside.severity),
+            (Kind::MisplacedMeta, Severity::Warning)
+        );
         let whole = check_text("{:undo}", &plover());
-        assert!(whole.is_empty(), "a macro as the whole entry is fine: {whole:?}");
+        assert!(
+            whole.is_empty(),
+            "a macro as the whole entry is fine: {whole:?}"
+        );
     }
 
     #[test]
@@ -1287,7 +1523,11 @@ mod tests {
         let found = findings_of("dupes", r#"{"KAT": "cat", "TKOG": "dog", "KAT": "kat"}"#);
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(
-            (found[0].kind, found[0].severity, found[0].outline.as_deref()),
+            (
+                found[0].kind,
+                found[0].severity,
+                found[0].outline.as_deref()
+            ),
             (Kind::DuplicateOutline, Severity::Warning, Some("KAT"))
         );
     }
@@ -1296,21 +1536,36 @@ mod tests {
     fn an_outline_in_two_files_is_a_note_not_a_warning() {
         let dir = folder("shadow");
         let first = put(&dir, "01.json", r#"{"KAT": "cat", "TKOG": "dog"}"#);
-        let second = put(&dir, "02.json", r#"{"KAT": "kitty", "TKOG": "hound", "PWAO": "boo"}"#);
+        let second = put(
+            &dir,
+            "02.json",
+            r#"{"KAT": "kitty", "TKOG": "hound", "PWAO": "boo"}"#,
+        );
         let (found, entries) = validate_files(&[first.clone(), second.clone()], &plover());
         assert_eq!(entries, 5);
         assert_eq!(found.len(), 1, "{found:?}");
         let note = &found[0];
-        assert_eq!((note.kind, note.severity, note.count), (Kind::ShadowedOutline, Severity::Info, Some(2)));
+        assert_eq!(
+            (note.kind, note.severity, note.count),
+            (Kind::ShadowedOutline, Severity::Info, Some(2))
+        );
         assert_eq!(note.file, second.display().to_string());
-        assert!(note.message.contains(&first.display().to_string()), "{}", note.message);
+        assert!(
+            note.message.contains(&first.display().to_string()),
+            "{}",
+            note.message
+        );
         assert_eq!(note.outline.as_deref(), Some("KAT"));
     }
 
     #[test]
     fn a_multi_stroke_outline_through_a_transparent_stroke_can_never_match() {
         let dir = folder("transparent");
-        let first = put(&dir, "01.json", r#"{"PWR": "{:transparent}", "SKWRA": "{:lookup}", "STPH": "{:tape:toggle}"}"#);
+        let first = put(
+            &dir,
+            "01.json",
+            r#"{"PWR": "{:transparent}", "SKWRA": "{:lookup}", "STPH": "{:tape:toggle}"}"#,
+        );
         let second = put(
             &dir,
             "02.json",
@@ -1323,18 +1578,30 @@ mod tests {
             .map(|f| f.outline.clone().unwrap())
             .collect();
         assert_eq!(unreachable, ["PWR/KAT", "KAT/PWR", "KAT/SKWRA", "STPH/KAT"]);
-        assert!(found.iter().filter(|f| f.kind == Kind::UnreachableOutline).all(|f| f.severity == Severity::Warning));
+        assert!(found
+            .iter()
+            .filter(|f| f.kind == Kind::UnreachableOutline)
+            .all(|f| f.severity == Severity::Warning));
         // A higher-priority file that makes the stroke a word leaves its outlines reachable
         let dir = folder("transparent-won");
         let first = put(&dir, "01.json", r#"{"PWR": "word"}"#);
-        let second = put(&dir, "02.json", r#"{"PWR": "{:transparent}", "PWR/KAT": "fine"}"#);
+        let second = put(
+            &dir,
+            "02.json",
+            r#"{"PWR": "{:transparent}", "PWR/KAT": "fine"}"#,
+        );
         let (found, _) = validate_files(&[first, second], &plover());
-        assert!(found.iter().all(|f| f.kind != Kind::UnreachableOutline), "{found:?}");
+        assert!(
+            found.iter().all(|f| f.kind != Kind::UnreachableOutline),
+            "{found:?}"
+        );
     }
 
     #[test]
     fn findings_of_one_kind_in_one_file_are_capped_with_a_count() {
-        let entries: Vec<String> = (0..CAP + 25).map(|n| format!("\"BAD{n}9\": \"x\"")).collect();
+        let entries: Vec<String> = (0..CAP + 25)
+            .map(|n| format!("\"BAD{n}9\": \"x\""))
+            .collect();
         let found = findings_of("cap", &format!("{{{}}}", entries.join(",")));
         assert_eq!(found.len(), CAP + 1);
         let last = found.last().unwrap();
@@ -1389,19 +1656,35 @@ mod tests {
         assert_eq!(closest("togle", ["show", "toggle"]), Some("toggle"));
         assert_eq!(closest("TOGGLE", ["toggle"]), Some("toggle"));
         assert_eq!(closest("xyz", ["toggle", "show"]), None);
-        assert_eq!(closest("ab", ["xy"]), None, "short words allow one edit only");
+        assert_eq!(
+            closest("ab", ["xy"]),
+            None,
+            "short words allow one edit only"
+        );
     }
 
     fn rules(trusted: &[&str], commands: Option<&[&str]>) -> Rules {
         let names: Vec<String> = trusted.iter().map(|name| (*name).to_string()).collect();
         Rules {
             trust: Trust::new(Path::new("/s"), &names),
-            commands: commands.map(|names| names.iter().map(|name| ((*name).to_string(), "x".to_string())).collect()),
+            commands: commands.map(|names| {
+                names
+                    .iter()
+                    .map(|name| ((*name).to_string(), "x".to_string()))
+                    .collect()
+            }),
         }
     }
 
     fn found(text: &str, file: &str, rules: &Rules) -> Vec<Problem> {
-        check_text_in(text, &plover(), &Where { rules, trusted: rules.trust.is_trusted(Path::new(file)) })
+        check_text_in(
+            text,
+            &plover(),
+            &Where {
+                rules,
+                trusted: rules.trust.is_trusted(Path::new(file)),
+            },
+        )
     }
 
     #[test]
@@ -1414,7 +1697,10 @@ mod tests {
         assert_eq!(wrong[0].suggestion.as_deref(), Some("{:run:password}"));
         let none = found("{:run:x}", "/s/a.json", &rules(&[], Some(&[])));
         assert!(none[0].message.contains("none are defined"), "{none:?}");
-        assert!(found("{:run:pasword}", "/s/a.json", &rules(&[], None)).is_empty(), "no config: nothing to check against");
+        assert!(
+            found("{:run:pasword}", "/s/a.json", &rules(&[], None)).is_empty(),
+            "no config: nothing to check against"
+        );
         let empty = found("{:run:}", "/s/a.json", &with);
         assert_eq!((empty.len(), empty[0].kind), (1, Kind::BadMetaArgument));
     }
@@ -1422,14 +1708,37 @@ mod tests {
     #[test]
     fn inline_shell_is_a_warning_in_an_untrusted_file_and_info_in_a_trusted_one() {
         let rules = rules(&["00-user.json"], None);
-        for text in ["{:shell:ls}", "{PLOVER:SHELL:ls}", "{:command:shell:ls}", "{plover:shell:ls}"] {
-            let not_legacy = |all: Vec<Problem>| all.into_iter().filter(|p| p.kind != Kind::LegacyAlias).collect::<Vec<_>>();
+        for text in [
+            "{:shell:ls}",
+            "{PLOVER:SHELL:ls}",
+            "{:command:shell:ls}",
+            "{plover:shell:ls}",
+        ] {
+            let not_legacy = |all: Vec<Problem>| {
+                all.into_iter()
+                    .filter(|p| p.kind != Kind::LegacyAlias)
+                    .collect::<Vec<_>>()
+            };
             let bad = not_legacy(found(text, "/s/lyk/a.json", &rules));
             assert_eq!(bad.len(), 1, "{text}: {bad:?}");
-            assert_eq!((bad[0].kind, bad[0].severity), (Kind::UntrustedShell, Severity::Warning), "{text}");
-            assert!(bad[0].message.contains("ignored: not a trusted dictionary; trusted: 00-user.json"), "{}", bad[0].message);
+            assert_eq!(
+                (bad[0].kind, bad[0].severity),
+                (Kind::UntrustedShell, Severity::Warning),
+                "{text}"
+            );
+            assert!(
+                bad[0]
+                    .message
+                    .contains("ignored: not a trusted dictionary; trusted: 00-user.json"),
+                "{}",
+                bad[0].message
+            );
             let good = not_legacy(found(text, "/s/00-user.json", &rules));
-            assert_eq!((good[0].kind, good[0].severity), (Kind::ShellCommand, Severity::Info), "{text}");
+            assert_eq!(
+                (good[0].kind, good[0].severity),
+                (Kind::ShellCommand, Severity::Info),
+                "{text}"
+            );
         }
         let empty = found("{:shell:}", "/s/00-user.json", &rules);
         assert_eq!(empty[0].kind, Kind::BadMetaArgument);
@@ -1439,8 +1748,14 @@ mod tests {
     fn brace_and_escape_mistakes_in_an_inline_command_are_findings() {
         let rules = rules(&["a.json"], None);
         let nested = found("{:shell:echo ${HOME}}", "/s/a.json", &rules);
-        assert_eq!((nested.len(), nested[0].kind), (1, Kind::UnbalancedBraces), "{nested:?}");
-        assert!(found(r"{:shell:echo $\{HOME\}}", "/s/a.json", &rules).iter().all(|p| p.kind == Kind::ShellCommand));
+        assert_eq!(
+            (nested.len(), nested[0].kind),
+            (1, Kind::UnbalancedBraces),
+            "{nested:?}"
+        );
+        assert!(found(r"{:shell:echo $\{HOME\}}", "/s/a.json", &rules)
+            .iter()
+            .all(|p| p.kind == Kind::ShellCommand));
         let open = found("{:shell:echo", "/s/a.json", &rules);
         assert_eq!(open[0].kind, Kind::UnbalancedBraces);
     }
@@ -1450,25 +1765,55 @@ mod tests {
         let dir = folder("trust-files");
         let steno = dir.join("steno");
         fs::create_dir_all(steno.join("lyk")).unwrap();
-        let mine = put(&steno, "00-user.json", r#"{"PWR": "{:run:password}", "SKWR": "{:shell:notify-send hi}"}"#);
-        let theirs = put(&steno.join("lyk"), "01.json", r#"{"TKOG": "{:shell:rm x}", "KAT": "{:run:missing}"}"#);
-        let rules = Rules { trust: Trust::standard(&steno), commands: Some(HashMap::from([("password".to_string(), "x".to_string())])) };
+        let mine = put(
+            &steno,
+            "00-user.json",
+            r#"{"PWR": "{:run:password}", "SKWR": "{:shell:notify-send hi}"}"#,
+        );
+        let theirs = put(
+            &steno.join("lyk"),
+            "01.json",
+            r#"{"TKOG": "{:shell:rm x}", "KAT": "{:run:missing}"}"#,
+        );
+        let rules = Rules {
+            trust: Trust::standard(&steno),
+            commands: Some(HashMap::from([("password".to_string(), "x".to_string())])),
+        };
         let (findings, _) = validate_files_with(&[mine, theirs], &plover(), &rules);
-        let kinds: Vec<(String, Kind)> = findings.iter().map(|f| (f.file.rsplit('/').next().unwrap().to_string(), f.kind)).collect();
-        assert!(kinds.contains(&("00-user.json".to_string(), Kind::ShellCommand)), "{kinds:?}");
-        assert!(kinds.contains(&("01.json".to_string(), Kind::UntrustedShell)), "{kinds:?}");
-        assert!(kinds.contains(&("01.json".to_string(), Kind::UnknownCommand)), "{kinds:?}");
+        let kinds: Vec<(String, Kind)> = findings
+            .iter()
+            .map(|f| (f.file.rsplit('/').next().unwrap().to_string(), f.kind))
+            .collect();
+        assert!(
+            kinds.contains(&("00-user.json".to_string(), Kind::ShellCommand)),
+            "{kinds:?}"
+        );
+        assert!(
+            kinds.contains(&("01.json".to_string(), Kind::UntrustedShell)),
+            "{kinds:?}"
+        );
+        assert!(
+            kinds.contains(&("01.json".to_string(), Kind::UnknownCommand)),
+            "{kinds:?}"
+        );
         assert_eq!(kinds.len(), 3, "{kinds:?}");
     }
 
     #[test]
     fn steno_validate_works_with_no_config_and_trusts_the_default_files() {
         let dir = folder("no-config");
-        let targets = super::super::validate_cli::targets(&dir.join("absent.ron"), &dir, None, &[]).unwrap();
+        let targets =
+            super::super::validate_cli::targets(&dir.join("absent.ron"), &dir, None, &[]).unwrap();
         assert_eq!(targets.len(), 1);
         assert!(targets[0].rules.commands.is_none());
-        assert!(targets[0].rules.trust.is_trusted(&dir.join("steno/00-user.json")));
-        assert!(!targets[0].rules.trust.is_trusted(&dir.join("steno/lyk/x.json")));
+        assert!(targets[0]
+            .rules
+            .trust
+            .is_trusted(&dir.join("steno/00-user.json")));
+        assert!(!targets[0]
+            .rules
+            .trust
+            .is_trusted(&dir.join("steno/lyk/x.json")));
     }
 
     #[test]
@@ -1481,11 +1826,16 @@ mod tests {
         for known in KNOWN {
             for verb in known.verbs {
                 let action = (known.run)(&ctx, verb);
-                assert!(action.command.is_some(), "{{:{}:{verb}}} makes no command", known.name);
+                assert!(
+                    action.command.is_some(),
+                    "{{:{}:{verb}}} makes no command",
+                    known.name
+                );
             }
             if !known.verbs.is_empty() && !known.bare_ok {
                 assert!(
-                    (known.run)(&ctx, "").command.is_none() && (known.run)(&ctx, "zzz").command.is_none(),
+                    (known.run)(&ctx, "").command.is_none()
+                        && (known.run)(&ctx, "zzz").command.is_none(),
                     "{} accepts a verb it does not list",
                     known.name
                 );
@@ -1498,7 +1848,8 @@ mod tests {
         let engine = include_str!("engine.rs");
         for name in meta::ENGINE_COMMANDS {
             assert!(
-                name.starts_with(char::is_alphabetic) && (engine.contains(&format!("\"{name}\"")) || name.ends_with("_control")),
+                name.starts_with(char::is_alphabetic)
+                    && (engine.contains(&format!("\"{name}\"")) || name.ends_with("_control")),
                 "engine command {name} is not run by the engine"
             );
         }

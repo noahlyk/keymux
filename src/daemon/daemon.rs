@@ -776,7 +776,8 @@ impl Daemon {
                     .paths
                     .first()
                     .and_then(|p| p.file_name().and_then(|n| n.to_str()));
-                let Some(group) = config.active_group_of(&id.to_string(), Some(&meta.name), event_path)
+                let Some(group) =
+                    config.active_group_of(&id.to_string(), Some(&meta.name), event_path)
                 else {
                     continue;
                 };
@@ -859,7 +860,10 @@ impl Daemon {
         members: &[(KeyboardId, KeyboardMeta)],
         paths: &HashSet<PathBuf>,
     ) -> Result<()> {
-        let config_mgr = self.user_configs.get(&uid).context("User config not loaded")?;
+        let config_mgr = self
+            .user_configs
+            .get(&uid)
+            .context("User config not loaded")?;
         let base_config = config_mgr.get_config();
         let config_path = config_mgr.get_config_path();
         let ids: Vec<String> = members.iter().map(|(id, _)| id.to_string()).collect();
@@ -891,8 +895,9 @@ impl Daemon {
         let (control, controlled) =
             control::channel().context("Failed to create a processor's control line")?;
         let (arrivals, arrivals_rx) = unbounded();
-        let roster: Arc<Mutex<HashSet<PathBuf>>> =
-            Arc::new(Mutex::new(devices.iter().map(|(path, _)| path.clone()).collect()));
+        let roster: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(
+            devices.iter().map(|(path, _)| path.clone()).collect(),
+        ));
         let dead_tx = self.processor_dead_tx.clone();
         let group_name = name.to_string();
         let thread_roster = Arc::clone(&roster);
@@ -1484,7 +1489,10 @@ impl Daemon {
     /// Stop every active processor thread. Used for graceful shutdown.
     fn stop_all_processors(&mut self) {
         let paths: Vec<PathBuf> = self.active_processors.keys().cloned().collect();
-        info!("Stopping {} processor thread(s) for shutdown", self.thread_count());
+        info!(
+            "Stopping {} processor thread(s) for shutdown",
+            self.thread_count()
+        );
         let group_names: Vec<String> = self.groups.keys().cloned().collect();
         for name in group_names {
             self.stop_group(&name);
@@ -1703,7 +1711,9 @@ impl Daemon {
                 // Create KeyboardId from string
                 let kbd_id = crate::keyboard_id::KeyboardId::new(hardware_id.clone());
                 // Check if keyboard exists
-                if self.all_keyboards.contains_key(&kbd_id) || self.groups.contains_key(&hardware_id) {
+                if self.all_keyboards.contains_key(&kbd_id)
+                    || self.groups.contains_key(&hardware_id)
+                {
                     // Find the first active user to assign to
                     // In multi-user mode, we need to know which user's config to update
                     // For now, we'll trigger a resync which will check all user configs

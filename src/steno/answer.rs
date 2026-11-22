@@ -132,11 +132,13 @@ impl EngineSetup {
     /// # Errors
     /// When the preset is unknown or the overrides don't build a key map.
     pub fn alias_keys(&self) -> Result<Vec<(usize, KeyCode)>> {
-        let main: std::collections::HashSet<KeyCode> =
-            self.keys_by_bit()?.into_values().collect();
+        let main: std::collections::HashSet<KeyCode> = self.keys_by_bit()?.into_values().collect();
         let map = self
             .layout
-            .build_key_map(&preset(&self.preset).map_err(|e| anyhow!(e))?, &self.overrides)
+            .build_key_map(
+                &preset(&self.preset).map_err(|e| anyhow!(e))?,
+                &self.overrides,
+            )
             .map_err(|errs| anyhow!(errs.join("; ")))?;
         let mut aliases: Vec<(usize, KeyCode)> = map
             .into_iter()
@@ -217,7 +219,13 @@ impl Lookup {
     /// The answer to `query` (see [`answer`]).
     #[must_use]
     pub fn answer(&self, query: &str, ask: Ask, cancelled: &dyn Fn() -> bool) -> Answer {
-        answer(&self.setup.layout, &self.base.fresh(), query, ask, cancelled)
+        answer(
+            &self.setup.layout,
+            &self.base.fresh(),
+            query,
+            ask,
+            cancelled,
+        )
     }
 
     /// How to draw an answer.
@@ -278,7 +286,12 @@ impl Answer {
         self.rows
             .iter()
             .filter(|row| !row.word.is_empty() && !row.strokes.is_empty())
-            .filter(|row| matches!(row.mark, Mark::Entry | Mark::Composed(_) | Mark::Fingerspelled))
+            .filter(|row| {
+                matches!(
+                    row.mark,
+                    Mark::Entry | Mark::Composed(_) | Mark::Fingerspelled
+                )
+            })
             .fold((0, 0), |(strokes, keys), row| {
                 (
                     strokes + row.strokes.len(),
@@ -370,7 +383,10 @@ fn forward(base: &Translator, strokes: &[u32], ask: Ask) -> Answer {
             rows.push(forward_row(base, &outline, Mark::Nearby));
         }
     }
-    Answer { rows, problem: None }
+    Answer {
+        rows,
+        problem: None,
+    }
 }
 
 fn reverse_rows(base: &Translator, text: &str, ask: Ask, cancelled: &dyn Fn() -> bool) -> Answer {
@@ -430,7 +446,10 @@ fn reverse_rows(base: &Translator, text: &str, ask: Ask, cancelled: &dyn Fn() ->
             }
         }
     }
-    Answer { rows, problem: None }
+    Answer {
+        rows,
+        problem: None,
+    }
 }
 
 #[cfg(test)]
@@ -500,7 +519,11 @@ mod tests {
         assert_eq!(rows.len(), 2);
         let ca = outlines(&ask("can", ALL));
         assert_eq!(ca[0].1, "KAPB");
-        let completions: Vec<_> = ca.iter().filter(|r| r.2 == Mark::Completion).map(|r| r.0.as_str()).collect();
+        let completions: Vec<_> = ca
+            .iter()
+            .filter(|r| r.2 == Mark::Completion)
+            .map(|r| r.0.as_str())
+            .collect();
         assert_eq!(completions, ["candy", "candle"]);
     }
 
@@ -526,7 +549,10 @@ mod tests {
         let rows = outlines(&ask("everybody's", ALL));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].1, "EFB/-Z");
-        assert_eq!(rows[0].2, Mark::Composed(vec!["everybody".into(), "'s".into()]));
+        assert_eq!(
+            rows[0].2,
+            Mark::Composed(vec!["everybody".into(), "'s".into()])
+        );
         // glued through the {^} entry
         let noone = outlines(&ask("noone", ALL));
         assert_eq!(noone[0].1, "TPHO/TK-LS/WUPB");
@@ -556,7 +582,10 @@ mod tests {
 
     #[test]
     fn stroke_mode_reads_lowercase_as_notation_and_refuses_anything_else() {
-        let stroke = Ask { stroke_mode: true, ..ALL };
+        let stroke = Ask {
+            stroke_mode: true,
+            ..ALL
+        };
         assert_eq!(outlines(&ask("kapbd", stroke))[0].1, "KAPBD");
         let bad = ask("hello world", stroke);
         assert!(bad.rows.is_empty(), "expected none");
@@ -572,7 +601,8 @@ mod tests {
     fn an_extra_key_reads_and_prints_in_the_layers_layout() {
         let layout = Layout::plover_with(&['+']).unwrap();
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"ED": "ed", "ED/+-D": "ended"}"#, &layout).unwrap();
+        dict.merge_json(r#"{"ED": "ed", "ED/+-D": "ended"}"#, &layout)
+            .unwrap();
         let base = Translator::new(dict);
         let found = answer(&layout, &base.fresh(), "ED/+-D", ALL, &|| false);
         assert_eq!(found.rows[0].word, "\"ended\"");
@@ -581,7 +611,8 @@ mod tests {
 
     /// A config directory with `config` as its config.ron and `files` in its steno folder.
     fn config_dir(name: &str, config: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("keymux-answer-test-{}-{name}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("keymux-answer-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("steno")).unwrap();
         std::fs::write(dir.join("config.ron"), config).unwrap();
@@ -610,7 +641,10 @@ mod tests {
                 extra_keys: ['+'], join_keys: ['+'],
                 layout_overrides: { "+": Key(KC_Q) },
             ))) })"#,
-            &[("a.json", r#"{"THAS": "thanks", "THAS/+EUFG": "thanksgiving"}"#)],
+            &[(
+                "a.json",
+                r#"{"THAS": "thanks", "THAS/+EUFG": "thanksgiving"}"#,
+            )],
         );
         let setup = setup_in(&dir);
         assert_eq!(setup.layout.join_mask(), 1 << 23);
@@ -702,8 +736,14 @@ mod tests {
             ],
         );
         let lookup = Lookup::load(setup_in(&dir));
-        assert_eq!(lookup.answer("cat", ALL, &|| false).rows[0].mark, Mark::Entry);
-        assert_ne!(lookup.answer("dog", ALL, &|| false).rows[0].mark, Mark::Entry);
+        assert_eq!(
+            lookup.answer("cat", ALL, &|| false).rows[0].mark,
+            Mark::Entry
+        );
+        assert_ne!(
+            lookup.answer("dog", ALL, &|| false).rows[0].mark,
+            Mark::Entry
+        );
     }
 
     #[test]
@@ -716,7 +756,10 @@ mod tests {
         );
         let lookup = Lookup::load(setup_in(&dir));
         let found = lookup.answer("the cat", ALL, &|| false);
-        assert_eq!(found.rows.iter().filter(|r| r.mark == Mark::Entry).count(), 2);
+        assert_eq!(
+            found.rows.iter().filter(|r| r.mark == Mark::Entry).count(),
+            2
+        );
     }
 
     /// A plugin that declares a join key (bit 23) and reads any two-stroke outline as "nomy", compiled for real.
@@ -754,7 +797,10 @@ pub extern "C" fn joins(bits: i64) -> i32 { i32::from(bits & (1 << 23) != 0) }
         let lookup = Lookup::load(setup_in(&dir));
         assert_eq!(lookup.plugin_problem, None);
         let found = lookup.answer("nomy", ALL, &|| false);
-        assert_eq!(found.rows[0].mark, Mark::Composed(vec!["no".into(), "my".into()]));
+        assert_eq!(
+            found.rows[0].mark,
+            Mark::Composed(vec!["no".into(), "my".into()])
+        );
         assert_eq!(
             lookup.setup.layout.render_strokes(&found.rows[0].strokes),
             "TPHO/+PHAOEU"
@@ -766,7 +812,10 @@ pub extern "C" fn joins(bits: i64) -> i32 { i32::from(bits & (1 << 23) != 0) }
         let dir = config_dir(
             "bad_plugin",
             JOIN_CONFIG,
-            &[("01-d.json", r#"{"TPHO": "no"}"#), ("02-bad.rs", "this is not rust")],
+            &[
+                ("01-d.json", r#"{"TPHO": "no"}"#),
+                ("02-bad.rs", "this is not rust"),
+            ],
         );
         let lookup = Lookup::load(setup_in(&dir));
         assert!(lookup.plugin_problem.unwrap().contains("1 of 1 plugin"));

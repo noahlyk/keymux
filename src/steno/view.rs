@@ -41,15 +41,26 @@ impl View<'_> {
         if answer.rows.is_empty() {
             return Vec::new();
         }
-        let cells: Vec<(String, usize)> = answer.rows.iter().map(|row| self.outline_cell(row)).collect();
+        let cells: Vec<(String, usize)> = answer
+            .rows
+            .iter()
+            .map(|row| self.outline_cell(row))
+            .collect();
         let word_width = answer
             .rows
             .iter()
-            .map(|row| measure_text_width(&row.word) + usize::from(row.mark == Mark::Fingerspelled) * 2)
+            .map(|row| {
+                measure_text_width(&row.word) + usize::from(row.mark == Mark::Fingerspelled) * 2
+            })
             .max()
             .unwrap_or(0)
             .max(WORD_WIDTH);
-        let outline_width = cells.iter().map(|(_, w)| *w).max().unwrap_or(0).max(OUTLINE_WIDTH);
+        let outline_width = cells
+            .iter()
+            .map(|(_, w)| *w)
+            .max()
+            .unwrap_or(0)
+            .max(OUTLINE_WIDTH);
 
         let mut header = format!(
             "{}  {}",
@@ -67,7 +78,10 @@ impl View<'_> {
             } else {
                 row.word.clone()
             };
-            let word = format!("{word}{}", " ".repeat(word_width.saturating_sub(measure_text_width(&word))));
+            let word = format!(
+                "{word}{}",
+                " ".repeat(word_width.saturating_sub(measure_text_width(&word)))
+            );
             let word = match row.mark {
                 Mark::Missing => self.paint(style(word).dim()),
                 Mark::Completion | Mark::Nearby => self.paint(style(word).dim()),
@@ -99,13 +113,15 @@ impl View<'_> {
         let (strokes, keys) = answer.totals();
         if strokes > 0 {
             lines.push(String::new());
-            lines.push(self.paint(
-                style(format!(
-                    "keys (best outline of each word): {keys} in {strokes} stroke{}",
-                    if strokes == 1 { "" } else { "s" }
-                ))
-                .dim(),
-            ));
+            lines.push(
+                self.paint(
+                    style(format!(
+                        "keys (best outline of each word): {keys} in {strokes} stroke{}",
+                        if strokes == 1 { "" } else { "s" }
+                    ))
+                    .dim(),
+                ),
+            );
         }
         lines
     }
@@ -130,7 +146,10 @@ impl View<'_> {
             .iter()
             .map(|&bits| self.stroke_text(bits))
             .collect();
-        (strokes.join(&style("/").dim().force_styling(true).to_string()), width)
+        (
+            strokes.join(&style("/").dim().force_styling(true).to_string()),
+            width,
+        )
     }
 
     /// One stroke, a colour a key by part of the keyboard, keys one finger plays together
@@ -172,8 +191,16 @@ impl View<'_> {
             KeyColor::Misc => Color::Cyan,
         };
         Some(if slot >= layout.extra_start() {
-            let name = layout.key_at(slot).map(|k| k.name.clone()).unwrap_or_default();
-            named(self.extra_colors.get(&name).copied().unwrap_or(KeyColor::Misc))
+            let name = layout
+                .key_at(slot)
+                .map(|k| k.name.clone())
+                .unwrap_or_default();
+            named(
+                self.extra_colors
+                    .get(&name)
+                    .copied()
+                    .unwrap_or(KeyColor::Misc),
+            )
         } else if slot == layout.number_slot() || slot == layout.star_slot() {
             Color::Cyan
         } else if slot < layout.left_end() {

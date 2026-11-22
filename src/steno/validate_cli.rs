@@ -45,7 +45,10 @@ pub fn targets(
     }
     // Without a config (or one that does not load), the standard trust and no names to check
     let config = crate::config::Config::load_or_hint(config_path).ok();
-    let rules = config.as_ref().map_or_else(|| Rules::standard(config_dir), |config| Rules::of_config(config, config_dir));
+    let rules = config.as_ref().map_or_else(
+        || Rules::standard(config_dir),
+        |config| Rules::of_config(config, config_dir),
+    );
     if !given.is_empty() {
         let setup = EngineSetup::load(config_path, config_dir, home);
         return Ok(vec![Target {
@@ -135,12 +138,20 @@ fn finding_text(finding: &Finding, indent: &str) -> String {
     }
     // `file:line:column`, which editors and terminals can jump to
     if let Some(at) = finding.line {
-        let column = finding.column.map_or_else(String::new, |column| format!(":{column}"));
-        line.push_str(&format!(" {}", format!("({}:{at}{column})", finding.file).dimmed()));
+        let column = finding
+            .column
+            .map_or_else(String::new, |column| format!(":{column}"));
+        line.push_str(&format!(
+            " {}",
+            format!("({}:{at}{column})", finding.file).dimmed()
+        ));
     }
     line.push_str(&format!(": {}\n", finding.message));
     if let Some(suggestion) = &finding.suggestion {
-        line.push_str(&format!("{indent}          {} {suggestion}\n", "suggestion:".green()));
+        line.push_str(&format!(
+            "{indent}          {} {suggestion}\n",
+            "suggestion:".green()
+        ));
     }
     if !finding.layers.is_empty() {
         line.push_str(&format!(
@@ -174,7 +185,11 @@ pub fn command(
             } else {
                 format!("steno layer {}", set.layers.join(", "))
             };
-            println!("{} {} file(s)", format!("{layers}:").bold(), set.files.len());
+            println!(
+                "{} {} file(s)",
+                format!("{layers}:").bold(),
+                set.files.len()
+            );
         }
         print!("{}", to_text(&report, ""));
     }
@@ -187,7 +202,8 @@ mod tests {
     use std::fs;
 
     fn folder(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("keymux-validate-cli-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("keymux-validate-cli-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -195,11 +211,19 @@ mod tests {
 
     fn exit_code(files: &[PathBuf], strict: bool) -> Result<i32> {
         let nowhere = Path::new("/nonexistent/keymux/config.ron");
-        command(nowhere, Path::new("/nonexistent/keymux"), None, files, strict, true)
+        command(
+            nowhere,
+            Path::new("/nonexistent/keymux"),
+            None,
+            files,
+            strict,
+            true,
+        )
     }
 
     #[test]
-    fn the_exit_code_is_zero_for_clean_one_for_errors_and_strict_warnings_and_an_error_for_no_such_path() {
+    fn the_exit_code_is_zero_for_clean_one_for_errors_and_strict_warnings_and_an_error_for_no_such_path(
+    ) {
         let dir = folder("exit");
         let clean = dir.join("clean.json");
         fs::write(&clean, r#"{"KAT": "cat", "-G": "{^ing}"}"#).unwrap();
@@ -208,8 +232,16 @@ mod tests {
         let broken = dir.join("broken.json");
         fs::write(&broken, r#"{"KAT": "#).unwrap();
         assert_eq!(exit_code(&[clean], true).unwrap(), 0);
-        assert_eq!(exit_code(std::slice::from_ref(&warned), false).unwrap(), 0, "warnings alone pass");
-        assert_eq!(exit_code(&[warned], true).unwrap(), 1, "--strict fails on warnings");
+        assert_eq!(
+            exit_code(std::slice::from_ref(&warned), false).unwrap(),
+            0,
+            "warnings alone pass"
+        );
+        assert_eq!(
+            exit_code(&[warned], true).unwrap(),
+            1,
+            "--strict fails on warnings"
+        );
         assert_eq!(exit_code(&[broken], false).unwrap(), 1);
         assert!(exit_code(&[dir.join("nothing.json")], false).is_err());
     }
@@ -222,23 +254,55 @@ mod tests {
         let nowhere = Path::new("/nonexistent/keymux/config.ron");
         let targets = targets(nowhere, nowhere, None, std::slice::from_ref(&file)).unwrap();
         let report = run(&targets, &dir.join("cache"));
-        let value: serde_json::Value = serde_json::from_str(&to_json(&report, false).unwrap()).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&to_json(&report, false).unwrap()).unwrap();
         let object = value.as_object().unwrap();
         let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["entries", "errors", "files", "findings", "info", "ok", "sets", "strict", "warnings"]);
+        assert_eq!(
+            keys,
+            [
+                "entries", "errors", "files", "findings", "info", "ok", "sets", "strict",
+                "warnings"
+            ]
+        );
         assert_eq!(object["ok"], false);
-        assert_eq!((&object["errors"], &object["warnings"], &object["info"]), (&1.into(), &1.into(), &0.into()));
+        assert_eq!(
+            (&object["errors"], &object["warnings"], &object["info"]),
+            (&1.into(), &1.into(), &0.into())
+        );
         assert_eq!(object["sets"][0]["files"][0], file.display().to_string());
         let findings = object["findings"].as_array().unwrap();
-        let mut finding_keys: Vec<&str> = findings[0].as_object().unwrap().keys().map(String::as_str).collect();
+        let mut finding_keys: Vec<&str> = findings[0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         finding_keys.sort_unstable();
         assert_eq!(
             finding_keys,
-            ["column", "count", "file", "kind", "layers", "line", "message", "outline", "severity", "suggestion"]
+            [
+                "column",
+                "count",
+                "file",
+                "kind",
+                "layers",
+                "line",
+                "message",
+                "outline",
+                "severity",
+                "suggestion"
+            ]
         );
-        let kinds: Vec<_> = findings.iter().map(|f| (f["severity"].as_str().unwrap(), f["kind"].as_str().unwrap())).collect();
-        assert_eq!(kinds, [("error", "bad_outline"), ("warning", "bad_meta_argument")]);
+        let kinds: Vec<_> = findings
+            .iter()
+            .map(|f| (f["severity"].as_str().unwrap(), f["kind"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [("error", "bad_outline"), ("warning", "bad_meta_argument")]
+        );
         assert_eq!(findings[1]["suggestion"], "{:tape:toggle}");
     }
 
@@ -252,9 +316,19 @@ mod tests {
         let text = to_text(&run(&targets, &dir.join("cache")), "");
         // Once as the heading, and once in the `file:line:column` an editor can jump to
         let at = format!("{}:1:2", file.display());
-        assert_eq!(text.matches(&file.display().to_string()).count(), 2, "{text}");
+        assert_eq!(
+            text.matches(&file.display().to_string()).count(),
+            2,
+            "{text}"
+        );
         assert!(text.contains(&at), "{text}");
-        assert!(text.contains("bad_meta_argument") && text.contains("{:tape:toggle}"), "{text}");
-        assert!(text.contains("1 files, 1 entries: 0 error(s), 1 warning(s), 0 note(s)"), "{text}");
+        assert!(
+            text.contains("bad_meta_argument") && text.contains("{:tape:toggle}"),
+            "{text}"
+        );
+        assert!(
+            text.contains("1 files, 1 entries: 0 error(s), 1 warning(s), 0 note(s)"),
+            "{text}"
+        );
     }
 }

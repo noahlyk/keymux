@@ -715,7 +715,10 @@ impl Translator {
         // and this is asked on every key that comes up mid-stroke
         let text = self.dict.as_dictionary().lookup(&[stroke])?;
         let (_, _, keys) = super::meta::first_up_marker(text)?;
-        Some(keys.and_then(|keys| self.dict.layout().parse_stroke(keys.trim())).unwrap_or(0))
+        Some(
+            keys.and_then(|keys| self.dict.layout().parse_stroke(keys.trim()))
+                .unwrap_or(0),
+        )
     }
 
     /// Whether the stroke makes an engine command (`{:engine:toggle}`, `{:run:NAME}`, ... or the legacy `{PLOVER:...}`), which must never repeat.
@@ -888,8 +891,10 @@ impl Translator {
             // to wipe out what undo left behind to redo: `self.hist.to_do` is always 0 on entry
             // (the previous flush reset it), so it being nonzero afterwards is exactly whether
             // this macro appended anything new.
-            let keeps_redo =
-                matches!(found.name.as_str(), "undo" | "undo_word" | "undo_or" | "redo");
+            let keeps_redo = matches!(
+                found.name.as_str(),
+                "undo" | "undo_word" | "undo_or" | "redo"
+            );
             self.translate_macro(&found, ops);
             if !keeps_redo && self.hist.to_do > 0 {
                 self.hist.redo.clear();
@@ -1047,7 +1052,9 @@ impl Translator {
             }
             // Lapwing's repeat macros, from its last-translation plugin
             macro_name::REPEAT_LAST_TRANSLATION => self.macro_repeat_translations(&found.cmdline),
-            macro_name::REPEAT_LAST_WORD | macro_name::REPEAT_LAST_FRAGMENT | macro_name::REPEAT_LAST_CHARACTER => {
+            macro_name::REPEAT_LAST_WORD
+            | macro_name::REPEAT_LAST_FRAGMENT
+            | macro_name::REPEAT_LAST_CHARACTER => {
                 self.macro_repeat_text(&found.name, &found.cmdline, found.stroke);
             }
             macro_name::RETRO_DELETE_SPACE | macro_name::RETROSPECTIVE_DELETE_SPACE => {
@@ -1958,7 +1965,11 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         t.stroke(stroke("TKOG"));
         t.stroke(stroke("HREFT"));
         t.stroke(stroke("KAT"));
-        assert_eq!(t.text(), "dog (|KAT)", "the screen no longer says what is at the cursor");
+        assert_eq!(
+            t.text(),
+            "dog (|KAT)",
+            "the screen no longer says what is at the cursor"
+        );
         t.stroke(stroke("TOP"));
         assert_eq!(
             t.text(),
@@ -2054,14 +2065,20 @@ pub extern "C" fn joins(bits: i64) -> i32 {
     #[test]
     #[allow(clippy::literal_string_with_formatting_args)] // `{:undo_word}` is a dictionary command
     fn undo_word_takes_back_a_whole_plugin_run() {
-        let mut t = with_shout_plugin(r#"{"KAT": "cat", "*U": "{:undo_word}", "R*": "{:redo}"}"#, "undo_word_run");
+        let mut t = with_shout_plugin(
+            r#"{"KAT": "cat", "*U": "{:undo_word}", "R*": "{:redo}"}"#,
+            "undo_word_run",
+        );
         let joined = stroke("TKOG") | (1 << 23);
         t.stroke(stroke("KAT"));
         t.stroke(stroke("TKOG"));
         t.stroke(joined);
         t.stroke(joined);
         let whole = t.text();
-        assert!(whole.starts_with("cat ") && whole.len() > "cat TKOG".len(), "{whole:?}");
+        assert!(
+            whole.starts_with("cat ") && whole.len() > "cat TKOG".len(),
+            "{whole:?}"
+        );
         t.stroke(stroke("*U"));
         assert_eq!(t.text(), "cat");
         t.stroke(stroke("R*"));
@@ -2694,7 +2711,10 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         let t = translator(json);
         assert_eq!(t.first_up_exempt(stroke("KAT")), Some(0));
         assert_eq!(t.first_up_exempt(stroke("TKOG")), Some(0));
-        assert_eq!(translator(r#"{"KAT": "cat"}"#).first_up_exempt(stroke("KAT")), None);
+        assert_eq!(
+            translator(r#"{"KAT": "cat"}"#).first_up_exempt(stroke("KAT")),
+            None
+        );
     }
 
     #[test]
@@ -2731,7 +2751,10 @@ pub extern "C" fn joins(bits: i64) -> i32 {
                 "AU": "{:run:pw}", "AE": "{PLOVER:RUN:pw}", "AO": "{:command:toggle}", "EU": "{:engine:sideways}"}"#,
         );
         for (native, legacy) in [("A", "E"), ("O", "U")] {
-            assert!(t.is_command(stroke(native)) && t.is_command(stroke(legacy)), "{native} {legacy}");
+            assert!(
+                t.is_command(stroke(native)) && t.is_command(stroke(legacy)),
+                "{native} {legacy}"
+            );
             let (native, legacy) = (commands_of(&mut t, native), commands_of(&mut t, legacy));
             assert_eq!(native[0].to_lowercase(), legacy[0].to_lowercase());
         }
@@ -3040,7 +3063,9 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         let mut t = class_translator(CLASS_JSON, "transparent-row");
         let text = run(
             &mut t,
-            &["PHRUP", "STKPW", "THAS", "PHRUP", "PHRUP", "STKPW", "+EUFG", "PHRUP"],
+            &[
+                "PHRUP", "STKPW", "THAS", "PHRUP", "PHRUP", "STKPW", "+EUFG", "PHRUP",
+            ],
         );
         assert_eq!(text, "thanksgiving");
         assert_eq!(history_len(&t), 1);
@@ -3074,7 +3099,10 @@ pub extern "C" fn joins(bits: i64) -> i32 {
     #[test]
     fn a_cursor_key_is_a_barrier_a_continuation_does_not_cross() {
         for key in ["HR-L", "PWA*RG", "RA*P"] {
-            let mut t = class_translator(CLASS_JSON, &format!("barrier-{}", key.len() + key.as_bytes()[0] as usize));
+            let mut t = class_translator(
+                CLASS_JSON,
+                &format!("barrier-{}", key.len() + key.as_bytes()[0] as usize),
+            );
             run(&mut t, &["THAS", key, "+EUFG"]);
             let text = t.text();
             assert!(!text.contains("thanksgiving"), "{key}: {text:?}");
@@ -3240,10 +3268,18 @@ pub extern "C" fn joins(bits: i64) -> i32 {
     fn undo_or_skips_transparent_strokes_like_undo() {
         let mut t = class_translator(UNDO_OR_JSON, "undo-or-transparent");
         run(&mut t, &["KAT", "TKOG", "PHRUP", "STKPW"]);
-        assert_eq!(run(&mut t, &["*E"]), "cat", "the transparent strokes are not in the way");
+        assert_eq!(
+            run(&mut t, &["*E"]),
+            "cat",
+            "the transparent strokes are not in the way"
+        );
         let mut t = class_translator(UNDO_OR_JSON, "undo-or-transparent-blocked");
         run(&mut t, &["KAT", "HR-L", "PHRUP", "STKPW"]);
-        assert_eq!(keys_of(&mut t, "*E"), word_delete_keys(), "and do not hide a barrier");
+        assert_eq!(
+            keys_of(&mut t, "*E"),
+            word_delete_keys(),
+            "and do not hide a barrier"
+        );
     }
 
     #[test]
@@ -3259,7 +3295,10 @@ pub extern "C" fn joins(bits: i64) -> i32 {
     fn undo_or_combination_shorthand() {
         assert_eq!(undo_or_combo("ctrl+backspace"), "Control_L(backspace)");
         assert_eq!(undo_or_combo("Ctrl+Shift+z"), "Control_L(Shift_L(z))");
-        assert_eq!(undo_or_combo("Control_L(BackSpace)"), "Control_L(BackSpace)");
+        assert_eq!(
+            undo_or_combo("Control_L(BackSpace)"),
+            "Control_L(BackSpace)"
+        );
         assert_eq!(undo_or_combo("Left"), "Left");
         assert_eq!(undo_or_combo(""), "");
     }
@@ -3284,9 +3323,15 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         assert!(t.is_command(stroke("SKWR*")));
         assert!(t.is_command(stroke("-FP")));
         assert!(!t.is_command(stroke("KAT")));
-        assert_eq!(commands_of(&mut t, "SKWR"), ["overlay_control:overlay:toggle"]);
+        assert_eq!(
+            commands_of(&mut t, "SKWR"),
+            ["overlay_control:overlay:toggle"]
+        );
         assert_eq!(commands_of(&mut t, "SKWR*"), ["overlay_control:tape:clear"]);
-        assert_eq!(commands_of(&mut t, "-FP"), ["overlay_control:lookup:toggle"]);
+        assert_eq!(
+            commands_of(&mut t, "-FP"),
+            ["overlay_control:lookup:toggle"]
+        );
         assert_eq!(t.text(), "");
         // A control that is not one runs nothing
         assert!(commands_of(&mut t, "-B").is_empty(), "expected none");
@@ -3369,6 +3414,9 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         );
         assert_eq!(history_len(&t), before, "no history entry");
         assert_eq!(run(&mut t, &["-G"]), "catting");
-        assert!(commands_of(&mut t, "-B").is_empty(), "another verb runs nothing");
+        assert!(
+            commands_of(&mut t, "-B").is_empty(),
+            "another verb runs nothing"
+        );
     }
 }

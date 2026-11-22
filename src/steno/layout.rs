@@ -1421,7 +1421,9 @@ mod tests {
             .build_key_map(&preset("qwerty").unwrap(), &overrides)
             .unwrap_err();
         assert!(
-            errors.iter().any(|e| e.contains("KC_G") && e.contains("used by both")),
+            errors
+                .iter()
+                .any(|e| e.contains("KC_G") && e.contains("used by both")),
             "{errors:?}"
         );
     }
@@ -1434,7 +1436,10 @@ mod tests {
         let errors = layout
             .build_key_map(&preset("qwerty").unwrap(), &overrides)
             .unwrap_err();
-        assert!(errors.iter().any(|e| e.contains("used by both")), "{errors:?}");
+        assert!(
+            errors.iter().any(|e| e.contains("used by both")),
+            "{errors:?}"
+        );
     }
 
     #[test]
@@ -1448,7 +1453,10 @@ mod tests {
             .iter()
             .any(|e| e.contains("unknown steno key \"NOPE|G\"")));
         let mut overrides = HashMap::new();
-        overrides.insert("*|G".to_string(), KeyAction::TO(crate::config::Layer("nav".to_string())));
+        overrides.insert(
+            "*|G".to_string(),
+            KeyAction::TO(crate::config::Layer("nav".to_string())),
+        );
         let errors = layout
             .build_key_map(&preset("qwerty").unwrap(), &overrides)
             .unwrap_err();

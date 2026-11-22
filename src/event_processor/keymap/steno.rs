@@ -61,7 +61,10 @@ impl KeymapProcessor {
             }
             let result = match self.held_keys.remove(&keycode)? {
                 HeldAction::StenoManaged(layer) => {
-                    let output = self.steno_engines.get_mut(&layer)?.key_event(keycode, false, at);
+                    let output = self
+                        .steno_engines
+                        .get_mut(&layer)?
+                        .key_event(keycode, false, at);
                     self.leave_if_asked(&layer);
                     steno_result(output)
                 }

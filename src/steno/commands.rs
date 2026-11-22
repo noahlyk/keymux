@@ -639,7 +639,11 @@ impl TapeView {
 /// Parse `KPA/TKAOEU` into its stroke bitmasks.
 fn parse_strokes(layout: &Layout, text: &str) -> Result<Vec<u32>> {
     text.split('/')
-        .map(|part| layout.parse_stroke(part).with_context(|| format!("\"{part}\" is not a steno stroke")))
+        .map(|part| {
+            layout
+                .parse_stroke(part)
+                .with_context(|| format!("\"{part}\" is not a steno stroke"))
+        })
         .collect()
 }
 
@@ -800,7 +804,8 @@ mod tests {
     #[test]
     fn show_keys_names_the_physical_keys_in_the_output() {
         // End to end through the view the commands print
-        let dict_dir = std::env::temp_dir().join(format!("keymux-commands-keys-{}", std::process::id()));
+        let dict_dir =
+            std::env::temp_dir().join(format!("keymux-commands-keys-{}", std::process::id()));
         std::fs::create_dir_all(dict_dir.join("steno")).unwrap();
         std::fs::write(dict_dir.join("steno/d.json"), r#"{"KWEUG": "quick"}"#).unwrap();
         std::fs::write(dict_dir.join("config.ron"), "(layers: {})").unwrap();
@@ -816,9 +821,16 @@ mod tests {
         };
         let answer = lookup.answer("quick", ask, &|| false);
         let lines = lookup.view(true, false).lines(&answer);
-        assert!(lines[0].starts_with("word") && lines[0].ends_with("keys"), "{lines:?}");
+        assert!(
+            lines[0].starts_with("word") && lines[0].ends_with("keys"),
+            "{lines:?}"
+        );
         // The default preset has no combined keys, so -E and -U each press their own key
-        assert!(lines[1].starts_with("quick") && lines[1].contains("KWEUG") && lines[1].ends_with("SDNML"), "{lines:?}");
+        assert!(
+            lines[1].starts_with("quick")
+                && lines[1].contains("KWEUG")
+                && lines[1].ends_with("SDNML"),
+            "{lines:?}"
+        );
     }
 }
-

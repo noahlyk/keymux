@@ -76,11 +76,18 @@ pub fn delayed_keys(
         SkewSide::Right => Some(Class::Right),
     };
     if let Some(wanted) = wanted {
-        set.extend(classes.iter().filter(|(_, &c)| c == wanted).map(|(&k, _)| k));
+        set.extend(
+            classes
+                .iter()
+                .filter(|(_, &c)| c == wanted)
+                .map(|(&k, _)| k),
+        );
     }
     for key in &config.keys {
         if !keys.contains_key(key) {
-            return Err(format!("skew key {key:?} is not a stroke key on this layer"));
+            return Err(format!(
+                "skew key {key:?} is not a stroke key on this layer"
+            ));
         }
         set.insert(*key);
     }
@@ -250,7 +257,11 @@ struct Prev {
 
 impl Tracker {
     #[must_use]
-    pub fn new(classes: HashMap<KeyCode, Class>, delayed: HashSet<KeyCode>, delay: Duration) -> Self {
+    pub fn new(
+        classes: HashMap<KeyCode, Class>,
+        delayed: HashSet<KeyCode>,
+        delay: Duration,
+    ) -> Self {
         Self {
             classes,
             delayed,
@@ -320,9 +331,9 @@ impl Tracker {
                 .filter(|&i| i != side)
                 .filter_map(|i| cur.last_up[i])
                 .max();
-            obs.gap_ms[side] = Some(other.and_then(|other| {
-                u32::try_from(micros(own, other)).ok().map(|us| us / 1000)
-            }));
+            obs.gap_ms[side] = Some(
+                other.and_then(|other| u32::try_from(micros(own, other)).ok().map(|us| us / 1000)),
+            );
         }
         obs.added_ms = match (cur.last_delayed, cur.last_other) {
             (Some(delayed), Some(other)) => {
@@ -334,7 +345,13 @@ impl Tracker {
             (Some(_), None) => u32::try_from(self.delay.as_millis()).unwrap_or(0),
             _ => 0,
         };
-        let last_up = cur.last_up.iter().flatten().max().copied().unwrap_or(cur.start);
+        let last_up = cur
+            .last_up
+            .iter()
+            .flatten()
+            .max()
+            .copied()
+            .unwrap_or(cur.start);
         if let Some(prev) = self.prev {
             let opposite = (prev.mask == 1 && cur.mask == 2) || (prev.mask == 2 && cur.mask == 1);
             if opposite && cur.start.saturating_duration_since(prev.start) <= SPLIT_WINDOW {
@@ -458,7 +475,8 @@ impl Stats {
         }
         self.delay_ms = delay_ms;
         if delay_ms > 0 {
-            self.recent.push_back(u8::try_from(obs.added_ms).unwrap_or(u8::MAX));
+            self.recent
+                .push_back(u8::try_from(obs.added_ms).unwrap_or(u8::MAX));
             while self.recent.len() > RECENT {
                 self.recent.pop_front();
             }
@@ -481,7 +499,10 @@ impl Stats {
     #[must_use]
     pub fn quartiles(&self) -> (i64, i64) {
         let n = self.samples();
-        (percentile(&self.diff, n, 0.25), percentile(&self.diff, n, 0.75))
+        (
+            percentile(&self.diff, n, 0.25),
+            percentile(&self.diff, n, 0.75),
+        )
     }
 
     #[must_use]
@@ -503,7 +524,11 @@ impl Stats {
     #[must_use]
     pub fn predict(&self, side: usize, delay_ms: u32) -> Cost {
         if delay_ms == 0 {
-            return Cost { share: 0.0, mean: 0.0, max: 0 };
+            return Cost {
+                share: 0.0,
+                mean: 0.0,
+                max: 0,
+            };
         }
         let mut waits = f64::from(self.gap_last[side]) * f64::from(delay_ms);
         let mut share = f64::from(self.gap_last[side]);
@@ -568,7 +593,9 @@ impl Stats {
         }
         let median = self.median();
         if self.samples() >= ENOUGH && median.abs() >= 2 {
-            let delay_ms = u32::try_from(median.abs()).unwrap_or(1).min(MAX_SKEW_DELAY_MS);
+            let delay_ms = u32::try_from(median.abs())
+                .unwrap_or(1)
+                .min(MAX_SKEW_DELAY_MS);
             let side = usize::from(median < 0);
             return Some(Suggestion {
                 side,
@@ -613,9 +640,18 @@ impl Stats {
                 out,
                 "  right minus left, first key down, as the keyboard reports it (before any skew delay):"
             );
-            let _ = writeln!(out, "  median {:+} ms   mean {:+.1} ms   25th..75th percentile {q1:+} .. {q3:+} ms", self.median(), self.mean());
+            let _ = writeln!(
+                out,
+                "  median {:+} ms   mean {:+.1} ms   25th..75th percentile {q1:+} .. {q3:+} ms",
+                self.median(),
+                self.mean()
+            );
             if self.diff_out > 0 {
-                let _ = writeln!(out, "  ({} more differed by over {DIFF_RANGE} ms and are left out)", self.diff_out);
+                let _ = writeln!(
+                    out,
+                    "  ({} more differed by over {DIFF_RANGE} ms and are left out)",
+                    self.diff_out
+                );
             }
         }
         let _ = writeln!(
@@ -641,15 +677,27 @@ impl Stats {
         }
         match self.suggest() {
             Some(s) => {
-                let (name, half) = if s.side == 0 { ("left", "Left") } else { ("right", "Right") };
+                let (name, half) = if s.side == 0 {
+                    ("left", "Left")
+                } else {
+                    ("right", "Right")
+                };
                 let how = if s.by_offset {
                     "the median offset (too few split strokes to size it by)"
                 } else {
                     "the smallest delay that joins 90% of the split strokes it can fix"
                 };
                 let cost = self.predict(s.side, s.delay_ms);
-                let _ = writeln!(out, "Suggested: delay the {name} half by {} ms ({how}).", s.delay_ms);
-                let _ = writeln!(out, "  Split suspects left at that value: {} of {}", s.remaining, self.split);
+                let _ = writeln!(
+                    out,
+                    "Suggested: delay the {name} half by {} ms ({how}).",
+                    s.delay_ms
+                );
+                let _ = writeln!(
+                    out,
+                    "  Split suspects left at that value: {} of {}",
+                    s.remaining, self.split
+                );
                 let _ = writeln!(
                     out,
                     "  Predicted added latency from the strokes so far: {:.0}% of strokes delayed, mean {:.1} ms, max {} ms; strokes ending on the {} half wait nothing",
@@ -665,7 +713,11 @@ impl Stats {
                 let _ = writeln!(out, "No skew detected: the halves line up (median offset under 2 ms) and few strokes split.");
             }
             None => {
-                let _ = writeln!(out, "No skew detected; need {} more two-hand strokes.", ENOUGH - n);
+                let _ = writeln!(
+                    out,
+                    "No skew detected; need {} more two-hand strokes.",
+                    ENOUGH - n
+                );
             }
         }
         let _ = writeln!(
@@ -735,26 +787,54 @@ mod tests {
     fn config_selects_a_half_or_keys_and_rejects_the_rest() {
         let layout = Layout::plover();
         let keys = keys();
-        let left = SkewConfig { delay_ms: 8, half: SkewSide::Left, keys: vec![] };
+        let left = SkewConfig {
+            delay_ms: 8,
+            half: SkewSide::Left,
+            keys: vec![],
+        };
         let set = delayed_keys(&left, &layout, &keys).unwrap();
         assert!(set.contains(&KeyCode::KC_Q) && !set.contains(&KeyCode::KC_N));
         assert_eq!(set.len(), 10);
-        let explicit = SkewConfig { delay_ms: 8, half: SkewSide::None, keys: vec![KeyCode::KC_Q, KeyCode::KC_T] };
+        let explicit = SkewConfig {
+            delay_ms: 8,
+            half: SkewSide::None,
+            keys: vec![KeyCode::KC_Q, KeyCode::KC_T],
+        };
         assert_eq!(delayed_keys(&explicit, &layout, &keys).unwrap().len(), 2);
         assert!(check_config(&left, &layout, &keys).is_ok());
-        let too_long = SkewConfig { delay_ms: 51, ..left };
-        assert!(check_config(&too_long, &layout, &keys).unwrap_err().contains("50 ms"));
-        let unknown = SkewConfig { delay_ms: 5, half: SkewSide::None, keys: vec![KeyCode::KC_F1] };
-        assert!(check_config(&unknown, &layout, &keys).unwrap_err().contains("not a stroke key"));
-        let empty = SkewConfig { delay_ms: 5, ..SkewConfig::default() };
-        assert!(check_config(&empty, &layout, &keys).unwrap_err().contains("select no stroke keys"));
+        let too_long = SkewConfig {
+            delay_ms: 51,
+            ..left
+        };
+        assert!(check_config(&too_long, &layout, &keys)
+            .unwrap_err()
+            .contains("50 ms"));
+        let unknown = SkewConfig {
+            delay_ms: 5,
+            half: SkewSide::None,
+            keys: vec![KeyCode::KC_F1],
+        };
+        assert!(check_config(&unknown, &layout, &keys)
+            .unwrap_err()
+            .contains("not a stroke key"));
+        let empty = SkewConfig {
+            delay_ms: 5,
+            ..SkewConfig::default()
+        };
+        assert!(check_config(&empty, &layout, &keys)
+            .unwrap_err()
+            .contains("select no stroke keys"));
         assert!(check_config(&SkewConfig::default(), &layout, &keys).is_ok());
     }
 
     fn tracker(delay: u32) -> Tracker {
         let layout = Layout::plover();
         let keys = keys();
-        let cfg = SkewConfig { delay_ms: delay, half: SkewSide::Left, keys: vec![] };
+        let cfg = SkewConfig {
+            delay_ms: delay,
+            half: SkewSide::Left,
+            keys: vec![],
+        };
         let delayed = delayed_keys(&cfg, &layout, &keys).unwrap();
         Tracker::new(classify(&layout, &keys), delayed, ms(u64::from(delay)))
     }
@@ -812,8 +892,20 @@ mod tests {
         // A symmetric spread around 0, and the same around +8 (the right half lags)
         for i in 0..400_i64 {
             let jitter = (i % 9) - 4;
-            centered.record(&Obs { diff_ms: Some(jitter), ..Obs::default() }, 0);
-            shifted.record(&Obs { diff_ms: Some(8 + jitter), ..Obs::default() }, 0);
+            centered.record(
+                &Obs {
+                    diff_ms: Some(jitter),
+                    ..Obs::default()
+                },
+                0,
+            );
+            shifted.record(
+                &Obs {
+                    diff_ms: Some(8 + jitter),
+                    ..Obs::default()
+                },
+                0,
+            );
         }
         assert_eq!(centered.median(), 0);
         assert_eq!(shifted.median(), 8);
@@ -833,13 +925,28 @@ mod tests {
         let mut stats = Stats::default();
         // Nine suspects need 6..=8 ms, one outlier needs 30: the 90% mark is 8, not 30
         for needed in [6, 6, 7, 7, 7, 8, 8, 8, 8, 30] {
-            stats.record(&Obs { split: Some((0, needed)), ..Obs::default() }, 0);
+            stats.record(
+                &Obs {
+                    split: Some((0, needed)),
+                    ..Obs::default()
+                },
+                0,
+            );
         }
         let s = stats.suggest().unwrap();
-        assert_eq!((s.side, s.delay_ms, s.remaining, s.by_offset), (0, 8, 1, false));
+        assert_eq!(
+            (s.side, s.delay_ms, s.remaining, s.by_offset),
+            (0, 8, 1, false)
+        );
         assert_eq!(stats.remaining_at(0, 7), 5);
         // Suspects whose first stroke was on the other half stay, whatever the delay
-        stats.record(&Obs { split: Some((1, 5)), ..Obs::default() }, 0);
+        stats.record(
+            &Obs {
+                split: Some((1, 5)),
+                ..Obs::default()
+            },
+            0,
+        );
         assert_eq!(stats.remaining_at(0, 50), 1);
     }
 
@@ -878,6 +985,13 @@ mod tests {
         assert!((cost.share - 0.5).abs() < 1e-9);
         // Delaying the right half instead: it ends the two chords and is alone once
         assert!((stats.predict(1, 8).share - 0.75).abs() < 1e-9);
-        assert_eq!(stats.predict(0, 0), Cost { share: 0.0, mean: 0.0, max: 0 });
+        assert_eq!(
+            stats.predict(0, 0),
+            Cost {
+                share: 0.0,
+                mean: 0.0,
+                max: 0
+            }
+        );
     }
 }

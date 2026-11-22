@@ -239,7 +239,10 @@ pub(crate) fn decode_text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
 
 /// Call `each` with every key of a JSON object and its value if that is a string, in order,
 /// without building the object: the strings are borrowed from `json` unless they have escapes.
-pub(crate) fn read_entries(json: &str, each: impl FnMut(&str, Option<&str>)) -> serde_json::Result<()> {
+pub(crate) fn read_entries(
+    json: &str,
+    each: impl FnMut(&str, Option<&str>),
+) -> serde_json::Result<()> {
     use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
     use std::borrow::Cow;
     use std::fmt;
@@ -484,7 +487,8 @@ impl Dictionary {
     /// How many entries hold an inline shell command.
     #[must_use]
     pub fn shell_entries(&self) -> usize {
-        self.iter_where(&|text| super::run_control::strip_shells(text).is_some()).count()
+        self.iter_where(&|text| super::run_control::strip_shells(text).is_some())
+            .count()
     }
 
     /// The table new entries go into: the last, which is the only one a dictionary built entry
@@ -646,8 +650,7 @@ impl Dictionary {
                 return false;
             }
             let lower = text.to_lowercase();
-            hit(&lower, &query, query_anywhere)
-                || hit(&bare(&lower), &bare_query, bare_anywhere)
+            hit(&lower, &query, query_anywhere) || hit(&bare(&lower), &bare_query, bare_anywhere)
         };
         let tier = |text: &str| {
             let lower = text.to_lowercase();

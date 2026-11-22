@@ -149,17 +149,26 @@ mod tests {
         let view = |part, verb| Some(Control::View(cmd(part, verb)));
         assert_eq!(parse("overlay", "show"), view(Part::Overlay, Verb::Show));
         assert_eq!(parse("overlay", "hide"), view(Part::Overlay, Verb::Hide));
-        assert_eq!(parse("overlay", "toggle"), view(Part::Overlay, Verb::Toggle));
+        assert_eq!(
+            parse("overlay", "toggle"),
+            view(Part::Overlay, Verb::Toggle)
+        );
         assert_eq!(parse("tape", "show"), view(Part::Tape, Verb::Show));
         assert_eq!(parse("tape", "hide"), view(Part::Tape, Verb::Hide));
         assert_eq!(parse("tape", "toggle"), view(Part::Tape, Verb::Toggle));
         assert_eq!(parse("tape", "clear"), Some(Control::ClearTape));
         assert_eq!(parse("keyboard", "show"), view(Part::Keyboard, Verb::Show));
         assert_eq!(parse("keyboard", "hide"), view(Part::Keyboard, Verb::Hide));
-        assert_eq!(parse("keyboard", "toggle"), view(Part::Keyboard, Verb::Toggle));
+        assert_eq!(
+            parse("keyboard", "toggle"),
+            view(Part::Keyboard, Verb::Toggle)
+        );
         assert_eq!(parse("lookup", "open"), Some(Control::Lookup(Verb::Show)));
         assert_eq!(parse("lookup", "close"), Some(Control::Lookup(Verb::Hide)));
-        assert_eq!(parse("lookup", "toggle"), Some(Control::Lookup(Verb::Toggle)));
+        assert_eq!(
+            parse("lookup", "toggle"),
+            Some(Control::Lookup(Verb::Toggle))
+        );
         // Case does not matter, as with every other meta
         assert_eq!(parse("Overlay", "HIDE"), view(Part::Overlay, Verb::Hide));
     }
@@ -185,7 +194,10 @@ mod tests {
         let mut view = ViewState::default();
         assert!(!view.apply(cmd(Part::Overlay, Verb::Show)), "already shown");
         assert!(view.apply(cmd(Part::Overlay, Verb::Hide)));
-        assert!(!view.apply(cmd(Part::Overlay, Verb::Hide)), "already hidden");
+        assert!(
+            !view.apply(cmd(Part::Overlay, Verb::Hide)),
+            "already hidden"
+        );
         assert!(view.hidden);
         assert!(view.apply(cmd(Part::Overlay, Verb::Toggle)));
         assert!(!view.hidden);

@@ -207,7 +207,8 @@ impl Lookup {
         // A phrase's outline is one group per word, not one stroke sequence to play through
         let strokes = match (mode, rows.first()) {
             (LookupMode::Phrase, _) | (_, None) => Vec::new(),
-            (_, Some(row)) => self.layout
+            (_, Some(row)) => self
+                .layout
                 .parse_strokes_trimmed(&row.outline)
                 .unwrap_or_default(),
         };
@@ -578,9 +579,15 @@ mod tests {
         .unwrap();
         let base = Translator::new(dict);
         let rows = typed("tape").view(&base).rows;
-        let shown: Vec<(&str, &str)> =
-            rows.iter().map(|r| (r.text.as_str(), r.outline.as_str())).collect();
-        assert_eq!(shown[0], ("tape", "TAEP"), "the word's best outline comes first");
+        let shown: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|r| (r.text.as_str(), r.outline.as_str()))
+            .collect();
+        assert_eq!(
+            shown[0],
+            ("tape", "TAEP"),
+            "the word's best outline comes first"
+        );
         assert!(shown.contains(&("{:tape:toggle}", "T*PL")), "{shown:?}");
         assert!(shown.contains(&("{:tape:clear}", "T*PLZ")), "{shown:?}");
         assert!(shown.contains(&("{^tape}", "SPH-PL")), "{shown:?}");
@@ -629,7 +636,10 @@ mod tests {
         for query in ["^ing", "{^ing}", "{^ING}", "ing", "{^in"] {
             let rows = rows_of(query);
             assert!(has(&rows, "{^ing}", "-G"), "{query}: {rows:?}");
-            assert!(!rows.iter().any(|(t, _)| t.starts_with('"')), "{query}: {rows:?}");
+            assert!(
+                !rows.iter().any(|(t, _)| t.starts_with('"')),
+                "{query}: {rows:?}"
+            );
         }
         assert_eq!(rows_of("{^ing}")[0].1, "-G", "exact text first");
         assert_eq!(rows_of("^ing")[0].1, "-G");
@@ -643,7 +653,11 @@ mod tests {
         assert!(!has(&rows_of("ng"), "{^ing}", "-G"), "{:?}", rows_of("ng"));
         assert!(has(&rows_of("^in"), "{^ing}", "-G"));
         assert!(has(&rows_of("ing"), "{^ing}", "-G"));
-        assert_eq!(rows_of("the").len(), 1, "a word with no entry in it adds none");
+        assert_eq!(
+            rows_of("the").len(),
+            1,
+            "a word with no entry in it adds none"
+        );
     }
 
     /// A dictionary and lookup in a layout with the `+` join key, as the lyk theory has it.
@@ -739,9 +753,15 @@ mod tests {
         );
         assert_eq!(several.hint, several.strokes[0]);
         // Nothing found, nothing to play
-        assert!(typed("zzzz").view(&translator()).strokes.is_empty(), "expected none");
+        assert!(
+            typed("zzzz").view(&translator()).strokes.is_empty(),
+            "expected none"
+        );
         // A phrase's outline is a group per word, not a sequence to step through
-        assert!(typed("candy candy").view(&translator()).strokes.is_empty(), "expected none");
+        assert!(
+            typed("candy candy").view(&translator()).strokes.is_empty(),
+            "expected none"
+        );
     }
 
     #[test]

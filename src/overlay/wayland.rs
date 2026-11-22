@@ -452,7 +452,8 @@ impl Overlay {
         let Some(mut pixmap) = PixmapMut::from_bytes(canvas, width, height) else {
             return;
         };
-        self.renderer.draw_view(&self.latest, self.view, &mut pixmap);
+        self.renderer
+            .draw_view(&self.latest, self.view, &mut pixmap);
         if !native {
             for pixel in canvas.as_chunks_mut::<4>().0.iter_mut() {
                 pixel.swap(0, 2);

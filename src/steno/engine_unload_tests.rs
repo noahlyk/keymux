@@ -168,7 +168,11 @@ fn history_and_joins_and_undo_carry_across_an_unload() {
     engine.wait_until_loaded();
     stroke(&mut engine, "KAT");
     stroke(&mut engine, "SKWR");
-    assert_eq!(stroke(&mut engine, "-S"), "s", "the suffix still joins to cat");
+    assert_eq!(
+        stroke(&mut engine, "-S"),
+        "s",
+        "the suffix still joins to cat"
+    );
     assert_eq!(engine.translator.text().trim(), "cats");
     // `*` takes back what was typed before the unload as well as after it
     stroke(&mut engine, "SKWR");
@@ -184,14 +188,19 @@ fn the_unload_stroke_is_transparent_and_stays_out_of_the_history() {
     engine.wait_until_loaded();
     stroke(&mut engine, "KAT");
     let before = journal::lock(&engine.translator.history()).clone();
-    assert!(engine.translator.is_command(Layout::plover().parse_stroke("SKWR").unwrap()));
+    assert!(engine
+        .translator
+        .is_command(Layout::plover().parse_stroke("SKWR").unwrap()));
     stroke(&mut engine, "SKWR");
     assert!(engine.translator.was_transparent());
     let after = journal::lock(&engine.translator.history()).clone();
     assert_eq!(format!("{before:?}"), format!("{after:?}"));
     // A verb it doesn't have does nothing
     stroke(&mut engine, "SKWR*");
-    assert!(!engine.unloaded, "the stroke loaded them and unloaded nothing");
+    assert!(
+        !engine.unloaded,
+        "the stroke loaded them and unloaded nothing"
+    );
     assert!(engine.dictionary_handle().is_some());
 }
 
@@ -279,10 +288,17 @@ fn a_reload_picks_up_an_edited_dictionary_and_files_are_not_read_while_unloaded(
     assert_eq!(stroke(&mut engine, "KAT").trim(), "cat");
     stroke(&mut engine, "SKWR");
     wait_dropped(&rig);
-    fs::write(rig.dict_dir.join("01.json"), DICT.replace("\"cat\"", "\"kitten\"")).unwrap();
+    fs::write(
+        rig.dict_dir.join("01.json"),
+        DICT.replace("\"cat\"", "\"kitten\""),
+    )
+    .unwrap();
     // The change is noticed by the watcher, which must not load anything while unloaded
     std::thread::sleep(Duration::from_millis(1200));
-    assert!(!live::holds(&rig.cache()), "an edit must not wake the engine");
+    assert!(
+        !live::holds(&rig.cache()),
+        "an edit must not wake the engine"
+    );
     assert_eq!(stroke(&mut engine, "KAT").trim(), "kitten");
 }
 
@@ -301,7 +317,11 @@ fn a_config_reload_while_unloaded_does_not_load_until_the_next_stroke() {
     assert!(fresh.unloaded && fresh.updates.is_none() && !fresh.loading);
     std::thread::sleep(Duration::from_millis(200));
     assert!(!live::holds(&rig.cache()), "nothing was loaded");
-    assert_eq!(stroke(&mut fresh, "-S"), "s", "and the history carried over");
+    assert_eq!(
+        stroke(&mut fresh, "-S"),
+        "s",
+        "and the history carried over"
+    );
     assert!(live::holds(&rig.cache()));
 }
 
@@ -451,7 +471,10 @@ fn unload_gives_back_the_memory_a_large_dictionary_holds() {
     );
     let held = (anon1 + file1).saturating_sub(anon0 + file0);
     let freed = (anon1 + file1).saturating_sub(anon2 + file2);
-    assert!(held > 10_000, "the dictionary should hold real memory ({held} KB)");
+    assert!(
+        held > 10_000,
+        "the dictionary should hold real memory ({held} KB)"
+    );
     assert!(
         freed * 10 >= held * 7,
         "unloading should give back most of the {held} KB, gave back {freed} KB"

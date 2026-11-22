@@ -144,7 +144,8 @@ mod tests {
         ron::from_str(text).unwrap()
     }
 
-    const GROUP: &str = r#"keyboard_groups: { "glove80": ["16c0:27db:0111:0003", "16c0:27d9:0111:0003"] }"#;
+    const GROUP: &str =
+        r#"keyboard_groups: { "glove80": ["16c0:27db:0111:0003", "16c0:27d9:0111:0003"] }"#;
 
     #[test]
     fn without_groups_the_status_is_the_enabled_keyboards_rule() {

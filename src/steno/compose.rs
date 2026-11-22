@@ -59,7 +59,8 @@ pub fn glue_for(base: &Translator) -> Glue {
     if let Some(bit) = (0..32).map(|b| 1u32 << b).find(|&bit| base.joins(bit)) {
         return Glue::JoinBit(bit);
     }
-    best_outline(entries_defined_as(base.dictionary(), "", "{^}")).map_or(Glue::Unavailable, Glue::Stroke)
+    best_outline(entries_defined_as(base.dictionary(), "", "{^}"))
+        .map_or(Glue::Unavailable, Glue::Stroke)
 }
 
 fn best_outline(found: Vec<Vec<u32>>) -> Option<Vec<u32>> {
@@ -229,7 +230,12 @@ const READING_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// exactly `word`. A plugin's reading that comes late is waited for (up to [`READING_WAIT`], and
 /// never past `cancelled`), as the engine settles it on a tick, so the proof sees what typing
 /// ends up with.
-fn types_exactly(base: &Translator, strokes: &[u32], word: &str, cancelled: &dyn Fn() -> bool) -> bool {
+fn types_exactly(
+    base: &Translator,
+    strokes: &[u32],
+    word: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> bool {
     let mut typed = base.fresh();
     let started = std::time::Instant::now();
     for &stroke in strokes {
@@ -254,9 +260,9 @@ fn types_exactly(base: &Translator, strokes: &[u32], word: &str, cancelled: &dyn
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::steno::formatter::Options;
     use crate::steno::layout::Layout;
     use crate::steno::plugin::Chain;
-    use crate::steno::formatter::Options;
     use std::sync::Arc;
 
     fn s(text: &str) -> u32 {
@@ -357,7 +363,11 @@ mod tests {
         // Fewer strokes beats fewer keys: abc + d is 2 strokes (12 keys), ab + cd 4 strokes (4)
         assert_eq!(
             run(
-                &[("ab", vec![1, 1]), ("cd", vec![1, 1]), ("abc", vec![0b1111])],
+                &[
+                    ("ab", vec![1, 1]),
+                    ("cd", vec![1, 1]),
+                    ("abc", vec![0b1111])
+                ],
                 &[("d", vec![0xFF])]
             ),
             ["abc", "d"]
@@ -508,9 +518,19 @@ pub extern "C" fn joins(bits: i64) -> i32 { i32::from(bits & (1 << 23) != 0) }
         let chain = Chain::test_with_reader(
             dict,
             layout,
-            Box::new(move |outline: &str, _: &str, _: Option<&crate::steno::strokes::Window>| read(outline)),
+            Box::new(
+                move |outline: &str, _: &str, _: Option<&crate::steno::strokes::Window>| {
+                    read(outline)
+                },
+            ),
         );
-        Translator::with_shared(Arc::new(chain), Options { start_attached: true, ..Options::default() })
+        Translator::with_shared(
+            Arc::new(chain),
+            Options {
+                start_attached: true,
+                ..Options::default()
+            },
+        )
     }
 
     #[test]
@@ -540,13 +560,19 @@ pub extern "C" fn joins(bits: i64) -> i32 { i32::from(bits & (1 << 23) != 0) }
             outline.contains('+').then(|| "nomy".to_owned())
         });
         t.set_plugin_deadline(std::time::Duration::from_millis(5));
-        assert!(compose_in(&t, "nomy").is_some(), "a late reading still proves it");
+        assert!(
+            compose_in(&t, "nomy").is_some(),
+            "a late reading still proves it"
+        );
     }
 
     #[test]
     fn a_dictionary_composition_is_still_proven_by_the_dictionary_with_a_plugin_loaded() {
         let t = with_reader(|_| None);
-        assert_eq!(compose_in(&t, "everybody's").unwrap().strokes, vec![s("EFB"), s("-Z")]);
+        assert_eq!(
+            compose_in(&t, "everybody's").unwrap().strokes,
+            vec![s("EFB"), s("-Z")]
+        );
     }
 
     #[test]
@@ -559,7 +585,9 @@ pub extern "C" fn joins(bits: i64) -> i32 { i32::from(bits & (1 << 23) != 0) }
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(150_000);
-        let mut json = String::from(r#"{"EFB":"everybody","-Z":"{^'s}","TK-LS":"{^}","TPHO":"no","WUPB":"one""#);
+        let mut json = String::from(
+            r#"{"EFB":"everybody","-Z":"{^'s}","TK-LS":"{^}","TPHO":"no","WUPB":"one""#,
+        );
         let (mut state, mut count, mut i) = (0x9E37_79B9u32, 0u32, 0u32);
         let mut seen = std::collections::HashSet::new();
         while count < entries {
@@ -585,7 +613,10 @@ pub extern "C" fn joins(bits: i64) -> i32 { i32::from(bits & (1 << 23) != 0) }
             let _ = compose(&base, word, &|| false);
         }
         let elapsed = start.elapsed();
-        eprintln!("compose x4 over {} entries: {elapsed:?}", t.dictionary().len());
+        eprintln!(
+            "compose x4 over {} entries: {elapsed:?}",
+            t.dictionary().len()
+        );
         assert!(elapsed.as_millis() < 500, "took {elapsed:?}");
     }
 }

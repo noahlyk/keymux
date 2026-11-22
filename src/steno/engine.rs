@@ -149,7 +149,15 @@ impl StenoEngine {
         label: &str,
     ) -> Result<Self> {
         let runtime = Runtime::standard(config_dir);
-        Self::from_config_with(config, disabled_in_game_mode, config_dir, home, history, label, runtime)
+        Self::from_config_with(
+            config,
+            disabled_in_game_mode,
+            config_dir,
+            home,
+            history,
+            label,
+            runtime,
+        )
     }
 
     /// Like [`Self::from_config`], with the commands the config defines and the dictionaries it
@@ -164,8 +172,8 @@ impl StenoEngine {
         label: &str,
         runtime: Runtime,
     ) -> Result<Self> {
-        let layout =
-            Layout::plover_with_joins(&config.extra_keys, &config.join_keys).map_err(|errors| anyhow!(errors.join("; ")))?;
+        let layout = Layout::plover_with_joins(&config.extra_keys, &config.join_keys)
+            .map_err(|errors| anyhow!(errors.join("; ")))?;
         let preset = preset(&config.layout).map_err(|e| anyhow!(e))?;
         let overrides: HashMap<String, KeyAction> = config.layout_overrides.clone();
         let keys = layout
@@ -214,11 +222,14 @@ impl StenoEngine {
         translator.set_stroke_classes(!config.disable_transparent);
         translator.set_undo_stops_at_barrier(config.undo_stops_at_barrier);
         translator.set_plugin_deadline(Duration::from_millis(u64::from(config.plugin_deadline_ms)));
-        let delayed = super::skew::delayed_keys(&config.skew, &layout, &keys).map_err(|e| anyhow!(e))?;
+        let delayed =
+            super::skew::delayed_keys(&config.skew, &layout, &keys).map_err(|e| anyhow!(e))?;
         let skew_tracker = super::skew::Tracker::new(
             super::skew::classify(&layout, &keys),
             delayed.clone(),
-            Duration::from_millis(u64::from(config.skew.delay_ms.min(crate::config::MAX_SKEW_DELAY_MS))),
+            Duration::from_millis(u64::from(
+                config.skew.delay_ms.min(crate::config::MAX_SKEW_DELAY_MS),
+            )),
         );
         Ok(Self {
             keys,
@@ -374,7 +385,10 @@ impl StenoEngine {
     /// [`Self::press`] or [`Self::release_at`].
     pub fn key_event(&mut self, key: KeyCode, pressed: bool, at: Instant) -> Option<StenoOutput> {
         if let Some(obs) = self.skew_tracker.event(key, pressed, at) {
-            super::skew::record(&obs, u32::try_from(self.skew.delay().as_millis()).unwrap_or(0));
+            super::skew::record(
+                &obs,
+                u32::try_from(self.skew.delay().as_millis()).unwrap_or(0),
+            );
         }
         if !self.skew.is_active() {
             return self.apply_key(key, pressed, at);
@@ -781,7 +795,8 @@ impl StenoEngine {
         // Same description as the tape file, so the overlay and `keymux steno tape` agree
         let read = self.translator.plugin_read().is_some();
         if repeated {
-            self.hub.push_repeat_of(stroke, description, unmatched, read);
+            self.hub
+                .push_repeat_of(stroke, description, unmatched, read);
         } else if read {
             self.hub.push_read_stroke(stroke, description, unmatched);
         } else {
@@ -988,7 +1003,13 @@ impl StenoEngine {
             unloaded: false,
             scope: live::Scope::default(),
             epoch: 0,
-            launcher: Launcher::new(HashMap::new(), std::sync::Arc::new(super::run_control::UserRunner { config_dir: PathBuf::new(), uid: None })),
+            launcher: Launcher::new(
+                HashMap::new(),
+                std::sync::Arc::new(super::run_control::UserRunner {
+                    config_dir: PathBuf::new(),
+                    uid: None,
+                }),
+            ),
         }
     }
 
@@ -1159,7 +1180,11 @@ mod tests {
         let later = now + Duration::from_hours(6);
         let ticked = engine.tick(later);
         assert_eq!(ticked, None, "a held stroke was sent by the clock");
-        assert_eq!(engine.next_deadline(), None, "nothing is due while keys are held");
+        assert_eq!(
+            engine.next_deadline(),
+            None,
+            "nothing is due while keys are held"
+        );
         assert_eq!(engine.release_at(keys[1], later), None);
         assert_eq!(engine.release_at(keys[0], later), None);
         // It still sends normally when the last key comes up
@@ -1367,7 +1392,8 @@ mod tests {
     const EXCEPT_DICT: &str = r#"{"KAT": "cat{:firstup:except=-T}"}"#;
 
     #[test]
-    fn lifting_an_exempt_key_first_sends_nothing_and_the_first_other_key_up_sends_the_whole_stroke() {
+    fn lifting_an_exempt_key_first_sends_nothing_and_the_first_other_key_up_sends_the_whole_stroke()
+    {
         let mut engine = engine_with_dict(EXCEPT_DICT);
         let [k, a, t] = kat_keys(&engine);
         let now = Instant::now();
@@ -1399,7 +1425,10 @@ mod tests {
     #[test]
     fn a_chord_of_only_exempt_keys_is_sent_on_the_last_key_up() {
         let mut engine = engine_with_dict(r#"{"T": "tee{:firstup:except=T}"}"#);
-        let t = key_for(&engine, 1 << crate::steno::layout::slot_by_name("T-").unwrap());
+        let t = key_for(
+            &engine,
+            1 << crate::steno::layout::slot_by_name("T-").unwrap(),
+        );
         engine.press(t, Instant::now());
         assert!(typed(engine.release(t)).contains("tee"));
     }
@@ -1540,21 +1569,30 @@ mod tests {
         assert_eq!(tape[0].gone, [[0, 4]]);
         assert_eq!((tape[1].stroke, tape[1].text.as_str()), (0, "-4 \"kat\""));
         assert!(tape[1].gone.is_empty(), "expected none");
-        assert!(!tape[0].read && tape[1].read, "only the plugin's line is a reading: {tape:?}");
+        assert!(
+            !tape[0].read && tape[1].read,
+            "only the plugin's line is a reading: {tape:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_stroke_a_plugin_read_is_flagged_on_the_overlay_tape_and_a_dictionary_entry_is_not() {
         let mut dict = Dictionary::default();
-        dict.merge_json(r#"{"TKOG": "dog"}"#, &Layout::plover()).unwrap();
+        dict.merge_json(r#"{"TKOG": "dog"}"#, &Layout::plover())
+            .unwrap();
         let chain = Chain::test_with_reader(
             dict,
             Layout::plover(),
-            Box::new(|outline: &str, _: &str, _: Option<&crate::steno::strokes::Window>| Some(outline.to_lowercase())),
+            Box::new(
+                |outline: &str, _: &str, _: Option<&crate::steno::strokes::Window>| {
+                    Some(outline.to_lowercase())
+                },
+            ),
         );
         let mut engine = engine_with_dict("{}");
-        engine.translator = Translator::with_shared(Arc::new(chain), super::super::formatter::Options::default());
+        engine.translator =
+            Translator::with_shared(Arc::new(chain), super::super::formatter::Options::default());
         let hub: &'static OverlayHub = Box::leak(Box::default());
         engine.set_hub(hub);
         let t0 = Instant::now();
@@ -1740,21 +1778,36 @@ mod tests {
         for outline in ["A", "E", "O"] {
             assert!(!engine.take_leave_request(), "{outline}");
             engine.translate(stroke_of(outline), false);
-            assert!(engine.take_leave_request(), "{outline} asks to leave the layer");
+            assert!(
+                engine.take_leave_request(),
+                "{outline} asks to leave the layer"
+            );
         }
         engine.translate(stroke_of("PHRUP"), false);
         assert!(engine.lookup_active());
-        let lines: Vec<String> = hub.snapshot().tape.iter().map(|line| line.text.clone()).collect();
-        assert!(lines.iter().all(|line| !line.to_lowercase().contains("plover")), "{lines:?}");
-        assert!(lines.iter().any(|line| line.contains("{:lookup}")), "{lines:?}");
+        let lines: Vec<String> = hub
+            .snapshot()
+            .tape
+            .iter()
+            .map(|line| line.text.clone())
+            .collect();
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.to_lowercase().contains("plover")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("{:lookup}")),
+            "{lines:?}"
+        );
     }
 
     #[test]
     #[allow(clippy::literal_string_with_formatting_args)] // markers, not formats
     fn a_transparent_stroke_sent_on_its_first_key_up_leaves_the_text_and_spacing_alone() {
-        let (mut engine, hub) = engine_with_hub(
-            r#"{"TKOG": "dog", "KAT": "{:transparent}{:firstup}{plover:focus}"}"#,
-        );
+        let (mut engine, hub) =
+            engine_with_hub(r#"{"TKOG": "dog", "KAT": "{:transparent}{:firstup}{plover:focus}"}"#);
         engine.translate(stroke_of("TKOG"), false);
         let [k, a, t] = kat_keys(&engine);
         let now = Instant::now();
@@ -1799,7 +1852,11 @@ mod tests {
             engine.lookup_input(LookupKey::Char(c));
         }
         assert_eq!(engine.translator.text(), "");
-        assert_eq!(hub.snapshot().tape.len(), 1, "only the lookup stroke itself");
+        assert_eq!(
+            hub.snapshot().tape.len(),
+            1,
+            "only the lookup stroke itself"
+        );
     }
 
     /// Strike the stroke written `text`, all its keys down and up together.
@@ -1839,7 +1896,11 @@ mod tests {
         );
         assert_eq!(state.control_seq, 1);
         strike(&mut engine, "KAT");
-        assert_eq!(hub.snapshot().control_seq, 2, "striking it again runs it again");
+        assert_eq!(
+            hub.snapshot().control_seq,
+            2,
+            "striking it again runs it again"
+        );
     }
 
     #[test]
@@ -1949,7 +2010,11 @@ mod tests {
         strike(&mut engine, "KAT");
         strike(&mut engine, "-B");
         strike(&mut engine, "-T");
-        assert_eq!(hub.snapshot().control_seq, 0, "the overlay control did not run");
+        assert_eq!(
+            hub.snapshot().control_seq,
+            0,
+            "the overlay control did not run"
+        );
         assert_eq!(engine.translator.text(), "cat -T");
         strike(&mut engine, "-B");
         strike(&mut engine, "*");

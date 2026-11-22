@@ -731,7 +731,13 @@ impl Chain {
     /// dictionaries in the order given, with a plugin at its own place among them. Nothing is
     /// read or parsed here, only merged, so it is what a reload costs when a file changed.
     #[must_use]
-    pub fn from_parts(files: &[PathBuf], parts: &Parts, cache_dir: &Path, layout: &Layout, trust: &Trust) -> Self {
+    pub fn from_parts(
+        files: &[PathBuf],
+        parts: &Parts,
+        cache_dir: &Path,
+        layout: &Layout,
+        trust: &Trust,
+    ) -> Self {
         let dict_only: Vec<PathBuf> = files
             .iter()
             .filter(|p| !is_plugin_file(p))
@@ -753,7 +759,9 @@ impl Chain {
         for path in files {
             if is_plugin_file(path) {
                 if !pending.is_empty() {
-                    steps.push(Step::Dict(Arc::new(parts.layered_trusting(&pending, trust))));
+                    steps.push(Step::Dict(Arc::new(
+                        parts.layered_trusting(&pending, trust),
+                    )));
                     pending.clear();
                 }
                 match load_one(path, &plugin_cache) {
@@ -765,7 +773,9 @@ impl Chain {
             }
         }
         if !pending.is_empty() {
-            steps.push(Step::Dict(Arc::new(parts.layered_trusting(&pending, trust))));
+            steps.push(Step::Dict(Arc::new(
+                parts.layered_trusting(&pending, trust),
+            )));
         }
         // Each plugin makes its reader on its own thread, `init` and all, side by side with the
         // others. The chain is wanted ready to read, so the first stroke after a load or a

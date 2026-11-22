@@ -70,7 +70,9 @@ pub fn spawn(frames: Sender<OverlaySnapshot>) {
                                 return; // the Wayland loop is gone
                             }
                         }
-                        tracing::warn!("daemon closed the overlay stream, exiting to be restarted with it");
+                        tracing::warn!(
+                            "daemon closed the overlay stream, exiting to be restarted with it"
+                        );
                         let _ = frames.send(OverlaySnapshot::default());
                         // Let the Wayland loop draw the hidden panel before the process ends
                         std::thread::sleep(Duration::from_millis(100));

@@ -569,7 +569,12 @@ mod tests {
     #[test]
     #[allow(clippy::literal_string_with_formatting_args)] // commands, not formats
     fn commands_are_written_with_their_native_names() {
-        let tape = |command: &str| describe(Some(&StenoOutput::Ops(vec![OutputOp::Command(command.into())])), false);
+        let tape = |command: &str| {
+            describe(
+                Some(&StenoOutput::Ops(vec![OutputOp::Command(command.into())])),
+                false,
+            )
+        };
         for (command, shown) in [
             ("toggle", "{:engine:toggle}"),
             ("SUSPEND", "{:engine:suspend}"),

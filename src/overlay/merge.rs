@@ -701,7 +701,9 @@ mod tests {
     fn a_column_of_its_own_changes_no_group_and_is_in_none() {
         use crate::config::OverlayPlacement;
         use crate::steno::layout::KeySpec;
-        let layout = Layout::plover().with_extra(KeySpec::new('+', "join")).unwrap();
+        let layout = Layout::plover()
+            .with_extra(KeySpec::new('+', "join"))
+            .unwrap();
         let config = OverlayConfig::default();
         let mut with_column = config.clone();
         with_column.overlay_overrides.insert(
@@ -720,7 +722,11 @@ mod tests {
         // The star is no neighbour of the left hand once a column sits between them, the
         // way a column shows no key next to it merging
         let tol = widened.keys[1].w * NEIGHBOUR_GAP;
-        assert!(adjacent(&plain.keys[5], &plain.keys[9], plain.keys[1].w * NEIGHBOUR_GAP));
+        assert!(adjacent(
+            &plain.keys[5],
+            &plain.keys[9],
+            plain.keys[1].w * NEIGHBOUR_GAP
+        ));
         assert!(!adjacent(&widened.keys[5], &widened.keys[9], tol));
         assert!(!adjacent(&widened.keys[6], &widened.keys[9], tol));
         // A group of the user's own naming the star beside the left hand is then an error
@@ -1006,7 +1012,10 @@ mod tests {
             merge_defaults: false,
             ..OverlayConfig::default()
         };
-        assert!(resolve(&none, &layout, &keyboard).0.is_empty(), "expected none");
+        assert!(
+            resolve(&none, &layout, &keyboard).0.is_empty(),
+            "expected none"
+        );
         let only_custom = OverlayConfig {
             merge_defaults: false,
             merges: vec![KeyMerge {
@@ -1022,7 +1031,10 @@ mod tests {
             merge_keys: false,
             ..only_custom
         };
-        assert!(resolve(&off, &layout, &keyboard).0.is_empty(), "expected none");
+        assert!(
+            resolve(&off, &layout, &keyboard).0.is_empty(),
+            "expected none"
+        );
     }
 
     #[test]

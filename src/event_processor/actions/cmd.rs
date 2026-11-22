@@ -77,13 +77,19 @@ pub(crate) fn run_as_user(cmd: &str, config_dir: &Path, uid: Option<u32>) -> Res
     let Some(uid) = uid.filter(|uid| *uid != 0) else {
         return Err("no non-root user id to run it as".to_string());
     };
-    user_info(uid).filter(|(name, _)| name != "root").map_or_else(
-        || Err(format!("user id {uid} has no non-root passwd entry to run it as")),
-        |user| {
-            launch(cmd, config_dir, Some(user));
-            Ok(())
-        },
-    )
+    user_info(uid)
+        .filter(|(name, _)| name != "root")
+        .map_or_else(
+            || {
+                Err(format!(
+                    "user id {uid} has no non-root passwd entry to run it as"
+                ))
+            },
+            |user| {
+                launch(cmd, config_dir, Some(user));
+                Ok(())
+            },
+        )
 }
 
 pub fn emit_cmd(cmd: &str, ctx: &HandleContext<'_>) -> (EmitResult, Option<HeldAction>) {
@@ -134,7 +140,15 @@ mod tests {
         assert_eq!(cmd, "/home/fib/bin/pw.sh x");
         assert_eq!(
             argv(&built),
-            ["runuser", "-u", "fib", "--", "/bin/bash", "-c", "/home/fib/bin/pw.sh x"]
+            [
+                "runuser",
+                "-u",
+                "fib",
+                "--",
+                "/bin/bash",
+                "-c",
+                "/home/fib/bin/pw.sh x"
+            ]
         );
         assert_eq!(built.get_current_dir(), Some(Path::new("/c")));
     }
@@ -143,8 +157,16 @@ mod tests {
     fn running_as_the_user_is_refused_without_a_non_root_user() {
         let why = |uid| run_as_user("true", Path::new("/"), uid).unwrap_err();
         assert!(why(None).contains("no non-root user id"), "{}", why(None));
-        assert!(why(Some(0)).contains("no non-root user id"), "{}", why(Some(0)));
-        assert!(why(Some(u32::MAX - 1)).contains("no non-root passwd entry"), "{}", why(Some(u32::MAX - 1)));
+        assert!(
+            why(Some(0)).contains("no non-root user id"),
+            "{}",
+            why(Some(0))
+        );
+        assert!(
+            why(Some(u32::MAX - 1)).contains("no non-root passwd entry"),
+            "{}",
+            why(Some(u32::MAX - 1))
+        );
     }
 
     #[test]

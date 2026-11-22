@@ -16,14 +16,18 @@ fn stroke_of(text: &str) -> u32 {
 }
 
 fn commands() -> HashMap<String, String> {
-    HashMap::from([("password".to_string(), "/home/u/password.sh".to_string()), ("lock".to_string(), "loginctl lock-session".to_string())])
+    HashMap::from([
+        ("password".to_string(), "/home/u/password.sh".to_string()),
+        ("lock".to_string(), "loginctl lock-session".to_string()),
+    ])
 }
 
 /// An engine over `json`, its dictionary trusted or not, running commands into the recorder.
 fn engine(json: &str, trusted: bool) -> (StenoEngine, Arc<Recorder>) {
     let mut dict = Dictionary::default();
     dict.merge_json(json, &Layout::plover()).unwrap();
-    let mut engine = StenoEngine::for_tests(if trusted { dict.trusted() } else { dict }, &HashMap::new());
+    let mut engine =
+        StenoEngine::for_tests(if trusted { dict.trusted() } else { dict }, &HashMap::new());
     let recorder = Arc::new(Recorder::default());
     engine.launcher = Launcher::new(commands(), recorder.clone());
     engine.hub = Box::leak(Box::default());
@@ -73,16 +77,29 @@ fn an_unknown_name_runs_nothing_and_the_stroke_still_does_nothing_else() {
 
 #[test]
 fn a_stroke_of_only_run_commands_is_transparent_on_the_tape_and_not_in_the_history() {
-    let (mut engine, _) = engine(r#"{"PWR": "{:run:password}", "KAT": "cat", "-S": "{^s}"}"#, false);
+    let (mut engine, _) = engine(
+        r#"{"PWR": "{:run:password}", "KAT": "cat", "-S": "{^s}"}"#,
+        false,
+    );
     let hub = engine.hub;
     hit(&mut engine, "KAT");
     let before = format!("{:?}", journal::lock(&engine.translator.history()).clone());
-    assert!(engine.translator.is_command(stroke_of("PWR")), "never repeats when held");
+    assert!(
+        engine.translator.is_command(stroke_of("PWR")),
+        "never repeats when held"
+    );
     hit(&mut engine, "PWR");
     assert!(engine.translator.was_transparent());
-    assert_eq!(format!("{:?}", journal::lock(&engine.translator.history()).clone()), before);
+    assert_eq!(
+        format!("{:?}", journal::lock(&engine.translator.history()).clone()),
+        before
+    );
     let tape = hub.snapshot().tape;
-    assert!(tape[1].transparent && tape[1].text.contains("run:password"), "{:?}", tape[1]);
+    assert!(
+        tape[1].transparent && tape[1].text.contains("run:password"),
+        "{:?}",
+        tape[1]
+    );
     // The join carries on across it: the suffix still attaches to cat
     hit(&mut engine, "-S");
     assert_eq!(engine.translator.text().trim(), "cats");
@@ -104,7 +121,10 @@ fn run_beside_text_types_the_text_and_is_an_ordinary_stroke() {
     assert_eq!(typed(hit(&mut engine, "PWR")).trim(), "hello");
     assert!(!engine.translator.was_transparent());
     assert_eq!(ran.ran(), ["loginctl lock-session"]);
-    assert!(engine.translator.is_command(stroke_of("PWR")), "still never repeats");
+    assert!(
+        engine.translator.is_command(stroke_of("PWR")),
+        "still never repeats"
+    );
 }
 
 #[test]
@@ -128,7 +148,11 @@ fn an_untrusted_dictionary_types_nothing_and_runs_nothing_for_inline_shell() {
     for outline in ["A", "E", "O", "U"] {
         assert_eq!(typed(hit(&mut engine, outline)), "", "{outline}");
     }
-    assert_eq!(typed(hit(&mut engine, "KAT")).trim(), "cats", "the rest of the entry still types");
+    assert_eq!(
+        typed(hit(&mut engine, "KAT")).trim(),
+        "cats",
+        "the rest of the entry still types"
+    );
     assert!(ran.ran().is_empty(), "{:?}", ran.ran());
 }
 
@@ -138,7 +162,11 @@ fn the_tape_never_shows_a_shell_command_line() {
     let hub = engine.hub;
     hit(&mut engine, "A");
     let tape = hub.snapshot().tape;
-    assert!(tape[0].transparent && !tape[0].text.contains("secret") && tape[0].text.contains("shell"), "{:?}", tape[0]);
+    assert!(
+        tape[0].transparent && !tape[0].text.contains("secret") && tape[0].text.contains("shell"),
+        "{:?}",
+        tape[0]
+    );
 }
 
 #[test]
@@ -146,19 +174,39 @@ fn the_winning_file_decides_not_the_file_an_entry_was_shadowed_from() {
     let rig = Rig::new("trust-winner");
     let steno = rig.config_dir.join("steno");
     fs::create_dir_all(&steno).unwrap();
-    fs::write(steno.join("00-user.json"), r#"{"A": "{:shell:from-user}", "E": "{:run:password}"}"#).unwrap();
+    fs::write(
+        steno.join("00-user.json"),
+        r#"{"A": "{:shell:from-user}", "E": "{:run:password}"}"#,
+    )
+    .unwrap();
     fs::write(steno.join("theory.json"), r#"{"A": "{:shell:from-theory}", "E": "{:shell:from-theory-E}", "O": "{:shell:theory-only}"}"#).unwrap();
     let run = |order: &[&str], trust: Option<Vec<String>>| -> Vec<String> {
         let recorder = Arc::new(Recorder::default());
         let mut config = rig.config();
-        config.dictionaries = order.iter().map(|name| steno.join(name).to_string_lossy().into_owned()).collect();
-        let names = trust.unwrap_or_else(|| crate::config::config::DEFAULT_TRUSTED_DICTIONARIES.map(String::from).to_vec());
+        config.dictionaries = order
+            .iter()
+            .map(|name| steno.join(name).to_string_lossy().into_owned())
+            .collect();
+        let names = trust.unwrap_or_else(|| {
+            crate::config::config::DEFAULT_TRUSTED_DICTIONARIES
+                .map(String::from)
+                .to_vec()
+        });
         let runtime = Runtime {
             trust: Trust::new(&steno, &names),
             launcher: Launcher::new(commands(), recorder.clone()),
         };
         let history = journal::new_shared(crate::steno::formatter::Formatter::default());
-        let mut engine = StenoEngine::from_config_with(&config, true, &rig.config_dir, None, &history, "t", runtime).unwrap();
+        let mut engine = StenoEngine::from_config_with(
+            &config,
+            true,
+            &rig.config_dir,
+            None,
+            &history,
+            "t",
+            runtime,
+        )
+        .unwrap();
         engine.wait_until_loaded();
         for outline in ["A", "E", "O"] {
             hit(&mut engine, outline);
@@ -166,13 +214,25 @@ fn the_winning_file_decides_not_the_file_an_entry_was_shadowed_from() {
         recorder.ran()
     };
     // The user's file first: its entries win and are trusted; the theory's O has no rival and is ignored
-    assert_eq!(run(&["00-user.json", "theory.json"], None), ["from-user", "/home/u/password.sh"]);
+    assert_eq!(
+        run(&["00-user.json", "theory.json"], None),
+        ["from-user", "/home/u/password.sh"]
+    );
     // The theory first: it wins A and E and is untrusted, so the trusted entries underneath it never run
-    assert_eq!(run(&["theory.json", "00-user.json"], None), Vec::<String>::new());
+    assert_eq!(
+        run(&["theory.json", "00-user.json"], None),
+        Vec::<String>::new()
+    );
     // Trusting the theory by name, and no longer the user's file
     let by_name = Some(vec!["theory.json".to_string()]);
-    assert_eq!(run(&["00-user.json", "theory.json"], by_name.clone()), ["/home/u/password.sh", "theory-only"]);
-    assert_eq!(run(&["theory.json", "00-user.json"], by_name), ["from-theory", "from-theory-E", "theory-only"]);
+    assert_eq!(
+        run(&["00-user.json", "theory.json"], by_name.clone()),
+        ["/home/u/password.sh", "theory-only"]
+    );
+    assert_eq!(
+        run(&["theory.json", "00-user.json"], by_name),
+        ["from-theory", "from-theory-E", "theory-only"]
+    );
 }
 
 #[test]
@@ -182,15 +242,28 @@ fn a_dictionary_names_files_in_a_folder_called_user_as_trusted_by_default() {
     fs::create_dir_all(steno.join("user")).unwrap();
     fs::create_dir_all(steno.join("lyk/user")).unwrap();
     fs::write(steno.join("user/mine.json"), r#"{"A": "{:shell:mine}"}"#).unwrap();
-    fs::write(steno.join("lyk/user/theirs.json"), r#"{"E": "{:shell:theirs}"}"#).unwrap();
+    fs::write(
+        steno.join("lyk/user/theirs.json"),
+        r#"{"E": "{:shell:theirs}"}"#,
+    )
+    .unwrap();
     let recorder = Arc::new(Recorder::default());
     let mut config = rig.config();
     config.dictionaries = Vec::new();
-    let runtime = Runtime { trust: Trust::standard(&steno), launcher: Launcher::new(commands(), recorder.clone()) };
+    let runtime = Runtime {
+        trust: Trust::standard(&steno),
+        launcher: Launcher::new(commands(), recorder.clone()),
+    };
     let history = journal::new_shared(crate::steno::formatter::Formatter::default());
-    let mut engine = StenoEngine::from_config_with(&config, true, &rig.config_dir, None, &history, "t", runtime).unwrap();
+    let mut engine =
+        StenoEngine::from_config_with(&config, true, &rig.config_dir, None, &history, "t", runtime)
+            .unwrap();
     engine.wait_until_loaded();
     hit(&mut engine, "A");
     hit(&mut engine, "E");
-    assert_eq!(recorder.ran(), ["mine"], "only a folder at the top of the steno folder is trusted");
+    assert_eq!(
+        recorder.ran(),
+        ["mine"],
+        "only a folder at the top of the steno folder is trusted"
+    );
 }

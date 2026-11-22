@@ -68,7 +68,10 @@ pub fn classify(name: &str, param: &str) -> Option<(Kind, String)> {
     } else {
         return None;
     };
-    Some((kind, if kind == Kind::Run { arg.trim() } else { arg }.to_string()))
+    Some((
+        kind,
+        if kind == Kind::Run { arg.trim() } else { arg }.to_string(),
+    ))
 }
 
 /// Every run and shell command in an entry's text, in order.
@@ -80,14 +83,21 @@ pub fn found_in(text: &str) -> Vec<Found> {
             let meta = unescape_atom(get_meta(m.as_str())?);
             let parsed = parse_meta(&meta)?;
             let (kind, arg) = classify(&parsed.name, parsed.param)?;
-            Some(Found { start: m.start(), end: m.end(), kind, arg })
+            Some(Found {
+                start: m.start(),
+                end: m.end(),
+                kind,
+                arg,
+            })
         })
         .collect()
 }
 
 /// Whether `text` could hold a shell command, which is what the lookup path asks first.
 fn may_have_shell(text: &str) -> bool {
-    text.as_bytes().windows(5).any(|window| window.eq_ignore_ascii_case(b"shell"))
+    text.as_bytes()
+        .windows(5)
+        .any(|window| window.eq_ignore_ascii_case(b"shell"))
 }
 
 /// `text` without its inline shell commands, or `None` when it has none. Nothing left of an entry
@@ -97,7 +107,10 @@ pub fn strip_shells(text: &str) -> Option<String> {
     if !may_have_shell(text) {
         return None;
     }
-    let shells: Vec<Found> = found_in(text).into_iter().filter(|f| f.kind == Kind::Shell).collect();
+    let shells: Vec<Found> = found_in(text)
+        .into_iter()
+        .filter(|f| f.kind == Kind::Shell)
+        .collect();
     if shells.is_empty() {
         return None;
     }
@@ -108,7 +121,11 @@ pub fn strip_shells(text: &str) -> Option<String> {
         at = found.end;
     }
     kept.push_str(&text[at..]);
-    Some(if kept.trim().is_empty() { "{:transparent}".to_string() } else { kept })
+    Some(if kept.trim().is_empty() {
+        "{:transparent}".to_string()
+    } else {
+        kept
+    })
 }
 
 /// Whether the entry is nothing but run and shell commands (and `{:firstup}` / `{:transparent}`
@@ -129,7 +146,10 @@ pub fn is_only_commands(text: &str) -> bool {
         };
         if classify(&parsed.name, parsed.param).is_some() {
             commands += 1;
-        } else if !["firstup", "transparent"].iter().any(|marker| parsed.name.eq_ignore_ascii_case(marker)) {
+        } else if !["firstup", "transparent"]
+            .iter()
+            .any(|marker| parsed.name.eq_ignore_ascii_case(marker))
+        {
             return false;
         }
     }
@@ -172,7 +192,10 @@ pub fn meta_shell(ctx: &Context, param: &str) -> Action {
 /// What is wrong with the argument of `{:run:}`, `{:shell:}`.
 #[must_use]
 pub fn check_argument(param: &str, _: &super::layout::Layout) -> Option<String> {
-    param.trim().is_empty().then(|| "has no argument, so it does nothing".to_string())
+    param
+        .trim()
+        .is_empty()
+        .then(|| "has no argument, so it does nothing".to_string())
 }
 
 /// The dictionary files trusted to run inline shell commands.
@@ -193,7 +216,11 @@ impl Trust {
         for name in names {
             let name = name.trim().trim_end_matches('/');
             let path = Path::new(name);
-            if name.is_empty() || path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            if name.is_empty()
+                || path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
                 continue;
             }
             trust.names.push(name.to_string());
@@ -205,7 +232,10 @@ impl Trust {
     /// The default: the user's own file `00-user.json` and the folder `user`.
     #[must_use]
     pub fn standard(steno_dir: &Path) -> Self {
-        let names: Vec<String> = crate::config::config::DEFAULT_TRUSTED_DICTIONARIES.iter().map(|n| (*n).to_string()).collect();
+        let names: Vec<String> = crate::config::config::DEFAULT_TRUSTED_DICTIONARIES
+            .iter()
+            .map(|n| (*n).to_string())
+            .collect();
         Self::new(steno_dir, &names)
     }
 
@@ -213,7 +243,10 @@ impl Trust {
     #[must_use]
     pub fn of_config(config: &crate::config::Config, config_dir: &Path) -> Self {
         let steno_dir = super::setup::steno_dir(config_dir);
-        config.trusted_dictionaries.as_ref().map_or_else(|| Self::standard(&steno_dir), |names| Self::new(&steno_dir, names))
+        config.trusted_dictionaries.as_ref().map_or_else(
+            || Self::standard(&steno_dir),
+            |names| Self::new(&steno_dir, names),
+        )
     }
 
     /// Whether `file` is trusted: it is a named file, or inside a named folder.
@@ -251,7 +284,8 @@ impl Runner for UserRunner {
     fn run(&self, command: &str) {
         let (command, dir, uid) = (command.to_string(), self.config_dir.clone(), self.uid);
         std::thread::spawn(move || {
-            if let Err(why) = crate::event_processor::actions::cmd::run_as_user(&command, &dir, uid) {
+            if let Err(why) = crate::event_processor::actions::cmd::run_as_user(&command, &dir, uid)
+            {
                 tracing::error!("steno command `{command}` not run: {why}");
             }
         });
@@ -269,14 +303,20 @@ pub struct Launcher {
 
 impl std::fmt::Debug for Launcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Launcher").field("commands", &self.commands.keys().collect::<Vec<_>>()).finish_non_exhaustive()
+        f.debug_struct("Launcher")
+            .field("commands", &self.commands.keys().collect::<Vec<_>>())
+            .finish_non_exhaustive()
     }
 }
 
 impl Launcher {
     #[must_use]
     pub fn new(commands: HashMap<String, String>, runner: Arc<dyn Runner>) -> Self {
-        Self { commands: Arc::new(commands), runner, unknown: HashSet::new() }
+        Self {
+            commands: Arc::new(commands),
+            runner,
+            unknown: HashSet::new(),
+        }
     }
 
     /// `{:run:NAME}`: the named command, or one error log for a name that isn't defined.
@@ -287,7 +327,10 @@ impl Launcher {
             None if self.unknown.insert(name.to_string()) => {
                 let mut known: Vec<&str> = self.commands.keys().map(String::as_str).collect();
                 known.sort_unstable();
-                tracing::error!("steno `{{:run:{name}}}`: no command `{name}` in the config's commands ({})", known.join(", "));
+                tracing::error!(
+                    "steno `{{:run:{name}}}`: no command `{name}` in the config's commands ({})",
+                    known.join(", ")
+                );
             }
             None => {}
         }
@@ -318,16 +361,28 @@ impl Runtime {
     /// For the session user `uid`, from the config.
     #[must_use]
     pub fn for_user(config: &crate::config::Config, config_dir: &Path, uid: u32) -> Self {
-        let runner = Arc::new(UserRunner { config_dir: config_dir.to_path_buf(), uid: Some(uid) });
-        Self { trust: Trust::of_config(config, config_dir), launcher: Launcher::new(config.commands.clone(), runner) }
+        let runner = Arc::new(UserRunner {
+            config_dir: config_dir.to_path_buf(),
+            uid: Some(uid),
+        });
+        Self {
+            trust: Trust::of_config(config, config_dir),
+            launcher: Launcher::new(config.commands.clone(), runner),
+        }
     }
 
     /// No commands, the standard trust, and a runner that refuses: what a layer built without a
     /// config has.
     #[must_use]
     pub fn standard(config_dir: &Path) -> Self {
-        let runner = Arc::new(UserRunner { config_dir: config_dir.to_path_buf(), uid: None });
-        Self { trust: Trust::standard(&super::setup::steno_dir(config_dir)), launcher: Launcher::new(HashMap::new(), runner) }
+        let runner = Arc::new(UserRunner {
+            config_dir: config_dir.to_path_buf(),
+            uid: None,
+        });
+        Self {
+            trust: Trust::standard(&super::setup::steno_dir(config_dir)),
+            launcher: Launcher::new(HashMap::new(), runner),
+        }
     }
 }
 
@@ -355,7 +410,10 @@ pub(crate) mod tests {
     #[test]
     fn every_spelling_of_a_command_is_found_with_its_escapes_undone() {
         let text = r"a{:run: password }{:shell:echo \{x\}}{PLOVER:SHELL:ls -l}{:command:shell:id}{plover:run:b}";
-        let found: Vec<(Kind, String)> = found_in(text).into_iter().map(|f| (f.kind, f.arg)).collect();
+        let found: Vec<(Kind, String)> = found_in(text)
+            .into_iter()
+            .map(|f| (f.kind, f.arg))
+            .collect();
         assert_eq!(
             found,
             [
@@ -366,14 +424,26 @@ pub(crate) mod tests {
                 (Kind::Run, "b".to_string()),
             ]
         );
-        assert!(found_in("shell{:tape:toggle}{^}run").is_empty(), "plain text and other metas are not commands");
+        assert!(
+            found_in("shell{:tape:toggle}{^}run").is_empty(),
+            "plain text and other metas are not commands"
+        );
     }
 
     #[test]
     fn stripping_cuts_out_only_the_shell_commands() {
-        assert_eq!(strip_shells("hi{:shell:rm -rf x} there").as_deref(), Some("hi there"));
-        assert_eq!(strip_shells("{PLOVER:SHELL:x}").as_deref(), Some("{:transparent}"));
-        assert_eq!(strip_shells("{:run:a}{:shell:x}").as_deref(), Some("{:run:a}"));
+        assert_eq!(
+            strip_shells("hi{:shell:rm -rf x} there").as_deref(),
+            Some("hi there")
+        );
+        assert_eq!(
+            strip_shells("{PLOVER:SHELL:x}").as_deref(),
+            Some("{:transparent}")
+        );
+        assert_eq!(
+            strip_shells("{:run:a}{:shell:x}").as_deref(),
+            Some("{:run:a}")
+        );
         assert_eq!(strip_shells("{:run:a}"), None);
         assert_eq!(strip_shells("the shell"), None);
     }
@@ -393,12 +463,28 @@ pub(crate) mod tests {
         let trust = Trust::standard(steno);
         assert!(trust.is_trusted(Path::new("/c/steno/00-user.json")));
         assert!(trust.is_trusted(Path::new("/c/steno/user/any/deeper.json")));
-        assert!(!trust.is_trusted(Path::new("/c/steno/lyk/00-user.json")), "a theory can't bring the name along");
+        assert!(
+            !trust.is_trusted(Path::new("/c/steno/lyk/00-user.json")),
+            "a theory can't bring the name along"
+        );
         assert!(!trust.is_trusted(Path::new("/c/steno/lyk/user/x.json")));
         assert!(!trust.is_trusted(Path::new("/c/steno/user-extra/x.json")));
-        let own = Trust::new(steno, &["mine.json".to_string(), "../x".to_string(), "team/".to_string()]);
-        assert!(own.is_trusted(Path::new("/c/steno/team/a.json")) && own.is_trusted(Path::new("/c/steno/mine.json")));
-        assert!(!own.is_trusted(Path::new("/c/steno/00-user.json")), "a set list replaces the default");
+        let own = Trust::new(
+            steno,
+            &[
+                "mine.json".to_string(),
+                "../x".to_string(),
+                "team/".to_string(),
+            ],
+        );
+        assert!(
+            own.is_trusted(Path::new("/c/steno/team/a.json"))
+                && own.is_trusted(Path::new("/c/steno/mine.json"))
+        );
+        assert!(
+            !own.is_trusted(Path::new("/c/steno/00-user.json")),
+            "a set list replaces the default"
+        );
         assert_eq!(own.describe(), "mine.json, team");
     }
 
@@ -406,22 +492,41 @@ pub(crate) mod tests {
     fn the_config_sets_the_commands_and_the_trust_and_a_new_config_replaces_both() {
         let parse = |text: &str| ron::from_str::<crate::config::Config>(text).unwrap();
         let first = parse(r#"(commands: { "password": "~/p.sh" })"#);
-        let second = parse(r#"(commands: { "other": "o" }, trusted_dictionaries: Some(["mine.json", "team/"]))"#);
+        let second = parse(
+            r#"(commands: { "other": "o" }, trusted_dictionaries: Some(["mine.json", "team/"]))"#,
+        );
         let dir = Path::new("/c");
-        let (one, two) = (Runtime::for_user(&first, dir, 1000), Runtime::for_user(&second, dir, 1000));
-        assert_eq!(one.launcher.commands.get("password").map(String::as_str), Some("~/p.sh"));
-        assert_eq!(two.launcher.commands.keys().collect::<Vec<_>>(), ["other"], "a reload builds from the new table");
+        let (one, two) = (
+            Runtime::for_user(&first, dir, 1000),
+            Runtime::for_user(&second, dir, 1000),
+        );
+        assert_eq!(
+            one.launcher.commands.get("password").map(String::as_str),
+            Some("~/p.sh")
+        );
+        assert_eq!(
+            two.launcher.commands.keys().collect::<Vec<_>>(),
+            ["other"],
+            "a reload builds from the new table"
+        );
         assert_eq!(one.trust.describe(), "00-user.json, user");
         assert_eq!(two.trust.describe(), "mine.json, team");
         let none = Runtime::for_user(&parse("(trusted_dictionaries: Some([]))"), dir, 1000);
-        assert_eq!(none.trust.describe(), "none", "an empty list trusts nothing");
+        assert_eq!(
+            none.trust.describe(),
+            "none",
+            "an empty list trusts nothing"
+        );
         assert!(parse("()").commands.is_empty());
     }
 
     #[test]
     fn an_unknown_name_is_logged_once_and_runs_nothing() {
         let recorder = Arc::new(Recorder::default());
-        let mut launcher = Launcher::new(HashMap::from([("a".to_string(), "do-a".to_string())]), recorder.clone());
+        let mut launcher = Launcher::new(
+            HashMap::from([("a".to_string(), "do-a".to_string())]),
+            recorder.clone(),
+        );
         launcher.run_named("nope");
         launcher.run_named("nope");
         launcher.run_named(" a ");

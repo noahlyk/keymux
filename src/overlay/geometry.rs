@@ -518,8 +518,14 @@ mod tests {
             .with_extra(KeySpec::new('^', "caret"))
             .unwrap();
         let overrides = HashMap::from([
-            ("+".to_string(), OverlayPlacement::ColumnBefore("*".to_string())),
-            ("^".to_string(), OverlayPlacement::ColumnBefore("*".to_string())),
+            (
+                "+".to_string(),
+                OverlayPlacement::ColumnBefore("*".to_string()),
+            ),
+            (
+                "^".to_string(),
+                OverlayPlacement::ColumnBefore("*".to_string()),
+            ),
         ]);
         let keyboard = Keyboard::new(0.0, 0.0, 300.0, &layout, &overrides);
         let step = step_of(&keyboard);

@@ -290,7 +290,10 @@ impl Parts {
     #[must_use]
     pub fn layered_trusting(&self, files: &[PathBuf], trust: &Trust) -> Dictionary {
         Dictionary::layered_trusting(files.iter().filter_map(|path| {
-            Some((self.by_path.get(path)?.dict.as_deref()?, trust.is_trusted(path)))
+            Some((
+                self.by_path.get(path)?.dict.as_deref()?,
+                trust.is_trusted(path),
+            ))
         }))
     }
 
@@ -303,7 +306,9 @@ impl Parts {
             .filter(|path| !trust.is_trusted(path))
             .filter_map(|path| {
                 let part = self.by_path.get(path)?;
-                let count = *part.shells.get_or_init(|| part.dict.as_deref().map_or(0, Dictionary::shell_entries));
+                let count = *part
+                    .shells
+                    .get_or_init(|| part.dict.as_deref().map_or(0, Dictionary::shell_entries));
                 (count > 0).then(|| (path.clone(), count))
             })
             .collect()

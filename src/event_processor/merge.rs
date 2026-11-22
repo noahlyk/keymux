@@ -228,7 +228,9 @@ impl<M: Member> Merge<M> {
 }
 
 fn key_event(code: u16, value: i32, at: SystemTime) -> InputEvent {
-    let since = at.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
+    let since = at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
     InputEvent::from(libc::input_event {
         time: libc::timeval {
             tv_sec: i64::try_from(since.as_secs()).unwrap_or(0),
@@ -313,19 +315,30 @@ impl<M: Member> Source for Merge<M> {
             i32::try_from(wait.as_nanos().div_ceil(1_000_000)).unwrap_or(i32::MAX)
         });
         self.pollfds.clear();
-        self.pollfds.extend(self.slots.iter().flatten().map(|slot| libc::pollfd {
-            fd: slot.member.poll_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        }));
+        self.pollfds
+            .extend(self.slots.iter().flatten().map(|slot| libc::pollfd {
+                fd: slot.member.poll_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            }));
         self.pollfds.push(libc::pollfd {
             fd: bell.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         });
         // SAFETY: `pollfds` holds exactly `len` valid, initialized entries
-        unsafe { libc::poll(self.pollfds.as_mut_ptr(), self.pollfds.len() as libc::nfds_t, millis) };
-        if self.pollfds.last().is_some_and(|bell| bell.revents & libc::POLLIN != 0) {
+        unsafe {
+            libc::poll(
+                self.pollfds.as_mut_ptr(),
+                self.pollfds.len() as libc::nfds_t,
+                millis,
+            )
+        };
+        if self
+            .pollfds
+            .last()
+            .is_some_and(|bell| bell.revents & libc::POLLIN != 0)
+        {
             // Silenced before the signal is taken, so a ring after the take is never lost
             bell.silence();
         }

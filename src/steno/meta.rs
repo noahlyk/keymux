@@ -229,8 +229,14 @@ fn run_lookup(ctx: &Context, param: &str) -> Action {
 }
 
 fn check_command(param: &str, _: &Layout) -> Option<String> {
-    let name = param.split(':').next().unwrap_or_default().trim().to_lowercase();
-    (!ENGINE_COMMANDS.contains(&name.as_str())).then(|| format!("`{name}` is not an engine command"))
+    let name = param
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    (!ENGINE_COMMANDS.contains(&name.as_str()))
+        .then(|| format!("`{name}` is not an engine command"))
 }
 
 fn check_key_combo(param: &str, _: &Layout) -> Option<String> {
@@ -238,7 +244,9 @@ fn check_key_combo(param: &str, _: &Layout) -> Option<String> {
 }
 
 fn check_case(param: &str, _: &Layout) -> Option<String> {
-    Case::parse(param).is_none().then(|| format!("`{param}` is not a case"))
+    Case::parse(param)
+        .is_none()
+        .then(|| format!("`{param}` is not a case"))
 }
 
 fn check_back(param: &str, _: &Layout) -> Option<String> {
@@ -255,7 +263,9 @@ fn check_first_up(param: &str, layout: &Layout) -> Option<String> {
         return None;
     }
     let Some(keys) = param.strip_prefix("except=") else {
-        return Some(format!("`{param}` is not an argument of firstup (only `except=KEYS`)"));
+        return Some(format!(
+            "`{param}` is not an argument of firstup (only `except=KEYS`)"
+        ));
     };
     let keys = keys.trim();
     if keys.is_empty() {
@@ -306,7 +316,14 @@ pub(crate) const ENGINE_COMMANDS: [&str; 15] = [
 /// The legacy commands keymux has no counterpart for: written through the legacy spelling they
 /// are accepted and do nothing (`set_config` is the one other legacy-only command, and it does
 /// set the options of a session).
-pub(crate) const NO_EFFECT: [&str; 6] = ["resume", "add_translation", "suggestions", "configure", "focus", "quit"];
+pub(crate) const NO_EFFECT: [&str; 6] = [
+    "resume",
+    "add_translation",
+    "suggestions",
+    "configure",
+    "focus",
+    "quit",
+];
 
 /// The native spelling of an engine command (the text an action carries, or what follows the
 /// legacy `{PLOVER:`), or `None` for a command keymux has no native name for.
@@ -320,7 +337,9 @@ pub(crate) fn native_spelling(command: &str) -> Option<String> {
         "lookup" => Some("{:lookup}".to_string()),
         "deleted" => Some("{:deleted}".to_string()),
         "run" | "shell" => Some(format!("{{:{name}:{args}}}")),
-        super::engine_control::COMMAND | super::overlay_control::COMMAND => Some(format!("{{:{args}}}")),
+        super::engine_control::COMMAND | super::overlay_control::COMMAND => {
+            Some(format!("{{:{args}}}"))
+        }
         _ => None,
     }
 }
@@ -339,59 +358,304 @@ pub(crate) fn display_command(command: &str) -> String {
 
 /// Every meta by name. Names are matched without regard to case.
 pub(crate) static KNOWN: &[KnownMeta] = &[
-    KnownMeta { name: "attach", run: meta_attach, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
-    KnownMeta { name: "carry_capitalize", run: meta_carry_capitalize, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
-    KnownMeta { name: "case", run: meta_case, verbs: &[], bare_ok: true, whole_entry: false, check: check_case },
-    KnownMeta { name: "retro_case", run: meta_retro_case, verbs: &[], bare_ok: true, whole_entry: false, check: check_case },
-    KnownMeta { name: "comma", run: meta_comma, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
-    KnownMeta { name: "stop", run: meta_stop, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
-    KnownMeta { name: "command", run: run_command, verbs: &[], bare_ok: true, whole_entry: false, check: check_command },
-    KnownMeta { name: "glue", run: meta_glue, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
-    KnownMeta { name: "if_next_matches", run: meta_if_next_matches, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
-    KnownMeta { name: "key_combo", run: run_key_combo, verbs: &[], bare_ok: true, whole_entry: false, check: check_key_combo },
-    KnownMeta { name: "mode", run: meta_mode, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
-    KnownMeta { name: "retro_currency", run: meta_retro_currency, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
-    KnownMeta { name: "word_end", run: run_word_end, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
+    KnownMeta {
+        name: "attach",
+        run: meta_attach,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: fine,
+    },
+    KnownMeta {
+        name: "carry_capitalize",
+        run: meta_carry_capitalize,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: fine,
+    },
+    KnownMeta {
+        name: "case",
+        run: meta_case,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: check_case,
+    },
+    KnownMeta {
+        name: "retro_case",
+        run: meta_retro_case,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: check_case,
+    },
+    KnownMeta {
+        name: "comma",
+        run: meta_comma,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: fine,
+    },
+    KnownMeta {
+        name: "stop",
+        run: meta_stop,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: fine,
+    },
+    KnownMeta {
+        name: "command",
+        run: run_command,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: check_command,
+    },
+    KnownMeta {
+        name: "glue",
+        run: meta_glue,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: fine,
+    },
+    KnownMeta {
+        name: "if_next_matches",
+        run: meta_if_next_matches,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: fine,
+    },
+    KnownMeta {
+        name: "key_combo",
+        run: run_key_combo,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: check_key_combo,
+    },
+    KnownMeta {
+        name: "mode",
+        run: meta_mode,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: fine,
+    },
+    KnownMeta {
+        name: "retro_currency",
+        run: meta_retro_currency,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: fine,
+    },
+    KnownMeta {
+        name: "word_end",
+        run: run_word_end,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: fine,
+    },
     // keymux's own: `{:back}` or `{:back:3}` erases that many characters of what was typed
-    KnownMeta { name: "back", run: meta_back, verbs: &[], bare_ok: true, whole_entry: false, check: check_back },
+    KnownMeta {
+        name: "back",
+        run: meta_back,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: check_back,
+    },
     // keymux's own: `{:firstup}` marks a stroke the engine sends when its first key comes up,
     // `{:firstup:except=KEYS}` one that sends when the first key not in KEYS comes up (read by
     // `first_up_marker`). It types nothing and changes nothing around it.
-    KnownMeta { name: "firstup", run: marker, verbs: &[], bare_ok: true, whole_entry: false, check: check_first_up },
+    KnownMeta {
+        name: "firstup",
+        run: marker,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: check_first_up,
+    },
     // keymux's own stroke classes (see `Translator::stroke`): `{:transparent}` is a stroke the
     // history never sees, `{:barrier}` / `{:nobarrier}` say that a stroke does or does not
     // end the outline context. Like `firstup` they type nothing and change nothing around them.
-    KnownMeta { name: "transparent", run: marker, verbs: &[], bare_ok: true, whole_entry: false, check: check_no_argument },
-    KnownMeta { name: "barrier", run: marker, verbs: &[], bare_ok: true, whole_entry: false, check: check_no_argument },
-    KnownMeta { name: "nobarrier", run: marker, verbs: &[], bare_ok: true, whole_entry: false, check: check_no_argument },
+    KnownMeta {
+        name: "transparent",
+        run: marker,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: check_no_argument,
+    },
+    KnownMeta {
+        name: "barrier",
+        run: marker,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: check_no_argument,
+    },
+    KnownMeta {
+        name: "nobarrier",
+        run: marker,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: check_no_argument,
+    },
     // Lapwing's stitching: `{:stitch:A}` is a fingerspelled letter that joins with a dash
-    KnownMeta { name: "stitch", run: meta_stitch, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
-    KnownMeta { name: "stitch_last_word", run: meta_stitch_last_word, verbs: &[], bare_ok: true, whole_entry: false, check: fine },
+    KnownMeta {
+        name: "stitch",
+        run: meta_stitch,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: fine,
+    },
+    KnownMeta {
+        name: "stitch_last_word",
+        run: meta_stitch_last_word,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: fine,
+    },
     // keymux's own `{:engine:unload}` (see `engine_control`; it types nothing)
-    KnownMeta { name: super::engine_control::NAME, run: super::engine_control::meta_action, verbs: &["unload", "suspend", "toggle"], bare_ok: false, whole_entry: false, check: fine },
+    KnownMeta {
+        name: super::engine_control::NAME,
+        run: super::engine_control::meta_action,
+        verbs: &["unload", "suspend", "toggle"],
+        bare_ok: false,
+        whole_entry: false,
+        check: fine,
+    },
     // `{:deleted}` as an entry's whole text hides the outline in every later dictionary (see `dict`)
-    KnownMeta { name: "deleted", run: marker, verbs: &[], bare_ok: true, whole_entry: false, check: check_no_argument },
+    KnownMeta {
+        name: "deleted",
+        run: marker,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: check_no_argument,
+    },
     // keymux's own `{:outline:last}` and `{:outline:next}` (see `outline_control`; they type
     // their text through the engine, not here)
-    KnownMeta { name: super::outline_control::NAME, run: super::outline_control::meta_action, verbs: &["last", "next"], bare_ok: false, whole_entry: false, check: fine },
+    KnownMeta {
+        name: super::outline_control::NAME,
+        run: super::outline_control::meta_action,
+        verbs: &["last", "next"],
+        bare_ok: false,
+        whole_entry: false,
+        check: fine,
+    },
     // keymux's own `{:run:NAME}` (a command from the config) and `{:shell:CMD}` (a command line, only
     // run from a trusted dictionary): see `run_control`. They type nothing.
-    KnownMeta { name: super::run_control::RUN, run: super::run_control::meta_run, verbs: &[], bare_ok: true, whole_entry: false, check: super::run_control::check_argument },
-    KnownMeta { name: super::run_control::SHELL, run: super::run_control::meta_shell, verbs: &[], bare_ok: true, whole_entry: false, check: super::run_control::check_argument },
-    KnownMeta { name: "lookup", run: run_lookup, verbs: &["open", "close", "toggle"], bare_ok: true, whole_entry: false, check: fine },
+    KnownMeta {
+        name: super::run_control::RUN,
+        run: super::run_control::meta_run,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: super::run_control::check_argument,
+    },
+    KnownMeta {
+        name: super::run_control::SHELL,
+        run: super::run_control::meta_shell,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: super::run_control::check_argument,
+    },
+    KnownMeta {
+        name: "lookup",
+        run: run_lookup,
+        verbs: &["open", "close", "toggle"],
+        bare_ok: true,
+        whole_entry: false,
+        check: fine,
+    },
     // keymux's own runtime overlay controls: `{:overlay:hide}`, `{:tape:clear}`, ...
     // (see `overlay_control`; they type nothing)
-    KnownMeta { name: "overlay", run: |ctx, param| super::overlay_control::meta_action(ctx, "overlay", param), verbs: VIEW_VERBS, bare_ok: false, whole_entry: false, check: fine },
-    KnownMeta { name: "keyboard", run: |ctx, param| super::overlay_control::meta_action(ctx, "keyboard", param), verbs: VIEW_VERBS, bare_ok: false, whole_entry: false, check: fine },
-    KnownMeta { name: "tape", run: |ctx, param| super::overlay_control::meta_action(ctx, "tape", param), verbs: &["show", "hide", "toggle", "clear"], bare_ok: false, whole_entry: false, check: fine },
+    KnownMeta {
+        name: "overlay",
+        run: |ctx, param| super::overlay_control::meta_action(ctx, "overlay", param),
+        verbs: VIEW_VERBS,
+        bare_ok: false,
+        whole_entry: false,
+        check: fine,
+    },
+    KnownMeta {
+        name: "keyboard",
+        run: |ctx, param| super::overlay_control::meta_action(ctx, "keyboard", param),
+        verbs: VIEW_VERBS,
+        bare_ok: false,
+        whole_entry: false,
+        check: fine,
+    },
+    KnownMeta {
+        name: "tape",
+        run: |ctx, param| super::overlay_control::meta_action(ctx, "tape", param),
+        verbs: &["show", "hide", "toggle", "clear"],
+        bare_ok: false,
+        whole_entry: false,
+        check: fine,
+    },
     // The history macros are run by the translator when they are an entry's whole text (see
     // `mapping_to_macro`); anywhere else they do nothing
-    KnownMeta { name: "undo", run: nothing, verbs: &[], bare_ok: true, whole_entry: true, check: check_undo_count },
-    KnownMeta { name: "undo_word", run: nothing, verbs: &[], bare_ok: true, whole_entry: true, check: fine },
-    KnownMeta { name: "undo_or", run: nothing, verbs: &[], bare_ok: true, whole_entry: true, check: check_undo_or },
-    KnownMeta { name: "redo", run: nothing, verbs: &[], bare_ok: true, whole_entry: true, check: check_undo_count },
-    KnownMeta { name: "again", run: nothing, verbs: &[], bare_ok: true, whole_entry: true, check: fine },
-    KnownMeta { name: "swap", run: nothing, verbs: &[], bare_ok: true, whole_entry: true, check: fine },
+    KnownMeta {
+        name: "undo",
+        run: nothing,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: true,
+        check: check_undo_count,
+    },
+    KnownMeta {
+        name: "undo_word",
+        run: nothing,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: true,
+        check: fine,
+    },
+    KnownMeta {
+        name: "undo_or",
+        run: nothing,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: true,
+        check: check_undo_or,
+    },
+    KnownMeta {
+        name: "redo",
+        run: nothing,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: true,
+        check: check_undo_count,
+    },
+    KnownMeta {
+        name: "again",
+        run: nothing,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: true,
+        check: fine,
+    },
+    KnownMeta {
+        name: "swap",
+        run: nothing,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: true,
+        check: fine,
+    },
 ];
 
 /// The known meta called `name`, in any letter case.
@@ -734,7 +998,10 @@ mod tests {
         assert_eq!(first_up_marker("x{:firstup}"), Some((1, 11, None)));
         assert_eq!(first_up_marker("{:firstupx}{:firstup:other}"), None);
         assert_eq!(strip_first_up(text), "{^}{#super(1)}{^}");
-        assert_eq!(strip_first_up("{:firstup}{:transparent}{:firstup}"), "{:transparent}");
+        assert_eq!(
+            strip_first_up("{:firstup}{:transparent}{:firstup}"),
+            "{:transparent}"
+        );
         assert_eq!(strip_first_up("{:firstup:except=T}"), "");
     }
 

@@ -115,7 +115,11 @@ impl Session {
         last: bool,
     ) -> (Vec<String>, usize) {
         let width = width.max(20);
-        let prompt = format!("{}{}", style(PROMPT).magenta().bold().force_styling(color), self.query);
+        let prompt = format!(
+            "{}{}",
+            style(PROMPT).magenta().bold().force_styling(color),
+            self.query
+        );
         let cursor = measure_text_width(PROMPT) + measure_text_width(&self.query);
         let mut lines = vec![prompt];
 
@@ -133,7 +137,12 @@ impl Session {
         if body.len() > room {
             let hidden = body.len() - room + 1;
             body.truncate(room.saturating_sub(1));
-            body.push(style(format!("… {hidden} more lines")).dim().force_styling(color).to_string());
+            body.push(
+                style(format!("… {hidden} more lines"))
+                    .dim()
+                    .force_styling(color)
+                    .to_string(),
+            );
         }
         lines.extend(body);
         if !last {
@@ -223,12 +232,17 @@ fn draw(
     color: bool,
     last: bool,
 ) -> Result<usize> {
-    let (width, height) = terminal::size().map_or((80, 24), |(w, h)| (usize::from(w), usize::from(h)));
-    let (lines, cursor) = session.frame(lookup, color, width, height.saturating_sub(1).max(4), last);
+    let (width, height) =
+        terminal::size().map_or((80, 24), |(w, h)| (usize::from(w), usize::from(h)));
+    let (lines, cursor) =
+        session.frame(lookup, color, width, height.saturating_sub(1).max(4), last);
     queue!(out, MoveToColumn(0), Clear(ClearType::FromCursorDown))?;
     write!(out, "{}", lines.join("\r\n"))?;
     if lines.len() > 1 {
-        queue!(out, MoveUp(u16::try_from(lines.len() - 1).unwrap_or(u16::MAX)))?;
+        queue!(
+            out,
+            MoveUp(u16::try_from(lines.len() - 1).unwrap_or(u16::MAX))
+        )?;
     }
     queue!(out, MoveToColumn(u16::try_from(cursor).unwrap_or(u16::MAX)))?;
     out.flush()?;
@@ -293,7 +307,10 @@ mod tests {
 
     fn type_in(session: &mut Session, text: &str) {
         for c in text.chars() {
-            assert_eq!(press(session, KeyCode::Char(c), KeyModifiers::NONE), Flow::Continue);
+            assert_eq!(
+                press(session, KeyCode::Char(c), KeyModifiers::NONE),
+                Flow::Continue
+            );
         }
     }
 
@@ -319,9 +336,18 @@ mod tests {
     fn the_leaving_keys() {
         let mut s = Session::new(false, false, false);
         assert_eq!(press(&mut s, KeyCode::Esc, KeyModifiers::NONE), Flow::Quit);
-        assert_eq!(press(&mut s, KeyCode::Enter, KeyModifiers::NONE), Flow::Keep);
-        assert_eq!(press(&mut s, KeyCode::Char('c'), KeyModifiers::CONTROL), Flow::Quit);
-        assert_eq!(press(&mut s, KeyCode::Char('d'), KeyModifiers::CONTROL), Flow::Quit);
+        assert_eq!(
+            press(&mut s, KeyCode::Enter, KeyModifiers::NONE),
+            Flow::Keep
+        );
+        assert_eq!(
+            press(&mut s, KeyCode::Char('c'), KeyModifiers::CONTROL),
+            Flow::Quit
+        );
+        assert_eq!(
+            press(&mut s, KeyCode::Char('d'), KeyModifiers::CONTROL),
+            Flow::Quit
+        );
         // a control letter never lands in the query
         assert_eq!(s.query, "");
     }
@@ -345,7 +371,10 @@ mod tests {
         assert_eq!(lines[0], "\u{203a} candy");
         assert_eq!(cursor, 7);
         assert!(lines[1].starts_with("word"), "{lines:?}");
-        assert!(lines[2].starts_with("candy") && lines[2].contains("KAPBD"), "{lines:?}");
+        assert!(
+            lines[2].starts_with("candy") && lines[2].contains("KAPBD"),
+            "{lines:?}"
+        );
         assert_eq!(lines.last().unwrap(), HINT);
         // the frame left on screen has no hint
         let (kept, _) = s.frame(&lookup, false, 80, 24, true);
@@ -361,7 +390,9 @@ mod tests {
         assert!(before.iter().any(|l| l.starts_with("candy")), "{before:?}");
         type_in(&mut s, "t");
         let (after, _) = s.frame(&lookup, false, 80, 24, false);
-        assert!(after.iter().any(|l| l.starts_with("cat") && l.contains("KAT")));
+        assert!(after
+            .iter()
+            .any(|l| l.starts_with("cat") && l.contains("KAT")));
         assert!(!after.iter().any(|l| l.starts_with("candy")));
     }
 
@@ -381,7 +412,13 @@ mod tests {
         let lookup = lookup();
         let session = Session::new(false, true, false);
         let mut out = Vec::new();
-        run_lines(&lookup, &session, &mut &b"cat\ncandy\n\ncan\n"[..], &mut out).unwrap();
+        run_lines(
+            &lookup,
+            &session,
+            &mut &b"cat\ncandy\n\ncan\n"[..],
+            &mut out,
+        )
+        .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("KAT") && text.contains("KAPBD"));
         assert!(!text.contains("KAPB \n") && !text.contains("can "));

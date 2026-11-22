@@ -64,9 +64,10 @@ impl Candidate {
             .filter(|finding| finding.severity == Severity::Error)
             .collect();
         if let Some(first) = errors.first() {
-            let file = std::path::Path::new(&first.file)
-                .file_name()
-                .map_or_else(|| first.file.clone(), |name| name.to_string_lossy().into_owned());
+            let file = std::path::Path::new(&first.file).file_name().map_or_else(
+                || first.file.clone(),
+                |name| name.to_string_lossy().into_owned(),
+            );
             let entry = first
                 .outline
                 .as_ref()
@@ -108,7 +109,11 @@ impl Notices {
     pub fn admit(&mut self, candidate: Option<Candidate>, now: Instant) -> Option<Notice> {
         let Candidate(notice) = candidate?;
         let allowed = self.last.as_ref().is_none_or(|(body, at)| {
-            let gap = if *body == notice.body { REPEAT_GAP } else { MIN_GAP };
+            let gap = if *body == notice.body {
+                REPEAT_GAP
+            } else {
+                MIN_GAP
+            };
             now.duration_since(*at) >= gap
         });
         if !allowed {
@@ -167,7 +172,10 @@ mod tests {
     fn a_clean_reload_says_nothing() {
         assert_eq!(Candidate::from_reload(&[], &[], false), None);
         // Notes are not problems
-        assert_eq!(Candidate::from_reload(&[], &[finding(Severity::Info)], false), None);
+        assert_eq!(
+            Candidate::from_reload(&[], &[finding(Severity::Info)], false),
+            None
+        );
         let mut notices = Notices::default();
         assert_eq!(notices.admit(None, Instant::now()), None);
     }
@@ -180,29 +188,66 @@ mod tests {
         ];
         let Candidate(notice) = Candidate::from_reload(&problems, &[], true).unwrap();
         assert_eq!(notice.urgency, "normal");
-        assert!(notice.body.starts_with("/x/steno/a.json: expected value at line 3 column 5"), "{}", notice.body);
+        assert!(
+            notice
+                .body
+                .starts_with("/x/steno/a.json: expected value at line 3 column 5"),
+            "{}",
+            notice.body
+        );
         assert!(notice.body.contains("(and 1 more)"), "{}", notice.body);
-        assert!(notice.body.contains("previous dictionary is still in use"), "{}", notice.body);
+        assert!(
+            notice.body.contains("previous dictionary is still in use"),
+            "{}",
+            notice.body
+        );
         // The first load has no previous dictionary to keep
         let Candidate(first) = Candidate::from_reload(&problems, &[], false).unwrap();
-        assert!(first.body.contains("left out") && !first.body.contains("previous"), "{}", first.body);
+        assert!(
+            first.body.contains("left out") && !first.body.contains("previous"),
+            "{}",
+            first.body
+        );
     }
 
     #[test]
     fn errors_name_the_file_the_entry_and_the_command_to_run() {
-        let found = [finding(Severity::Warning), finding(Severity::Error), finding(Severity::Error)];
+        let found = [
+            finding(Severity::Warning),
+            finding(Severity::Error),
+            finding(Severity::Error),
+        ];
         let Candidate(notice) = Candidate::from_reload(&[], &found, false).unwrap();
         assert_eq!(notice.urgency, "normal");
-        assert!(notice.body.starts_with("02-words.json: KAT: the outline is not valid"), "{}", notice.body);
-        assert!(notice.body.contains("2 error(s)") && notice.body.contains("keymux steno validate"), "{}", notice.body);
+        assert!(
+            notice
+                .body
+                .starts_with("02-words.json: KAT: the outline is not valid"),
+            "{}",
+            notice.body
+        );
+        assert!(
+            notice.body.contains("2 error(s)") && notice.body.contains("keymux steno validate"),
+            "{}",
+            notice.body
+        );
     }
 
     #[test]
     fn warnings_alone_are_one_quiet_notice_with_the_count() {
-        let found = [finding(Severity::Warning), finding(Severity::Warning), finding(Severity::Info)];
+        let found = [
+            finding(Severity::Warning),
+            finding(Severity::Warning),
+            finding(Severity::Info),
+        ];
         let Candidate(notice) = Candidate::from_reload(&[], &found, false).unwrap();
         assert_eq!(notice.urgency, "low");
-        assert!(notice.body.starts_with("2 warning(s)") && notice.body.contains("keymux steno validate"), "{}", notice.body);
+        assert!(
+            notice.body.starts_with("2 warning(s)")
+                && notice.body.contains("keymux steno validate"),
+            "{}",
+            notice.body
+        );
     }
 
     #[test]
@@ -210,18 +255,31 @@ mod tests {
         let now = Instant::now();
         let mut notices = Notices::default();
         let broken = |text: &str| Candidate::from_reload(&[text.to_string()], &[], true);
-        assert!(notices.admit(broken("a.json: bad"), now).is_some(), "the first is sent");
+        assert!(
+            notices.admit(broken("a.json: bad"), now).is_some(),
+            "the first is sent"
+        );
         // The same text again, and a clean save in between, stay quiet for the repeat gap
-        assert!(notices.admit(broken("a.json: bad"), now + Duration::from_secs(5)).is_none());
+        assert!(notices
+            .admit(broken("a.json: bad"), now + Duration::from_secs(5))
+            .is_none());
         assert!(notices.admit(None, now + Duration::from_secs(6)).is_none());
-        let almost = (now + REPEAT_GAP).checked_sub(Duration::from_secs(1)).unwrap();
+        let almost = (now + REPEAT_GAP)
+            .checked_sub(Duration::from_secs(1))
+            .unwrap();
         assert!(notices.admit(broken("a.json: bad"), almost).is_none());
-        assert!(notices.admit(broken("a.json: bad"), now + REPEAT_GAP).is_some());
+        assert!(notices
+            .admit(broken("a.json: bad"), now + REPEAT_GAP)
+            .is_some());
         // A different problem waits only the short gap
         let later = now + REPEAT_GAP;
-        let almost = (later + MIN_GAP).checked_sub(Duration::from_secs(1)).unwrap();
+        let almost = (later + MIN_GAP)
+            .checked_sub(Duration::from_secs(1))
+            .unwrap();
         assert!(notices.admit(broken("a.json: worse"), almost).is_none());
-        assert!(notices.admit(broken("a.json: worse"), later + MIN_GAP).is_some());
+        assert!(notices
+            .admit(broken("a.json: worse"), later + MIN_GAP)
+            .is_some());
     }
 
     #[test]
@@ -241,16 +299,24 @@ mod tests {
             dir.join("cache"),
             super::super::layout::Layout::plover(),
         );
-        updates.recv_timeout(Duration::from_secs(10)).expect("the first dictionary");
+        updates
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the first dictionary");
         std::fs::write(&file, r#"{"KAT": "cat", "BADOUTLINE9": "x"}"#).unwrap();
         let wanted = dir.display().to_string();
         let end = Instant::now() + Duration::from_secs(10);
         loop {
-            let sent = crate::lock(&SENT).iter().any(|n| n.body.contains("words.json") && n.body.contains("BADOUTLINE9"));
+            let sent = crate::lock(&SENT)
+                .iter()
+                .any(|n| n.body.contains("words.json") && n.body.contains("BADOUTLINE9"));
             if sent {
                 break;
             }
-            assert!(Instant::now() < end, "no notification for {wanted}: {:?}", crate::lock(&SENT));
+            assert!(
+                Instant::now() < end,
+                "no notification for {wanted}: {:?}",
+                crate::lock(&SENT)
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
     }

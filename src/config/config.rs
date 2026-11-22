@@ -1438,7 +1438,7 @@ impl Config {
                         .unwrap_or_else(default_tapping_term),
                     mt_config: override_cfg.mt_config.clone().unwrap_or_default(),
                     enabled_keyboards: self.enabled_keyboards.clone(), // Keep global enabled_keyboards
-                    keyboard_groups: self.keyboard_groups.clone(), // Groups are global
+                    keyboard_groups: self.keyboard_groups.clone(),     // Groups are global
                     remaps: override_cfg.remaps.clone().unwrap_or_default(),
                     layers: override_cfg.layers.clone().unwrap_or_default(),
                     game_mode: override_cfg.game_mode.clone().unwrap_or_default(),
@@ -1795,7 +1795,12 @@ impl Config {
             for (second, second_members) in &named[i + 1..] {
                 for a in *first_members {
                     for b in *second_members {
-                        if a == b || a == "*" || b == "*" || a.contains(b.as_str()) || b.contains(a.as_str()) {
+                        if a == b
+                            || a == "*"
+                            || b == "*"
+                            || a.contains(b.as_str())
+                            || b.contains(a.as_str())
+                        {
                             check.errors.push(format!(
                                 "keyboard groups \"{first}\" and \"{second}\" overlap: \"{a}\" and \"{b}\" can name the same keyboard (a keyboard belongs to at most one group)"
                             ));
@@ -1860,7 +1865,8 @@ impl Config {
                         .and_then(|preset| layout.build_key_map(&preset, &steno.layout_overrides))
                 });
                 if let (Ok(layout), Ok(map)) = (&layout, &key_map) {
-                    if let Err(problem) = crate::steno::skew::check_config(&steno.skew, layout, map) {
+                    if let Err(problem) = crate::steno::skew::check_config(&steno.skew, layout, map)
+                    {
                         check.errors.push(format!("{name}: {problem}"));
                     }
                 }
@@ -1913,7 +1919,9 @@ impl Config {
                 let mut probe = layout.clone();
                 for (name, group) in &overlay.key_groups {
                     if let Err(problem) = probe.set_key_group(name, *group) {
-                        check.warnings.push(format!("overlay: {problem}, so it does nothing"));
+                        check
+                            .warnings
+                            .push(format!("overlay: {problem}, so it does nothing"));
                     }
                 }
                 #[cfg(feature = "overlay")]
@@ -2071,12 +2079,16 @@ mod tests {
     #[test]
     fn skew_parses_with_a_half_or_keys_and_defaults_to_off() {
         let off = parse(r#"(layers: { "steno": (kind: Steno(())) })"#);
-        let LayerKind::Steno(steno) = &off.layers[&Layer::new("steno")].kind else { panic!() };
+        let LayerKind::Steno(steno) = &off.layers[&Layer::new("steno")].kind else {
+            panic!()
+        };
         assert_eq!(steno.skew, SkewConfig::default());
         let on = parse(
             r#"(layers: { "steno": (kind: Steno((skew: (delay_ms: 8, half: Left, keys: [KC_T])))) })"#,
         );
-        let LayerKind::Steno(steno) = &on.layers[&Layer::new("steno")].kind else { panic!() };
+        let LayerKind::Steno(steno) = &on.layers[&Layer::new("steno")].kind else {
+            panic!()
+        };
         assert_eq!(steno.skew.delay_ms, 8);
         assert_eq!(steno.skew.half, SkewSide::Left);
         assert_eq!(steno.skew.keys, vec![KeyCode::KC_T]);
@@ -2085,14 +2097,24 @@ mod tests {
 
     #[test]
     fn validate_rejects_a_skew_that_is_too_long_or_names_a_key_that_is_not_a_stroke_key() {
-        let long = parse(r#"(layers: { "steno": (kind: Steno((skew: (delay_ms: 51, half: Left)))) })"#);
+        let long =
+            parse(r#"(layers: { "steno": (kind: Steno((skew: (delay_ms: 51, half: Left)))) })"#);
         let report = long.validate(None);
         let errors: Vec<&str> = report.errors().collect();
-        assert!(errors.len() == 1 && errors[0].contains("50 ms maximum"), "{errors:?}");
-        let unknown = parse(r#"(layers: { "steno": (kind: Steno((skew: (delay_ms: 5, keys: [KC_F1])))) })"#);
+        assert!(
+            errors.len() == 1 && errors[0].contains("50 ms maximum"),
+            "{errors:?}"
+        );
+        let unknown =
+            parse(r#"(layers: { "steno": (kind: Steno((skew: (delay_ms: 5, keys: [KC_F1])))) })"#);
         let report = unknown.validate(None);
         let errors: Vec<&str> = report.errors().collect();
-        assert!(errors.len() == 1 && errors[0].contains("KC_F1") && errors[0].contains("not a stroke key"), "{errors:?}");
+        assert!(
+            errors.len() == 1
+                && errors[0].contains("KC_F1")
+                && errors[0].contains("not a stroke key"),
+            "{errors:?}"
+        );
         let nothing = parse(r#"(layers: { "steno": (kind: Steno((skew: (delay_ms: 5)))) })"#);
         let report = nothing.validate(None);
         assert_eq!(report.errors().count(), 1);
@@ -2100,9 +2122,8 @@ mod tests {
 
     #[test]
     fn a_join_key_that_is_not_an_extra_key_is_reported_by_check() {
-        let bad = parse(
-            r#"(layers: { "steno": (kind: Steno((extra_keys: ['+'], join_keys: ['~']))) })"#,
-        );
+        let bad =
+            parse(r#"(layers: { "steno": (kind: Steno((extra_keys: ['+'], join_keys: ['~']))) })"#);
         let report = bad.validate(None);
         let errors: Vec<&str> = report.errors().collect();
         assert_eq!(errors.len(), 1, "{errors:?}");
@@ -2110,9 +2131,8 @@ mod tests {
             errors[0].contains("steno layer \"steno\"") && errors[0].contains("join_keys"),
             "{errors:?}"
         );
-        let good = parse(
-            r#"(layers: { "steno": (kind: Steno((extra_keys: ['+'], join_keys: ['+']))) })"#,
-        );
+        let good =
+            parse(r#"(layers: { "steno": (kind: Steno((extra_keys: ['+'], join_keys: ['+']))) })"#);
         assert!(good.validate(None).is_ok());
     }
 
@@ -2176,7 +2196,9 @@ mod tests {
         let report = config.validate(None);
         let errors: Vec<&str> = report.errors().collect();
         assert!(
-            errors.iter().any(|e| e.contains("KC_G") && e.contains("used by both")),
+            errors
+                .iter()
+                .any(|e| e.contains("KC_G") && e.contains("used by both")),
             "{errors:?}"
         );
     }
@@ -2191,7 +2213,12 @@ mod tests {
         );
         let report = config.validate(None);
         assert!(report.is_ok());
-        assert_eq!(report.warnings().count(), 2, "{:?}", report.warnings().collect::<Vec<_>>());
+        assert_eq!(
+            report.warnings().count(),
+            2,
+            "{:?}",
+            report.warnings().collect::<Vec<_>>()
+        );
     }
 
     #[cfg(feature = "overlay")]
@@ -2215,9 +2242,7 @@ mod tests {
         let report = config.validate(None);
         assert!(report.is_ok(), "{:?}", report.errors().collect::<Vec<_>>());
         // Keys that are not next to each other, or no key at all: errors, in plain words
-        let bad = parse(
-            r#"(overlay: (merges: [(keys: ["T-", "-T"]), (keys: ["Q-", "T-"])]))"#,
-        );
+        let bad = parse(r#"(overlay: (merges: [(keys: ["T-", "-T"]), (keys: ["Q-", "T-"])]))"#);
         let report = bad.validate(None);
         let errors: Vec<&str> = report.errors().collect();
         assert_eq!(errors.len(), 2, "{errors:?}");
@@ -2481,7 +2506,10 @@ mod tests {
     fn a_removed_stroke_timeout_ms_in_an_old_config_is_ignored() {
         let layer: LayerConfig =
             ron::from_str(r"(kind: Steno((stroke_timeout_ms: 5000, dictionaries: [])))").unwrap();
-        assert!(matches!(layer.kind, LayerKind::Steno(_)), "an old config still loads");
+        assert!(
+            matches!(layer.kind, LayerKind::Steno(_)),
+            "an old config still loads"
+        );
     }
 
     #[test]
@@ -2541,7 +2569,10 @@ mod tests {
     fn a_config_without_groups_has_none_and_every_keyboard_is_alone() {
         let config = parse(r#"(enabled_keyboards: ["16c0:27db"])"#);
         assert!(config.keyboard_groups.is_empty());
-        assert_eq!(config.group_of("16c0:27db:0111:0003", Some("Glove80"), None), None);
+        assert_eq!(
+            config.group_of("16c0:27db:0111:0003", Some("Glove80"), None),
+            None
+        );
         assert!(config.validate(None).errors().next().is_none());
     }
 
@@ -2554,7 +2585,11 @@ mod tests {
         assert_eq!(of("16c0:27db:0111:0003", "Glove80", None), Some("desk"));
         assert_eq!(of("16c0:27db:0111:0003@1-2", "Glove80", None), Some("desk"));
         assert_eq!(of("046d:c52b:0111:0003@3-1", "K", None), Some("desk"));
-        assert_eq!(of("046d:c52b:0111:0003@3-2", "K", None), None, "@port is exact");
+        assert_eq!(
+            of("046d:c52b:0111:0003@3-2", "K", None),
+            None,
+            "@port is exact"
+        );
         assert_eq!(of("1234:5678:0111:0003", "K", Some("event9")), Some("lap"));
         assert_eq!(of("1234:5678:0111:0003", "Planck EZ", None), Some("lap"));
         assert_eq!(of("1234:5678:0111:0003", "Other", None), None);
@@ -2581,9 +2616,8 @@ mod tests {
 
     #[test]
     fn overlapping_groups_are_a_validation_error() {
-        let config = parse(
-            r#"(keyboard_groups: { "a": ["16c0:27db:0111:0003"], "b": ["16c0:27db"] })"#,
-        );
+        let config =
+            parse(r#"(keyboard_groups: { "a": ["16c0:27db:0111:0003"], "b": ["16c0:27db"] })"#);
         let report = config.validate(None);
         let errors: Vec<&str> = report.errors().collect();
         assert!(errors.iter().any(|e| e.contains("overlap")), "{errors:?}");
@@ -2609,7 +2643,11 @@ mod tests {
     #[test]
     fn a_member_nothing_is_connected_for_is_listed_for_a_warning() {
         let config = parse(GROUPS);
-        let connected = vec![("16c0:27db:0111:0003".to_string(), "Glove80".to_string(), None)];
+        let connected = vec![(
+            "16c0:27db:0111:0003".to_string(),
+            "Glove80".to_string(),
+            None,
+        )];
         let unmatched = config.unmatched_group_members(&connected);
         assert_eq!(
             unmatched,
@@ -2619,7 +2657,10 @@ mod tests {
                 ("lap".to_string(), "Planck".to_string()),
             ]
         );
-        assert!(config.validate(None).errors().next().is_none(), "absent members are no error");
+        assert!(
+            config.validate(None).errors().next().is_none(),
+            "absent members are no error"
+        );
     }
 
     #[test]
@@ -2634,14 +2675,23 @@ mod tests {
             layers: { "group": (kind: Remap, remaps: {}), "member": (kind: Remap, remaps: {}) },
         )"#,
         );
-        let ids = vec!["16c0:27db:0111:0003".to_string(), "046d:c52b:0111:0003".to_string()];
+        let ids = vec![
+            "16c0:27db:0111:0003".to_string(),
+            "046d:c52b:0111:0003".to_string(),
+        ];
         let layer = |c: &Config| c.default_layer.as_ref().map(|l| l.0.clone());
         assert_eq!(layer(&config.for_group("desk", &ids)), Some("group".into()));
         let mut without = config.clone();
         without.per_keyboard_overrides.remove("desk");
-        assert_eq!(layer(&without.for_group("desk", &ids)), Some("member".into()));
+        assert_eq!(
+            layer(&without.for_group("desk", &ids)),
+            Some("member".into())
+        );
         assert_eq!(layer(&without.for_group("desk", &ids[1..])), None);
         // A keyboard that is not in a group is unchanged
-        assert_eq!(layer(&config.for_keyboard("16c0:27db:0111:0003")), Some("member".into()));
+        assert_eq!(
+            layer(&config.for_keyboard("16c0:27db:0111:0003")),
+            Some("member".into())
+        );
     }
 }

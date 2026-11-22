@@ -268,7 +268,14 @@ impl OverlayHub {
         self.push_entry(stroke, text, false, true, false);
     }
 
-    fn push_entry(&self, stroke: u32, text: String, unmatched: bool, transparent: bool, read: bool) {
+    fn push_entry(
+        &self,
+        stroke: u32,
+        text: String,
+        unmatched: bool,
+        transparent: bool,
+        read: bool,
+    ) {
         self.update(|state| {
             // The tape only drops its oldest entry, so the newest one always holds the last seq
             let seq = state.tape.back().map_or(1, |last| last.seq + 1);
@@ -417,7 +424,11 @@ mod tests {
         let cleared = hub.snapshot();
         assert!(cleared.tape.is_empty());
         hub.clear_tape();
-        assert_eq!(hub.snapshot().generation, cleared.generation, "nothing to clear");
+        assert_eq!(
+            hub.snapshot().generation,
+            cleared.generation,
+            "nothing to clear"
+        );
         hub.push_stroke(3, String::new(), false);
         assert_eq!(hub.snapshot().tape.len(), 1);
     }
@@ -609,7 +620,11 @@ mod tests {
         assert_eq!(read, [false, true, true, true]);
         // A repeat counts on the line it repeats and leaves its flag alone
         hub.push_repeat_of(4, "\"c\"".into(), false, false);
-        assert!(hub.snapshot().tape.iter().all(|line| line.repeats == 0 || line.read));
+        assert!(hub
+            .snapshot()
+            .tape
+            .iter()
+            .all(|line| line.repeats == 0 || line.read));
     }
 
     #[test]

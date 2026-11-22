@@ -12,10 +12,10 @@
 //! and `text_scale` nudges the text alone.
 
 use super::anim;
-use super::ViewState;
 use super::geometry::{KeyGroup, Keyboard, Rect};
 use super::glyphs::{self, GlyphCache};
 use super::merge;
+use super::ViewState;
 use crate::config::{Half, KeyColor, OverlayConfig};
 use crate::steno::erasure::{self, Ink};
 use crate::steno::layout::Layout;
@@ -341,7 +341,10 @@ impl Renderer {
         let stroke_tiers = STROKE_TIERS
             .iter()
             .map(|ratio| {
-                GlyphCache::new(bold.clone(), glyphs::crisp_size(&bold, stroke_px * ratio, 'H'))
+                GlyphCache::new(
+                    bold.clone(),
+                    glyphs::crisp_size(&bold, stroke_px * ratio, 'H'),
+                )
             })
             .collect();
         let words_px = glyphs::crisp_size(&bold, stroke_px * WORDS_RATIO, 'x');
@@ -462,7 +465,11 @@ impl Renderer {
                     Some((slot, Half::Bottom)) => rounded_rect(
                         *r,
                         0.0,
-                        if has_square_bottom(*slot) { 0.0 } else { f32::MAX },
+                        if has_square_bottom(*slot) {
+                            0.0
+                        } else {
+                            f32::MAX
+                        },
                     ),
                     None => rounded_rect(*r, soft, soft),
                 })
@@ -530,7 +537,12 @@ impl Renderer {
     /// Draw what `view` leaves showing (runtime `{:tape:hide}` and `{:keyboard:hide}`; the whole
     /// panel hidden is the caller's business: it draws nothing at all). A hidden tape leaves its
     /// place empty, and an open lookup still shows there, since it was asked for.
-    pub fn draw_view(&mut self, snapshot: &OverlaySnapshot, view: ViewState, pixmap: &mut PixmapMut) {
+    pub fn draw_view(
+        &mut self,
+        snapshot: &OverlaySnapshot,
+        view: ViewState,
+        pixmap: &mut PixmapMut,
+    ) {
         pixmap.fill(Color::TRANSPARENT);
         if let Some(panel) = &self.panel {
             let [r, g, b] = self.theme.panel;
@@ -713,8 +725,12 @@ impl Renderer {
                         + baseline_in_line
                 }
             };
-            let lit = (playing && view.rows.first().is_some_and(|best| std::ptr::eq(row, best)))
-                .then(|| step % Self::lookup_strokes(view).len());
+            let lit = (playing
+                && view
+                    .rows
+                    .first()
+                    .is_some_and(|best| std::ptr::eq(row, best)))
+            .then(|| step % Self::lookup_strokes(view).len());
             if plan.outline.is_empty() {
                 // Not steno: drawn as plain text
                 draw_lines(
@@ -815,7 +831,13 @@ impl Renderer {
         for &i in &fused {
             let (accent, held) = fused_look(i);
             let strength = if held { 1.0 } else { GLOW_DIM };
-            glow(pixmap, &self.merge_shapes[i].path, accent, strength, self.scale);
+            glow(
+                pixmap,
+                &self.merge_shapes[i].path,
+                accent,
+                strength,
+                self.scale,
+            );
         }
         for (slot, shape) in self.key_shapes.iter().enumerate() {
             if fused_bits & (1 << slot) != 0 {
@@ -837,7 +859,11 @@ impl Renderer {
             fill(
                 pixmap,
                 &self.merge_shapes[i].path,
-                if held { accent } else { with_alpha(accent, 150) },
+                if held {
+                    accent
+                } else {
+                    with_alpha(accent, 150)
+                },
             );
         }
         for (slot, shape) in self.key_shapes.iter().enumerate() {
@@ -1215,10 +1241,17 @@ impl Renderer {
             match (key.pair, span_start) {
                 (Some(_), None) if next_same => span_start = Some(at),
                 (Some(_), Some(from)) if !next_same => {
-                    if let Some(rect) =
-                        tiny_skia::Rect::from_xywh(from, underline_y, at + advance - from, thickness)
-                    {
-                        fill(pixmap, &PathBuilder::from_rect(rect), fade_color(key.color, fade));
+                    if let Some(rect) = tiny_skia::Rect::from_xywh(
+                        from,
+                        underline_y,
+                        at + advance - from,
+                        thickness,
+                    ) {
+                        fill(
+                            pixmap,
+                            &PathBuilder::from_rect(rect),
+                            fade_color(key.color, fade),
+                        );
                     }
                     span_start = None;
                 }
@@ -1265,11 +1298,7 @@ impl Renderer {
                 x += group;
             }
             for (k, run) in unit.iter().enumerate() {
-                let strength = if lit(index) {
-                    fade
-                } else {
-                    fade * anim::DIM
-                };
+                let strength = if lit(index) { fade } else { fade * anim::DIM };
                 if k > 0 {
                     // the thin rule between two strokes of one word
                     x += space;
@@ -1472,7 +1501,12 @@ impl Renderer {
         let color = match self.config.tape_read_color {
             Some(read) if entry.read && !entry.unmatched => {
                 let [r, g, b, a] = read;
-                [r, g, b, (f32::from(a) * self.config.text_opacity.clamp(0.0, 1.0)).round() as u8]
+                [
+                    r,
+                    g,
+                    b,
+                    (f32::from(a) * self.config.text_opacity.clamp(0.0, 1.0)).round() as u8,
+                ]
             }
             _ => color,
         };
@@ -1800,7 +1834,12 @@ fn draw_char(
     if light && !glyph.halo.is_empty() {
         let pad = glyphs::HALO_PAD as i32;
         let drop = scale.round().max(1.0) as i32;
-        let shadow = [SHADOW_TINT[0], SHADOW_TINT[1], SHADOW_TINT[2], (u16::from(color[3]) * SHADOW_ALPHA / 255) as u8];
+        let shadow = [
+            SHADOW_TINT[0],
+            SHADOW_TINT[1],
+            SHADOW_TINT[2],
+            (u16::from(color[3]) * SHADOW_ALPHA / 255) as u8,
+        ];
         blend_mask(
             pixmap,
             &glyph.halo,
@@ -1978,7 +2017,10 @@ mod tests {
         }
         // Every word (and every outline) still shows up exactly once, in order.
         assert_eq!(text_lines.join(" "), words.join(" "));
-        assert_eq!(outline_lines.iter().map(Vec::len).sum::<usize>(), words.len());
+        assert_eq!(
+            outline_lines.iter().map(Vec::len).sum::<usize>(),
+            words.len()
+        );
     }
 
     #[test]
@@ -2137,7 +2179,10 @@ mod tests {
         let default = Renderer::new(&OverlayConfig::default(), 1, 1900).unwrap();
         assert_eq!(default.tape_lines(), tall.tape_lines());
         let top = (default.tape_lines() as f32).mul_add(-default.line_height, default.tape_bottom);
-        assert!((0.0..14.0).contains(&top), "the line grid starts just above the margin: {top}");
+        assert!(
+            (0.0..14.0).contains(&top),
+            "the line grid starts just above the margin: {top}"
+        );
         // `tape_lines` caps it; zero is allowed
         let capped = OverlayConfig {
             tape_lines: Some(5),
@@ -2154,16 +2199,33 @@ mod tests {
     #[test]
     fn the_fade_is_only_the_last_few_lines_at_the_top() {
         for lines in [6, 8, 40, 400] {
-            let ramp: Vec<f32> = (0..lines).map(|row| line_fade(row, lines, 0.2, 5)).collect();
+            let ramp: Vec<f32> = (0..lines)
+                .map(|row| line_fade(row, lines, 0.2, 5))
+                .collect();
             // everything but the last five lines is exactly full strength
-            assert!(ramp[..lines - 5].iter().all(|&f| f == 1.0), "{lines}: {ramp:?}");
+            assert!(
+                ramp[..lines - 5].iter().all(|&f| f == 1.0),
+                "{lines}: {ramp:?}"
+            );
             // the last five fall in even steps to the floor at the very top
-            assert!(ramp[lines - 5..].iter().all(|&f| f < 1.0), "{lines}: {ramp:?}");
-            assert!((ramp[lines - 1] - 0.2).abs() < 1e-6, "{lines}: top is the floor");
+            assert!(
+                ramp[lines - 5..].iter().all(|&f| f < 1.0),
+                "{lines}: {ramp:?}"
+            );
+            assert!(
+                (ramp[lines - 1] - 0.2).abs() < 1e-6,
+                "{lines}: top is the floor"
+            );
             let tail = &ramp[lines - 6..];
-            assert!(tail.windows(2).all(|pair| pair[0] > pair[1]), "monotonic: {tail:?}");
+            assert!(
+                tail.windows(2).all(|pair| pair[0] > pair[1]),
+                "monotonic: {tail:?}"
+            );
             let steps: Vec<f32> = tail.windows(2).map(|p| p[0] - p[1]).collect();
-            assert!(steps.iter().all(|s| (s - 0.16).abs() < 1e-5), "even steps: {steps:?}");
+            assert!(
+                steps.iter().all(|s| (s - 0.16).abs() < 1e-5),
+                "even steps: {steps:?}"
+            );
         }
         // the number of fading lines is the knob
         let ramp: Vec<f32> = (0..20).map(|row| line_fade(row, 20, 0.0, 3)).collect();
@@ -2186,9 +2248,14 @@ mod tests {
     fn tape_ink_margins(config: &OverlayConfig, scale: u32, height: u32) -> (u32, f32) {
         let mut renderer = Renderer::new(config, scale, height).unwrap();
         let (w, h) = renderer.size();
-        let mut snapshot = OverlaySnapshot { layer: Some("steno".into()), ..OverlaySnapshot::default() };
+        let mut snapshot = OverlaySnapshot {
+            layer: Some("steno".into()),
+            ..OverlaySnapshot::default()
+        };
         for i in 0..renderer.tape_lines() {
-            snapshot.tape.push_back(tape_entry(i as u64 + 1, "TEFT", "\"test\""));
+            snapshot
+                .tape
+                .push_back(tape_entry(i as u64 + 1, "TEFT", "\"test\""));
         }
         let mut pixmap = Pixmap::new(w, h).unwrap();
         renderer.draw(&snapshot, &mut pixmap.as_mut());
@@ -2230,22 +2297,34 @@ mod tests {
         let (above, below) = tape_ink_margins(&loose(0), 1, 1080);
         assert!((below - MIN_MARGIN_Y).abs() < 0.01 && (above as f32 - below).abs() <= 2.0);
         // capped: the tape is not stretched and still never rises above the margin
-        let capped = OverlayConfig { tape_lines: Some(5), ..OverlayConfig::default() };
+        let capped = OverlayConfig {
+            tape_lines: Some(5),
+            ..OverlayConfig::default()
+        };
         let r = Renderer::new(&capped, 1, 1080).unwrap();
         assert!((5.0f32).mul_add(-r.line_height, r.tape_bottom) > 14.0);
     }
 
     #[test]
     fn lines_fitting_the_screen_follow_its_height() {
-        let fits = |h| Renderer::new(&OverlayConfig::default(), 1, h).unwrap().tape_lines();
+        let fits = |h| {
+            Renderer::new(&OverlayConfig::default(), 1, h)
+                .unwrap()
+                .tape_lines()
+        };
         let (a, b, c) = (fits(1080), fits(1440), fits(2160));
         assert!(a > 30, "1080 shows {a} lines");
         assert!(a < b && b < c, "{a} {b} {c}");
         // 360 more pixels of height add about 360 / line pitch lines
-        let line = Renderer::new(&OverlayConfig::default(), 1, 1080).unwrap().line_height;
+        let line = Renderer::new(&OverlayConfig::default(), 1, 1080)
+            .unwrap()
+            .line_height;
         assert!(((b - a) as f32 - 360.0 / line).abs() <= 1.0);
         // never more than the entries the overlay is sent
-        let huge = OverlayConfig { text_scale: 0.3, ..OverlayConfig::default() };
+        let huge = OverlayConfig {
+            text_scale: 0.3,
+            ..OverlayConfig::default()
+        };
         assert!(Renderer::new(&huge, 1, 4000).unwrap().tape_lines() <= TAPE_CAPACITY);
     }
 
@@ -2290,7 +2369,10 @@ mod tests {
             .collect();
         // row 0 is the oldest, at the top
         assert!(alphas[0] < alphas[lines - 1], "{alphas:?}");
-        assert!(alphas[0] > 20, "the oldest line is faint but still there: {alphas:?}");
+        assert!(
+            alphas[0] > 20,
+            "the oldest line is faint but still there: {alphas:?}"
+        );
         // Only the last five lines fade, getting dimmer going up; every other line is the same
         // full strength as the newest
         let full = alphas[lines - 1];
@@ -2299,8 +2381,14 @@ mod tests {
             alphas[5..].iter().all(|&a| a.abs_diff(full) <= 4),
             "below the fade every line is at full strength: {alphas:?}"
         );
-        assert!(alphas[..5].iter().all(|&a| a < full - 8), "the last five fade: {alphas:?}");
-        assert!(alphas[..5].windows(2).all(|p| p[0] < p[1]), "dimmer going up: {alphas:?}");
+        assert!(
+            alphas[..5].iter().all(|&a| a < full - 8),
+            "the last five fade: {alphas:?}"
+        );
+        assert!(
+            alphas[..5].windows(2).all(|p| p[0] < p[1]),
+            "dimmer going up: {alphas:?}"
+        );
     }
 
     #[test]
@@ -2356,20 +2444,33 @@ mod tests {
         // The default panel is 340 px wide: readable, not huge. The strokes are about the size of
         // the keys' own labels, and the words at least as big
         assert!((20.0..=30.0).contains(&strokes), "strokes are {strokes} px");
-        assert!(strokes >= label, "strokes ({strokes}) are smaller than key labels ({label})");
+        assert!(
+            strokes >= label,
+            "strokes ({strokes}) are smaller than key labels ({label})"
+        );
         assert!(words >= strokes, "the words must be the biggest text");
         assert!(words <= 32.0, "words are {words} px, too big");
         // Lines are compact: a line is about as tall as the words' text size, with no gap
         // between one entry and the next beyond the underline's room
         assert!(renderer.line_height >= words * 0.8);
-        assert!(renderer.line_height <= words * 1.05, "{}", renderer.line_height);
+        assert!(
+            renderer.line_height <= words * 1.05,
+            "{}",
+            renderer.line_height
+        );
         // A typical eight-key stroke takes well over half the paper, and the words get the larger share
         let mut renderer = renderer;
         let eight = renderer.stroke_run(crate::steno::layout::parse_stroke("STKPWHRA").unwrap());
         let width = renderer.run_width(&eight, 0);
         let paper = renderer.paper_right - renderer.paper_left;
-        assert!(width <= paper * 1.15, "eight keys ({width}) overflow the paper ({paper})");
-        assert!(width >= paper * 0.5, "eight keys ({width}) leave the paper empty ({paper})");
+        assert!(
+            width <= paper * 1.15,
+            "eight keys ({width}) overflow the paper ({paper})"
+        );
+        assert!(
+            width >= paper * 0.5,
+            "eight keys ({width}) leave the paper empty ({paper})"
+        );
         assert!(
             renderer.words_right - renderer.words_left > paper,
             "the words get more room than the strokes"
@@ -2380,9 +2481,8 @@ mod tests {
     fn a_stroke_too_long_for_the_paper_is_set_smaller_and_still_fits() {
         let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
         let (w, h) = renderer.size();
-        let long = renderer.stroke_run(
-            crate::steno::layout::parse_stroke("STKPWHRAOEUFRPBLGTSDZ").unwrap(),
-        );
+        let long = renderer
+            .stroke_run(crate::steno::layout::parse_stroke("STKPWHRAOEUFRPBLGTSDZ").unwrap());
         let paper = renderer.paper_right - renderer.paper_left;
         let last = renderer.last_tier();
         let full = renderer.run_width(&long, 0);
@@ -2408,12 +2508,24 @@ mod tests {
         let line = [vec![long]];
         let baseline = renderer.tape_bottom - renderer.line_height;
         let (right, max) = (renderer.paper_right, paper);
-        renderer.draw_line(&mut pixmap.as_mut(), &line, right, max, baseline, 1.0, 0, None);
+        renderer.draw_line(
+            &mut pixmap.as_mut(),
+            &line,
+            right,
+            max,
+            baseline,
+            1.0,
+            0,
+            None,
+        );
         let left_of_paper = (0..h)
             .flat_map(|y| (0..renderer.paper_left as u32 - 1).map(move |x| (x, y)))
             .filter_map(|(x, y)| pixmap.pixel(x, y))
             .any(|p| p.alpha() > 0);
-        assert!(!left_of_paper, "a long stroke spilled off the left of the paper");
+        assert!(
+            !left_of_paper,
+            "a long stroke spilled off the left of the paper"
+        );
     }
 
     #[test]
@@ -2429,10 +2541,17 @@ mod tests {
             .filter(|p| p.alpha() > 220)
             .collect();
         // K is a left-hand key (amber), A a vowel (blue), P B D the right hand (purple)
-        let amber = pixels.iter().any(|p| p.red() > 180 && p.green() > 110 && p.blue() < 120);
+        let amber = pixels
+            .iter()
+            .any(|p| p.red() > 180 && p.green() > 110 && p.blue() < 120);
         let blue = pixels.iter().any(|p| p.blue() > 180 && p.red() < 140);
-        let purple = pixels.iter().any(|p| p.blue() > 180 && p.red() > 130 && p.green() < 150);
-        assert!(amber && blue && purple, "amber {amber}, blue {blue}, purple {purple}");
+        let purple = pixels
+            .iter()
+            .any(|p| p.blue() > 180 && p.red() > 130 && p.green() < 150);
+        assert!(
+            amber && blue && purple,
+            "amber {amber}, blue {blue}, purple {purple}"
+        );
     }
 
     #[test]
@@ -2454,7 +2573,9 @@ mod tests {
     #[test]
     fn a_wrapped_outline_never_splits_a_stroke() {
         let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
-        let units = renderer.outline_units("KAPBD/TKAEUT/STKPWHR/PHAPB").unwrap();
+        let units = renderer
+            .outline_units("KAPBD/TKAEUT/STKPWHR/PHAPB")
+            .unwrap();
         let strokes: Vec<Run> = units.into_iter().flatten().collect();
         // wrapping packs a line as far as the smallest letters allow, so measure in those
         let last = renderer.last_tier();
@@ -2497,10 +2618,7 @@ mod tests {
             .flat_map(|py| (x0..x1).map(move |px| (px, py)))
             .filter_map(|(px, py)| pixmap.pixel(px, py))
             .any(|p| p.alpha() > 0);
-        assert!(
-            lit,
-            "the extra key's letter should be drawn on the paper"
-        );
+        assert!(lit, "the extra key's letter should be drawn on the paper");
     }
 
     #[test]
@@ -2580,14 +2698,20 @@ mod tests {
         let config = OverlayConfig::default();
         let ordinary = draw(&config, vec![entry(1, false)]);
         let dimmed = draw(&config, vec![entry(1, true)]);
-        assert!(ink(&dimmed) > 0 && ink(&dimmed) < ink(&ordinary), "dimmed, not gone");
+        assert!(
+            ink(&dimmed) > 0 && ink(&dimmed) < ink(&ordinary),
+            "dimmed, not gone"
+        );
         // Left out, it is as if it was never on the tape; kept, the real line is not disturbed
         let hide = OverlayConfig {
             tape_transparent: false,
             ..OverlayConfig::default()
         };
         assert_eq!(draw(&hide, vec![entry(1, false), entry(2, true)]), ordinary);
-        assert_ne!(draw(&config, vec![entry(1, false), entry(2, true)]), ordinary);
+        assert_ne!(
+            draw(&config, vec![entry(1, false), entry(2, true)]),
+            ordinary
+        );
     }
 
     #[test]
@@ -2614,9 +2738,19 @@ mod tests {
             renderer.draw(&snapshot, &mut pixmap.as_mut());
             pixmap.data().to_vec()
         };
-        let plain = OverlayConfig { tape_read_marker: String::new(), tape_read_color: None, ..OverlayConfig::default() };
-        let marked = OverlayConfig { tape_read_color: None, ..OverlayConfig::default() };
-        let tinted = OverlayConfig { tape_read_marker: String::new(), ..OverlayConfig::default() };
+        let plain = OverlayConfig {
+            tape_read_marker: String::new(),
+            tape_read_color: None,
+            ..OverlayConfig::default()
+        };
+        let marked = OverlayConfig {
+            tape_read_color: None,
+            ..OverlayConfig::default()
+        };
+        let tinted = OverlayConfig {
+            tape_read_marker: String::new(),
+            ..OverlayConfig::default()
+        };
         let ordinary = draw(&OverlayConfig::default(), false);
         // Turned off, a reading is drawn as any entry; a flag alone changes nothing then
         assert_eq!(draw(&plain, true), draw(&plain, false));
@@ -2653,7 +2787,9 @@ mod tests {
         let mut counts = [0; 4];
         for py in 0..h {
             for px in 0..w {
-                let Some(p) = pixmap.pixel(px, py) else { continue };
+                let Some(p) = pixmap.pixel(px, py) else {
+                    continue;
+                };
                 for (i, c) in [theme.left, theme.vowel, theme.right, theme.misc]
                     .into_iter()
                     .enumerate()
@@ -2729,9 +2865,11 @@ mod tests {
                 .count()
         };
         assert!(below(&[1, 2]) > 0, "T over K go together: underlined");
-        assert!(below(&[1, 3]) == 0, "T and P are different fingers: no underline");
+        assert!(
+            below(&[1, 3]) == 0,
+            "T and P are different fingers: no underline"
+        );
     }
-
 
     #[test]
     fn each_part_of_the_keyboard_lights_in_its_own_colour() {
@@ -2866,7 +3004,10 @@ mod tests {
         // spot is part of the pad; the bottom is fully round, so it is empty
         let top_corner = alpha_at(2.0, t.y + 2.0);
         let bottom_corner = alpha_at(2.0, t.bottom() - 3.0);
-        assert!(top_corner > 0, "top corner faces the key above, so it is square");
+        assert!(
+            top_corner > 0,
+            "top corner faces the key above, so it is square"
+        );
         assert_eq!(bottom_corner, 0, "bottom is a round end");
         assert!(alpha_at(2.0, t.y + t.h / 2.0) > 0, "body of the pad");
     }
@@ -2924,8 +3065,7 @@ mod tests {
                 half: Half::Top,
             },
         );
-        let mut renderer =
-            Renderer::with_layout(&config, 1, 900, test_layout_with_join()).unwrap();
+        let mut renderer = Renderer::with_layout(&config, 1, 900, test_layout_with_join()).unwrap();
         let (w, h) = renderer.size();
         let mut pixmap = Pixmap::new(w, h).unwrap();
         renderer.draw(&OverlaySnapshot::default(), &mut pixmap.as_mut());
@@ -2933,11 +3073,18 @@ mod tests {
         let (join, s) = (kb.extra[0], kb.keys[0]);
         let alpha_at = |x: f32, y: f32| pixmap.pixel(x as u32, y as u32).unwrap().alpha();
         // The join key's bottom and S-'s top face each other, so both are square there
-        assert!(alpha_at(join.x + 1.0, join.bottom() - 1.0) > 0, "join bottom");
+        assert!(
+            alpha_at(join.x + 1.0, join.bottom() - 1.0) > 0,
+            "join bottom"
+        );
         assert!(alpha_at(s.x + 1.0, s.y + 1.0) > 0, "S- top");
         // ...while the join key's top and S-'s bottom keep their own shapes
         assert!(alpha_at(join.x + 1.0, join.y) < 128, "join top is softened");
-        assert_eq!(alpha_at(s.x + 1.0, s.bottom() - 3.0), 0, "S- bottom is a round end");
+        assert_eq!(
+            alpha_at(s.x + 1.0, s.bottom() - 3.0),
+            0,
+            "S- bottom is a round end"
+        );
     }
 
     #[test]
@@ -2947,10 +3094,14 @@ mod tests {
         let mut pixmap = Pixmap::new(w, h).unwrap();
         renderer.draw(&OverlaySnapshot::default(), &mut pixmap.as_mut());
         let bar = renderer.keyboard.as_ref().unwrap().keys[22];
-        let alpha_at = |dx: f32, y: f32| pixmap.pixel((bar.x + dx) as u32, y as u32).unwrap().alpha();
+        let alpha_at =
+            |dx: f32, y: f32| pixmap.pixel((bar.x + dx) as u32, y as u32).unwrap().alpha();
         // A pill would have no pad at the left edge a few pixels in from the top and bottom
         assert!(alpha_at(1.0, bar.y + bar.h / 2.0) > 0, "middle of the end");
-        assert!(alpha_at(3.0, bar.y + 3.0) > 0, "the corner is only softened");
+        assert!(
+            alpha_at(3.0, bar.y + 3.0) > 0,
+            "the corner is only softened"
+        );
     }
 
     #[test]
@@ -3014,7 +3165,9 @@ mod tests {
             };
             for i in 0..renderer.tape_lines() {
                 let (stroke, text) = words[i % words.len()];
-                snapshot.tape.push_back(tape_entry(i as u64 + 1, stroke, text));
+                snapshot
+                    .tape
+                    .push_back(tape_entry(i as u64 + 1, stroke, text));
             }
             let write = |name: &str, pixmap: &Pixmap| {
                 let mut out = format!("P6 {w} {h} 255\n").into_bytes();
@@ -3292,7 +3445,10 @@ mod tests {
         // T is the left-hand T- (slot 1); -D is slot 20
         let (t, d) = (1, 20);
         let first = drawn(&mut renderer, &view);
-        assert!(key_lit(&renderer, &first, t), "the first stroke lights first");
+        assert!(
+            key_lit(&renderer, &first, t),
+            "the first stroke lights first"
+        );
         assert!(!key_lit(&renderer, &first, d), "and not the second yet");
 
         renderer.set_step(1);
@@ -3308,8 +3464,8 @@ mod tests {
 
     #[test]
     fn a_lookup_with_the_join_key_lights_it_on_the_continuation_stroke_only() {
-        use crate::steno::layout::Layout;
         use crate::config::OverlayPlacement;
+        use crate::steno::layout::Layout;
         // A join key drawn as the top half of S-
         let mut config = OverlayConfig::default();
         config.overlay_overrides.insert(
@@ -3343,7 +3499,10 @@ mod tests {
         let e = crate::steno::layout::slot_by_name("-E").unwrap();
         let first = drawn(&mut renderer, &view);
         assert!(key_lit(&renderer, &first, e), "ED starts with E");
-        assert!(!join_lit(&renderer, &first), "no join key on the first stroke");
+        assert!(
+            !join_lit(&renderer, &first),
+            "no join key on the first stroke"
+        );
         renderer.set_step(1);
         let second = drawn(&mut renderer, &view);
         assert!(join_lit(&renderer, &second), "+-D lights the join key");
@@ -3463,7 +3622,9 @@ mod tests {
             (words_x..words_x + 80)
                 .flat_map(|x| {
                     // mid-line, where the letters are (the bigger text starts further down)
-                    let p = pixmap.pixel(x, row + (renderer.line_height / 2.0) as u32).unwrap();
+                    let p = pixmap
+                        .pixel(x, row + (renderer.line_height / 2.0) as u32)
+                        .unwrap();
                     [p.red(), p.green(), p.blue(), p.alpha()]
                 })
                 .collect()
@@ -3521,8 +3682,8 @@ mod tests {
             let lit = |y0: u32, y1: u32| {
                 (y0..y1).any(|y| (0..w).any(|x| pixmap.pixel(x, y).unwrap().alpha() > 0))
             };
-            let top = (renderer.tape_lines() as f32)
-                .mul_add(-renderer.line_height, renderer.tape_bottom);
+            let top =
+                (renderer.tape_lines() as f32).mul_add(-renderer.line_height, renderer.tape_bottom);
             assert!((0.0..14.0).contains(&top));
             for line in 0..renderer.tape_lines() {
                 let y = (line as f32).mul_add(renderer.line_height, top);
@@ -3724,8 +3885,9 @@ mod tests {
                 query: "i want to go to the store and buy cookies".into(),
                 rows: vec![LookupRow {
                     text: "I want to go to the store and buy cookies".into(),
-                    outline: "EU / WAUPBT / TO / TKPWOE / TO / -T / STOR / APBD / PWEU / KAOBG/KEUS"
-                        .into(),
+                    outline:
+                        "EU / WAUPBT / TO / TKPWOE / TO / -T / STOR / APBD / PWEU / KAOBG/KEUS"
+                            .into(),
                 }],
                 hint: 0,
                 strokes: Vec::new(),
@@ -4001,16 +4163,14 @@ mod tests {
                 half: Half::Top,
             },
         );
-        let renderer =
-            Renderer::with_layout(&config, 1, 900, test_layout_with_join()).unwrap();
+        let renderer = Renderer::with_layout(&config, 1, 900, test_layout_with_join()).unwrap();
         let g = groups_of(&renderer, "+TK");
         assert_eq!(g[0].1, g[1].1);
         assert_eq!(g[1].1, g[2].1);
         assert!(g[0].1.is_some());
 
         config.key_groups.insert("join".into(), 77);
-        let renderer =
-            Renderer::with_layout(&config, 1, 900, test_layout_with_join()).unwrap();
+        let renderer = Renderer::with_layout(&config, 1, 900, test_layout_with_join()).unwrap();
         let g = groups_of(&renderer, "+TK");
         assert_eq!(g[0].1, Some(77));
         assert_ne!(g[0].1, g[1].1);
@@ -4021,7 +4181,10 @@ mod tests {
         let layout = || test_layout_with_join();
         let plain = Renderer::with_layout(&OverlayConfig::default(), 1, 900, layout()).unwrap();
         let bits = plain.layout.parse_stroke("+K").unwrap();
-        assert_eq!(plain.stroke_run(bits)[0].color, plain.theme.accent(KeyGroup::Misc));
+        assert_eq!(
+            plain.stroke_run(bits)[0].color,
+            plain.theme.accent(KeyGroup::Misc)
+        );
 
         for (color, group) in [
             (KeyColor::Left, KeyGroup::LeftHand),
@@ -4031,7 +4194,10 @@ mod tests {
             let mut config = OverlayConfig::default();
             config.extra_colors.insert("+".into(), color);
             let renderer = Renderer::with_layout(&config, 1, 900, layout()).unwrap();
-            assert_eq!(renderer.stroke_run(bits)[0].color, renderer.theme.accent(group));
+            assert_eq!(
+                renderer.stroke_run(bits)[0].color,
+                renderer.theme.accent(group)
+            );
         }
     }
 
@@ -4065,7 +4231,10 @@ mod tests {
         };
         let shown = draw(&mut renderer, &snapshot, ViewState::default());
         assert_ne!(shown.data(), draw(&mut renderer, &snapshot, no_tape).data());
-        assert_ne!(shown.data(), draw(&mut renderer, &snapshot, no_keyboard).data());
+        assert_ne!(
+            shown.data(),
+            draw(&mut renderer, &snapshot, no_keyboard).data()
+        );
         // With the tape hidden it draws what a snapshot with no tape does
         let mut bare = snapshot.clone();
         bare.tape.clear();
@@ -4126,7 +4295,10 @@ mod tests {
         let keys = renderer.keyboard.as_ref().unwrap().keys;
         for (a, b) in [(1, 3), (3, 5)] {
             let (x, y) = gap_between(keys[a], keys[b]);
-            assert!(alpha_at(&merged, x, y) > 250, "gap {a}-{b} filled when merged");
+            assert!(
+                alpha_at(&merged, x, y) > 250,
+                "gap {a}-{b} filled when merged"
+            );
         }
         // Merging off: the same keys lit one by one leave the gap between them dark
         let off = OverlayConfig {
@@ -4155,7 +4327,9 @@ mod tests {
         let (x, y) = gap_between(keys[3], keys[5]);
         assert!(alpha_at(&pixmap, x, y) < 150);
         let h = keys[5];
-        let unlit = pixmap.pixel((h.x + h.w / 2.0) as u32, (h.y + 4.0) as u32).unwrap();
+        let unlit = pixmap
+            .pixel((h.x + h.w / 2.0) as u32, (h.y + 4.0) as u32)
+            .unwrap();
         assert!(unlit.red() < 100, "H is not lit");
         // T alone is no group
         let (renderer, one) = keys_drawn(&OverlayConfig::default(), "T", true);
@@ -4187,7 +4361,10 @@ mod tests {
         let (x, y) = (t.x + 3.0, t.y + t.h / 2.0);
         assert!(alpha_at(&dim, x, y) < alpha_at(&held, x, y));
         let (gx, gy) = gap_between(t, renderer.keyboard.as_ref().unwrap().keys[3]);
-        assert!(alpha_at(&dim, gx, gy) > 100, "still fused while only in the stroke");
+        assert!(
+            alpha_at(&dim, gx, gy) > 100,
+            "still fused while only in the stroke"
+        );
     }
 
     #[test]
@@ -4209,10 +4386,16 @@ mod tests {
         let bottom = a.bottom();
         // The flat bottom runs through the middle, where two half circles would have dipped away
         let mid = (a.x + a.w + o.x) / 2.0;
-        assert!(alpha_at(&pixmap, mid, bottom - 2.0) > 250, "flat bottom between the paddles");
+        assert!(
+            alpha_at(&pixmap, mid, bottom - 2.0) > 250,
+            "flat bottom between the paddles"
+        );
         assert!(alpha_at(&pixmap, mid, a.y + a.h / 2.0) > 250);
         // The outer bottom corners are rounded off
-        assert!(alpha_at(&pixmap, a.x + 1.0, bottom - 2.0) < 100, "only the glow reaches it");
+        assert!(
+            alpha_at(&pixmap, a.x + 1.0, bottom - 2.0) < 100,
+            "only the glow reaches it"
+        );
         assert!(alpha_at(&pixmap, o.x + o.w - 2.0, bottom - 2.0) < 100);
         // Unmerged, the paddles each have their own round end and a dip between them
         let off = OverlayConfig {
@@ -4263,7 +4446,10 @@ mod tests {
         let star = kb.keys[9];
         let at = |pixmap: &Pixmap, rect: Rect, fy: f32| {
             let p = pixmap
-                .pixel((rect.x + rect.w / 2.0) as u32, rect.h.mul_add(fy, rect.y) as u32)
+                .pixel(
+                    (rect.x + rect.w / 2.0) as u32,
+                    rect.h.mul_add(fy, rect.y) as u32,
+                )
                 .unwrap();
             (p.red(), p.green(), p.blue())
         };
@@ -4278,8 +4464,15 @@ mod tests {
         assert_ne!(at(&both, join, 0.5), at(&dark, join, 0.5));
         assert_ne!(at(&both, star, 0.5), at(&dark, star, 0.5));
         // The tall key is shaped like the star: soft at the top corner, round at the bottom
-        assert!(alpha_at(&lit, join.x + 1.0, join.y) < 128, "soft top corner");
-        assert_eq!(alpha_at(&lit, join.x + 1.0, join.bottom() - 3.0), 0, "round bottom");
+        assert!(
+            alpha_at(&lit, join.x + 1.0, join.y) < 128,
+            "soft top corner"
+        );
+        assert_eq!(
+            alpha_at(&lit, join.x + 1.0, join.bottom() - 3.0),
+            0,
+            "round bottom"
+        );
     }
 
     #[test]
@@ -4289,7 +4482,12 @@ mod tests {
         let kb = renderer.keyboard.as_ref().unwrap();
         // The # bar is the top of the diagram: nothing but the keys above the thumbs
         assert!(kb.extra[0].y > kb.keys[22].y);
-        assert_eq!(renderer.stroke_run(1 << renderer.layout.extra_start()).len(), 1);
+        assert_eq!(
+            renderer
+                .stroke_run(1 << renderer.layout.extra_start())
+                .len(),
+            1
+        );
     }
 
     /// Writes the join column as PPMs to `$OVERLAY_PREVIEW_DIR`:
@@ -4311,7 +4509,13 @@ mod tests {
             let kb = renderer.keyboard.as_ref().unwrap();
             let top = (kb.keys[22].y - 10.0) as u32;
             let mut out = format!("P6 {w} {} 255\n", h - top).into_bytes();
-            for px in pixmap.data().as_chunks::<4>().0.iter().skip((top * w) as usize) {
+            for px in pixmap
+                .data()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .skip((top * w) as usize)
+            {
                 for c in &px[..3] {
                     out.push(c + (60 * (255 - u32::from(px[3])) / 255) as u8);
                 }
@@ -4345,14 +4549,21 @@ mod tests {
             ..OverlayConfig::default()
         };
         for stroke in [
-            "KW", "-BGS", "-FRPB", "AO", "-EU", "SR", "KR", "STKPWHR", "SKR", "TKPH", "SKWR", "TPH-PB",
+            "KW", "-BGS", "-FRPB", "AO", "-EU", "SR", "KR", "STKPWHR", "SKR", "TKPH", "SKWR",
+            "TPH-PB",
         ] {
             let (renderer, pixmap) = keys_drawn(&config, stroke, true);
             let (w, h) = renderer.size();
             let kb = renderer.keyboard.as_ref().unwrap();
             let top = (kb.keys[22].y - 10.0) as u32;
             let mut out = format!("P6 {w} {} 255\n", h - top).into_bytes();
-            for px in pixmap.data().as_chunks::<4>().0.iter().skip((top * w) as usize) {
+            for px in pixmap
+                .data()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .skip((top * w) as usize)
+            {
                 for c in &px[..3] {
                     out.push(c + (60 * (255 - u32::from(px[3])) / 255) as u8);
                 }

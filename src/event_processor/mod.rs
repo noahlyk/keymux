@@ -4,12 +4,12 @@ use anyhow::{Context, Result};
 use control::Controlled;
 use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
 use evdev::{AttributeSet, Device, Key};
-use merge::{Arrival, Merge};
-use std::collections::HashSet;
-use std::path::PathBuf;
 pub use keymap::KeymapProcessor;
+use merge::{Arrival, Merge};
 use pump::{Pump, Step};
+use std::collections::HashSet;
 use std::os::unix::io::AsRawFd;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tracing::{error, info};
 
@@ -153,7 +153,11 @@ fn run_group_loop(
             Ok(()) => {
                 info!("Grabbed {} for {}", path.display(), name);
                 if merge.join(path.clone(), device).is_err() {
-                    error!("{} has too many devices; not using {}", name, path.display());
+                    error!(
+                        "{} has too many devices; not using {}",
+                        name,
+                        path.display()
+                    );
                 }
             }
             Err(e) => {
@@ -207,8 +211,8 @@ fn prepare_member(device: &mut Device) -> Result<()> {
 
 /// Open a device that joins a running group: made ready as at the start.
 pub fn open_member_device(path: &std::path::Path) -> Result<Device> {
-    let mut device = Device::open(path)
-        .with_context(|| format!("Failed to open device: {}", path.display()))?;
+    let mut device =
+        Device::open(path).with_context(|| format!("Failed to open device: {}", path.display()))?;
     prepare_member(&mut device)?;
     Ok(device)
 }

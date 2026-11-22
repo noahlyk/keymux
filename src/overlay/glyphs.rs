@@ -282,7 +282,9 @@ mod tests {
 
         // Across the stem the shadow rises smoothly from nothing: no pixel jumps by more than a
         // third of the range, so it reads as depth, not as an outline
-        let row: Vec<i32> = (0..w).map(|x| i32::from(glyph.halo[(h / 2) * w + x])).collect();
+        let row: Vec<i32> = (0..w)
+            .map(|x| i32::from(glyph.halo[(h / 2) * w + x]))
+            .collect();
         assert!(row[0] < 25, "{row:?}");
         assert!(row.windows(2).all(|p| (p[1] - p[0]).abs() < 100), "{row:?}");
         // It is dense at the stem and faint at the far edge of its reach

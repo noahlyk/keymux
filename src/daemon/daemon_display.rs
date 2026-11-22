@@ -82,7 +82,10 @@ impl DaemonDisplay {
     fn status_str(kbd: &crate::ipc::KeyboardInfo) -> String {
         match (&kbd.enabled, &kbd.matched_rule) {
             (true, None) if kbd.group.is_some() => {
-                format!("✓ In group \"{}\"", kbd.group.as_deref().unwrap_or_default())
+                format!(
+                    "✓ In group \"{}\"",
+                    kbd.group.as_deref().unwrap_or_default()
+                )
             }
             (true, Some(rule)) => format!("✓ Enabled by \"{}\"", rule),
             (true, None) => "✓ Enabled implicitly".to_string(),
@@ -181,7 +184,10 @@ mod tests {
             DaemonDisplay::status_str(&info(true, None, Some("desk"))),
             "✓ In group \"desk\""
         );
-        assert_eq!(DaemonDisplay::status_str(&info(true, None, None)), "✓ Enabled implicitly");
+        assert_eq!(
+            DaemonDisplay::status_str(&info(true, None, None)),
+            "✓ Enabled implicitly"
+        );
         assert_eq!(
             DaemonDisplay::status_str(&info(true, Some("*"), None)),
             "✓ Enabled by \"*\""

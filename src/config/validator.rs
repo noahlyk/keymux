@@ -64,16 +64,17 @@ pub fn validate_config(config_path: Option<&Path>, strict: bool) -> Result<()> {
 
     // Keyboards come and go, so a member nothing connected matches is a warning, never an error
     if !config.keyboard_groups.is_empty() {
-        let connected: Vec<(String, String, Option<String>)> = crate::keyboard_id::find_all_keyboards()
-            .into_iter()
-            .map(|(id, keyboard)| {
-                let event = keyboard
-                    .devices
-                    .first()
-                    .and_then(|(path, _)| path.file_name()?.to_str().map(str::to_string));
-                (id.to_string(), keyboard.name, event)
-            })
-            .collect();
+        let connected: Vec<(String, String, Option<String>)> =
+            crate::keyboard_id::find_all_keyboards()
+                .into_iter()
+                .map(|(id, keyboard)| {
+                    let event = keyboard
+                        .devices
+                        .first()
+                        .and_then(|(path, _)| path.file_name()?.to_str().map(str::to_string));
+                    (id.to_string(), keyboard.name, event)
+                })
+                .collect();
         // With no keyboard readable at all (no access to /dev/input) there is nothing to compare
         if !connected.is_empty() {
             for (group, pattern) in config.unmatched_group_members(&connected) {
@@ -103,9 +104,15 @@ pub fn validate_config(config_path: Option<&Path>, strict: bool) -> Result<()> {
             let line = format!(
                 "dictionary {}{}: {}{}",
                 finding.file,
-                finding.outline.as_ref().map_or_else(String::new, |outline| format!(" \"{outline}\"")),
+                finding
+                    .outline
+                    .as_ref()
+                    .map_or_else(String::new, |outline| format!(" \"{outline}\"")),
                 finding.message,
-                finding.suggestion.as_ref().map_or_else(String::new, |s| format!(" (suggestion: {s})")),
+                finding
+                    .suggestion
+                    .as_ref()
+                    .map_or_else(String::new, |s| format!(" (suggestion: {s})")),
             );
             match finding.severity {
                 Severity::Error => errors.push(line),

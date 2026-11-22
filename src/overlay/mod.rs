@@ -204,7 +204,11 @@ mod tests {
         assert!(!take_controls(&mut view, &mut seen, &first));
         assert_eq!((view, seen), (ViewState::default(), 1));
         // The placeholder frame sent while the daemon is away does not rewind or change it
-        assert!(!take_controls(&mut view, &mut seen, &OverlaySnapshot::default()));
+        assert!(!take_controls(
+            &mut view,
+            &mut seen,
+            &OverlaySnapshot::default()
+        ));
         assert_eq!(seen, 1);
     }
 
@@ -218,7 +222,10 @@ mod tests {
             tape_hidden: true,
             ..shown
         };
-        assert!(has_content(&config, no_tape, &snapshot), "the keyboard stays");
+        assert!(
+            has_content(&config, no_tape, &snapshot),
+            "the keyboard stays"
+        );
         let nothing = ViewState {
             tape_hidden: true,
             keyboard_hidden: true,
@@ -234,7 +241,10 @@ mod tests {
             hidden: true,
             ..shown
         };
-        assert!(!has_content(&config, hidden, &looking), "hide wins over a lookup");
+        assert!(
+            !has_content(&config, hidden, &looking),
+            "hide wins over a lookup"
+        );
     }
 
     #[test]
