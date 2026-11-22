@@ -1,7 +1,7 @@
 use crate::keycode::KeyCode;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 /// Enable or Disable action for a keyboard entry
@@ -730,6 +730,33 @@ fn renamed_layers_behave_alike(old: &Config, new: &Config) -> bool {
     })
 }
 
+/// Whether one `enabled_keyboards`-style pattern names a keyboard.
+///
+/// It does when it is the keyboard's event file (`event17` or
+/// `/dev/input/event17`), its hardware id (a prefix or any part of it, with or without
+/// `@port`), or part of its name. `*` is not handled here: callers decide what it means.
+/// Shared by `enabled_keyboards` and `keyboard_groups`, so both match alike.
+#[must_use]
+pub fn pattern_matches(
+    pattern: &str,
+    keyboard_id: &str,
+    keyboard_name: Option<&str>,
+    event_path: Option<&str>,
+) -> bool {
+    let normalized_event = event_path.map(|e| e.strip_prefix("/dev/input/").unwrap_or(e));
+    let normalized_pattern = pattern.strip_prefix("/dev/input/").unwrap_or(pattern);
+    // Event path match (e.g., "event17" or "/dev/input/event17")
+    let by_event =
+        normalized_event.is_some_and(|event| pattern == event || normalized_pattern == event);
+    // ID match or name match
+    let by_id_or_name = keyboard_id.contains(pattern)
+        || keyboard_id.contains(normalized_pattern)
+        || keyboard_id.starts_with(pattern)
+        || keyboard_id.starts_with(normalized_pattern)
+        || keyboard_name.is_some_and(|name| name.contains(pattern));
+    by_event || by_id_or_name
+}
+
 /// Main configuration structure
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
@@ -747,6 +774,14 @@ pub struct Config {
     pub game_mode: GameMode,
     #[serde(default)]
     pub per_keyboard_overrides: HashMap<String, PerKeyboardConfig>,
+
+    /// Keyboard groups: several physical keyboards used as ONE logical keyboard, by group name.
+    /// Each member is a pattern exactly as in `enabled_keyboards` (a hardware id, a prefix of
+    /// one, `id@port`, an event name, part of the keyboard's name). One processor serves the
+    /// whole group, so a steno chord, a layer, a held modifier or a one-shot can span members.
+    /// The group name is also accepted as a key of `per_keyboard_overrides`.
+    #[serde(default)]
+    pub keyboard_groups: BTreeMap<String, Vec<String>>,
 
     /// Double-tap window (milliseconds) - QMK tap dance inspired
     /// Default: 250ms (configurable, sensible default)
@@ -1250,23 +1285,8 @@ impl Config {
                         continue;
                     }
 
-                    // Check if this entry matches the keyboard
                     // Match against: event path, ID (partial or exact), or keyboard name
-                    let normalized_event =
-                        event_path.map(|e| e.strip_prefix("/dev/input/").unwrap_or(e));
-
-                    let normalized_pattern = pattern.strip_prefix("/dev/input/").unwrap_or(pattern);
-
-                    // Event path match (e.g., "event17" or "/dev/input/event17")
-                    let by_event = normalized_event
-                        .is_some_and(|event| pattern == event || normalized_pattern == event);
-                    // ID match or name match
-                    let by_id_or_name = keyboard_id.contains(pattern)
-                        || keyboard_id.contains(normalized_pattern)
-                        || keyboard_id.starts_with(pattern)
-                        || keyboard_id.starts_with(normalized_pattern)
-                        || keyboard_name.is_some_and(|name| name.contains(pattern));
-                    let matches = by_event || by_id_or_name;
+                    let matches = pattern_matches(pattern, keyboard_id, keyboard_name, event_path);
 
                     if matches {
                         final_action = Some(action);
@@ -1297,26 +1317,83 @@ impl Config {
         }
     }
 
-    /// Get effective config for a specific keyboard
-    /// Applies per-keyboard overrides on top of the global config (or replaces it)
-    #[must_use]
-    #[allow(clippy::option_if_let_else)] // Complex nested logic, keeping for readability
-    pub fn for_keyboard(&self, keyboard_id: &str) -> Self {
-        // Match per_keyboard_overrides using prefix logic for backwards compatibility:
-        // a key without "@port" matches any port of that hardware ID; "@port" is exact.
+    /// The per-keyboard override for one keyboard: a key without "@port" matches any port of
+    /// that hardware ID (backwards compatible); "@port" is exact.
+    fn override_for(&self, keyboard_id: &str) -> Option<&PerKeyboardConfig> {
         let our_base = keyboard_id.split('@').next().unwrap_or(keyboard_id);
-        let override_cfg = self.per_keyboard_overrides.iter().find_map(|(key, cfg)| {
+        self.per_keyboard_overrides.iter().find_map(|(key, cfg)| {
             let matches = if key.contains('@') {
                 key == keyboard_id
             } else {
                 key.as_str() == our_base
             };
-            if matches {
-                Some(cfg)
-            } else {
-                None
-            }
-        });
+            matches.then_some(cfg)
+        })
+    }
+
+    /// The group a keyboard belongs to, if any: the first group, by name, with a member pattern
+    /// that names it (matched exactly as `enabled_keyboards` entries are; `*` is every keyboard).
+    #[must_use]
+    pub fn group_of(
+        &self,
+        keyboard_id: &str,
+        keyboard_name: Option<&str>,
+        event_path: Option<&str>,
+    ) -> Option<&str> {
+        self.keyboard_groups
+            .iter()
+            .find(|(_, members)| {
+                members.iter().any(|pattern| {
+                    pattern == "*"
+                        || pattern_matches(pattern, keyboard_id, keyboard_name, event_path)
+                })
+            })
+            .map(|(name, _)| name.as_str())
+    }
+
+    /// The group this keyboard is a working member of: [`Self::group_of`], unless
+    /// `enabled_keyboards` names the keyboard itself `Disable` (the last specific entry that
+    /// names it decides; a `*` entry never takes a member out, and a group needs no
+    /// `enabled_keyboards` entry to be enabled).
+    #[must_use]
+    pub fn active_group_of(
+        &self,
+        keyboard_id: &str,
+        keyboard_name: Option<&str>,
+        event_path: Option<&str>,
+    ) -> Option<&str> {
+        let group = self.group_of(keyboard_id, keyboard_name, event_path)?;
+        let disabled = match self.enabled_keyboards.normalize() {
+            EnabledKeyboards::ExplicitNone | EnabledKeyboards::SomeNone => false,
+            EnabledKeyboards::List(entries) | EnabledKeyboards::SomeList(entries) => entries
+                .iter()
+                .filter(|entry| entry.pattern() != "*")
+                .rfind(|entry| {
+                    pattern_matches(entry.pattern(), keyboard_id, keyboard_name, event_path)
+                })
+                .is_some_and(|entry| entry.action() == EnableDisable::Disable),
+        };
+        (!disabled).then_some(group)
+    }
+
+    /// Get effective config for a specific keyboard
+    /// Applies per-keyboard overrides on top of the global config (or replaces it)
+    #[must_use]
+    pub fn for_keyboard(&self, keyboard_id: &str) -> Self {
+        self.with_override(self.override_for(keyboard_id))
+    }
+
+    /// The effective config of a keyboard group. An entry of `per_keyboard_overrides` named
+    /// after the group wins; with none, the override of the first connected member that has
+    /// one (`member_ids` in the order given) applies; with none, the global config.
+    #[must_use]
+    pub fn for_group(&self, group: &str, member_ids: &[String]) -> Self {
+        let own = self.per_keyboard_overrides.get(group);
+        self.with_override(own.or_else(|| member_ids.iter().find_map(|id| self.override_for(id))))
+    }
+
+    #[allow(clippy::option_if_let_else)] // Complex nested logic, keeping for readability
+    fn with_override(&self, override_cfg: Option<&PerKeyboardConfig>) -> Self {
         if let Some(override_cfg) = override_cfg {
             if self.per_keyboard_inherits_global_layout {
                 // INHERITING MODE: Start with global config, merge/override with per-keyboard settings
@@ -1361,6 +1438,7 @@ impl Config {
                         .unwrap_or_else(default_tapping_term),
                     mt_config: override_cfg.mt_config.clone().unwrap_or_default(),
                     enabled_keyboards: self.enabled_keyboards.clone(), // Keep global enabled_keyboards
+                    keyboard_groups: self.keyboard_groups.clone(), // Groups are global
                     remaps: override_cfg.remaps.clone().unwrap_or_default(),
                     layers: override_cfg.layers.clone().unwrap_or_default(),
                     game_mode: override_cfg.game_mode.clone().unwrap_or_default(),
@@ -1527,6 +1605,7 @@ impl Config {
                 self.check_socd(),
                 self.check_timing(),
                 self.check_layer_references(),
+                self.check_keyboard_groups(),
                 self.check_steno_layers(dictionaries),
                 self.check_overlay(),
             ],
@@ -1687,6 +1766,68 @@ impl Config {
         }
         check.summary = format!("{} layers", self.layers.len());
         check
+    }
+
+    fn check_keyboard_groups(&self) -> Check {
+        let mut check = Check::new("keyboard groups");
+        let named: Vec<(&String, &Vec<String>)> = self.keyboard_groups.iter().collect();
+        for (name, members) in &named {
+            if name.is_empty() || name.contains(['*', '@', ':']) {
+                check.errors.push(format!(
+                    "keyboard group \"{name}\": a name must be non-empty and have no '*', '@' or ':' (it would read as a hardware id)"
+                ));
+            }
+            if members.is_empty() {
+                check
+                    .errors
+                    .push(format!("keyboard group \"{name}\" has no members"));
+            }
+            if members.iter().any(String::is_empty) {
+                check.errors.push(format!(
+                    "keyboard group \"{name}\" has an empty member pattern"
+                ));
+            }
+        }
+        // A keyboard belongs to at most one group. Which keyboards exist is not known here, so
+        // two patterns clash when one could name whatever the other names: equal, or one inside
+        // the other ("046d" and "046d:c52b")
+        for (i, (first, first_members)) in named.iter().enumerate() {
+            for (second, second_members) in &named[i + 1..] {
+                for a in *first_members {
+                    for b in *second_members {
+                        if a == b || a == "*" || b == "*" || a.contains(b.as_str()) || b.contains(a.as_str()) {
+                            check.errors.push(format!(
+                                "keyboard groups \"{first}\" and \"{second}\" overlap: \"{a}\" and \"{b}\" can name the same keyboard (a keyboard belongs to at most one group)"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        check.summary = format!("{} groups", named.len());
+        check
+    }
+
+    /// The member patterns of every group that name none of `keyboards` (id, name, event file).
+    /// Keyboards come and go, so this is for a warning, never an error.
+    #[must_use]
+    pub fn unmatched_group_members(
+        &self,
+        keyboards: &[(String, String, Option<String>)],
+    ) -> Vec<(String, String)> {
+        let mut unmatched = Vec::new();
+        for (group, members) in &self.keyboard_groups {
+            for pattern in members {
+                let found = pattern == "*"
+                    || keyboards.iter().any(|(id, name, event)| {
+                        pattern_matches(pattern, id, Some(name), event.as_deref())
+                    });
+                if !found {
+                    unmatched.push((group.clone(), pattern.clone()));
+                }
+            }
+        }
+        unmatched
     }
 
     fn check_steno_layers(&self, dictionaries: Option<DictionaryRoots<'_>>) -> Check {
@@ -2394,5 +2535,113 @@ mod tests {
         // CMD action
         let input = r#"KC_F1: CMD("/usr/bin/test"),"#;
         assert_eq!(Config::preprocess_config(input), input);
+    }
+
+    #[test]
+    fn a_config_without_groups_has_none_and_every_keyboard_is_alone() {
+        let config = parse(r#"(enabled_keyboards: ["16c0:27db"])"#);
+        assert!(config.keyboard_groups.is_empty());
+        assert_eq!(config.group_of("16c0:27db:0111:0003", Some("Glove80"), None), None);
+        assert!(config.validate(None).errors().next().is_none());
+    }
+
+    const GROUPS: &str = r#"(keyboard_groups: { "desk": ["16c0:27db", "046d:c52b:0111:0003@3-1"], "lap": ["event9", "Planck"] })"#;
+
+    #[test]
+    fn group_members_match_like_enabled_keyboards_entries() {
+        let config = parse(GROUPS);
+        let of = |id, name, event| config.group_of(id, Some(name), event);
+        assert_eq!(of("16c0:27db:0111:0003", "Glove80", None), Some("desk"));
+        assert_eq!(of("16c0:27db:0111:0003@1-2", "Glove80", None), Some("desk"));
+        assert_eq!(of("046d:c52b:0111:0003@3-1", "K", None), Some("desk"));
+        assert_eq!(of("046d:c52b:0111:0003@3-2", "K", None), None, "@port is exact");
+        assert_eq!(of("1234:5678:0111:0003", "K", Some("event9")), Some("lap"));
+        assert_eq!(of("1234:5678:0111:0003", "Planck EZ", None), Some("lap"));
+        assert_eq!(of("1234:5678:0111:0003", "Other", None), None);
+    }
+
+    #[test]
+    fn a_member_is_enabled_implicitly_unless_enabled_keyboards_disables_it() {
+        let id = "16c0:27db:0111:0003";
+        let none = parse(GROUPS);
+        assert_eq!(none.active_group_of(id, None, None), Some("desk"));
+        let only_others = parse(
+            r#"(enabled_keyboards: ["abcd:0001"], keyboard_groups: { "desk": ["16c0:27db"] })"#,
+        );
+        assert_eq!(only_others.active_group_of(id, None, None), Some("desk"));
+        let disabled = parse(
+            r#"(enabled_keyboards: ["*", ("16c0:27db", "Disable")], keyboard_groups: { "desk": ["16c0:27db"] })"#,
+        );
+        assert_eq!(disabled.active_group_of(id, None, None), None);
+        let star_disable = parse(
+            r#"(enabled_keyboards: [("*", "Disable")], keyboard_groups: { "desk": ["16c0:27db"] })"#,
+        );
+        assert_eq!(star_disable.active_group_of(id, None, None), Some("desk"));
+    }
+
+    #[test]
+    fn overlapping_groups_are_a_validation_error() {
+        let config = parse(
+            r#"(keyboard_groups: { "a": ["16c0:27db:0111:0003"], "b": ["16c0:27db"] })"#,
+        );
+        let report = config.validate(None);
+        let errors: Vec<&str> = report.errors().collect();
+        assert!(errors.iter().any(|e| e.contains("overlap")), "{errors:?}");
+        let same = parse(r#"(keyboard_groups: { "a": ["x1"], "b": ["x1"] })"#);
+        assert!(same.validate(None).errors().any(|e| e.contains("overlap")));
+        let apart = parse(GROUPS);
+        assert!(apart.validate(None).errors().next().is_none());
+    }
+
+    #[test]
+    fn a_bad_group_name_or_an_empty_group_is_an_error() {
+        for text in [
+            r#"(keyboard_groups: { "16c0:27db": ["a"] })"#,
+            r#"(keyboard_groups: { "": ["a"] })"#,
+            r#"(keyboard_groups: { "desk": [] })"#,
+            r#"(keyboard_groups: { "desk": [""] })"#,
+        ] {
+            let report = parse(text).validate(None);
+            assert!(report.errors().next().is_some(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_member_nothing_is_connected_for_is_listed_for_a_warning() {
+        let config = parse(GROUPS);
+        let connected = vec![("16c0:27db:0111:0003".to_string(), "Glove80".to_string(), None)];
+        let unmatched = config.unmatched_group_members(&connected);
+        assert_eq!(
+            unmatched,
+            vec![
+                ("desk".to_string(), "046d:c52b:0111:0003@3-1".to_string()),
+                ("lap".to_string(), "event9".to_string()),
+                ("lap".to_string(), "Planck".to_string()),
+            ]
+        );
+        assert!(config.validate(None).errors().next().is_none(), "absent members are no error");
+    }
+
+    #[test]
+    fn a_groups_own_override_beats_a_members_and_a_members_applies_without_one() {
+        let config = parse(
+            r#"(
+            keyboard_groups: { "desk": ["16c0:27db", "046d:c52b"] },
+            per_keyboard_overrides: {
+                "desk": (default_layer: Some("group")),
+                "16c0:27db:0111:0003": (default_layer: Some("member")),
+            },
+            layers: { "group": (kind: Remap, remaps: {}), "member": (kind: Remap, remaps: {}) },
+        )"#,
+        );
+        let ids = vec!["16c0:27db:0111:0003".to_string(), "046d:c52b:0111:0003".to_string()];
+        let layer = |c: &Config| c.default_layer.as_ref().map(|l| l.0.clone());
+        assert_eq!(layer(&config.for_group("desk", &ids)), Some("group".into()));
+        let mut without = config.clone();
+        without.per_keyboard_overrides.remove("desk");
+        assert_eq!(layer(&without.for_group("desk", &ids)), Some("member".into()));
+        assert_eq!(layer(&without.for_group("desk", &ids[1..])), None);
+        // A keyboard that is not in a group is unchanged
+        assert_eq!(layer(&config.for_keyboard("16c0:27db:0111:0003")), Some("member".into()));
     }
 }
