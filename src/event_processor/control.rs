@@ -74,6 +74,14 @@ impl Control {
     }
 }
 
+impl Control {
+    /// Wake the thread without a signal, for something it reads from elsewhere (a keyboard
+    /// group's new member).
+    pub fn wake(&self) {
+        self.bell.ring();
+    }
+}
+
 impl Drop for Control {
     fn drop(&mut self) {
         self.bell.ring();

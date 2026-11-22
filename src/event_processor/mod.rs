@@ -4,6 +4,9 @@ use anyhow::{Context, Result};
 use control::Controlled;
 use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
 use evdev::{AttributeSet, Device, Key};
+use merge::{Arrival, Merge};
+use std::collections::HashSet;
+use std::path::PathBuf;
 pub use keymap::KeymapProcessor;
 use pump::{Pump, Step};
 use std::os::unix::io::AsRawFd;
@@ -18,6 +21,9 @@ mod debounce;
 mod emission_tests;
 pub mod keymap;
 pub mod layer_stack;
+pub mod merge;
+#[cfg(test)]
+mod merge_tests;
 mod output;
 mod pump;
 #[cfg(test)]
@@ -108,16 +114,125 @@ fn run_event_processor(
     }
 }
 
+/// Run the event processor loop of a keyboard group.
+///
+/// Every member device, one keymap, one
+/// virtual keyboard, one thread. Members that appear or go away while it runs arrive on
+/// `arrivals`; it returns when told to stop, when Alt+F12 releases the group, or when the last
+/// member is gone.
+pub fn run_group(
+    group: &str,
+    members: Vec<(PathBuf, Device)>,
+    arrivals: crossbeam_channel::Receiver<Arrival<Device>>,
+    roster: Arc<Mutex<HashSet<PathBuf>>>,
+    keymap: &Arc<Mutex<KeymapProcessor>>,
+    user_id: u32,
+    control: Controlled,
+) {
+    if let Err(e) = run_group_loop(group, members, arrivals, roster, keymap, user_id, control) {
+        error!("Event processor for group {} failed: {}", group, e);
+    }
+    info!("Event processor thread exiting for group: {}", group);
+}
+
+fn run_group_loop(
+    group: &str,
+    members: Vec<(PathBuf, Device)>,
+    arrivals: crossbeam_channel::Receiver<Arrival<Device>>,
+    roster: Arc<Mutex<HashSet<PathBuf>>>,
+    shared_keymap: &Arc<Mutex<KeymapProcessor>>,
+    user_id: u32,
+    control: Controlled,
+) -> Result<()> {
+    let name = format!("group {group}");
+    let mut merge = Merge::with_roster(arrivals, roster.clone());
+    let mut keys = AttributeSet::<Key>::new();
+    for (path, mut device) in members {
+        keys_of(&device, &mut keys);
+        match prepare_member(&mut device) {
+            Ok(()) => {
+                info!("Grabbed {} for {}", path.display(), name);
+                if merge.join(path.clone(), device).is_err() {
+                    error!("{} has too many devices; not using {}", name, path.display());
+                }
+            }
+            Err(e) => {
+                error!("{}: {}: {:#}", name, path.display(), e);
+                crate::lock(&roster).remove(&path);
+            }
+        }
+    }
+    if merge.is_empty() {
+        anyhow::bail!("no member of {name} could be grabbed");
+    }
+
+    let mut virtual_device = build_virtual_device(&keys, &name)?;
+    info!("Created virtual device for: {}", name);
+    output::release_all_keys_on_startup(&mut virtual_device);
+
+    let mut pump = Pump::new(name.clone(), user_id, control);
+    loop {
+        match pump.step(shared_keymap, &mut merge, &mut virtual_device)? {
+            Step::Read | Step::Idle => {}
+            Step::Shutdown => {
+                merge.release_all();
+                info!("Every device of {name} ungrabbed and released");
+                return Ok(());
+            }
+            Step::Escaped => {
+                merge.release_all();
+                crate::steno::setup::notify_user(
+                    user_id,
+                    "keymux released a keyboard group",
+                    &format!(
+                        "Alt+F12 released every keyboard of {name} from keymux. Replug one to use keymux again."
+                    ),
+                );
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Non-blocking reads, and the device grabbed: what a member needs before it is read.
+fn prepare_member(device: &mut Device) -> Result<()> {
+    let fd = device.as_raw_fd();
+    // SAFETY: fd is the open device's own descriptor, and only its flags are touched
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL, 0);
+        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+    device.grab().context("Failed to grab device")
+}
+
+/// Open a device that joins a running group: made ready as at the start.
+pub fn open_member_device(path: &std::path::Path) -> Result<Device> {
+    let mut device = Device::open(path)
+        .with_context(|| format!("Failed to open device: {}", path.display()))?;
+    prepare_member(&mut device)?;
+    Ok(device)
+}
+
+fn keys_of(device: &Device, keys: &mut AttributeSet<Key>) {
+    if let Some(physical_keys) = device.supported_keys() {
+        for key in physical_keys {
+            keys.insert(key);
+        }
+    }
+}
+
 /// Create a virtual uinput device that mimics the physical keyboard
 fn create_virtual_device(physical_device: &Device, keyboard_name: &str) -> Result<VirtualDevice> {
     let mut keys = AttributeSet::<Key>::new();
 
     // Copy all supported keys from physical device
-    if let Some(physical_keys) = physical_device.supported_keys() {
-        for key in physical_keys {
-            keys.insert(key);
-        }
-    }
+    keys_of(physical_device, &mut keys);
+    build_virtual_device(&keys, keyboard_name)
+}
+
+/// The virtual keyboard with `keys` and the media keys.
+fn build_virtual_device(keys: &AttributeSet<Key>, keyboard_name: &str) -> Result<VirtualDevice> {
+    let mut keys = keys.clone();
 
     // Media keys too, for `{#AudioPlay}` and the like: a device only sends the keys it advertises
     for key in crate::keycode::KeyCode::ALL {

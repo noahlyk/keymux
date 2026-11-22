@@ -22,6 +22,12 @@ pub trait Source {
     /// Nothing was queued: sleep until something is, `deadline` comes, or the daemon rings
     /// `bell`, whichever is first. With no deadline, that is as long as it takes.
     fn wait(&mut self, deadline: Option<Instant>, bell: &Doorbell);
+    /// Whether the source already filters switch bounce, per physical key, before it merges
+    /// several keyboards: a second filter over the merged stream would take a real press of
+    /// one member right after a release of another for chatter.
+    fn debounced(&self) -> bool {
+        false
+    }
 }
 
 impl Source for Device {
@@ -163,6 +169,7 @@ impl Pump {
         // thread was busy or asleep is replayed at those moments, so the wait never looks
         // like a key held for longer than it was.
         let anchor = (Instant::now(), SystemTime::now());
+        let debounce = !source.debounced();
         for ev in &self.events {
             // Alt+F12 releases this keyboard from keymux. It's checked on the raw key, before
             // the keymap, so no layer or remap can swallow it.
@@ -185,7 +192,7 @@ impl Pump {
                     let at = moment_of(anchor, ev);
                     // Switch-bounce chatter, and the matching half of its pair, never reaches
                     // the keymap - see debounce.rs. Judged by when the key really bounced.
-                    if self.debounce.is_chatter(ev.code(), pressed, at) {
+                    if debounce && self.debounce.is_chatter(ev.code(), pressed, at) {
                         continue;
                     }
                     let result = keymap.process_key_at(key, pressed, at);
@@ -207,7 +214,7 @@ impl Pump {
 
 /// When `event` happened, on the monotonic clock: the kernel stamped it on the system clock
 /// as it happened, and `anchor` is both clocks read together once the batch was in hand.
-fn moment_of(anchor: (Instant, SystemTime), event: &InputEvent) -> Instant {
+pub(super) fn moment_of(anchor: (Instant, SystemTime), event: &InputEvent) -> Instant {
     let age = anchor
         .1
         .duration_since(event.timestamp())

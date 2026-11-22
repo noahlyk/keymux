@@ -17,8 +17,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 /// Records everything emitted, as (type, code, value).
 #[derive(Default)]
-struct Recorder {
-    events: Vec<(EventType, u16, i32)>,
+pub(super) struct Recorder {
+    pub(super) events: Vec<(EventType, u16, i32)>,
 }
 
 impl Sink for Recorder {
@@ -31,7 +31,7 @@ impl Sink for Recorder {
 
 impl Recorder {
     /// The key events, as (code, value).
-    fn keys(&self) -> Vec<(u16, i32)> {
+    pub(super) fn keys(&self) -> Vec<(u16, i32)> {
         self.events
             .iter()
             .filter(|(kind, _, _)| *kind == EventType::KEY)
@@ -40,7 +40,7 @@ impl Recorder {
     }
 
     /// The text the key presses would type, letters and spaces only.
-    fn typed(&self) -> String {
+    pub(super) fn typed(&self) -> String {
         self.keys()
             .iter()
             .filter(|&&(_, value)| value == 1)
@@ -166,19 +166,33 @@ fn the_pacer_keeps_in_flight_events_under_the_kernel_queue_and_never_splits_a_ke
 
 /// A keyboard that starts on a steno layer whose dictionary knows one word, `KAT` = cat, in a
 /// temp directory of its own.
-struct Fixture {
+pub(super) struct Fixture {
     dir: PathBuf,
 }
 
 impl Fixture {
-    fn new(name: &str) -> Self {
+    pub(super) fn new(name: &str) -> Self {
         let dir =
             std::env::temp_dir().join(format!("keymux-emission-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         Self { dir }
     }
 
-    fn processor(&self) -> KeymapProcessor {
+    pub(super) fn path(&self) -> &std::path::Path {
+        &self.dir
+    }
+
+    /// A keymap from the config `text`, as the daemon builds one.
+    pub(super) fn processor_with(&self, text: &str) -> KeymapProcessor {
+        let config_path = self.dir.join("config.ron");
+        std::fs::write(&config_path, text).unwrap();
+        let config = Config::load(&config_path).unwrap();
+        let mut keymap = KeymapProcessor::new(&config, config_path, 0);
+        keymap.wait_for_steno_dictionaries();
+        keymap
+    }
+
+    pub(super) fn processor(&self) -> KeymapProcessor {
         let dict = self.dir.join("main.json");
         std::fs::write(&dict, r#"{"KAT": "cat"}"#).unwrap();
         let config_path = self.dir.join("config.ron");
@@ -245,7 +259,7 @@ impl Source for Script {
 }
 
 /// A key event as the kernel would report it, stamped `at`.
-fn key_at(key: Key, value: i32, at: SystemTime) -> InputEvent {
+pub(super) fn key_at(key: Key, value: i32, at: SystemTime) -> InputEvent {
     let since = at.duration_since(SystemTime::UNIX_EPOCH).unwrap();
     InputEvent::from(libc::input_event {
         time: libc::timeval {
@@ -260,13 +274,13 @@ fn key_at(key: Key, value: i32, at: SystemTime) -> InputEvent {
 
 /// A pump with the daemon's end of its line, which must outlive it: dropping that end reads
 /// as a shutdown.
-struct Harness {
-    pump: Pump,
-    control: Control,
+pub(super) struct Harness {
+    pub(super) pump: Pump,
+    pub(super) control: Control,
 }
 
 impl Harness {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let (control, controlled) = control::channel().unwrap();
         Self {
             pump: Pump::new("test keyboard".into(), 0, controlled),
