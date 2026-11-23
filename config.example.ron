@@ -415,15 +415,6 @@
                 // nothing is typed and letting go of its keys does nothing; Send types it when
                 // its keys come up. Strokes already sent stay sent.
                 leave_mid_stroke: Discard,
-                // Split keyboard whose halves reach the host at different times (a wireless half):
-                // hold back the FAST half's key events (down and up) by delay_ms (0..=50) so both
-                // halves line up. `half` is Left or Right (taken from the layout: the left bank and
-                // the thumb keys before the star are left; the star and number key are neither);
-                // `keys` adds or replaces it with physical keys that are stroke keys. Strokes that
-                // end on the delayed half wait delay_ms; the other half is never delayed. Measure
-                // it with `keymux steno skew`. Default: no delay, nothing queued.
-                // skew: (delay_ms: 8, half: Left),
-                // skew: (delay_ms: 8, keys: [KC_Q, KC_W, KC_E]),
             )),
             // Non-stroke keys listed here still work while steno is active,
             // e.g. KC_ESC: TO("base") to leave. Anything else is swallowed.

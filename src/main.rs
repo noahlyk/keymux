@@ -237,20 +237,6 @@ fn main() -> Result<()> {
                     };
                     std::process::exit(code);
                 }
-                cli::StenoAction::Skew { reset } => {
-                    match keymux::ipc::send_request(&keymux::ipc::IpcRequest::SkewStats {
-                        reset: *reset,
-                    })? {
-                        keymux::ipc::IpcResponse::SkewStats(stats) if *reset => {
-                            println!(
-                                "Skew measurements cleared ({} two-hand strokes were recorded).",
-                                stats.samples()
-                            );
-                        }
-                        keymux::ipc::IpcResponse::SkewStats(stats) => print!("{}", stats.report()),
-                        other => anyhow::bail!("unexpected answer from the daemon: {other:?}"),
-                    }
-                }
                 cli::StenoAction::Tape { follow, lines } => {
                     let (uid, _) = keymux::get_actual_user_uid();
                     let home = keymux::get_user_home_dir(uid)?;

@@ -330,18 +330,6 @@ impl Layout {
         self.star_slot() + 1
     }
 
-    /// The stroke bits of each hand, `(left, right)`: the left bank and the thumb keys before
-    /// the star, and the thumb keys after the star and the right bank. The star, the number key
-    /// and extra keys are in neither (a split keyboard's thumb clusters decide where the user
-    /// places them, so they are never guessed).
-    #[must_use]
-    pub const fn hand_masks(&self) -> (u32, u32) {
-        let (star, number) = (self.star_slot(), self.number_slot());
-        let left = (1u32 << star) - 1;
-        let right = ((1u32 << number) - 1) & !((1u32 << (star + 1)) - 1);
-        (left, right)
-    }
-
     /// Index of the first right-hand key.
     #[must_use]
     pub(crate) const fn right_start(&self) -> usize {

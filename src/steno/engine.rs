@@ -61,10 +61,6 @@ pub struct StenoEngine {
     /// Stroke keys physically down, so a release can tell which of their bits are still pressed
     held_keys: HashSet<KeyCode>,
     chord: ChordState,
-    /// A split keyboard's fast half, held back so both halves line up (see [`super::skew`])
-    skew: super::skew::Delay,
-    /// Raw arrival times of the stroke keys, for `keymux steno skew`
-    skew_tracker: super::skew::Tracker,
     timing: Timing,
     /// The last stroke sent and when, to tell a double tap
     last: Option<(u32, Instant)>,
@@ -224,21 +220,10 @@ impl StenoEngine {
         translator.set_stroke_classes(!config.disable_transparent);
         translator.set_undo_stops_at_barrier(config.undo_stops_at_barrier);
         translator.set_plugin_deadline(Duration::from_millis(u64::from(config.plugin_deadline_ms)));
-        let delayed =
-            super::skew::delayed_keys(&config.skew, &layout, &keys).map_err(|e| anyhow!(e))?;
-        let skew_tracker = super::skew::Tracker::new(
-            super::skew::classify(&layout, &keys),
-            delayed.clone(),
-            Duration::from_millis(u64::from(
-                config.skew.delay_ms.min(crate::config::MAX_SKEW_DELAY_MS),
-            )),
-        );
         Ok(Self {
             keys,
             held_keys: HashSet::new(),
             chord: ChordState::new(),
-            skew: super::skew::Delay::new(config.skew.delay_ms, delayed),
-            skew_tracker,
             timing: Timing {
                 double_tap_window: Duration::from_millis(u64::from(config.double_tap_window_ms)),
                 repeat_delay: Duration::from_millis(u64::from(config.repeat_delay_ms)),
@@ -382,53 +367,6 @@ impl StenoEngine {
         self.lookup = None;
     }
 
-    /// A stroke key went down or up at `at`, as the keyboard reported it. With a skew delay
-    /// configured, the delayed half's events wait and are replayed `delay` later in order, after
-    /// every event of the other half that arrived before then; without one this is exactly
-    /// [`Self::press`] or [`Self::release_at`].
-    pub fn key_event(&mut self, key: KeyCode, pressed: bool, at: Instant) -> Option<StenoOutput> {
-        if let Some(obs) = self.skew_tracker.event(key, pressed, at) {
-            super::skew::record(
-                &obs,
-                u32::try_from(self.skew.delay().as_millis()).unwrap_or(0),
-            );
-        }
-        if !self.skew.is_active() {
-            return self.apply_key(key, pressed, at);
-        }
-        let mut merged = Merged::default();
-        self.replay_due(at, &mut merged);
-        if self.skew.delays(key) {
-            self.skew.push(key, pressed, at);
-        } else if let Some(output) = self.apply_key(key, pressed, at) {
-            merged.push(output);
-        }
-        merged.finish()
-    }
-
-    fn apply_key(&mut self, key: KeyCode, pressed: bool, at: Instant) -> Option<StenoOutput> {
-        if pressed {
-            self.press(key, at);
-            None
-        } else {
-            self.release_at(key, at)
-        }
-    }
-
-    /// Replay the held-back events due by `now`, each as of its own due time.
-    fn replay_due(&mut self, now: Instant, merged: &mut Merged) {
-        while let Some(queued) = self.skew.pop_due(now) {
-            if let Some(output) = self.apply_key(queued.key, queued.pressed, queued.due) {
-                merged.push(output);
-            }
-        }
-    }
-
-    /// The layer was left: replay what is held back at once instead of when due.
-    pub fn flush_skew(&mut self, now: Instant) {
-        self.skew.expedite(now);
-    }
-
     /// Whether leaving the layer abandons a stroke in progress.
     #[must_use]
     pub const fn discards_on_leave(&self) -> bool {
@@ -552,8 +490,7 @@ impl StenoEngine {
             .translator
             .has_late()
             .then(|| Instant::now() + LATE_POLL);
-        let skewed = self.skew.next_due();
-        [repeat_starts, next_repeat, late, skewed]
+        [repeat_starts, next_repeat, late]
             .into_iter()
             .flatten()
             .min()
@@ -565,11 +502,6 @@ impl StenoEngine {
     /// A held stroke is never sent by the clock: only its keys coming up (or first-up) sends it.
     pub fn tick(&mut self, now: Instant) -> Option<StenoOutput> {
         self.sync_unload();
-        let mut held_back = Merged::default();
-        self.replay_due(now, &mut held_back);
-        if let Some(output) = held_back.finish() {
-            return Some(output);
-        }
         if let Some(output) = self.poll_dictionary() {
             return Some(output);
         }
@@ -1003,8 +935,6 @@ impl StenoEngine {
             keys: build_key_map(&preset("qwerty").unwrap(), overrides).unwrap(),
             held_keys: HashSet::new(),
             chord: ChordState::new(),
-            skew: super::skew::Delay::default(),
-            skew_tracker: super::skew::Tracker::default(),
             timing: Timing::default(),
             last: None,
             arming: None,
@@ -1303,7 +1233,6 @@ mod tests {
             fresh_on_enter: false,
             disable_typing_history: false,
             typing_layout: "us".to_string(),
-            skew: crate::config::SkewConfig::default(),
             leave_mid_stroke: crate::config::LeaveMidStroke::default(),
         };
         let history =
@@ -2068,10 +1997,6 @@ mod unload_tests;
 #[cfg(test)]
 #[path = "send_early_tests.rs"]
 mod send_early_tests;
-
-#[cfg(test)]
-#[path = "skew_tests.rs"]
-mod skew_tests;
 
 #[cfg(test)]
 #[path = "run_tests.rs"]

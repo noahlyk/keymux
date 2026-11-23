@@ -878,31 +878,6 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
 - A stroke that matches nothing on its own, but starts a longer entry, is typed as its keys, such as `KPA-`. The next stroke completes the entry and replaces them. If it doesn't, they stay until `*` takes them back.
 - A stroke that matches nothing is typed as its keys too, in capitals with one hyphen between the hands and the star on the right (`STPWHA-UBGSZ`), and is marked `?` on the tape, followed by what it typed (`? "STPWHA-UBGSZ"`). `*` takes it back like any word.
 
-### Split keyboards and radio lag
-
-On a split keyboard whose halves reach the computer by different routes (one half on USB, the other over a wireless link) the two halves' key events arrive a few milliseconds apart. A stroke is built from the keys pressed until the last one comes up, so a chord with both hands can split in two: the fast half's keys are pressed and released before the slow half's first key arrives, and the stroke becomes two strokes. The cure is to hold the fast half back, a little, so the two line up.
-
-Two settings in the steno layer, and one measurement:
-
-```ron
-"steno": (
-    kind: Steno((
-        // The left half is the fast one here: hold its events back 8 ms
-        skew: (delay_ms: 8, half: Left),
-        // or name physical keys instead: skew: (delay_ms: 8, keys: [KC_Q, KC_A, KC_Z]),
-    )),
-),
-```
-
-- `delay_ms` is 0 to 50 (`keymux validate` rejects more). The default 0 delays nothing and queues nothing.
-- `half` is `Left` or `Right`: the stroke keys of that half, from the layout (left bank plus the thumb keys before the star, or the thumb keys after the star plus the right bank). The star, the number key and extra keys belong to neither half; list them in `keys` if they sit on the delayed half. `keys` lists physical keys, which must be stroke keys of the layer; with both, the delayed keys are the union.
-- Both the key-down and the key-up of a delayed key are held back by the same time and replayed in order, so that half keeps its own timing and only the offset to the other half changes. Events of the other half pass straight through. Other layers, keyboards without `skew` and keys that are not stroke keys are untouched. Leaving the steno layer replays what is held back at once, so no key stays down.
-- **Cost.** A stroke is sent when its last key comes up. A stroke whose last key comes up on the other (slow) half, and a stroke of that half alone, are sent exactly when they would be without `skew`. A stroke of the delayed half alone waits `delay_ms`. A two-hand stroke whose last key comes up on the delayed half waits `delay_ms` minus however long the other half's last key had already been up, so at most `delay_ms`. Nothing else is delayed.
-
-**Calibrating.** While you type normally, the daemon records, for strokes with keys on both halves, the difference between the first key down on the right half and on the left half (milliseconds only, never which keys), and counts pairs of strokes on opposite halves that started within 40 ms of each other (split suspects). `keymux steno skew` prints the count, median, mean and quartiles of that difference, the split suspects, the added latency of your current setting over the last strokes (share of strokes delayed, mean and max), a suggested `delay_ms` with the half to delay, how many suspects remain at that value and the latency it would add, and the line to paste. The suggestion is the smallest delay that joins 90% of the split strokes the delayed half can fix. Human timing is noisy but symmetric over thousands of chords, so a median shifted from zero estimates the radio lag; it needs a few hundred two-hand strokes (it says how many more). The measurement uses the times the keyboard reports before any delay, so it stays valid with `skew` on. `keymux steno skew --reset` starts over. Typical values are a few milliseconds.
-
-The firmware side is the other lever: the connection settings of the split link, interference from other 2.4 GHz devices and keeping the two halves in line of sight all change how late and how steady the wireless half is. A steadier link needs a smaller `delay_ms`.
-
 ### Live lookup
 
 Midway through a sentence and can't remember the stroke for a word? Write the stroke that
@@ -982,7 +957,6 @@ same lookup live in a terminal: see [Interactive lookup](#interactive-lookup).
 | `keymux steno add KAT "cat"` | Add or replace an entry in `00-user.json`, which beats every other dictionary. It writes a file, so it needs both arguments and has no interactive form |
 | `keymux steno validate [FILE...]` | Check the dictionaries without running them: parse errors, bad outlines, unbalanced braces, unknown metas with a suggestion, bad meta arguments, unreachable entries. `--strict`, `--json`; see [Checking dictionaries](#checking-dictionaries) |
 | `keymux steno tape` | Show what each recent stroke typed. `-f` keeps printing new strokes, `-n N` sets how many lines to start with. On a terminal, `-N` counts and what a later stroke took back are dimmed (and redrawn dimmed as you follow) |
-| `keymux steno skew` | Split keyboards: measure the lag between the halves from your typing in the running daemon, with the suggested `skew` setting and its latency cost. `--reset` starts over (see [Split keyboards and radio lag](#split-keyboards-and-radio-lag)) |
 
 #### Interactive lookup
 
@@ -1362,7 +1336,7 @@ Two physical keyboards (a Glove80 and a second board, a split pair that connects
 
 **`keymux list`** marks each member with its group (`In group "desk"`) and counts the group in the summary (`2 enabled (1 group of 2 keyboards)`); a member counts as enabled without an `enabled_keyboards` entry.
 
-**Limits.** Kernel timestamps are when the host received the event, so a Bluetooth or wireless member and a wired one have the usual radio skew between them; if chords that span them split, measure with `keymux steno skew` and set `skew` (see "Split keyboards and radio lag"): it works on the merged stream, and a `keys:` list may name physical keys of either member. The merge puts events from several members in time order within one read of the devices, a few milliseconds at most, so an event a device delivered late can still come out after one stamped a little later. At most 64 devices per group. The group's virtual keyboard offers the keys its members had when it started (plus media keys); a member that joins later with keys none of them had cannot type those. Mice and other pointing devices are not keyboards to keymux and cannot be members.
+**Limits.** Kernel timestamps are when the host received the event, so a Bluetooth or wireless member and a wired one can reach the host at slightly different times; keymux does not correct for that. The merge puts events from several members in time order within one read of the devices, a few milliseconds at most, so an event a device delivered late can still come out after one stamped a little later. At most 64 devices per group. The group's virtual keyboard offers the keys its members had when it started (plus media keys); a member that joins later with keys none of them had cannot type those. Mice and other pointing devices are not keyboards to keymux and cannot be members.
 
 **Try it.** Add `keyboard_groups` as above, run `keymux validate`, then `keymux reload` (or save with `hot_config_reload: true`). `keymux list` should show both keyboards `In group "desk"`. Press a key on each and chord across them with the steno layer on; hold the same key on both and release one, and nothing should happen until the second lets go; unplug one member and the other keeps working.
 

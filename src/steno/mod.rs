@@ -37,7 +37,6 @@ pub mod rtf;
 pub mod run_control;
 pub mod setup;
 pub mod shortest;
-pub mod skew;
 pub mod source;
 pub mod strokes;
 pub mod tape;

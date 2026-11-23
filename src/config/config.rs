@@ -398,9 +398,6 @@ pub struct StenoConfig {
     /// history: `us` (the default), `dvorak` or `colemak`.
     #[serde(default = "default_typing_layout")]
     pub typing_layout: String,
-    /// Line the two halves of a split keyboard up. See [`SkewConfig`]. Off by default.
-    #[serde(default)]
-    pub skew: SkewConfig,
     /// What leaving this layer (`TO("base")`, a released momentary layer, game mode) does to a
     /// stroke whose keys are still down. See [`LeaveMidStroke`].
     #[serde(default)]
@@ -416,41 +413,6 @@ pub enum LeaveMidStroke {
     /// The chord is sent when its keys come up, as if the layer was still on.
     Send,
 }
-
-/// Which half of a split steno layout [`SkewConfig`] delays.
-///
-/// It is the half whose events reach the host first. The halves come from the layout: the left bank and the thumb keys before the
-/// star are the left half, the thumb keys after the star and the right bank are the right half.
-/// The star, the number key and extra keys belong to neither.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SkewSide {
-    #[default]
-    None,
-    Left,
-    Right,
-}
-
-/// Compensation for a split keyboard whose halves reach the host at different times.
-///
-/// Think of a wireless half. The events of the fast half, key down and key up alike, are held back by `delay_ms`
-/// and replayed in order, so each half keeps its own timing and only the offset between them
-/// changes. Events of the other half pass straight through. `delay_ms` is added to strokes
-/// whose last key comes up on the delayed half; see the README, "Split keyboards and radio lag".
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SkewConfig {
-    /// How long the delayed keys wait, 0 to 50 ms. 0 (the default) delays nothing.
-    #[serde(default)]
-    pub delay_ms: u32,
-    /// Delay every stroke key of this half, taken from the layout.
-    #[serde(default)]
-    pub half: SkewSide,
-    /// Physical keys to delay besides `half`'s (or instead of it): any stroke keys of this layer.
-    #[serde(default)]
-    pub keys: Vec<KeyCode>,
-}
-
-/// The longest `skew.delay_ms`.
-pub const MAX_SKEW_DELAY_MS: u32 = 50;
 
 fn default_typing_layout() -> String {
     "us".to_string()
@@ -1872,18 +1834,14 @@ impl Config {
                     || format!("steno layer \"{}\"", layer.0),
                     |id| format!("steno layer \"{}\" (keyboard \"{id}\")", layer.0),
                 );
-                let layout = Layout::plover_with_joins(&steno.extra_keys, &steno.join_keys);
-                let key_map = layout.clone().and_then(|layout| {
-                    preset(&steno.layout)
-                        .map_err(|e| vec![e])
-                        .and_then(|preset| layout.build_key_map(&preset, &steno.layout_overrides))
-                });
-                if let (Ok(layout), Ok(map)) = (&layout, &key_map) {
-                    if let Err(problem) = crate::steno::skew::check_config(&steno.skew, layout, map)
-                    {
-                        check.errors.push(format!("{name}: {problem}"));
-                    }
-                }
+                let key_map = Layout::plover_with_joins(&steno.extra_keys, &steno.join_keys)
+                    .and_then(|layout| {
+                        preset(&steno.layout)
+                            .map_err(|e| vec![e])
+                            .and_then(|preset| {
+                                layout.build_key_map(&preset, &steno.layout_overrides)
+                            })
+                    });
                 if let Err(problems) = key_map {
                     check.errors.extend(
                         problems
@@ -2091,47 +2049,14 @@ mod tests {
     }
 
     #[test]
-    fn skew_parses_with_a_half_or_keys_and_defaults_to_off() {
-        let off = parse(r#"(layers: { "steno": (kind: Steno(())) })"#);
-        let LayerKind::Steno(steno) = &off.layers[&Layer::new("steno")].kind else {
-            panic!()
-        };
-        assert_eq!(steno.skew, SkewConfig::default());
-        let on = parse(
-            r#"(layers: { "steno": (kind: Steno((skew: (delay_ms: 8, half: Left, keys: [KC_T])))) })"#,
-        );
-        let LayerKind::Steno(steno) = &on.layers[&Layer::new("steno")].kind else {
-            panic!()
-        };
-        assert_eq!(steno.skew.delay_ms, 8);
-        assert_eq!(steno.skew.half, SkewSide::Left);
-        assert_eq!(steno.skew.keys, vec![KeyCode::KC_T]);
-        assert!(on.validate(None).is_ok());
-    }
-
-    #[test]
-    fn validate_rejects_a_skew_that_is_too_long_or_names_a_key_that_is_not_a_stroke_key() {
-        let long =
-            parse(r#"(layers: { "steno": (kind: Steno((skew: (delay_ms: 51, half: Left)))) })"#);
-        let report = long.validate(None);
-        let errors: Vec<&str> = report.errors().collect();
-        assert!(
-            errors.len() == 1 && errors[0].contains("50 ms maximum"),
-            "{errors:?}"
-        );
-        let unknown =
-            parse(r#"(layers: { "steno": (kind: Steno((skew: (delay_ms: 5, keys: [KC_F1])))) })"#);
-        let report = unknown.validate(None);
-        let errors: Vec<&str> = report.errors().collect();
-        assert!(
-            errors.len() == 1
-                && errors[0].contains("KC_F1")
-                && errors[0].contains("not a stroke key"),
-            "{errors:?}"
-        );
-        let nothing = parse(r#"(layers: { "steno": (kind: Steno((skew: (delay_ms: 5)))) })"#);
-        let report = nothing.validate(None);
-        assert_eq!(report.errors().count(), 1);
+    fn a_removed_skew_option_in_an_old_config_is_ignored() {
+        let old =
+            parse(r#"(layers: { "steno": (kind: Steno((skew: (delay_ms: 8, half: Left)))) })"#);
+        assert!(matches!(
+            old.layers[&Layer::new("steno")].kind,
+            LayerKind::Steno(_)
+        ));
+        assert!(old.validate(None).is_ok());
     }
 
     #[test]

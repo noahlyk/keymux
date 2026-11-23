@@ -1587,9 +1587,6 @@ impl Daemon {
                 self.recompute_and_apply_game_mode();
                 IpcResponse::Ok
             }
-            IpcRequest::SkewStats { reset } => {
-                IpcResponse::SkewStats(Box::new(crate::steno::skew::take_snapshot(reset)))
-            }
             IpcRequest::GetGlobalOverride => {
                 IpcResponse::GlobalOverrideStatus(self.global_override)
             }
