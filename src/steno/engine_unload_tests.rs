@@ -66,6 +66,7 @@ impl Rig {
             disable_typing_history: false,
             typing_layout: "us".to_string(),
             skew: crate::config::SkewConfig::default(),
+            leave_mid_stroke: crate::config::LeaveMidStroke::default(),
         }
     }
 

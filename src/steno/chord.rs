@@ -37,6 +37,11 @@ impl ChordState {
         self.stroke |= new;
     }
 
+    /// Forget the chord in progress: no keys held, nothing to send.
+    pub const fn clear(&mut self) {
+        *self = Self::new();
+    }
+
     /// Whether a key has gone down since the last stroke was sent.
     #[must_use]
     pub const fn is_fresh(&self) -> bool {

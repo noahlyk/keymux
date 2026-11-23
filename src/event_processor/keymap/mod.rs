@@ -148,6 +148,7 @@ impl KeymapProcessor {
     pub fn set_game_mode(&mut self, active: bool) {
         self.layer_stack.set_game_mode(active);
         self.remap.mt.set_game_mode(active);
+        self.discard_left_chords();
     }
 
     /// Settle any tap-dance that time alone decides, as of now: a first press held past the
@@ -220,6 +221,9 @@ impl KeymapProcessor {
         pressed: bool,
         at: Instant,
     ) -> ProcessResult {
+        // A layer left since the last event (by a daemon-side change, say) abandons its chord
+        // before this event is routed
+        self.discard_left_chords();
         if let Some(result) = self.lookup_capture(keycode, pressed, at) {
             self.publish_overlay_layer();
             return result;
@@ -234,6 +238,8 @@ impl KeymapProcessor {
             self.watch_typing(&result);
             result
         });
+        // This event may be the one that left the layer
+        self.discard_left_chords();
         if pressed {
             self.steno_setup_hint();
         }

@@ -410,6 +410,11 @@
                 // A dictionary entry `{:undo_or:ctrl+backspace}` is undo with a fallback key
                 // combination of your own (`{:undo_or:Control_L(BackSpace)}` is the same).
                 undo_stops_at_barrier: true,
+                // What leaving this layer does to a stroke whose keys are still down (TO("base"),
+                // a released momentary layer, game mode): Discard (default) abandons the chord,
+                // nothing is typed and letting go of its keys does nothing; Send types it when
+                // its keys come up. Strokes already sent stay sent.
+                leave_mid_stroke: Discard,
                 // Split keyboard whose halves reach the host at different times (a wireless half):
                 // hold back the FAST half's key events (down and up) by delay_ms (0..=50) so both
                 // halves line up. `half` is Left or Right (taken from the layout: the left bank and

@@ -125,6 +125,36 @@ impl KeymapProcessor {
         Some(ProcessResult::None)
     }
 
+    /// Abandon the chord of every steno layer that is no longer the one capturing keys (it was
+    /// left, or game mode took it over) and asks for `leave_mid_stroke: Discard`. Its held keys
+    /// become swallowed ones, so their releases do nothing, in this layer or the new one.
+    /// Called around every event, so any way of leaving (a remap, a released momentary layer,
+    /// a steno command, game mode, a toggle) is caught.
+    pub(super) fn discard_left_chords(&mut self) {
+        let top = self.layer_stack.layers().last();
+        let game_mode = self.layer_stack.is_game_mode_active();
+        let left: Vec<Layer> = self
+            .steno_engines
+            .iter_mut()
+            .filter(|(layer, engine)| {
+                let capturing = top == Some(*layer) && !(game_mode && engine.disabled_in_game_mode);
+                !capturing && engine.discards_on_leave() && engine.chord_in_progress()
+            })
+            .map(|(layer, engine)| {
+                engine.discard_chord();
+                layer.clone()
+            })
+            .collect();
+        if left.is_empty() {
+            return;
+        }
+        for action in self.held_keys.values_mut() {
+            if matches!(action, HeldAction::StenoManaged(layer) if left.contains(layer)) {
+                *action = HeldAction::SwallowedBySteno;
+            }
+        }
+    }
+
     /// A stroke that wrote `{:engine:toggle}` or `{:engine:suspend}` leaves the steno layer, so the
     /// keys type normally again.
     pub(super) fn leave_if_asked(&mut self, layer: &Layer) {
@@ -134,6 +164,7 @@ impl KeymapProcessor {
             .is_some_and(StenoEngine::take_leave_request)
         {
             self.layer_stack.deactivate_layer(layer);
+            self.discard_left_chords();
             self.publish_overlay_layer();
         }
     }

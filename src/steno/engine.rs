@@ -101,6 +101,8 @@ pub struct StenoEngine {
     /// A stroke wrote `{:engine:toggle}` or `{:engine:suspend}` (or their legacy spellings): the layer should be left
     leave_requested: bool,
     fresh_on_enter: bool,
+    /// Leaving the layer abandons a stroke in progress (`leave_mid_stroke: Discard`)
+    discard_on_leave: bool,
     label: String,
     /// Where the dictionaries come from, to load them again after an unload
     source: Option<Source>,
@@ -262,6 +264,7 @@ impl StenoEngine {
             outline_armed: false,
             leave_requested: false,
             fresh_on_enter: config.fresh_on_enter,
+            discard_on_leave: config.leave_mid_stroke == crate::config::LeaveMidStroke::Discard,
             label: label.to_string(),
             epoch: scope.epoch(),
             scope,
@@ -424,6 +427,28 @@ impl StenoEngine {
     /// The layer was left: replay what is held back at once instead of when due.
     pub fn flush_skew(&mut self, now: Instant) {
         self.skew.expedite(now);
+    }
+
+    /// Whether leaving the layer abandons a stroke in progress.
+    #[must_use]
+    pub const fn discards_on_leave(&self) -> bool {
+        self.discard_on_leave
+    }
+
+    /// Whether a chord is in progress: a key is down. A stroke already sent early leaves its still-held keys counted here.
+    #[must_use]
+    pub fn chord_in_progress(&self) -> bool {
+        self.chord.held() != 0 || !self.held_keys.is_empty()
+    }
+
+    /// The layer was left mid-stroke and the stroke is abandoned: the chord is cleared, and a repeat in progress or about to start is cancelled.
+    /// Strokes already sent, the history and the last stroke (for a double tap) are untouched.
+    pub fn discard_chord(&mut self) {
+        self.held_keys.clear();
+        self.chord.clear();
+        self.arming = None;
+        self.repeating = None;
+        self.publish_keys();
     }
 
     /// A stroke key went down.
@@ -998,6 +1023,7 @@ impl StenoEngine {
             outline_armed: false,
             leave_requested: false,
             fresh_on_enter: false,
+            discard_on_leave: false,
             label: String::new(),
             source: None,
             unloaded: false,
@@ -1278,6 +1304,7 @@ mod tests {
             disable_typing_history: false,
             typing_layout: "us".to_string(),
             skew: crate::config::SkewConfig::default(),
+            leave_mid_stroke: crate::config::LeaveMidStroke::default(),
         };
         let history =
             crate::steno::journal::new_shared(crate::steno::formatter::Formatter::default());

@@ -262,9 +262,12 @@ fn game_mode_hands_keys_back_to_normal_remapping() {
 }
 
 #[test]
-fn stroke_released_after_layer_exit_still_types() {
+fn stroke_released_after_layer_exit_still_types_with_send() {
     let fixture = Fixture::new("exit");
-    let mut p = fixture.processor();
+    let mut p = fixture.processor_from(&CONFIG.replace(
+        "dictionaries: [\"DICT\"],",
+        "dictionaries: [\"DICT\"], leave_mid_stroke: Send,",
+    ));
     enter_steno(&mut p);
 
     assert_eq!(p.process_key(KeyCode::KC_S, true), ProcessResult::None);
@@ -1145,4 +1148,167 @@ fn the_overlay_greys_what_an_undo_took_back_but_not_past_typing_by_hand() {
     chord(&mut p, &[star]);
     let tape = hub.snapshot().tape;
     assert!(tape[0].gone.is_empty(), "{tape:?}");
+}
+
+/// The steno layer is held with Tab, and F1 leaves it for the base layer.
+const LEAVE_CONFIG: &str = r#"(
+    remaps: {
+        KC_TAB: MO("chords"),
+    },
+    layers: {
+        "chords": (
+            kind: Steno((
+                dictionaries: ["DICT"],
+                SETTING
+            )),
+            remaps: {
+                KC_F1: TO("base"),
+            },
+            disabled_in_game_mode: true,
+        ),
+    },
+    game_mode: (
+        remaps: {},
+    ),
+)"#;
+
+const CAT: [KeyCode; 3] = [KeyCode::KC_S, KeyCode::KC_C, KeyCode::KC_P];
+
+fn leave_processor(fixture: &Fixture, setting: &str, dictionary: &str) -> KeymapProcessor {
+    let mut p = fixture.processor_with(&LEAVE_CONFIG.replace("SETTING", setting), dictionary);
+    enter_steno(&mut p);
+    p
+}
+
+fn press_all(p: &mut KeymapProcessor, keys: &[KeyCode]) {
+    for key in keys {
+        assert_eq!(p.process_key(*key, true), ProcessResult::None);
+    }
+}
+
+fn release_all(p: &mut KeymapProcessor, keys: &[KeyCode]) -> Vec<ProcessResult> {
+    keys.iter().map(|key| p.process_key(*key, false)).collect()
+}
+
+const DICT: &str = r#"{"KAT": "cat", "-PB": "and"}"#;
+
+#[test]
+fn leaving_steno_mid_stroke_discards_the_chord_by_default() {
+    let fixture = Fixture::new("leave-discard");
+    let mut p = leave_processor(&fixture, "", DICT);
+    press_all(&mut p, &CAT);
+    p.process_key(KeyCode::KC_F1, true);
+    assert_eq!(p.current_layer_name(), "base");
+    p.process_key(KeyCode::KC_F1, false);
+    assert_eq!(
+        release_all(&mut p, &CAT),
+        vec![ProcessResult::None; 3],
+        "nothing typed, and the releases do nothing in base"
+    );
+    // A key pressed after the switch works in the base layer
+    assert_eq!(
+        p.process_key(KeyCode::KC_A, true),
+        ProcessResult::EmitKey(KeyCode::KC_A, true)
+    );
+    assert_eq!(
+        p.process_key(KeyCode::KC_A, false),
+        ProcessResult::EmitKey(KeyCode::KC_A, false)
+    );
+    // Nothing was left half-held: a key pressed again afterwards is an ordinary key
+    assert_eq!(
+        p.process_key(KeyCode::KC_S, true),
+        ProcessResult::EmitKey(KeyCode::KC_S, true)
+    );
+}
+
+#[test]
+fn leaving_steno_mid_stroke_sends_the_stroke_with_send() {
+    let fixture = Fixture::new("leave-send");
+    let mut p = leave_processor(&fixture, "leave_mid_stroke: Send,", DICT);
+    press_all(&mut p, &CAT);
+    p.process_key(KeyCode::KC_F1, true);
+    p.process_key(KeyCode::KC_F1, false);
+    let results = release_all(&mut p, &CAT);
+    assert_eq!(results[2], ProcessResult::TypeString("cat".to_string()));
+}
+
+#[test]
+fn a_stroke_finished_before_the_switch_is_unaffected() {
+    let fixture = Fixture::new("leave-done");
+    let mut p = leave_processor(&fixture, "", DICT);
+    assert_eq!(
+        chord(&mut p, &CAT),
+        ProcessResult::TypeString("cat".to_string())
+    );
+    p.process_key(KeyCode::KC_F1, true);
+    p.process_key(KeyCode::KC_F1, false);
+    assert_eq!(p.current_layer_name(), "base");
+    // The next stroke on a fresh visit to steno still continues from "cat"
+    enter_steno(&mut p);
+    assert_eq!(
+        chord(&mut p, &CAT),
+        ProcessResult::TypeString(" cat".to_string())
+    );
+}
+
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // a dictionary meta, not a format string
+fn a_stroke_sent_on_its_first_key_up_stays_sent_and_the_held_keys_type_nothing_more() {
+    let fixture = Fixture::new("leave-firstup");
+    let mut p = leave_processor(&fixture, "", r#"{"KAT": "{:firstup}cat"}"#);
+    press_all(&mut p, &CAT);
+    // S comes up first: the stroke goes now, C and P stay down
+    assert_eq!(
+        p.process_key(KeyCode::KC_S, false),
+        ProcessResult::TypeString("cat".to_string())
+    );
+    p.process_key(KeyCode::KC_F1, true);
+    p.process_key(KeyCode::KC_F1, false);
+    assert_eq!(release_all(&mut p, &CAT[1..]), vec![ProcessResult::None; 2]);
+}
+
+#[test]
+fn releasing_a_momentary_steno_layer_mid_stroke_discards_the_chord() {
+    let fixture = Fixture::new("leave-momentary");
+    let mut p = leave_processor(&fixture, "", DICT);
+    press_all(&mut p, &CAT);
+    p.process_key(KeyCode::KC_TAB, false);
+    assert_eq!(p.current_layer_name(), "base");
+    assert_eq!(release_all(&mut p, &CAT), vec![ProcessResult::None; 3]);
+}
+
+#[test]
+fn releasing_a_momentary_steno_layer_mid_stroke_sends_with_send() {
+    let fixture = Fixture::new("leave-momentary-send");
+    let mut p = leave_processor(&fixture, "leave_mid_stroke: Send,", DICT);
+    press_all(&mut p, &CAT);
+    p.process_key(KeyCode::KC_TAB, false);
+    let results = release_all(&mut p, &CAT);
+    assert_eq!(results[2], ProcessResult::TypeString("cat".to_string()));
+}
+
+#[test]
+fn game_mode_taking_over_mid_stroke_discards_the_chord() {
+    let fixture = Fixture::new("leave-game");
+    let mut p = leave_processor(&fixture, "", DICT);
+    press_all(&mut p, &CAT);
+    p.set_game_mode(true);
+    assert_eq!(release_all(&mut p, &CAT), vec![ProcessResult::None; 3]);
+}
+
+#[test]
+fn a_discarded_chord_leaves_no_double_tap_or_repeat_behind() {
+    let fixture = Fixture::new("leave-repeat");
+    let mut p = leave_processor(&fixture, "", DICT);
+    assert_eq!(
+        chord(&mut p, &CAT),
+        ProcessResult::TypeString("cat".to_string())
+    );
+    // Pressed again soon after: a double tap in the making, then the layer is left
+    press_all(&mut p, &CAT);
+    p.process_key(KeyCode::KC_F1, true);
+    p.process_key(KeyCode::KC_F1, false);
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    assert_eq!(p.check_steno_timeouts(), ProcessResult::None);
+    assert_eq!(p.next_deadline(), None);
 }

@@ -401,6 +401,20 @@ pub struct StenoConfig {
     /// Line the two halves of a split keyboard up. See [`SkewConfig`]. Off by default.
     #[serde(default)]
     pub skew: SkewConfig,
+    /// What leaving this layer (`TO("base")`, a released momentary layer, game mode) does to a
+    /// stroke whose keys are still down. See [`LeaveMidStroke`].
+    #[serde(default)]
+    pub leave_mid_stroke: LeaveMidStroke,
+}
+
+/// What happens to a stroke in progress when its steno layer is left.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LeaveMidStroke {
+    /// The chord is abandoned: nothing is typed, and letting go of its keys does nothing.
+    #[default]
+    Discard,
+    /// The chord is sent when its keys come up, as if the layer was still on.
+    Send,
 }
 
 /// Which half of a split steno layout [`SkewConfig`] delays.
@@ -2661,6 +2675,28 @@ mod tests {
             config.validate(None).errors().next().is_none(),
             "absent members are no error"
         );
+    }
+
+    #[test]
+    fn leave_mid_stroke_defaults_to_discard_and_rejects_unknown_values() {
+        let layer = |extra: &str| {
+            parse(&format!(
+                r#"(layers: {{ "steno": (kind: Steno(({extra}))) }})"#
+            ))
+        };
+        let steno = |config: &Config| match &config.layers[&Layer::new("steno")].kind {
+            LayerKind::Steno(steno) => steno.leave_mid_stroke,
+            LayerKind::Remap => panic!("not a steno layer"),
+        };
+        assert_eq!(steno(&layer("")), LeaveMidStroke::Discard);
+        assert_eq!(
+            steno(&layer("leave_mid_stroke: Send")),
+            LeaveMidStroke::Send
+        );
+        assert!(ron::from_str::<Config>(
+            r#"(layers: { "steno": (kind: Steno((leave_mid_stroke: Maybe)))})"#
+        )
+        .is_err());
     }
 
     #[test]
