@@ -420,6 +420,17 @@ pub(crate) fn mapping_to_macro(mapping: Option<&str>, stroke: u32) -> Option<Mac
     })
 }
 
+/// How the strokes struck on a [`Translator::shadow`] group (see [`Translator::follow_stroke`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Followed {
+    /// Every stroke struck on it, in order
+    pub strokes: Vec<u32>,
+    /// The entry of each translation they make, in order
+    pub entries: Vec<super::outline_control::Entry>,
+    /// The last stroke grew the translation before it instead of starting one
+    pub grew: bool,
+}
+
 /// Converts a stream of strokes into typing.
 #[derive(Debug)]
 pub struct Translator {
@@ -433,6 +444,8 @@ pub struct Translator {
     unmatched: bool,
     /// Whether the last stroke was a transparent one (see [`Self::stroke`])
     transparent: bool,
+    /// Whether the last stroke ran a macro (undo, redo, a retro command, ...)
+    ran_macro: bool,
     /// Whether the stroke classes (`{:transparent}`, the lookup command's transparency, and
     /// barriers) are honoured; `disable_transparent` turns them off
     classes_enabled: bool,
@@ -465,6 +478,7 @@ impl Clone for Translator {
             hist: History::default(),
             unmatched: self.unmatched,
             transparent: self.transparent,
+            ran_macro: self.ran_macro,
             classes_enabled: self.classes_enabled,
             undo_stops_at_barrier: self.undo_stops_at_barrier,
             plugin_deadline: self.plugin_deadline,
@@ -506,6 +520,7 @@ impl Translator {
             hist: History::default(),
             unmatched: false,
             transparent: false,
+            ran_macro: false,
             classes_enabled: true,
             undo_stops_at_barrier: true,
             plugin_deadline: DEFAULT_PLUGIN_DEADLINE,
@@ -595,6 +610,7 @@ impl Translator {
     fn begin_stroke(&mut self) {
         self.unmatched = false;
         self.transparent = false;
+        self.ran_macro = false;
         self.late = None;
         self.plugin_read = None;
         self.budget.start(Instant::now() + self.plugin_deadline);
@@ -753,13 +769,117 @@ impl Translator {
         let found = self.lookup(&[stroke], &SUFFIX_KEYS, before);
         let late = self.budget.take_late().is_some();
         match found {
-            Some(text) => match self.budget.reader_of(&[stroke], &text) {
-                Some(plugin) => Entry::Plugin { text, plugin },
-                None => Entry::Dictionary(text),
-            },
+            Some(text) => Entry::Found(text),
             None if late => Entry::Late,
             None => Entry::None,
         }
+    }
+
+    /// A copy to follow strokes on for `{:outline:next}` and `{:outline:explain}` (see
+    /// [`Self::follow_stroke`]): the same dictionaries, text on screen and stroke log, so a
+    /// plugin reads exactly as it would here, but nothing translated yet, so the first stroke
+    /// struck on it starts a translation of its own. What it types goes nowhere.
+    #[must_use]
+    pub fn shadow(&self) -> Self {
+        let copy = self.clone();
+        {
+            let mut history = journal::lock(&copy.shared);
+            history.state.translations.clear();
+            history.state.tail = None;
+            history.to_undo.clear();
+            history.to_do = 0;
+            history.redo.clear();
+        }
+        copy
+    }
+
+    /// Strike `stroke` on a [`Self::shadow`] and say how its translations now group: every
+    /// stroke struck on it since it was made, the entry of each translation they make, and
+    /// whether this stroke grew the last translation (a longer entry, or a join, replacing it)
+    /// rather than starting one. `None` for a stroke that makes no translation of its own: a
+    /// transparent one, or a macro such as undo.
+    pub fn follow_stroke(&mut self, stroke: u32) -> Option<Followed> {
+        use super::outline_control::Entry;
+        let before = journal::lock(&self.shared).state.translations.len();
+        let _ = self.stroke(stroke);
+        if self.transparent || self.ran_macro {
+            return None;
+        }
+        let late = self.late.is_some();
+        let history = journal::lock(&self.shared);
+        let translations = &history.state.translations;
+        let last = translations.last()?;
+        if !last.origin.is_stroke() || last.strokes.last() != Some(&stroke) {
+            return None;
+        }
+        let entries = translations
+            .iter()
+            .enumerate()
+            .map(|(i, t)| match &t.english {
+                Some(text) => Entry::Found(text.clone()),
+                None if late && i + 1 == translations.len() => Entry::Late,
+                None => Entry::None,
+            })
+            .collect();
+        let strokes = translations
+            .iter()
+            .flat_map(|t| t.strokes.iter().copied())
+            .collect();
+        let grew = before > 0 && translations.len() <= before;
+        drop(history);
+        Some(Followed {
+            strokes,
+            entries,
+            grew,
+        })
+    }
+
+    /// Whether a mod says `stroke` continues the outline `{:outline:next}` or
+    /// `{:outline:explain}` is following (see [`Chain::outline_continues`]).
+    #[must_use]
+    pub fn outline_continues(&self, stroke: u32) -> bool {
+        self.dict.outline_continues(stroke)
+    }
+
+    /// Whether the last translation is `text` typed by [`Self::type_text`], so
+    /// [`Self::retype_text`] can put other text in its place.
+    #[must_use]
+    pub fn last_typed_is(&self, text: &str) -> bool {
+        journal::lock(&self.shared)
+            .state
+            .translations
+            .last()
+            .is_some_and(|t| {
+                t.strokes.is_empty() && t.origin.is_stroke() && t.english.as_deref() == Some(text)
+            })
+    }
+
+    /// Put `text` in place of the text [`Self::type_text`] typed last (see
+    /// [`Self::last_typed_is`]), formatted again from what came before it, so a pending
+    /// `{:surround:next:...}` wraps it as it wrapped the old text. Undo takes the new text
+    /// back as one, never putting the old one back.
+    pub fn retype_text(&mut self, text: &str) -> Option<StenoOutput> {
+        self.begin_stroke();
+        self.check_out();
+        let Some(last) = self
+            .hist
+            .state
+            .translations
+            .last()
+            .filter(|t| t.strokes.is_empty() && t.origin.is_stroke())
+            .cloned()
+        else {
+            self.check_in();
+            return None;
+        };
+        self.stroke_start = last.begins.unwrap_or(self.hist.screen.len());
+        self.hist.redo.clear();
+        self.untranslate_translation(&last);
+        self.translate_translation(Translation::new(Vec::new(), Some(text.to_string())));
+        let ops = self.flush(None);
+        let output = self.finish(ops);
+        self.check_in();
+        output
     }
 
     /// The strokes of the last translation that strokes made (`{:outline:last}`): not text typed
@@ -909,6 +1029,7 @@ impl Translator {
                 found.name.as_str(),
                 "undo" | "undo_word" | "undo_or" | "redo"
             );
+            self.ran_macro = true;
             self.translate_macro(&found, ops);
             if !keeps_redo && self.hist.to_do > 0 {
                 self.hist.redo.clear();
@@ -1862,7 +1983,7 @@ pub extern "C" fn joins(bits: i64) -> i32 {
 
     #[test]
     #[allow(clippy::literal_string_with_formatting_args)] // a suffix entry, not a format
-    fn explain_names_the_entry_or_the_plugin_reading_and_types_nothing() {
+    fn explain_shows_the_entry_or_the_plugin_reading_and_types_nothing() {
         use crate::steno::outline_control::Entry;
         let (mut t, go) = with_gated_plugin(
             r#"{"KAT": "cat", "KAT/TKOG": "catdog", "-G": "{^ing}"}"#,
@@ -1871,15 +1992,9 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         drop(go);
         t.stroke(stroke("KAT"));
         // Only the stroke's own entry, not the longer one it starts
-        assert_eq!(t.explain(stroke("KAT")), Entry::Dictionary("cat".into()));
-        assert_eq!(t.explain(stroke("-G")), Entry::Dictionary("{^ing}".into()));
-        assert_eq!(
-            t.explain(stroke("TOP")),
-            Entry::Plugin {
-                text: "top".into(),
-                plugin: "reader".into()
-            }
-        );
+        assert_eq!(t.explain(stroke("KAT")), Entry::Found("cat".into()));
+        assert_eq!(t.explain(stroke("-G")), Entry::Found("{^ing}".into()));
+        assert_eq!(t.explain(stroke("TOP")), Entry::Found("top".into()));
         assert_eq!(t.text(), "cat", "nothing typed");
         assert_eq!(t.plugin_read(), None);
     }
@@ -1893,6 +2008,32 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         drop(go);
         let mut plain = Translator::new(Dictionary::default());
         assert_eq!(plain.explain(stroke("TOP")), Entry::None);
+    }
+
+    #[test]
+    fn following_on_a_shadow_groups_strokes_and_types_nothing_for_real() {
+        use crate::steno::outline_control::Entry;
+        let (mut t, go) = with_gated_plugin(
+            r#"{"KAT": "cat", "KAT/TKOG": "catdog", "*": "=undo"}"#,
+            Duration::from_millis(5),
+        );
+        t.stroke(stroke("KAT"));
+        let mut shadow = t.shadow();
+        // The first stroke starts a translation of its own, never growing the real `cat`
+        let first = shadow.follow_stroke(stroke("TKOG")).unwrap();
+        assert_eq!(first.strokes, vec![stroke("TKOG")]);
+        assert!(!first.grew);
+        assert_eq!(first.entries, vec![Entry::Late], "the plugin was late");
+        let mut shadow = t.shadow();
+        shadow.follow_stroke(stroke("KAT")).unwrap();
+        let grown = shadow.follow_stroke(stroke("TKOG")).unwrap();
+        assert_eq!(grown.strokes, vec![stroke("KAT"), stroke("TKOG")]);
+        assert!(grown.grew);
+        assert_eq!(grown.entries, vec![Entry::Found("catdog".into())]);
+        // A macro makes no translation of its own
+        assert_eq!(shadow.follow_stroke(UNDO_STROKE), None);
+        assert_eq!(t.text(), "cat", "nothing typed for real");
+        drop(go);
     }
 
     #[test]

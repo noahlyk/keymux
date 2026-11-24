@@ -78,6 +78,22 @@
 //! up) is its own business; keymux has no notion of any particular key behaving so. See
 //! `docs/plugins/sticky-key.rs`.
 //!
+//! # The outline-continues interface (optional)
+//!
+//! `{:outline:next}` and `{:outline:explain}` follow the next translation as the engine groups
+//! it (see [`super::outline_control`]). A theory that wants some strokes to always continue the
+//! outline being followed, even where the engine would start a new translation with them,
+//! exports:
+//!
+//! ```ignore
+//! #[no_mangle]
+//! pub extern "C" fn outline_continues(stroke: i64) -> i32;
+//! ```
+//!
+//! Asked with a stroke's bits only while one of those commands is following an outline, never
+//! otherwise. Non-zero makes the stroke part of the outline shown. See
+//! `docs/plugins/outline-join.rs`.
+//!
 //! # The init interface (optional)
 //!
 //! ```ignore
@@ -121,7 +137,8 @@
 //! # Mods
 //!
 //! `alloc` and `fallback` are required only of a plugin that reads words. One that only changes
-//! how the engine behaves (`joins`, `send_early`) leaves them out: a mod, never asked for a word.
+//! how the engine behaves (`joins`, `send_early`, `outline_continues`) leaves them out: a mod,
+//! never asked for a word.
 //!
 //! # A slow reading never holds up typing
 //!
@@ -282,6 +299,8 @@ pub(crate) struct Plugin {
     joins_known: rustc_hash::FxHashMap<u32, bool>,
     /// `send_early(held, stroke) -> bool`, if this plugin exports one: see the module doc.
     send_early: Option<TypedFunc<(i64, i64), i32>>,
+    /// `outline_continues(stroke) -> bool`, if this plugin exports one: see the module doc.
+    outline_continues: Option<TypedFunc<i64, i32>>,
     /// `init()`, if this plugin exports one: see the module doc.
     init: Option<Init>,
     /// `context(ptr, len)`, if this plugin exports one: see the module doc.
@@ -338,8 +357,19 @@ impl Plugin {
         let send_early = instance
             .get_typed_func::<(i64, i64), i32>(&mut store, "send_early")
             .ok();
-        if reads.is_none() && joins.is_none() && send_early.is_none() {
-            bail!("plugin {name:?} exports none of fallback, joins, send_early");
+        let outline_continues = instance
+            .get_typed_func::<i64, i32>(&mut store, "outline_continues")
+            .ok();
+        if outline_continues.is_none()
+            && instance.get_func(&mut store, "outline_continues").is_some()
+        {
+            bail!(
+                "plugin {name:?} has outline_continues, but not outline_continues(stroke) -> i32"
+            );
+        }
+        if reads.is_none() && joins.is_none() && send_early.is_none() && outline_continues.is_none()
+        {
+            bail!("plugin {name:?} exports none of fallback, joins, send_early, outline_continues");
         }
         let init = instance
             .get_typed_func::<(), ()>(&mut store, "init")
@@ -370,6 +400,7 @@ impl Plugin {
             joins,
             joins_known: rustc_hash::FxHashMap::default(),
             send_early,
+            outline_continues,
             init,
             context,
         })
@@ -401,7 +432,10 @@ impl Plugin {
         let context = plugin.context.is_some();
         let history = plugin.history;
         let module = plugin.module.clone();
-        let mods = (plugin.joins.is_some() || plugin.send_early.is_some()).then(|| {
+        let mods = (plugin.joins.is_some()
+            || plugin.send_early.is_some()
+            || plugin.outline_continues.is_some())
+        .then(|| {
             plugin.reads = None;
             Mutex::new(plugin)
         });
@@ -534,6 +568,19 @@ impl Plugin {
         };
         send_early
             .call(&mut self.store, (i64::from(held), i64::from(stroke)))
+            .unwrap_or(0)
+            != 0
+    }
+
+    /// Ask this plugin whether `stroke` continues the outline `{:outline:next}` or
+    /// `{:outline:explain}` follows - see the module doc's "outline-continues interface".
+    /// `false` if it doesn't export `outline_continues`, or if the call failed.
+    pub fn outline_continues(&mut self, stroke: u32) -> bool {
+        let Some(continues) = &self.outline_continues else {
+            return false;
+        };
+        continues
+            .call(&mut self.store, i64::from(stroke))
             .unwrap_or(0)
             != 0
     }
@@ -962,6 +1009,20 @@ impl Chain {
         })
     }
 
+    /// Whether `stroke` continues the outline `{:outline:next}` or `{:outline:explain}` is
+    /// following: any plugin says so through [`Plugin::outline_continues`]. `false` with no
+    /// plugin that exports it. Asked only while an outline is followed.
+    #[must_use]
+    pub fn outline_continues(&self, stroke: u32) -> bool {
+        self.steps.iter().any(|step| match step {
+            Step::Plugin(plugin) => plugin
+                .mods
+                .as_ref()
+                .is_some_and(|m| lock(m).outline_continues(stroke)),
+            Step::Dict(_) => false,
+        })
+    }
+
     /// Whether `strokes` reads as one word to ask a plugin about: a single stroke, or several
     /// where every one after the first continues the word before it (see [`Self::joins`]),
     /// declaring itself a continuation on purpose. Anything else is a window the engine's own
@@ -1201,6 +1262,31 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         assert!(
             !chain.send_early(sticky, sticky),
             "nothing but the sticky key: nothing to send"
+        );
+        assert_eq!(chain.lookup(&[kat]), None, "and it never reads a word");
+    }
+
+    #[test]
+    fn the_documented_outline_mod_continues_a_followed_outline_with_its_key() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("docs")
+            .join("plugins")
+            .join("outline-join.rs");
+        let cache = tmp_dir("the_documented_outline_mod_continues_a_followed_outline");
+        let chain = Chain::load_cached(&[source], &cache, &Layout::plover());
+        assert_eq!(
+            chain.plugin_count(),
+            1,
+            "a mod with only outline_continues loads"
+        );
+        let kat = Layout::plover().parse_stroke("KAT").unwrap();
+        let join = 1 << 23;
+        assert!(chain.outline_continues(kat | join));
+        assert!(chain.outline_continues(join));
+        assert!(!chain.outline_continues(kat));
+        assert!(
+            !chain.joins(kat | join),
+            "it changes no grouping of its own"
         );
         assert_eq!(chain.lookup(&[kat]), None, "and it never reads a word");
     }

@@ -119,6 +119,23 @@ with the next key pressed, and letting go of them alone sends nothing. `sticky-k
 make one key sticky: hold it, and each stroke goes as its other keys come up, the held key part of
 every one.
 
+### `outline_continues` (optional)
+
+`{:outline:next}` and `{:outline:explain}` follow the next translation as the engine groups it: a
+multi-stroke entry (`KPA/TKAOEU`) or a joined run is named whole, and the first stroke that starts
+a new translation ends them. A plugin can make some strokes always continue the outline shown:
+
+```rust
+#[no_mangle]
+pub extern "C" fn outline_continues(stroke: i64) -> i32 { /* ... */ }
+```
+
+Asked with one stroke's bits, and only for a stroke struck while one of those commands is
+following an outline (never otherwise, so it costs nothing the rest of the time). Non-zero makes
+the stroke part of the outline even where the engine starts a new translation with it; the entry
+shown is then each translation's entry, in order, separated by spaces. It changes nothing about
+how strokes translate. `outline-join.rs` makes a theory's join key `+` continue every outline.
+
 ### `init` (optional)
 
 ```rust
@@ -233,7 +250,7 @@ layer (`plugin_deadline_ms`, 30 by default):
   A reading that has started cannot be stopped; it finishes and is kept for a moment, in case it
   is asked for again.
 
-`joins` and `send_early` are answered by a second instance of the same module, on the engine's
+`joins`, `send_early` and `outline_continues` are answered by a second instance of the same module, on the engine's
 own thread, so they never wait behind a reading. The two instances share no memory: keep
 whatever `fallback` needs from call to call (a cache of the run read last, say) in what
 `fallback` itself sees (it, `init` and `context` share the reading instance), and never count on
@@ -253,10 +270,10 @@ theory can score its fallback on real typing from these lines.
 ## Mods: a plugin that reads no words
 
 `alloc` and `fallback` are only required of a plugin that reads words. One that only changes how
-the engine behaves (`joins`, `send_early`) leaves them out and is a *mod*: it sits in the steno
-folder like any plugin, is never asked for a word, and must export `fallback`, `joins` or
-`send_early` (`init` and `context` alone are not enough).
-`sticky-key.rs` is a complete one.
+the engine behaves (`joins`, `send_early`, `outline_continues`) leaves them out and is a *mod*: it
+sits in the steno folder like any plugin, is never asked for a word, and must export `fallback`,
+`joins`, `send_early` or `outline_continues` (`init` and `context` alone are not enough).
+`sticky-key.rs` and `outline-join.rs` are complete ones.
 
 ## Where things are cached
 

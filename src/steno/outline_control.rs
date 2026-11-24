@@ -6,18 +6,29 @@
 //! text on screen comes from: the last one in the history that strokes made, so an undo moves it
 //! back and these commands themselves never count. With nothing to name it types nothing.
 //!
-//! `{:outline:next}` arms a one-shot mode: the next stroke does not translate or act (a command,
-//! a key combination or an undo in it does not run) and types its own notation instead, then the
-//! mode clears. That next stroke can be anything, the arming stroke included: striking it twice
-//! types its own notation. To cancel, strike anything and undo what it typed.
+//! `{:outline:next}` arms a mode that follows the next translation: the strokes after it
+//! translate as ever, but silently (nothing they would type, run or press happens), only to see
+//! how the engine groups them, and the notation of that translation is typed instead. A stroke
+//! that grows it (the next stroke of a multi-stroke entry, `KPA/TKAOEU`, or a stroke a plugin
+//! joins onto the word before, `TPHAT/+STKPWAEUGS`) types the whole outline again in place of the
+//! old one, the engine's usual taking back and typing over. The first stroke that starts a
+//! translation of its own ends the mode and is translated as usual. A mod can make some strokes
+//! always continue the outline (`outline_continues`, see [`super::plugin`]). A first stroke that
+//! makes no translation of its own (a transparent one such as the arming stroke itself, or a macro
+//! such as undo) types its own notation once, without running, and the mode clears: striking the
+//! arming stroke twice types its own notation. To cancel, strike anything and undo what it typed.
 //!
-//! `{:outline:explain}` arms the same one-shot mode, but the next stroke types its notation and
-//! the raw text it looks up to, unexecuted: `+*-G -> {^ing}`. What it shows is that one stroke
-//! on its own, looked up once the way a stroke is (the dictionaries, then a plugin's reading,
-//! then a suffix key folded off), never a longer multi-stroke entry it may start. A plugin's
-//! reading is marked with the plugin's name (`STKPWHR -> word (plugin NAME)`), a plugin that
-//! did not answer in time with `(plugin late)`, and a stroke with nothing at all with `(none)`.
+//! `{:outline:explain}` does the same, typing the outline and the raw text of the entry it looks
+//! up to, unexecuted: `+*-G -> {^ing}`, `KPA/TKAOEU -> today`. An entry a plugin read is shown as
+//! its plain text, a stroke a plugin did not answer in time as `(plugin late)`, and a stroke with
+//! nothing at all as `(none)`. Where a mod continued the outline past what the engine grouped, the
+//! entries of its translations are shown in order, separated by spaces. A first stroke with no
+//! translation of its own shows that one stroke on its own, looked up once the way a stroke is.
 //! Asking a plugin runs nothing: its reading is text the engine is given back.
+//!
+//! The typed text is one word to undo, whatever it replaced: `*` takes the whole explanation
+//! back. A `{:surround:next:...}` armed before the command wraps it whole, and keeps wrapping it
+//! each time it is typed again. Following costs nothing while nothing is armed.
 //!
 //! All three are transparent strokes like the overlay controls: they stay out of the history and
 //! keep the spacing and any pending join around them. The notation they type is a translation of
@@ -58,31 +69,55 @@ impl Verb {
     }
 }
 
-/// What one stroke on its own looks up to, for `{:outline:explain}`.
+/// What a translation looks up to, for `{:outline:explain}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
-    /// An entry in the dictionaries (or a suffix key folded off one), as raw text
-    Dictionary(String),
-    /// A plugin's reading, and the plugin's name
-    Plugin { text: String, plugin: String },
+    /// An entry in the dictionaries (or a suffix key folded off one), or a plugin's reading, as
+    /// raw text
+    Found(String),
     /// A plugin was asked and did not answer in time
     Late,
     /// Nothing reads the stroke
     None,
 }
 
-/// The text `{:outline:explain}` types for a stroke written `notation` that looks up to
-/// `entry`: `NOTATION -> ENTRY`, with braces escaped so the entry is typed as it is written and
-/// never runs.
+/// The text `{:outline:explain}` types for an outline: `NOTATION -> ENTRY`.
+///
+/// `notation` is the outline written out and `entries` what its translations look up to,
+/// separated by spaces, with braces escaped so an entry is typed as it is written and never runs.
 #[must_use]
-pub fn explanation(notation: &str, entry: &Entry) -> String {
-    let shown = match entry {
-        Entry::Dictionary(text) => escape(text),
-        Entry::Plugin { text, plugin } => format!("{} (plugin {})", escape(text), escape(plugin)),
-        Entry::Late => "(plugin late)".to_string(),
-        Entry::None => "(none)".to_string(),
-    };
-    format!("{} -> {shown}", escape(notation))
+pub fn explanation(notation: &str, entries: &[Entry]) -> String {
+    let shown: Vec<String> = entries
+        .iter()
+        .map(|entry| match entry {
+            Entry::Found(text) => escape(text),
+            Entry::Late => "(plugin late)".to_string(),
+            Entry::None => "(none)".to_string(),
+        })
+        .collect();
+    format!("{} -> {}", escape(notation), shown.join(" "))
+}
+
+/// Where `{:outline:next}` and `{:outline:explain}` stand.
+#[derive(Debug, Default)]
+pub enum Mode {
+    /// Nothing armed: strokes translate as ever
+    #[default]
+    Off,
+    /// Armed: the next stroke starts the outline to follow
+    Armed(Verb),
+    /// Following an outline: a stroke that grows it types it again
+    Following(Box<Following>),
+}
+
+/// An outline being followed.
+#[derive(Debug)]
+pub struct Following {
+    pub verb: Verb,
+    /// A copy of the translator the strokes are struck on, to see how they group
+    pub shadow: super::translate::Translator,
+    /// The text typed for the outline so far
+    pub typed: String,
 }
 
 /// `text` with every brace escaped, so the formatter types it as text (see
@@ -152,14 +187,16 @@ mod tests {
 
     #[test]
     fn an_explanation_escapes_the_entry() {
-        let entry = Entry::Dictionary("{^ing}".to_string());
-        assert_eq!(explanation("+*-G", &entry), "+*-G -> \\{^ing\\}");
-        let read = Entry::Plugin {
-            text: "word".to_string(),
-            plugin: "solver".to_string(),
-        };
-        assert_eq!(explanation("STKPW", &read), "STKPW -> word (plugin solver)");
-        assert_eq!(explanation("-Z", &Entry::None), "-Z -> (none)");
-        assert_eq!(explanation("-Z", &Entry::Late), "-Z -> (plugin late)");
+        let entry = Entry::Found("{^ing}".to_string());
+        assert_eq!(explanation("+*-G", &[entry]), "+*-G -> \\{^ing\\}");
+        let read = Entry::Found("word".to_string());
+        assert_eq!(explanation("STKPW", &[read]), "STKPW -> word");
+        assert_eq!(explanation("-Z", &[Entry::None]), "-Z -> (none)");
+        assert_eq!(explanation("-Z", &[Entry::Late]), "-Z -> (plugin late)");
+        let two = [Entry::Found("national".into()), Entry::None];
+        assert_eq!(
+            explanation("TPHAT/+-Z", &two),
+            "TPHAT/+-Z -> national (none)"
+        );
     }
 }

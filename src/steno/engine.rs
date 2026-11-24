@@ -91,9 +91,9 @@ pub struct StenoEngine {
     lookup_search: Option<LookupSearch>,
     /// The layout stroke notation is read and written in, extra keys included, for the lookup
     layout: Layout,
-    /// `{:outline:next}` or `{:outline:explain}` is armed: the next stroke types its own
-    /// notation, and with `Explain` what it looks up to (see [`super::outline_control`])
-    outline_armed: Option<super::outline_control::Verb>,
+    /// Whether `{:outline:next}` or `{:outline:explain}` is armed or following an outline (see
+    /// [`super::outline_control`])
+    outline: super::outline_control::Mode,
     /// A stroke wrote `{:engine:toggle}` or `{:engine:suspend}` (or their legacy spellings): the layer should be left
     leave_requested: bool,
     fresh_on_enter: bool,
@@ -246,7 +246,7 @@ impl StenoEngine {
             lookup: None,
             lookup_search: (!cfg!(test)).then(|| LookupSearch::new(OverlayHub::global())),
             layout,
-            outline_armed: None,
+            outline: super::outline_control::Mode::Off,
             leave_requested: false,
             fresh_on_enter: config.fresh_on_enter,
             discard_on_leave: config.leave_mid_stroke == crate::config::LeaveMidStroke::Discard,
@@ -264,7 +264,7 @@ impl StenoEngine {
     pub fn enter(&mut self) {
         // A lookup left open before leaving the layer isn't carried over
         self.lookup = None;
-        self.outline_armed = None;
+        self.outline = super::outline_control::Mode::Off;
         if self.fresh_on_enter {
             self.start_fresh();
         }
@@ -700,19 +700,14 @@ impl StenoEngine {
 
     /// Translate a stroke. A repeat counts on the stroke's tape line instead of adding lines.
     fn translate(&mut self, stroke: u32, repeated: bool) -> Option<StenoOutput> {
-        // Armed by `{:outline:next}` or `{:outline:explain}`: the stroke, whatever it is (the
-        // arming stroke too), types its notation instead of translating or acting
-        let output = if let Some(verb) = self.outline_armed.take() {
-            let notation = self.layout.render_strokes(&[stroke]);
-            let text = if verb == super::outline_control::Verb::Explain {
-                let entry = self.translator.explain(stroke);
-                super::outline_control::explanation(&notation, &entry)
-            } else {
-                notation
-            };
-            self.translator.type_text(&text)
-        } else {
-            self.translator.stroke(stroke)
+        // Armed by `{:outline:next}` or `{:outline:explain}`, or following the outline one
+        // started: the stroke types notation instead of translating or acting
+        let output = match std::mem::take(&mut self.outline) {
+            super::outline_control::Mode::Off => self.translator.stroke(stroke),
+            super::outline_control::Mode::Armed(verb) => self.begin_outline(verb, stroke),
+            super::outline_control::Mode::Following(following) => {
+                self.follow_outline(following, stroke)
+            }
         };
         // A transparent stroke is on the tape (dimmed, marked `~` in the file) but not part of
         // the text: its line says what it ran, so describe it before the commands are consumed
@@ -793,17 +788,94 @@ impl StenoEngine {
         StenoOutput::from_ops(rest)
     }
 
+    /// The first stroke after `{:outline:next}` or `{:outline:explain}`: struck on a shadow of
+    /// the translator to see what it makes, its outline (and entry) typed in its place, and the
+    /// outline followed from there. A stroke that makes no translation of its own (a transparent
+    /// one, the arming stroke included, or a macro such as undo) types its own notation once.
+    fn begin_outline(
+        &mut self,
+        verb: super::outline_control::Verb,
+        stroke: u32,
+    ) -> Option<StenoOutput> {
+        use super::outline_control::{explanation, Following, Mode, Verb};
+        let mut shadow = self.translator.shadow();
+        if let Some(followed) = shadow.follow_stroke(stroke) {
+            let text = self.outline_text(verb, &followed);
+            let output = self.translator.type_text(&text);
+            self.outline = Mode::Following(Box::new(Following {
+                verb,
+                shadow,
+                typed: text,
+            }));
+            return output;
+        }
+        let notation = self.render_notation(&[stroke]);
+        let text = if verb == Verb::Explain {
+            let entry = self.translator.explain(stroke);
+            explanation(&notation, &[entry])
+        } else {
+            notation
+        };
+        self.translator.type_text(&text)
+    }
+
+    /// A stroke while an outline is followed: if it grows the outline (as the engine groups it,
+    /// or because a mod says it continues it), the outline is typed again in place of the old
+    /// text; otherwise following ends and the stroke translates as usual.
+    fn follow_outline(
+        &mut self,
+        mut following: Box<super::outline_control::Following>,
+        stroke: u32,
+    ) -> Option<StenoOutput> {
+        let grown = following
+            .shadow
+            .follow_stroke(stroke)
+            .filter(|followed| followed.grew || self.translator.outline_continues(stroke));
+        match grown {
+            Some(followed) if self.translator.last_typed_is(&following.typed) => {
+                let text = self.outline_text(following.verb, &followed);
+                let output = self.translator.retype_text(&text);
+                following.typed = text;
+                self.outline = super::outline_control::Mode::Following(following);
+                output
+            }
+            _ => self.translator.stroke(stroke),
+        }
+    }
+
+    /// What `{:outline:next}` (the notation) or `{:outline:explain}` (and the entries) types for
+    /// a followed outline.
+    fn outline_text(
+        &self,
+        verb: super::outline_control::Verb,
+        followed: &super::translate::Followed,
+    ) -> String {
+        let notation = self.render_notation(&followed.strokes);
+        if verb == super::outline_control::Verb::Explain {
+            super::outline_control::explanation(&notation, &followed.entries)
+        } else {
+            notation
+        }
+    }
+
+    /// Strokes as the outline commands write them, in the layer's layout.
+    fn render_notation(&self, strokes: &[u32]) -> String {
+        self.layout.render_strokes(strokes)
+    }
+
     /// `{:outline:last}`, `{:outline:next}` and `{:outline:explain}` (see
     /// [`super::outline_control`]), as the engine command `outline:VERB`: `next` and `explain`
     /// arm the one-shot mode, `last` returns what typing the last outline made.
     fn run_outline_control(&mut self, args: &str) -> Option<StenoOutput> {
         use super::outline_control::{verb_of, Verb};
         match verb_of(args) {
-            Some(verb @ (Verb::Next | Verb::Explain)) => self.outline_armed = Some(verb),
+            Some(verb @ (Verb::Next | Verb::Explain)) => {
+                self.outline = super::outline_control::Mode::Armed(verb);
+            }
             Some(Verb::Last) => {
                 let strokes = self.translator.last_outline();
                 if !strokes.is_empty() {
-                    let notation = self.layout.render_strokes(&strokes);
+                    let notation = self.render_notation(&strokes);
                     return self.translator.type_text(&notation);
                 }
             }
@@ -955,7 +1027,7 @@ impl StenoEngine {
             lookup: None,
             lookup_search: None,
             layout: Layout::plover(),
-            outline_armed: None,
+            outline: super::outline_control::Mode::Off,
             leave_requested: false,
             fresh_on_enter: false,
             discard_on_leave: false,
@@ -2054,6 +2126,10 @@ mod unload_tests;
 #[cfg(test)]
 #[path = "send_early_tests.rs"]
 mod send_early_tests;
+
+#[cfg(test)]
+#[path = "outline_follow_tests.rs"]
+mod outline_follow_tests;
 
 #[cfg(test)]
 #[path = "run_tests.rs"]
