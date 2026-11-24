@@ -41,6 +41,13 @@
 //! at the first vowel, star or `-`, each hand read greedily, longest spelling first, from the
 //! table's spellings and that hand's own letters); otherwise Plover's notation read leniently.
 //! So both `TPHAEPL` and `NAEM` read as the same stroke.
+//!
+//! A [`Split`] says how a stroke's hands divide into groups when something knows better than the
+//! table: an `outlines` entry (each of its strokes split as its short form reads), or a plugin
+//! that read the word and reported its sound groups ([`Notation::render_strokes_split`];
+//! precedence: `outlines` entry > report > table). The overlay draws a stroke's groups fused on
+//! its keyboard ([`Notation::diagram_groups`]), a compound entry as the entries its spelling is
+//! made of (`TPHR`, `FL`, as `TP` `F` and `HR` `L`).
 
 use super::layout::Layout;
 use std::collections::HashMap;
@@ -84,7 +91,20 @@ struct Table {
     /// Whole outlines written their own way, and the way back
     outlines: HashMap<Vec<u32>, String>,
     by_short: HashMap<String, Vec<u32>>,
+    /// The key groups each stroke of an `outlines` entry is written with (see [`Split`])
+    outline_groups: HashMap<Vec<u32>, Vec<Split>>,
+    /// Each compound entry's keys and the smaller entries (or single keys) its spelling is made
+    /// of, in key order: `TPHR` (FL) is `TP` (F) and `HR` (L). An entry that is no compound of
+    /// others is not here
+    parts: HashMap<u32, Vec<(u32, String)>>,
 }
+
+/// How one stroke's hands split into key groups, each written as one piece.
+///
+/// The sets of two keys or more that go together (each within one hand). Every key of a hand in
+/// no group is written alone. A stroke written by the table alone has no `Split`: the table
+/// decides.
+pub type Split = Vec<u32>;
 
 /// How a layer writes and reads strokes: its [`Layout`] and, when the theory ships one, its
 /// notation file. Cheap to clone.
@@ -92,6 +112,8 @@ struct Table {
 pub struct Notation {
     layout: Layout,
     table: Option<Arc<Table>>,
+    /// The file's text, as read: what the overlay is sent to read the same notation
+    source: Option<Arc<str>>,
 }
 
 impl From<Layout> for Notation {
@@ -107,6 +129,7 @@ impl Notation {
         Self {
             layout,
             table: None,
+            source: None,
         }
     }
 
@@ -168,9 +191,14 @@ impl Notation {
         table.right = hand_entries(&layout, object.get("right"), Hand::Right);
         table.left_tokens = tokens(&layout, &table.left, Hand::Left);
         table.right_tokens = tokens(&layout, &table.right, Hand::Right);
+        table.parts = compound_parts(&layout, &table.left)
+            .into_iter()
+            .chain(compound_parts(&layout, &table.right))
+            .collect();
         let mut notation = Self {
             layout,
             table: Some(Arc::new(table)),
+            source: Some(Arc::from(text)),
         };
         // Outlines are checked by reading them back with the table, so they come last
         let outlines = object
@@ -190,11 +218,18 @@ impl Notation {
                 warn!("steno notation: outline {raw:?} written {short:?} does not read back as {raw:?}; dropped");
                 continue;
             }
-            kept.push((strokes, short.to_string()));
+            let groups = short
+                .split('/')
+                .map(|part| notation.written_groups(part))
+                .collect::<Option<Vec<Split>>>();
+            kept.push((strokes, short.to_string(), groups));
         }
         if let Some(table) = notation.table.as_mut().and_then(Arc::get_mut) {
-            for (strokes, short) in kept {
+            for (strokes, short, groups) in kept {
                 table.by_short.insert(short.clone(), strokes.clone());
+                if let Some(groups) = groups.filter(|g| g.len() == strokes.len()) {
+                    table.outline_groups.insert(strokes.clone(), groups);
+                }
                 table.outlines.insert(strokes, short);
             }
         }
@@ -214,9 +249,23 @@ impl Notation {
         self.table.is_none()
     }
 
+    /// The notation file's text as it was read; `None` for Plover's notation alone.
+    #[must_use]
+    pub const fn source(&self) -> Option<&Arc<str>> {
+        self.source.as_ref()
+    }
+
     /// One stroke, written in pieces (see [`Piece`]).
     #[must_use]
     pub fn render_stroke_pieces(&self, bits: u32) -> Vec<Piece> {
+        self.render_stroke_pieces_split(bits, None)
+    }
+
+    /// One stroke, written in pieces with its hands split as `split` says (see [`Split`]), or by
+    /// the table when `None`. A group that is not all down in `bits`, or holds keys of both
+    /// hands, is not used.
+    #[must_use]
+    pub fn render_stroke_pieces_split(&self, bits: u32, split: Option<&[u32]>) -> Vec<Piece> {
         let layout = &self.layout;
         let plover = || {
             layout
@@ -256,9 +305,14 @@ impl Notation {
         let left_end = layout.left_end();
         let right_start = layout.right_start();
         let mask = |range: std::ops::Range<usize>| range.fold(0u32, |m, slot| m | (1 << slot));
-        self.cluster(bits & mask(0..left_end), &table.left, &mut out);
         let middle = bits & mask(left_end..right_start);
         let right = bits & mask(right_start..number_slot);
+        let left = bits & mask(0..left_end);
+        let hand = |keys: u32, entries: &[(u32, String)], out: &mut Vec<Piece>| match split {
+            Some(groups) => self.split_hand(keys, groups, entries, out),
+            None => self.cluster(keys, entries, out),
+        };
+        hand(left, &table.left, &mut out);
         for slot in left_end..right_start {
             if middle & (1 << slot) != 0 {
                 out.push(Piece {
@@ -273,7 +327,7 @@ impl Notation {
                 keys: 0,
             });
         }
-        self.cluster(right, &table.right, &mut out);
+        hand(right, &table.right, &mut out);
         out
     }
 
@@ -314,6 +368,74 @@ impl Notation {
             .outlines
             .get(strokes)
             .map(String::as_str)
+    }
+
+    /// An outline written for people when something says how its strokes split (see [`Split`]):
+    /// the file's own way of writing this exact outline first, then `split` (one per stroke,
+    /// such as a plugin reports for a word it read), then the table. **Precedence: `outlines`
+    /// entry > `split` > table.**
+    #[must_use]
+    pub fn render_strokes_split(&self, strokes: &[u32], split: Option<&[Split]>) -> String {
+        let split = split.filter(|split| split.len() == strokes.len());
+        match (&self.table, split) {
+            (Some(table), Some(split)) if !table.outlines.contains_key(strokes) => strokes
+                .iter()
+                .zip(split)
+                .map(|(&bits, groups)| {
+                    self.render_stroke_pieces_split(bits, Some(groups))
+                        .into_iter()
+                        .map(|piece| piece.text)
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("/"),
+            _ => self.render_strokes(strokes),
+        }
+    }
+
+    /// How each stroke of this exact outline is split, when the file writes the outline its own
+    /// way (its `outlines` entry); `None` when the table decides.
+    #[must_use]
+    pub fn outline_split(&self, strokes: &[u32]) -> Option<&[Split]> {
+        self.table
+            .as_ref()?
+            .outline_groups
+            .get(strokes)
+            .map(Vec::as_slice)
+    }
+
+    /// The key groups the table writes one stroke with: each piece of two keys or more.
+    #[must_use]
+    pub fn table_split(&self, bits: u32) -> Split {
+        self.render_stroke_pieces(bits)
+            .into_iter()
+            .filter(|piece| piece.keys.count_ones() > 1)
+            .map(|piece| piece.keys)
+            .collect()
+    }
+
+    /// The key groups to draw as one on a keyboard diagram for a stroke written with `split`
+    /// (the table's when `None`), and each one's label: every piece of two keys or more of the
+    /// hands, a compound entry as the entries its spelling is made of (`TPHR`, written `FL`, is
+    /// `TP` labelled `F` and `HR` labelled `L`), down to the finest (a compound of compounds is
+    /// taken apart too). Keys in no group stand alone. Empty for
+    /// Plover's notation alone.
+    #[must_use]
+    pub fn diagram_groups(&self, bits: u32, split: Option<&[u32]>) -> Vec<(u32, String)> {
+        let Some(table) = &self.table else {
+            return Vec::new();
+        };
+        let layout = &self.layout;
+        let mask = |range: std::ops::Range<usize>| range.fold(0u32, |m, slot| m | (1 << slot));
+        let hands = mask(0..layout.left_end()) | mask(layout.right_start()..layout.number_slot());
+        let mut out = Vec::new();
+        for piece in self.render_stroke_pieces_split(bits, split) {
+            if piece.keys.count_ones() < 2 || piece.keys & !hands != 0 {
+                continue;
+            }
+            finest(&table.parts, piece.keys, piece.text, &mut out);
+        }
+        out
     }
 
     /// Read one stroke, Plover's notation or the short form; `None` for anything else and for a
@@ -367,12 +489,32 @@ impl Notation {
                 return Some(bits);
             }
         }
-        self.parse_short(table, text).or(raw)
+        self.parse_short(table, text, None).or(raw)
+    }
+
+    /// The key groups one stroke's written text splits its hands into (see [`Split`]): none for
+    /// text that is exactly Plover's notation (every key its own letter), else the short form's
+    /// pieces of two keys or more. `None` when it reads as neither.
+    fn written_groups(&self, text: &str) -> Option<Split> {
+        let table = self.table.as_ref()?;
+        if let Some(bits) = self.layout.parse_stroke_bits(text) {
+            if self.layout.render_stroke(bits) == text {
+                return Some(Vec::new());
+            }
+        }
+        let mut groups = Vec::new();
+        self.parse_short(table, text, Some(&mut groups))?;
+        Some(groups)
     }
 
     /// The short form: extra keys and `#` anywhere, the left hand up to the first vowel, star or
     /// `-`, those as they are, then the right hand.
-    fn parse_short(&self, table: &Table, text: &str) -> Option<u32> {
+    fn parse_short(
+        &self,
+        table: &Table,
+        text: &str,
+        mut groups: Option<&mut Vec<u32>>,
+    ) -> Option<u32> {
         let layout = &self.layout;
         let extra_start = layout.extra_start();
         let number_slot = layout.number_slot();
@@ -402,7 +544,7 @@ impl Notation {
         let end = rest[start..]
             .find(|ch: char| !is_middle(ch))
             .map_or(rest.len(), |i| start + i);
-        bits |= read_hand(&rest[..start], &table.left_tokens)?;
+        bits |= read_hand(&rest[..start], &table.left_tokens, groups.as_deref_mut())?;
         let mut cursor = left_end;
         let mut dashed = false;
         for ch in rest[start..end].chars() {
@@ -417,7 +559,7 @@ impl Notation {
             bits |= 1 << slot;
             cursor = slot + 1;
         }
-        bits |= read_hand(&rest[end..], &table.right_tokens)?;
+        bits |= read_hand(&rest[end..], &table.right_tokens, groups)?;
         Some(bits)
     }
 
@@ -449,6 +591,41 @@ impl Notation {
             out.push(Piece { text, keys: chord });
             keys &= !chord;
         }
+    }
+
+    /// Write one hand's keys as `groups` split them: from the lowest key left, the group holding
+    /// it (all down, all in this hand), written as the table's spelling for exactly those keys or
+    /// else as their own letters, else the key's own letter.
+    fn split_hand(
+        &self,
+        mut keys: u32,
+        groups: &[u32],
+        entries: &[(u32, String)],
+        out: &mut Vec<Piece>,
+    ) {
+        let hand = keys;
+        while keys != 0 {
+            let low = keys.isolate_lowest_one();
+            let group = groups
+                .iter()
+                .copied()
+                .find(|&g| g & low != 0 && g & !keys == 0 && g & !hand == 0)
+                .unwrap_or(low);
+            let text = entries
+                .iter()
+                .find(|(chord, _)| *chord == group)
+                .map_or_else(|| self.letters_of(group), |(_, text)| text.clone());
+            out.push(Piece { text, keys: group });
+            keys &= !group;
+        }
+    }
+
+    /// Keys written as their own letters, in key order.
+    fn letters_of(&self, keys: u32) -> String {
+        (0..32)
+            .filter(|slot| keys & (1 << slot) != 0)
+            .map(|slot| self.char_of(slot))
+            .collect()
     }
 
     fn char_of(&self, slot: usize) -> char {
@@ -578,16 +755,88 @@ fn tokens(layout: &Layout, entries: &[(u32, String)], hand: Hand) -> Vec<(String
 
 /// One hand's keys from its text, greedily, longest token first; `None` if some text is left
 /// that no token reads.
-fn read_hand(mut text: &str, tokens: &[(String, u32)]) -> Option<u32> {
+fn read_hand(
+    mut text: &str,
+    tokens: &[(String, u32)],
+    mut groups: Option<&mut Vec<u32>>,
+) -> Option<u32> {
     let mut bits = 0;
     while !text.is_empty() {
         let (token, keys) = tokens
             .iter()
             .find(|(token, _)| text.starts_with(token.as_str()))?;
         bits |= keys;
+        if keys.count_ones() > 1 {
+            if let Some(groups) = groups.as_deref_mut() {
+                groups.push(*keys);
+            }
+        }
         text = &text[token.len()..];
     }
     Some(bits)
+}
+
+/// A group of keys as the finest groups its spelling is made of, through compounds of compounds
+/// (`-RBGT`, `RKT`, is `-RBG` `RK` and `-T`, and `-RBG` is `-R` and `-BG` `K`): only the groups
+/// of two keys or more go to `out`.
+fn finest(
+    parts: &HashMap<u32, Vec<(u32, String)>>,
+    keys: u32,
+    text: String,
+    out: &mut Vec<(u32, String)>,
+) {
+    match parts.get(&keys) {
+        Some(made_of) => {
+            for (keys, text) in made_of {
+                finest(parts, *keys, text.clone(), out);
+            }
+        }
+        None if keys.count_ones() > 1 => out.push((keys, text)),
+        None => {}
+    }
+}
+
+/// Each compound entry of one hand and the smaller entries or single keys its spelling is made
+/// of (see `Table::parts`): read from its lowest key, the entry with the most keys whose spelling
+/// the rest of the text starts with, else the key's own letter, as long as the whole spelling is
+/// used up. An entry its spelling cannot be made up of so is not a compound.
+fn compound_parts(layout: &Layout, entries: &[(u32, String)]) -> Vec<(u32, Vec<(u32, String)>)> {
+    fn go(
+        layout: &Layout,
+        others: &[&(u32, String)],
+        keys: u32,
+        text: &str,
+    ) -> Option<Vec<(u32, String)>> {
+        if keys == 0 {
+            return text.is_empty().then(Vec::new);
+        }
+        let low = keys.isolate_lowest_one();
+        let mut candidates: Vec<(u32, String)> = others
+            .iter()
+            .filter(|(chord, _)| chord.isolate_lowest_one() == low && chord & !keys == 0)
+            .map(|(chord, spelling)| (*chord, spelling.clone()))
+            .collect();
+        candidates.sort_by_key(|(chord, _)| std::cmp::Reverse(chord.count_ones()));
+        let letter = layout
+            .key_at(low.trailing_zeros() as usize)
+            .map(|key| key.char.to_string())?;
+        candidates.push((low, letter));
+        candidates.into_iter().find_map(|(chord, spelling)| {
+            let rest = text.strip_prefix(spelling.as_str())?;
+            let mut parts = go(layout, others, keys & !chord, rest)?;
+            parts.insert(0, (chord, spelling));
+            Some(parts)
+        })
+    }
+    entries
+        .iter()
+        .filter_map(|(keys, spelling)| {
+            let others: Vec<&(u32, String)> =
+                entries.iter().filter(|(other, _)| other != keys).collect();
+            let parts = go(layout, &others, *keys, spelling)?;
+            (parts.len() > 1).then_some((*keys, parts))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -774,6 +1023,90 @@ mod tests {
         }
         assert_eq!(n.parse_strokes("/S"), layout.parse_strokes("/S"));
         assert_eq!(n.parse_stroke("NAEM"), None);
+    }
+
+    #[test]
+    fn a_compound_is_drawn_as_the_groups_its_spelling_is_made_of() {
+        let n = table(TABLE);
+        let groups = |text: &str| -> Vec<(String, String)> {
+            n.diagram_groups(raw(&n, text), None)
+                .into_iter()
+                .map(|(keys, label)| (n.layout().render_stroke(keys), label))
+                .collect()
+        };
+        // flower: TPHR is written FL, and drawn as F (TP) and L (HR)
+        assert_eq!(
+            groups("TPHROUR"),
+            [("TP".into(), "F".into()), ("HR".into(), "L".into())]
+        );
+        assert_eq!(
+            groups("TPHAEPL"),
+            [("TPH".into(), "N".into()), ("-PL".into(), "M".into())]
+        );
+        // A compound of a compound: -RBGT (RKT) is -RBG (RK) and -T, and -RBG is -R and -BG (K)
+        let nested = table(r#"{"right": {"BG": "K", "RBG": "RK", "RBGT": "RKT"}}"#);
+        let rkt = nested.diagram_groups(raw(&nested, "-RBGT"), None);
+        assert_eq!(rkt, [(raw(&nested, "-BG"), "K".to_string())]);
+        // A single key is no group; vowels never are
+        assert_eq!(groups("KAT"), Vec::<(String, String)>::new());
+        assert_eq!(
+            plain().diagram_groups(raw(&n, "TPHAEPL"), None),
+            Vec::<(u32, String)>::new()
+        );
+    }
+
+    #[test]
+    fn an_outline_written_its_own_way_says_how_its_strokes_split() {
+        let n = table(
+            r#"{"left": {"TPH": "N"}, "right": {"RB": "SH", "PB": "N"},
+                "outlines": {"ORB": "ORB", "EPB/SHRAOEUPB": "EN/SHRAOEUN"}}"#,
+        );
+        let orb = raw(&n, "ORB");
+        // The table alone writes -RB as SH; this outline is O, R and B
+        assert_eq!(n.render_stroke(orb), "OSH");
+        assert_eq!(n.outline_split(&[orb]), Some(&[Vec::new()][..]));
+        assert_eq!(
+            n.diagram_groups(orb, Some(&[])),
+            Vec::<(u32, String)>::new()
+        );
+        assert_eq!(n.diagram_groups(orb, None).len(), 1);
+        let shine = [raw(&n, "EPB"), raw(&n, "SHRAOEUPB")];
+        let split = n.outline_split(&shine).unwrap();
+        assert_eq!(split, [vec![raw(&n, "-PB")], vec![raw(&n, "-PB")]]);
+        assert_eq!(n.outline_split(&[raw(&n, "KAT")]), None);
+    }
+
+    #[test]
+    fn a_reported_split_comes_after_the_outlines_entry_and_before_the_table() {
+        let n = table(r#"{"left": {"TPH": "N", "HR": "L"}, "outlines": {"TPHO": "TPHO"}}"#);
+        let flow = raw(&n, "TPHROE");
+        assert_eq!(n.render_strokes(&[flow]), "NROE");
+        // A plugin read it as F + L
+        let split = vec![vec![raw(&n, "TP"), raw(&n, "HR")]];
+        assert_eq!(n.render_strokes_split(&[flow], Some(&split)), "TPLOE");
+        assert_eq!(
+            n.parse_strokes(&n.render_strokes_split(&[flow], Some(&split))),
+            Some(vec![flow])
+        );
+        // The outlines entry wins over a report; a report for other strokes is not used
+        let no = raw(&n, "TPHO");
+        assert_eq!(
+            n.render_strokes_split(&[no], Some(&[vec![raw(&n, "TP")]])),
+            "TPHO"
+        );
+        assert_eq!(n.render_strokes_split(&[flow], Some(&[])), "NROE");
+        assert_eq!(n.table_split(flow), [raw(&n, "TPH")]);
+        // A group not all down, or across both hands, is not used
+        assert_eq!(
+            n.render_strokes_split(&[flow], Some(&[vec![raw(&n, "SKWR")]])),
+            "TPHROE"
+        );
+    }
+
+    #[test]
+    fn the_source_is_kept_for_the_overlay_and_plain_has_none() {
+        assert_eq!(table(TABLE).source().map(|s| &**s), Some(TABLE));
+        assert!(plain().source().is_none());
     }
 
     #[test]
