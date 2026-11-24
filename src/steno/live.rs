@@ -57,6 +57,8 @@ struct Entry {
     built_from: u64,
     /// Every file parsed on its own, kept between reloads: only a changed file is read again
     parts: Parts,
+    /// The theory notation file beside the dictionaries as last seen (see [`NotationStamp`])
+    notation: Option<NotationStamp>,
     subscribers: Vec<Sender<Arc<Chain>>>,
     /// What was last said to the user about these files, so a flapping save is not a stream of
     /// notifications
@@ -326,6 +328,34 @@ fn lower_priority() {
     }
 }
 
+impl Entry {
+    /// Only the notation file changed: send the same dictionaries again, so each layer reads it
+    /// again as they arrive.
+    fn resend_if_notation_changed(&mut self, notation: Option<NotationStamp>) {
+        if self.notation == notation {
+            return;
+        }
+        self.notation = notation;
+        if let Some(latest) = &self.latest {
+            info!("steno notation file changed: layers read it again");
+            self.subscribers
+                .retain(|subscriber| subscriber.send(Arc::clone(latest)).is_ok());
+        }
+    }
+}
+
+/// Where a layer's theory notation file is and what it looked like (its path, size and time
+/// changed), so a change to it alone is noticed: the dictionaries are sent again, as they are,
+/// and each layer reads the notation again as they arrive (see [`super::notation`]).
+type NotationStamp = (PathBuf, u64, Option<std::time::SystemTime>);
+
+fn notation_stamp(key: &Key) -> Option<NotationStamp> {
+    let path =
+        super::source::find_in_folders(&key.roots, &key.cache_dir, super::notation::FILE_NAME)?;
+    let meta = std::fs::metadata(&path).ok()?;
+    Some((path, meta.len(), meta.modified().ok()))
+}
+
 /// Read `key`'s files again if they changed, and send the result to everyone subscribed.
 ///
 /// Only the files that changed are read and parsed: a `stat` per file says which (see
@@ -334,6 +364,7 @@ fn lower_priority() {
 fn refresh(key: &Key) {
     let started = Instant::now();
     let files = expand(&key.roots, &key.cache_dir);
+    let notation = notation_stamp(key);
     let hub = hub();
     let (mut parts, built_from, first_time) = {
         let mut state = lock(&hub.state);
@@ -352,6 +383,7 @@ fn refresh(key: &Key) {
             && entry.parts.is_current(&files)
             && entry.built_from == entry.parts.generation()
         {
+            entry.resend_if_notation_changed(notation);
             return;
         }
         let taken = (
@@ -443,6 +475,9 @@ fn refresh(key: &Key) {
         .retain(|file, _| ignored.iter().any(|(f, _)| f == file));
     let notice = entry.notices.admit(candidate, Instant::now());
     let Some(dict) = dict else {
+        if !keep_old {
+            entry.resend_if_notation_changed(notation);
+        }
         drop(state);
         if let Some(notice) = notice {
             deliver(&key.roots, &notice);
@@ -451,6 +486,7 @@ fn refresh(key: &Key) {
     };
     entry.latest = Some(Arc::clone(&dict));
     entry.built_from = generation;
+    entry.notation = notation;
     entry
         .subscribers
         .retain(|subscriber| subscriber.send(Arc::clone(&dict)).is_ok());
@@ -571,6 +607,23 @@ mod tests {
         until(&updates, |d| !says(d, "hound"));
         fs::rename(dir.join("disabled_more"), dir.join("more")).unwrap();
         until(&updates, |d| says(d, "hound"));
+    }
+
+    #[test]
+    fn a_change_to_the_notation_file_alone_sends_the_dictionaries_again() {
+        let dir = folder("notation");
+        fs::write(dir.join("a.json"), r#"{"KAT": "cat"}"#).unwrap();
+        let file = dir.join(super::super::notation::FILE_NAME);
+        fs::write(&file, r#"{"left": {"TPH": "N"}}"#).unwrap();
+        let updates = subscribe(vec![dir.to_path_buf()], dir.join("cache"), Layout::plover());
+        let first = until(&updates, |d| says(d, "cat"));
+        // Its own size changes, so the stamp does whatever the clock's resolution
+        fs::write(&file, r#"{"left": {"TPH": "N", "TP": "F"}}"#).unwrap();
+        let again = next(&updates);
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "the same dictionaries, not rebuilt"
+        );
     }
 
     #[test]
