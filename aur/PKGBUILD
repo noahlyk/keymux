@@ -3,7 +3,7 @@ pkgname=keymux
 pkgver=1.17.0
 pkgrel=1
 pkgdesc="Keyboard middleware for gaming with low-level input interception"
-arch=('x86_64' 'aarch64')
+arch=('x86_64')
 url="https://github.com/noahlyk/keymux"
 license=('GPL-3.0-or-later')
 depends=('udev' 'libevdev')
@@ -20,15 +20,8 @@ optdepends=('systemd: for systemd service files (or use OpenRC/runit scripts)'
 options=('!debug' '!lto')
 install=keymux.install
 
-_arch="$CARCH"
-if [ "$_arch" = "x86_64" ]; then
-    _arch="x86_64"
-elif [ "$_arch" = "aarch64" ]; then
-    _arch="aarch64"
-fi
-
+source_x86_64=("https://github.com/noahlyk/keymux/releases/download/v${pkgver}/keymux-${pkgver}-x86_64.tar.gz")
 source=(
-    "https://github.com/noahlyk/keymux/releases/download/v${pkgver}/keymux-${pkgver}-${_arch}.tar.gz"
     "LICENSE::https://raw.githubusercontent.com/noahlyk/keymux/v${pkgver}/LICENSE"
     "NOTICE::https://raw.githubusercontent.com/noahlyk/keymux/v${pkgver}/NOTICE"
     "keymux.service::https://raw.githubusercontent.com/noahlyk/keymux/v${pkgver}/systemd/keymux.service"
@@ -57,7 +50,9 @@ source=(
     "runit-keymux-bspwm-run::https://raw.githubusercontent.com/noahlyk/keymux/v${pkgver}/runit/keymux-bspwm/run"
     "runit-keymux-bspwm-log-run::https://raw.githubusercontent.com/noahlyk/keymux/v${pkgver}/runit/keymux-bspwm/log/run"
 )
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+# placeholders: the release workflow fills in the real sums (updpkgsums) and refuses to push a SKIP
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+sha256sums_x86_64=('SKIP')
 
 package() {
     install -Dm755 "$srcdir/keymux" "$pkgdir/usr/bin/keymux"

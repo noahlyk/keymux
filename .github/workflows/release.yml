@@ -214,7 +214,7 @@ jobs:
           # real checksums of the release files and the files from the tag, then a check that every
           # source downloads and matches them
           sudo -u builduser bash -c 'cd /home/builduser/aur && updpkgsums && makepkg --verifysource --noconfirm'
-          if grep -q SKIP /home/builduser/aur/PKGBUILD; then
+          if grep -q "'SKIP'" /home/builduser/aur/PKGBUILD; then
             echo "a checksum is still SKIP: not pushing"
             exit 1
           fi
