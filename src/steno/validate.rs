@@ -413,11 +413,16 @@ pub fn validate_files_with(
         let Ok(bytes) = std::fs::read(file) else {
             continue;
         };
+        let keys = spelled_keys(file, layout);
         let _ = scan(file, &bytes, |key, value| {
             if key.contains('/') {
                 return;
             }
-            if let Some(stroke) = layout.parse_stroke(key) {
+            let stroke = keys.as_ref().map_or_else(
+                || layout.parse_stroke(key),
+                |notation| notation.parse_stroke(key),
+            );
+            if let Some(stroke) = stroke {
                 let transparent =
                     value.is_some_and(is_transparent_mapping) && stroke & layout.join_mask() == 0;
                 winners.entry(stroke).or_insert(transparent);
@@ -604,6 +609,19 @@ struct ScanError {
     column: Option<usize>,
 }
 
+/// The notation a JSON dictionary's keys are spelled in, when its theory ships one that says so
+/// beside it (see [`super::notation::Notation::for_keys_in`]): its keys are read with it, as the
+/// daemon reads them.
+fn spelled_keys(file: &Path, layout: &Layout) -> Option<super::notation::Notation> {
+    if !file
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+    {
+        return None;
+    }
+    super::notation::Notation::for_keys_in(file.parent()?, layout).map(|(notation, _)| notation)
+}
+
 /// Per kind and file, how many findings were held back past [`CAP`].
 #[derive(Default)]
 struct Capped(HashMap<(Kind, Severity), usize>);
@@ -651,8 +669,13 @@ fn check_file_into(
                 .or_default() += 1;
         }
     };
+    let keys = spelled_keys(file, layout);
     let result = scan(file, &bytes, |key, value| {
-        let Some(strokes) = layout.parse_strokes(key) else {
+        let parsed = keys.as_ref().map_or_else(
+            || layout.parse_strokes(key),
+            |notation| notation.parse_strokes(key),
+        );
+        let Some(strokes) = parsed else {
             let mut finding = Finding::new(
                 file,
                 Severity::Error,

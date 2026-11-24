@@ -23,6 +23,7 @@ use super::dict::{
     Dictionary, Source, StampKey,
 };
 use super::layout::Layout;
+use super::notation::Notation;
 use super::run_control::Trust;
 use super::source::is_plugin_file;
 use sha2::{Digest, Sha256};
@@ -146,8 +147,15 @@ impl Parts {
             changed: self.order != files,
             ..Refresh::default()
         };
+        // The notation each folder's keys are spelled in, if any, read once a refresh
+        let mut spelled: HashMap<PathBuf, Option<(Notation, String)>> = HashMap::new();
         for path in files {
-            match self.update(path, &parts_dir, layout) {
+            let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+            let keys = spelled
+                .entry(dir.clone())
+                .or_insert_with(|| Notation::for_keys_in(&dir, layout))
+                .as_ref();
+            match self.update(path, &parts_dir, layout, keys) {
                 Ok(Update::Same) => report.unchanged += 1,
                 Ok(Update::Touched) => report.unchanged += 1,
                 Ok(Update::Restored) => {
@@ -186,7 +194,23 @@ impl Parts {
         report
     }
 
-    fn update(&mut self, path: &Path, parts_dir: &Path, layout: &Layout) -> anyhow::Result<Update> {
+    fn update(
+        &mut self,
+        path: &Path,
+        parts_dir: &Path,
+        layout: &Layout,
+        keys: Option<&(Notation, String)>,
+    ) -> anyhow::Result<Update> {
+        // A file whose keys are spelled in its theory's notation is read with it, so its cached
+        // copy is that of the file and the notation together
+        let name = match keys {
+            Some((_, digest)) => format!(
+                "{} (keys spelled by notation {})",
+                path.display(),
+                &digest[..16]
+            ),
+            None => path.display().to_string(),
+        };
         use anyhow::Context;
         // The stamp is taken before the contents are read: a write in between leaves the stamp
         // older than the contents, so the next check sees a difference and reads again.
@@ -209,7 +233,7 @@ impl Parts {
         if let (Some(key), false, true) =
             (&key, self.by_path.contains_key(path), !is_plugin_file(path))
         {
-            if let Some((dict, digest)) = read_cache_by_stamp(&copy, path, key, layout) {
+            if let Some((dict, digest)) = read_cache_by_stamp(&copy, &name, key, layout) {
                 debug!(
                     "steno dictionary {} restored without reading it",
                     path.display()
@@ -239,7 +263,7 @@ impl Parts {
         let (dict, restored) = if is_plugin_file(path) {
             (None, false)
         } else {
-            let source: Vec<Source> = vec![(path.display().to_string(), digest.clone())];
+            let source: Vec<Source> = vec![(name, digest.clone())];
             if let Some(dict) = read_cache(&copy, &source, layout) {
                 set_cache_stamp(&copy, key.as_ref());
                 debug!(
@@ -250,7 +274,7 @@ impl Parts {
                 (Some(Arc::new(dict)), true)
             } else {
                 let mut dict = Dictionary::default();
-                let stats = dict.merge_bytes(path, &bytes, layout)?;
+                let stats = dict.merge_bytes_keyed(path, &bytes, layout, keys.map(|(n, _)| n))?;
                 info!(
                     "steno dictionary {}: {} entries ({} invalid skipped)",
                     path.display(),

@@ -78,7 +78,7 @@ pub struct Piece {
 }
 
 /// A theory's notation file, read against one layout.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Table {
     number: NumberStyle,
     /// (keys, spelling) of each hand, in file order
@@ -91,8 +91,6 @@ struct Table {
     /// Whole outlines written their own way, and the way back
     outlines: HashMap<Vec<u32>, String>,
     by_short: HashMap<String, Vec<u32>>,
-    /// The key groups each stroke of an `outlines` entry is written with (see [`Split`])
-    outline_groups: HashMap<Vec<u32>, Vec<Split>>,
     /// Each compound entry's keys and the smaller entries (or single keys) its spelling is made
     /// of, in key order: `TPHR` (FL) is `TP` (F) and `HR` (L). An entry that is no compound of
     /// others is not here
@@ -110,6 +108,9 @@ struct Table {
     /// The file lists the outlines whose split it knows (`agree`): a group of keys is written as
     /// one only where the split is known. Without it, the table writes every stroke
     strict: bool,
+    /// The theory's dictionary keys are spelled in this notation (`"spelled": "keys"`): a key that
+    /// is not Plover's notation is read with the table, and is how that outline is written
+    spelled: bool,
 }
 
 /// A stable hash of an outline's strokes, to look it up in [`Table::agree`].
@@ -173,9 +174,107 @@ impl Notation {
     #[must_use]
     pub fn load(layout: Layout, roots: &[PathBuf], skip: &Path) -> Self {
         match super::source::find_in_folders(roots, skip, FILE_NAME) {
-            Some(path) => Self::load_file(layout, &path),
+            Some(path) => {
+                let mut notation = Self::load_file(layout, &path);
+                // A theory whose keys are spelled in its notation: each key spelled short is how
+                // its outline is written (the dictionaries beside the file)
+                if notation.spells_keys() {
+                    let started = std::time::Instant::now();
+                    let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+                    let mut learned = 0;
+                    for file in super::source::expand(&[dir], skip) {
+                        if file
+                            .extension()
+                            .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+                        {
+                            if let Ok(text) = std::fs::read_to_string(&file) {
+                                learned += notation.learn_keys(&text);
+                            }
+                        }
+                    }
+                    notation.share_spellings();
+                    tracing::info!(
+                        "steno notation: {learned} outlines spelled by their keys, read in {:?}",
+                        started.elapsed()
+                    );
+                }
+                notation
+            }
             None => Self::plain(layout),
         }
+    }
+
+    /// The notation a dictionary file's keys are spelled in, with the notation file's digest: the
+    /// theory's [`FILE_NAME`] in the file's own folder, when it says its keys are spelled in it
+    /// (`"spelled": "keys"`). `None` for any other file, whose keys are Plover's notation.
+    #[must_use]
+    pub fn for_keys_in(dir: &Path, layout: &Layout) -> Option<(Self, String)> {
+        use sha2::Digest as _;
+        let text = std::fs::read_to_string(dir.join(FILE_NAME)).ok()?;
+        let notation = Self::from_json(layout.clone(), &text).ok()?;
+        let digest = format!("{:x}", sha2::Sha256::digest(text.as_bytes()));
+        notation.spells_keys().then_some((notation, digest))
+    }
+
+    /// Whether the theory's dictionary keys are spelled in this notation (see [`Self::for_keys_in`]).
+    #[must_use]
+    pub fn spells_keys(&self) -> bool {
+        self.table.as_ref().is_some_and(|table| table.spelled)
+    }
+
+    /// What the overlay is sent ([`Self::source`]) for a theory whose keys spell its outlines: the
+    /// file with every spelled outline added as an `outlines` entry (keyed by Plover's notation),
+    /// so the overlay, which reads no dictionary, writes them as the keys do.
+    fn share_spellings(&mut self) {
+        let (Some(table), Some(source)) = (&self.table, &self.source) else {
+            return;
+        };
+        let Ok(serde_json::Value::Object(mut object)) =
+            serde_json::from_str::<serde_json::Value>(source)
+        else {
+            return;
+        };
+        let outlines: serde_json::Map<String, serde_json::Value> = table
+            .outlines
+            .iter()
+            .map(|(strokes, short)| {
+                (
+                    self.layout.render_strokes(strokes),
+                    serde_json::Value::String(short.clone()),
+                )
+            })
+            .collect();
+        object.insert("outlines".to_string(), serde_json::Value::Object(outlines));
+        self.source = serde_json::to_string(&object).ok().map(Arc::from);
+    }
+
+    /// Learns how a dictionary's keys spell their outlines: each key that is not Plover's notation
+    /// and reads back as an outline is that outline's way of writing (kept like an `outlines`
+    /// entry; its groups are read from it when asked). Returns how many.
+    pub fn learn_keys(&mut self, json: &str) -> usize {
+        let mut found: Vec<(Vec<u32>, String)> = Vec::new();
+        let _ = super::dict::read_entries(json, |key, _| {
+            if self
+                .layout
+                .parse_strokes(key)
+                .is_some_and(|strokes| self.layout.render_strokes(&strokes) == key)
+            {
+                return;
+            }
+            if let Some(strokes) = self.parse_strokes(key) {
+                found.push((strokes, key.to_string()));
+            }
+        });
+        let count = found.len();
+        let Some(table) = self.table.as_mut() else {
+            return 0;
+        };
+        let table = Arc::make_mut(table);
+        table.outlines.reserve(count);
+        for (strokes, key) in found {
+            table.outlines.entry(strokes).or_insert(key);
+        }
+        count
     }
 
     /// The notation in the file at `path`; plain when it cannot be read (logged).
@@ -242,6 +341,11 @@ impl Notation {
         table.right = hand_entries(&layout, object.get("right"), Hand::Right, &middle_chars);
         table.left_tokens = tokens(&layout, &table.left, Hand::Left, &table.ascii);
         table.right_tokens = tokens(&layout, &table.right, Hand::Right, &table.ascii);
+        if object.get("spelled").and_then(serde_json::Value::as_str) == Some("keys") {
+            // The keys spell every known split; any other outline is written a key each
+            table.spelled = true;
+            table.strict = true;
+        }
         if let Some(agree) = object.get("agree").and_then(serde_json::Value::as_array) {
             table.strict = true;
             table.agree = agree
@@ -277,18 +381,12 @@ impl Notation {
                 warn!("steno notation: outline {raw:?} written {short:?} does not read back as {raw:?}; dropped");
                 continue;
             }
-            let groups = short
-                .split('/')
-                .map(|part| notation.written_groups(part))
-                .collect::<Option<Vec<Split>>>();
-            kept.push((strokes, short.to_string(), groups));
+            // Its groups are read from its short form when asked (`outline_split`)
+            kept.push((strokes, short.to_string()));
         }
         if let Some(table) = notation.table.as_mut().and_then(Arc::get_mut) {
-            for (strokes, short, groups) in kept {
+            for (strokes, short) in kept {
                 table.by_short.insert(short.clone(), strokes.clone());
-                if let Some(groups) = groups.filter(|g| g.len() == strokes.len()) {
-                    table.outline_groups.insert(strokes.clone(), groups);
-                }
                 table.outlines.insert(strokes, short);
             }
         }
@@ -522,8 +620,16 @@ impl Notation {
     #[must_use]
     pub fn outline_split(&self, strokes: &[u32]) -> Option<Vec<Split>> {
         let table = self.table.as_ref()?;
-        if let Some(split) = table.outline_groups.get(strokes) {
-            return Some(split.clone());
+        // An `outlines` entry, or a key that spells its outline (see `learn_keys`): its groups,
+        // read from its short form
+        if let Some(short) = table.outlines.get(strokes) {
+            let groups = short
+                .split('/')
+                .map(|part| self.written_groups(part))
+                .collect::<Option<Vec<Split>>>();
+            if let Some(groups) = groups.filter(|g| g.len() == strokes.len()) {
+                return Some(groups);
+            }
         }
         (table.strict && !strokes.is_empty() && table.agree.contains(&outline_hash(strokes)))
             .then(|| strokes.iter().map(|&bits| self.table_split(bits)).collect())
@@ -1490,6 +1596,180 @@ mod tests {
             table.outlines.len()
         );
         assert!(took.as_secs_f64() < 2.0, "{took:?}");
+    }
+
+    /// A theory whose keys are spelled in its notation (`"spelled": "keys"`): the dictionary
+    /// reads `NĪT` as `TPHAOEUT`, the key is how that outline is written, and an outline no key
+    /// spells is written raw.
+    #[test]
+    fn keys_spelled_in_the_notation_are_read_and_written_as_spelled() {
+        let dir = crate::test_dir::TestDir::new("keymux-notation-spelled");
+        let theory = dir.join("lyk");
+        std::fs::create_dir_all(&theory).unwrap();
+        std::fs::write(
+            theory.join(FILE_NAME),
+            r#"{"number": "letters", "left": {"TPH": "N", "TPHR": "FL"}, "right": {"RB": "Š"},
+                "middle": {"AOEU": "Ī", "OU": "OU"}, "ascii": {"Š": "SH"}, "spelled": "keys"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            theory.join("02-words.json"),
+            "{\"NĪT\": \"night\", \"FLOUR\": \"flower\", \"TPHO\": \"no\", \"NĪT/+-Š\": \"nightish\"}",
+        )
+        .unwrap();
+        let layout = Layout::plover_with(&['+']).unwrap();
+        let (keys, _) =
+            Notation::for_keys_in(&theory, &layout).expect("the folder's keys are spelled");
+        let mut dict = crate::steno::dict::Dictionary::default();
+        let file = theory.join("02-words.json");
+        dict.merge_bytes_keyed(&file, &std::fs::read(&file).unwrap(), &layout, Some(&keys))
+            .unwrap();
+        let night = layout.parse_strokes("TPHAOEUT").unwrap();
+        assert_eq!(dict.lookup(&night), Some("night"));
+        assert_eq!(
+            dict.lookup(&layout.parse_strokes("TPHROUR").unwrap()),
+            Some("flower")
+        );
+        assert_eq!(
+            dict.lookup(&layout.parse_strokes("TPHAOEUT/+-RB").unwrap()),
+            Some("nightish")
+        );
+        let n = Notation::load(layout.clone(), &[dir.to_path_buf()], &dir.join("cache"));
+        assert_eq!(n.render_strokes(&night), "NĪT");
+        assert_eq!(
+            n.render_strokes(&layout.parse_strokes("TPHAOEUT/+-RB").unwrap()),
+            "NĪT/+-Š"
+        );
+        // No key spells `TPHO` short, nor this stroke: both are raw
+        assert_eq!(
+            n.render_strokes(&layout.parse_strokes("TPHO").unwrap()),
+            "TPHO"
+        );
+        assert_eq!(
+            n.render_strokes(&layout.parse_strokes("TPHAOEUD").unwrap()),
+            "TPHAOEUD"
+        );
+        // The groups of a spelled key are drawn as one
+        assert_eq!(
+            n.outline_split(&night),
+            Some(vec![vec![raw(&n, "TPH"), raw(&n, "AOEU")]])
+        );
+        // The overlay is sent the spellings with the table, and writes them the same way
+        let overlay = Notation::from_json(layout.clone(), n.source().unwrap()).unwrap();
+        assert_eq!(overlay.render_strokes(&night), "NĪT");
+        // Without `"spelled": "keys"` a folder's keys are Plover's notation
+        std::fs::write(theory.join(FILE_NAME), r#"{"left": {"TPH": "N"}}"#).unwrap();
+        assert!(Notation::for_keys_in(&theory, &layout).is_none());
+    }
+
+    /// How long a theory's spelled dictionaries take to load, and the memory they take:
+    /// `KEYMUX_STENO_DIR=folder cargo test --release --lib -- --ignored --nocapture
+    /// a_spelled_theory_loads`. The folder holds the theory's deployed files.
+    #[test]
+    #[ignore = "needs KEYMUX_STENO_DIR"]
+    fn a_spelled_theory_loads() {
+        let Some(dir) = std::env::var_os("KEYMUX_STENO_DIR").map(PathBuf::from) else {
+            return;
+        };
+        let rss = || -> u64 {
+            std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|s| {
+                    s.lines()
+                        .find(|l| l.starts_with("VmRSS:"))
+                        .and_then(|l| l.split_whitespace().nth(1)?.parse().ok())
+                })
+                .unwrap_or(0)
+        };
+        let layout = Layout::plover_with(&['+']).unwrap();
+        let cache =
+            std::env::temp_dir().join(format!("keymux-spelled-cache-{}", std::process::id()));
+        let files: Vec<PathBuf> = crate::steno::source::expand(std::slice::from_ref(&dir), &cache)
+            .into_iter()
+            .filter(|f| f.extension().is_some_and(|e| e == "json"))
+            .collect();
+        let before = rss();
+        let started = std::time::Instant::now();
+        let mut parts = crate::steno::parts::Parts::default();
+        let report = parts.refresh(&files, &cache, &layout);
+        let dict = parts.layered(&files);
+        let dict_took = started.elapsed();
+        let after_dict = rss();
+        let started = std::time::Instant::now();
+        let n = Notation::load(layout.clone(), std::slice::from_ref(&dir), &cache);
+        let notation_took = started.elapsed();
+        let after_notation = rss();
+        let started = std::time::Instant::now();
+        let mut again = crate::steno::parts::Parts::default();
+        again.refresh(&files, &cache, &layout);
+        let cached_took = started.elapsed();
+        let spelled = n.table.as_ref().map_or(0, |t| t.outlines.len());
+        let started = std::time::Instant::now();
+        let overlay = Notation::from_json(layout.clone(), n.source().unwrap()).unwrap();
+        println!(
+            "the overlay's copy: {} bytes, read in {:?} ({} outlines)",
+            n.source().unwrap().len(),
+            started.elapsed(),
+            overlay.table.as_ref().map_or(0, |t| t.outlines.len())
+        );
+        println!(
+            "{} entries in {} files: parsed in {dict_took:?} (+{} MB), from cache in {cached_took:?}; notation with {spelled} spelled outlines in {notation_took:?} (+{} MB); {} problems",
+            dict.len(),
+            files.len(),
+            after_dict.saturating_sub(before) / 1024,
+            after_notation.saturating_sub(after_dict) / 1024,
+            report.problems.len()
+        );
+        let _ = std::fs::remove_dir_all(&cache);
+        // With `KEYMUX_STENO_RAW_DIR`, the same theory built with raw keys: every file reads as
+        // the same entries, and no two keys of a file read as one outline
+        let Some(raw_dir) = std::env::var_os("KEYMUX_STENO_RAW_DIR").map(PathBuf::from) else {
+            return;
+        };
+        let (keys, _) = Notation::for_keys_in(&dir, &layout).expect("the spelled folder says so");
+        let (mut compared, mut spelled_keys) = (0, 0);
+        for file in &files {
+            let name = file.file_name().unwrap();
+            let raw_file = raw_dir.join(name);
+            let text = std::fs::read_to_string(file).unwrap();
+            let mut count = 0;
+            let mut outlines = std::collections::HashSet::new();
+            let _ = crate::steno::dict::read_entries(&text, |key, _| {
+                count += 1;
+                if layout
+                    .parse_strokes(key)
+                    .is_none_or(|s| layout.render_strokes(&s) != key)
+                {
+                    spelled_keys += 1;
+                }
+                assert!(
+                    outlines.insert(
+                        keys.parse_strokes(key)
+                            .unwrap_or_else(|| panic!("{key:?} does not read"))
+                    ),
+                    "{key:?} collides"
+                );
+            });
+            assert_eq!(outlines.len(), count, "{}", file.display());
+            let mut spelled = crate::steno::dict::Dictionary::default();
+            spelled
+                .merge_bytes_keyed(file, text.as_bytes(), &layout, Some(&keys))
+                .unwrap();
+            let mut raw = crate::steno::dict::Dictionary::default();
+            raw.merge_file(&raw_file, &layout).unwrap();
+            let a: std::collections::BTreeMap<Vec<u32>, String> = spelled
+                .iter()
+                .map(|(k, v)| (k.to_vec(), v.to_string()))
+                .collect();
+            let b: std::collections::BTreeMap<Vec<u32>, String> = raw
+                .iter()
+                .map(|(k, v)| (k.to_vec(), v.to_string()))
+                .collect();
+            assert_eq!(a.len(), b.len(), "{}", file.display());
+            assert!(a == b, "{} reads differently spelled", file.display());
+            compared += a.len();
+        }
+        println!("{compared} entries read the same spelled and raw; {spelled_keys} keys spelled short, every key read back, none collide");
     }
 
     #[test]

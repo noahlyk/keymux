@@ -369,6 +369,19 @@ impl Dictionary {
         bytes: &[u8],
         layout: &Layout,
     ) -> Result<MergeStats> {
+        self.merge_bytes_keyed(path, bytes, layout, None)
+    }
+
+    /// Like [`Self::merge_bytes`], a JSON file's keys read with `keys` when its theory spells
+    /// them in its notation (see [`super::notation::Notation::for_keys_in`]): `NĪT` is the same
+    /// outline as `TPHAOEUT`.
+    pub fn merge_bytes_keyed(
+        &mut self,
+        path: &Path,
+        bytes: &[u8],
+        layout: &Layout,
+        keys: Option<&super::notation::Notation>,
+    ) -> Result<MergeStats> {
         let name = path.file_name().and_then(|n| n.to_str());
         if name == Some(WORDLIST_FILE) {
             let words = Orthography::from_wordlist(&decode_text(bytes));
@@ -381,18 +394,35 @@ impl Dictionary {
         if has_extension(path, "rtf") {
             return self.merge_rtf(bytes, layout);
         }
-        self.merge_json(&decode_text(bytes), layout)
+        self.merge_json_keyed(&decode_text(bytes), layout, keys)
             .with_context(|| path.display().to_string())
     }
 
     /// Merge one Plover JSON dictionary. Entries already present are kept.
     pub fn merge_json(&mut self, json: &str, layout: &Layout) -> Result<MergeStats> {
+        self.merge_json_keyed(json, layout, None)
+    }
+
+    /// Like [`Self::merge_json`], the keys read with `keys` when given (see
+    /// [`Self::merge_bytes_keyed`]).
+    pub fn merge_json_keyed(
+        &mut self,
+        json: &str,
+        layout: &Layout,
+        keys: Option<&super::notation::Notation>,
+    ) -> Result<MergeStats> {
+        let parse = |key: &str| {
+            keys.map_or_else(
+                || layout.parse_strokes(key),
+                |notation| notation.parse_strokes(key),
+            )
+        };
         let mut stats = MergeStats::default();
         let fresh = self.tables.iter().all(|table| table.is_empty());
         let mut builder = Builder::default();
         let mut loose: Vec<(Vec<u32>, String)> = Vec::new();
         // Within one file the last of two spellings of the same outline wins, as in Plover
-        read_entries(json, |key, text| match (layout.parse_strokes(key), text) {
+        read_entries(json, |key, text| match (parse(key), text) {
             (Some(strokes), Some(text)) if fresh => {
                 builder.add(&strokes, text);
             }
@@ -872,7 +902,7 @@ pub(super) fn read_cache(file: &Path, sources: &[Source], layout: &Layout) -> Op
 /// the way it did then (`stamp`) - so the file need not be read to be sure.
 pub(super) fn read_cache_by_stamp(
     file: &Path,
-    source: &Path,
+    source: &str,
     stamp: &StampKey,
     layout: &Layout,
 ) -> Option<(Dictionary, String)> {
@@ -884,7 +914,7 @@ pub(super) fn read_cache_by_stamp(
     let [(path, digest)] = cache.sources.as_slice() else {
         return None;
     };
-    (*path == source.display().to_string()).then(|| {
+    (*path == source).then(|| {
         (
             Dictionary {
                 trusted: Vec::new(),
