@@ -8,6 +8,11 @@
 //! the thread is always working toward the newest run, never a backlog of runs nobody is
 //! waiting on any more. A reading that has started cannot be stopped; it finishes and is kept.
 //!
+//! A preview (the overlay showing what a held chord would type, see [`super::preview`]) asks too,
+//! but only ever as a guest: its question waits in a slot of its own that the thread takes only
+//! when no stroke is waiting, a newer preview question replaces an older one there, and its answer
+//! is looked at, never taken, so the stroke that follows finds it ready and does not read it again.
+//!
 //! The thread makes its reader first (see [`Worker::spawn_with`]): a plugin's instance, and
 //! whatever the plugin builds up front in its `init`. A question asked meanwhile waits in the
 //! queue like any other, so a stroke asked about then is late, never held up.
@@ -45,6 +50,8 @@ pub enum Asked {
 #[derive(Default)]
 struct Queue {
     waiting: VecDeque<Question>,
+    /// The newest preview's question, read only when nothing is waiting
+    preview: Option<Question>,
     busy: Option<Question>,
     /// Finished readings not yet picked up, oldest first
     answers: VecDeque<(Question, Option<String>)>,
@@ -76,11 +83,25 @@ impl Queue {
         self.answers.remove(at).map(|(_, answer)| answer)
     }
 
+    /// [`Self::take`], leaving the reading in for whoever asks next.
+    #[allow(clippy::option_option)]
+    fn peek(&self, outline: &str, before: &str, window: Option<&Window>) -> Option<Option<String>> {
+        self.answers
+            .iter()
+            .rev()
+            .find(|(q, _)| is(q, outline, before, window))
+            .map(|(_, answer)| answer.clone())
+    }
+
     fn is_asked(&self, outline: &str, before: &str, window: Option<&Window>) -> bool {
         self.busy
             .as_ref()
             .is_some_and(|q| is(q, outline, before, window))
             || self.waiting.iter().any(|q| is(q, outline, before, window))
+            || self
+                .preview
+                .as_ref()
+                .is_some_and(|q| is(q, outline, before, window))
     }
 }
 
@@ -125,7 +146,9 @@ impl Worker {
                             if queue.closed {
                                 return;
                             }
-                            if let Some(question) = queue.waiting.pop_front() {
+                            if let Some(question) =
+                                queue.waiting.pop_front().or_else(|| queue.preview.take())
+                            {
                                 queue.busy = Some(question.clone());
                                 break question;
                             }
@@ -190,6 +213,15 @@ impl Worker {
         if newest {
             queue.waiting.clear();
         }
+        // A preview asked it already: it is a stroke's question now, read in the stroke's turn
+        if queue
+            .preview
+            .as_ref()
+            .is_some_and(|q| is(q, outline, before, window))
+            || newest
+        {
+            queue.preview = None;
+        }
         if !queue.is_asked(outline, before, window) {
             queue
                 .waiting
@@ -213,6 +245,53 @@ impl Worker {
                 }
             };
         }
+    }
+
+    /// [`Self::ask`] for a preview: the question waits only for a thread with nothing else to
+    /// do, in place of any older preview's, and a reading is looked at and left in, for the
+    /// stroke that may follow to take.
+    pub fn ask_preview(
+        &self,
+        outline: &str,
+        before: &str,
+        window: Option<&Window>,
+        until: Option<Instant>,
+    ) -> Asked {
+        let (queue, rung) = &*self.shared;
+        let mut queue = lock(queue);
+        if let Some(answer) = queue.peek(outline, before, window) {
+            return Asked::Answered(answer);
+        }
+        if !queue.is_asked(outline, before, window) {
+            queue.preview = Some((outline.to_owned(), before.to_owned(), window.cloned()));
+            rung.notify_all();
+        }
+        loop {
+            if let Some(answer) = queue.peek(outline, before, window) {
+                return Asked::Answered(answer);
+            }
+            let left = until.map_or(std::time::Duration::MAX, |until| {
+                until.saturating_duration_since(Instant::now())
+            });
+            if left.is_zero() {
+                return Asked::Late;
+            }
+            queue = rung
+                .wait_timeout(queue, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+
+    /// [`Self::ready`] for a preview: the reading is left in.
+    #[allow(clippy::option_option)]
+    pub fn peek(
+        &self,
+        outline: &str,
+        before: &str,
+        window: Option<&Window>,
+    ) -> Option<Option<String>> {
+        lock(&self.shared.0).peek(outline, before, window)
     }
 
     /// A reading already made of `outline` after `before`, if there is one, without asking or
@@ -258,6 +337,8 @@ pub struct Budget {
     late: std::cell::RefCell<Option<(Vec<u32>, String, u64)>>,
     /// Every reading a plugin gave this stroke: outline, plugin, reading
     read: std::cell::RefCell<Vec<(Vec<u32>, String, String)>>,
+    /// The strokes are a preview's (see [`Worker::ask_preview`]): never [`Self::start`]ed away
+    preview: std::cell::Cell<bool>,
 }
 
 impl Budget {
@@ -267,6 +348,15 @@ impl Budget {
         self.asked.set(false);
         self.late.borrow_mut().take();
         self.read.borrow_mut().clear();
+    }
+
+    /// Ask plugins as a preview from now on (see [`Worker::ask_preview`]).
+    pub fn set_preview(&self) {
+        self.preview.set(true);
+    }
+
+    pub const fn is_preview(&self) -> bool {
+        self.preview.get()
     }
 
     pub const fn until(&self) -> Option<Instant> {
@@ -414,6 +504,42 @@ mod tests {
             worker.settled("A/+B", "", None),
             "and nothing is coming for it"
         );
+    }
+
+    #[test]
+    fn a_preview_waits_behind_strokes_and_leaves_its_reading_for_the_stroke() {
+        let (worker, go) = gated();
+        assert_eq!(worker.ask("X", "", None, Some(soon()), true), Asked::Late);
+        // The thread is on X: a preview's question waits in its slot, a newer one replacing it
+        assert_eq!(
+            worker.ask_preview("OLD", "", None, Some(soon())),
+            Asked::Late
+        );
+        assert_eq!(worker.ask_preview("P", "", None, Some(soon())), Asked::Late);
+        // A stroke's question goes ahead of the preview's
+        assert_eq!(worker.ask("Y", "", None, Some(soon()), false), Asked::Late);
+        go.send(()).unwrap(); // X
+        go.send(()).unwrap(); // Y, before P
+        assert_eq!(
+            worker.ask("Y", "", None, None, false),
+            Asked::Answered(Some("YY".into()))
+        );
+        go.send(()).unwrap(); // P
+        assert_eq!(
+            worker.ask_preview("P", "", None, None),
+            Asked::Answered(Some("PP".into()))
+        );
+        assert_eq!(
+            worker.peek("P", "", None),
+            Some(Some("PP".into())),
+            "left in"
+        );
+        assert_eq!(
+            worker.ready("P", "", None),
+            Some(Some("PP".into())),
+            "for the stroke"
+        );
+        assert_eq!(worker.ready("OLD", "", None), None, "replaced, never read");
     }
 
     #[test]

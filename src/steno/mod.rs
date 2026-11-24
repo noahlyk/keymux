@@ -33,6 +33,7 @@ pub mod overlay_control;
 pub mod packed;
 pub mod parts;
 pub mod plugin;
+pub mod preview;
 pub mod reverse;
 pub mod rtf;
 pub mod run_control;

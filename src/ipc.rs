@@ -243,6 +243,8 @@ pub fn serve_overlay(mut stream: UnixStream, hub: &OverlayHub) {
         return;
     };
     let gone = AtomicBool::new(false);
+    // Counted while it is subscribed, so the daemon previews chords only for someone to see
+    let _watching = hub.watch();
     std::thread::scope(|scope| {
         scope.spawn(|| {
             let mut ignored = [0u8; 64];

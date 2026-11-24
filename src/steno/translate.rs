@@ -789,6 +789,73 @@ impl Translator {
         }
     }
 
+    /// A handle to preview strokes from on another thread (see [`Self::preview`]): this
+    /// translator's dictionaries and settings, and its very history, shared, not copied, so a
+    /// preview made from it later starts from what is typed then. Cheap: nothing is copied.
+    #[must_use]
+    pub fn preview_handle(&self) -> Self {
+        Self {
+            dict: Arc::clone(&self.dict),
+            machine: self.machine,
+            shared: Arc::clone(&self.shared),
+            hist: History::default(),
+            unmatched: false,
+            transparent: false,
+            ran_macro: false,
+            classes_enabled: self.classes_enabled,
+            undo_stops_at_barrier: self.undo_stops_at_barrier,
+            plugin_deadline: self.plugin_deadline,
+            budget: Budget::default(),
+            late: None,
+            plugin_read: None,
+            plugin_groups: None,
+            stroke_start: 0,
+        }
+    }
+
+    /// What `stroke` would do if it were struck now, for the overlay's preview (see
+    /// [`super::preview`]): it is struck on a copy of this translator, the history and the text on
+    /// screen with it, so it groups, joins, spaces and capitalises exactly as the real stroke
+    /// would, and plugins are asked as a preview (see [`super::worker::Worker::ask_preview`]),
+    /// waiting no longer than a stroke would. Nothing runs and nothing is typed.
+    #[must_use]
+    pub fn preview(&self, stroke: u32) -> super::preview::Struck {
+        use super::preview::{Kind, Struck};
+        let mut copy = self.clone();
+        copy.budget.set_preview();
+        let before = journal::lock(&copy.shared).screen.clone();
+        let output = copy.stroke(stroke);
+        let after = journal::lock(&copy.shared).screen.clone();
+        let outline = copy.last_outline();
+        let groups = copy.plugin_groups.clone();
+        let read = copy.plugin_read.is_some();
+        let word = super::preview::changed_word(&before, &after);
+        let acts = copy.transparent
+            || copy.ran_macro
+            || matches!(&output, Some(StenoOutput::Ops(ops))
+                if ops.iter().any(|op| matches!(op, OutputOp::Command(_))));
+        let (kind, text) = if copy.late.is_some() {
+            (Kind::Late, String::new())
+        } else if copy.unmatched {
+            (Kind::Unmatched, String::new())
+        } else if !acts && !word.is_empty() {
+            (Kind::Text, word)
+        } else {
+            match copy.explain(stroke) {
+                super::outline_control::Entry::Found(entry) => (Kind::Entry, entry),
+                super::outline_control::Entry::Late => (Kind::Late, String::new()),
+                super::outline_control::Entry::None => (Kind::Unmatched, String::new()),
+            }
+        };
+        Struck {
+            kind,
+            text,
+            read,
+            outline,
+            groups,
+        }
+    }
+
     /// A copy to follow strokes on for `{:outline:next}` and `{:outline:explain}` (see
     /// [`Self::follow_stroke`]): the same dictionaries, text on screen and stroke log, so a
     /// plugin reads exactly as it would here, but nothing translated yet, so the first stroke
@@ -2064,6 +2131,134 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         assert_eq!(t.text(), "cat top");
         assert!(!t.has_late());
         assert_eq!(t.plugin_read(), Some(("reader".into(), "top".into())));
+    }
+
+    /// Preview `stroke` on `t`, then strike it for real: the preview, and the word the real
+    /// stroke changed on screen (see [`crate::steno::preview::changed_word`]).
+    fn preview_then_strike(
+        t: &mut Translator,
+        stroke: u32,
+    ) -> (super::super::preview::Struck, String) {
+        let before = t.text();
+        let preview = t.preview(stroke);
+        assert_eq!(t.text(), before, "a preview types nothing");
+        t.stroke(stroke);
+        let word = crate::steno::preview::changed_word(&before, &t.text());
+        (preview, word)
+    }
+
+    #[test]
+    fn a_preview_is_what_the_stroke_types_for_a_dictionary_word() {
+        use crate::steno::preview::Kind;
+        let mut t = translator(r#"{"KAT": "cat", "TKOG": "dog", "-G": "{^ing}"}"#);
+        for s in ["KAT", "TKOG", "-G"] {
+            let (preview, word) = preview_then_strike(&mut t, stroke(s));
+            assert_eq!(
+                (preview.kind, preview.text.as_str()),
+                (Kind::Text, word.as_str())
+            );
+        }
+        assert_eq!(t.text(), "cat dogging");
+        let (preview, _) = preview_then_strike(&mut t, stroke("KAT"));
+        assert_eq!(preview.text, "cat");
+        assert_eq!(preview.outline, vec![stroke("KAT")]);
+    }
+
+    #[test]
+    fn a_preview_of_the_next_stroke_of_an_entry_is_the_whole_entry() {
+        use crate::steno::preview::Kind;
+        let mut t =
+            translator(r#"{"KPA": "{-|}", "TKAOEU": "die", "KPA/TKAOEU": "today", "KAT": "cat"}"#);
+        t.stroke(stroke("KAT"));
+        // `KPA` alone types nothing yet: its entry as written
+        let (first, word) = preview_then_strike(&mut t, stroke("KPA"));
+        assert_eq!(
+            (first.kind, first.text.as_str(), word.as_str()),
+            (Kind::Entry, "{-|}", "")
+        );
+        let (preview, word) = preview_then_strike(&mut t, stroke("TKAOEU"));
+        assert_eq!((preview.kind, preview.text.as_str()), (Kind::Text, "today"));
+        assert_eq!(word, "today");
+        assert_eq!(preview.outline, vec![stroke("KPA"), stroke("TKAOEU")]);
+    }
+
+    #[test]
+    fn a_preview_capitalises_after_a_sentence_ends() {
+        let mut t = translator(r#"{"KAT": "cat", "TP-PL": "{.}", "TKOG": "dog"}"#);
+        t.stroke(stroke("KAT"));
+        t.stroke(stroke("TP-PL"));
+        let (preview, word) = preview_then_strike(&mut t, stroke("TKOG"));
+        assert_eq!(preview.text, "Dog");
+        assert_eq!(word, "Dog");
+        assert_eq!(t.text(), "cat. Dog");
+    }
+
+    #[test]
+    fn a_preview_of_a_command_or_macro_shows_its_entry_and_runs_nothing() {
+        use crate::steno::preview::Kind;
+        let mut t = translator(
+            r#"{"KAT": "cat", "TAEUP": "{:tape:clear}", "*": "=undo", "R-R": "{#Return}"}"#,
+        );
+        t.stroke(stroke("KAT"));
+        let tape = t.preview(stroke("TAEUP"));
+        assert_eq!(
+            (tape.kind, tape.text.as_str()),
+            (Kind::Entry, "{:tape:clear}")
+        );
+        let undo = t.preview(stroke("*"));
+        assert_eq!((undo.kind, undo.text.as_str()), (Kind::Entry, "=undo"));
+        let keys = t.preview(stroke("R-R"));
+        assert_eq!((keys.kind, keys.text.as_str()), (Kind::Entry, "{#Return}"));
+        assert_eq!(t.text(), "cat", "nothing undone or typed");
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "", "the history is the real one still");
+    }
+
+    #[test]
+    fn a_preview_of_a_stroke_with_no_translation_is_unmatched() {
+        use crate::steno::preview::Kind;
+        let mut t = translator(r#"{"KAT": "cat"}"#);
+        let preview = t.preview(stroke("TPWHR"));
+        assert_eq!(preview.kind, Kind::Unmatched);
+        t.stroke(stroke("TPWHR"));
+        assert!(t.was_unmatched(), "the real stroke matches nothing too");
+    }
+
+    #[test]
+    fn a_preview_of_a_join_is_the_whole_word_the_plugin_reads() {
+        use crate::steno::preview::Kind;
+        let (mut t, go) = with_gated_plugin(r#"{"TPHAT": "nat"}"#, Duration::from_secs(10));
+        drop(go); // the reader answers at once
+        let layout = Layout::plover_with_joins(&['+'], &['+']).unwrap();
+        t.stroke(layout.parse_stroke("TPHAT").unwrap());
+        let plus = layout.parse_stroke("+STKPWAEUGS").unwrap();
+        let (preview, word) = preview_then_strike(&mut t, plus);
+        assert_eq!(
+            (preview.kind, preview.text.as_str()),
+            (Kind::Text, "tphatstkpwaeugs")
+        );
+        assert!(preview.read, "a plugin's reading");
+        assert_eq!(word, preview.text);
+        assert_eq!(preview.outline.len(), 2);
+    }
+
+    #[test]
+    fn a_preview_says_late_and_leaves_the_reading_for_the_stroke() {
+        use crate::steno::preview::Kind;
+        let (mut t, go) = with_gated_plugin(r#"{"KAT": "cat"}"#, Duration::from_millis(5));
+        t.stroke(stroke("KAT"));
+        assert_eq!(t.preview(stroke("TOP")).kind, Kind::Late);
+        go.send(()).unwrap();
+        // Once read, the preview has it, and leaves it for the stroke, which is not late
+        let started = std::time::Instant::now();
+        while t.preview(stroke("TOP")).kind == Kind::Late {
+            assert!(started.elapsed() < Duration::from_secs(10), "never read");
+        }
+        assert_eq!(t.preview(stroke("TOP")).text, "top");
+        t.set_plugin_deadline(Duration::from_millis(5));
+        t.stroke(stroke("TOP"));
+        assert!(!t.has_late(), "the reading was waiting for the stroke");
+        assert_eq!(t.text(), "cat top");
     }
 
     #[test]

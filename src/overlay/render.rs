@@ -23,6 +23,7 @@ use crate::steno::notation::Notation;
 use crate::steno::overlay::{
     LookupMode, LookupRow, LookupView, OverlaySnapshot, TapeEntry, TAPE_CAPACITY,
 };
+use crate::steno::preview::Kind as PreviewKind;
 use anyhow::Result;
 use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, PixmapMut, Stroke, Transform};
 
@@ -1040,17 +1041,22 @@ impl Renderer {
 
         // A stroke still being pressed draws as its own newest line, ahead of the finished ones,
         // so the keys appear on the tape as they go down instead of waiting for the stroke to
-        // complete. It has no text yet: what it types isn't known until it's released.
+        // complete. Its text, dimmed, is the daemon's preview of what letting go would type
+        // (`preview`), once it has one for exactly these keys.
+        let preview = snapshot
+            .preview
+            .as_ref()
+            .filter(|preview| self.config.preview && preview.chord == snapshot.chord);
         let live = (snapshot.chord != 0).then(|| TapeEntry {
             seq: 0,
             stroke: snapshot.chord,
-            text: String::new(),
-            unmatched: false,
+            text: preview.map(|p| p.shown().to_owned()).unwrap_or_default(),
+            unmatched: preview.is_some_and(|p| p.kind == PreviewKind::Unmatched),
             repeats: 0,
             transparent: false,
             gone: Vec::new(),
-            read: false,
-            split: None,
+            read: preview.is_some_and(|p| p.read),
+            split: preview.and_then(|p| p.split.clone()),
         });
 
         let room = self.words_right - self.words_left;
@@ -1115,6 +1121,17 @@ impl Renderer {
     /// strokes took back (an undo, a correction, a late reading) grey, so the text in full
     /// colour is what is on screen. A miss's `?` goes grey once all it typed was taken back.
     fn tape_entry_runs(entry: &TapeEntry, marker: &str) -> Vec<(String, Ink)> {
+        // The live line's text is a preview, already as it reads, not a tape description
+        if entry.seq == 0 {
+            let mut runs = Vec::new();
+            if !entry.text.is_empty() {
+                if entry.read && !marker.is_empty() {
+                    runs.push((format!("{marker} "), Ink::Normal));
+                }
+                runs.push((entry.text.clone(), Ink::Normal));
+            }
+            return runs;
+        }
         let pieces = erasure::pieces(entry.output());
         let typed = erasure::typed_len(&pieces);
         let alive = erasure::alive_from_gone(&entry.gone, typed);
@@ -1678,6 +1695,12 @@ impl Renderer {
             }
             _ => color,
         };
+        // The live line's text is only a preview of what letting go would type: dimmed
+        let fade = if entry.seq == 0 {
+            fade * PREVIEW_DIM
+        } else {
+            fade
+        };
         let (normal, gone) = (fade_color(color, fade), fade_color(self.theme.gone, fade));
         let mut text = String::new();
         let mut colors = Vec::new();
@@ -1761,6 +1784,9 @@ fn tail_that_fits<'a>(glyphs: &mut GlyphCache, text: &'a str, max: f32) -> &'a s
 
 /// How strong a transparent stroke's tape line is next to an ordinary one.
 const TRANSPARENT_DIM: f32 = 0.45;
+
+/// How strong the preview on the live line is, against a finished line's text.
+const PREVIEW_DIM: f32 = 0.5;
 
 /// How strong a tape line is, by how many lines it is above the newest one (`0` is the newest)
 /// on a tape of `lines` lines: full strength everywhere except the last `fading` lines at the
@@ -3104,6 +3130,81 @@ mod tests {
             sample(&pixmap),
             "a key held mid-stroke should draw on the tape's newest line"
         );
+    }
+
+    #[test]
+    fn the_live_line_shows_the_preview_dimmed_only_for_the_keys_held_and_when_on() {
+        use crate::steno::preview::Preview;
+        let t_bit = 1 << Layout::plover().paper_order()[0];
+        let snapshot = |preview: Option<Preview>| OverlaySnapshot {
+            layer: Some("steno".into()),
+            held: t_bit,
+            chord: t_bit,
+            preview,
+            ..OverlaySnapshot::default()
+        };
+        let preview = |chord: u32| Preview {
+            chord,
+            text: "it".into(),
+            ..Preview::default()
+        };
+        // The brightest ink in the words column of the newest line
+        let ink = |config: &OverlayConfig, snapshot: &OverlaySnapshot| -> u8 {
+            let mut renderer = Renderer::new(config, 1, 900).unwrap();
+            let (w, h) = renderer.size();
+            let mut pixmap = Pixmap::new(w, h).unwrap();
+            renderer.draw(snapshot, &mut pixmap.as_mut());
+            let (top, bottom) = (
+                renderer.tape_bottom - renderer.line_height,
+                renderer.tape_bottom,
+            );
+            let (x0, x1) = (
+                renderer.words_left as u32,
+                (renderer.words_right as u32).min(w),
+            );
+            (top.max(0.0) as u32..(bottom as u32).min(h))
+                .flat_map(|py| (x0..x1).map(move |px| (px, py)))
+                .filter_map(|(px, py)| pixmap.pixel(px, py))
+                .map(|p| p.red().max(p.green()).max(p.blue()))
+                .max()
+                .unwrap_or(0)
+        };
+        let config = OverlayConfig::default();
+        let none = ink(&config, &snapshot(None));
+        let shown = ink(&config, &snapshot(Some(preview(t_bit))));
+        assert!(shown > none, "the preview is drawn: {shown} > {none}");
+        let finished = ink(
+            &config,
+            &OverlaySnapshot {
+                tape: [TapeEntry {
+                    seq: 1,
+                    stroke: t_bit,
+                    text: "\"it\"".into(),
+                    unmatched: false,
+                    repeats: 0,
+                    transparent: false,
+                    gone: Vec::new(),
+                    read: false,
+                    split: None,
+                }]
+                .into(),
+                ..OverlaySnapshot::default()
+            },
+        );
+        assert!(
+            finished > shown,
+            "dimmer than a finished line: {shown} < {finished}"
+        );
+        assert_eq!(
+            ink(&config, &snapshot(Some(preview(t_bit | 2)))),
+            none,
+            "a preview for other keys is not drawn"
+        );
+        let off = OverlayConfig {
+            preview: false,
+            ..OverlayConfig::default()
+        };
+        assert_eq!(ink(&off, &snapshot(Some(preview(t_bit)))), none, "off");
     }
 
     #[test]

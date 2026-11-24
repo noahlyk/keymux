@@ -925,6 +925,12 @@ pub struct OverlayConfig {
     pub tape_read_marker: String,
     /// The colour (RGBA) of a plugin-read line's text; `None` leaves it in the usual colour
     pub tape_read_color: Option<[u8; 4]>,
+    /// While stroke keys are held, the tape's live line shows, dimmed, what the chord would type
+    /// if let go now: the word (as the engine would join, space and capitalise it), a command's
+    /// entry as written (never run), `…` while a plugin is still reading it, `?` for no
+    /// translation. The daemon works it out off the key path, only while an overlay is showing
+    /// the tape. Off shows the keys alone.
+    pub preview: bool,
     /// A .ttf/.otf to use instead of the embedded Atkinson Hyperlegible
     pub font: Option<String>,
     /// Steno layers that show the overlay. Empty means every steno layer.
@@ -1012,6 +1018,7 @@ impl Default for OverlayConfig {
             tape_transparent: true,
             tape_read_marker: "~".to_owned(),
             tape_read_color: Some([150, 205, 235, 255]),
+            preview: true,
             extra_keys: Vec::new(),
             overlay_overrides: HashMap::new(),
             key_groups: HashMap::new(),

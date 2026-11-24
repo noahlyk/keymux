@@ -1057,15 +1057,24 @@ impl Chain {
             before,
             |plugin, reader, outline, asked_before, window| {
                 let found = if budget.is_late() {
-                    reader.ready(outline, asked_before, window).flatten()
+                    if budget.is_preview() {
+                        reader.peek(outline, asked_before, window).flatten()
+                    } else {
+                        reader.ready(outline, asked_before, window).flatten()
+                    }
                 } else {
-                    match reader.ask(
-                        outline,
-                        asked_before,
-                        window,
-                        budget.until(),
-                        budget.first_ask(),
-                    ) {
+                    let asked = if budget.is_preview() {
+                        reader.ask_preview(outline, asked_before, window, budget.until())
+                    } else {
+                        reader.ask(
+                            outline,
+                            asked_before,
+                            window,
+                            budget.until(),
+                            budget.first_ask(),
+                        )
+                    };
+                    match asked {
                         Asked::Answered(found) => found,
                         Asked::Late => {
                             budget.mark_late(strokes, before.text, before.base);

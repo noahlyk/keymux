@@ -1247,6 +1247,24 @@ key fits. The overlay never takes clicks or focus. It costs next to nothing: it 
 
 ![overlay](docs/overlay-preview.png)
 
+**The live line previews what you are about to type.** While stroke keys are down, the stroke
+already shows as the tape's newest line, and after it, dimmed, what the chord would type if you
+let go now, updated with every key: `TPHAOEUT` held shows `night`. It is the engine's own answer,
+the chord struck on a copy of the translator, so it is exactly what the release types: a plugin's
+reading (with its marker), a `+` continuation or the next stroke of a multi-stroke entry as the
+whole word the engine would retranslate it to (`TPHAT/+STKPWAEUGS` shows `internationalization`,
+`KPA/TKAOEU` shows `today`), capitalised after a full stop, without the spaces around it. A stroke
+that runs something (a command, a macro such as undo, a key press, a meta that types nothing yet)
+shows its entry as written, `{:tape:clear}`, `=undo`, `{-|}`, and never runs it; a stroke nothing
+translates shows `?`; a plugin that has not answered within the stroke's deadline
+(`plugin_deadline_ms`) shows `…` until its reading is in, and that reading is then waiting for the
+release, so the stroke itself is not late. A stroke already sent early (a sticky key held) or one
+while `{:outline:next}` is following shows the keys alone. The daemon works the preview out on a
+thread of its own, never on the key path (a key change costs a counter and a message), only while
+an overlay is connected and no lookup covers the tape (an overlay hidden with `{:overlay:hide}`
+is still connected, so it is still worked out), and a plugin is asked only when it has no
+stroke to read. `preview: false` (or `tape: false`) turns it off in the daemon too.
+
 It runs as your user, since the daemon runs as root and can't draw on your screen. Start it
 with `systemctl --user enable --now keymux-steno.service`, or run `keymux overlay` by hand.
 It needs a Wayland compositor with `wlr-layer-shell`: niri, Hyprland and Sway have it, GNOME
@@ -1270,6 +1288,7 @@ overlay: (
     tape_transparent: true, // show transparent strokes (a lookup, ...) dimmed on the tape; false leaves them out
     tape_read_marker: "~",  // drawn before a line a plugin read (not an entry); "" = no marker
     tape_read_color: Some([150, 205, 235, 255]), // that line's text colour (RGBA); None = the usual colour
+    preview: true,       // the live line shows, dimmed, what the chord held would type if let go now
     font: None,          // path to a .ttf/.otf; None uses the bundled Atkinson Hyperlegible
     layers: [],          // steno layers that show it; empty means all of them
     hide_delay_ms: 40,   // how long it stays up after it would hide by itself (see below); 0 = at once

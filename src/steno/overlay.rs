@@ -7,10 +7,11 @@
 
 use super::erasure::{self, Screen};
 use super::overlay_control::ViewCommand;
+use super::preview::Preview;
 use crate::lock;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -159,6 +160,10 @@ pub struct OverlaySnapshot {
     /// moved; on every other frame it travels as `None` and the overlay keeps what it has.
     #[serde(default)]
     pub notation: Option<NotationText>,
+    /// What the chord held would type if let go now (see [`super::preview`]), for the live line
+    /// of the tape; only for exactly the keys in `chord`
+    #[serde(default)]
+    pub preview: Option<Preview>,
     /// The tape replayed: which characters of each line are still on screen. The daemon's own
     /// bookkeeping for `TapeEntry::gone`; never sent to an overlay.
     #[serde(skip)]
@@ -187,6 +192,18 @@ const CONTROLS_KEPT: usize = 8;
 pub struct OverlayHub {
     state: Mutex<OverlaySnapshot>,
     changed: Condvar,
+    /// Overlays subscribed now (see [`Self::watch`]): with none, there is nothing to preview for
+    watchers: AtomicUsize,
+}
+
+/// An overlay subscribed, for as long as this is kept (see [`OverlayHub::watch`]).
+#[derive(Debug)]
+pub struct Watching<'a>(&'a OverlayHub);
+
+impl Drop for Watching<'_> {
+    fn drop(&mut self) {
+        self.0.watchers.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl OverlayHub {
@@ -208,6 +225,7 @@ impl OverlayHub {
             state.chord = 0;
             state.held = 0;
             state.lookup = None;
+            state.preview = None;
             true
         });
     }
@@ -278,14 +296,48 @@ impl OverlayHub {
         });
     }
 
-    /// A stroke key went down or up.
+    /// A stroke key went down or up. A preview for other keys goes.
     pub fn set_keys(&self, chord: u32, held: u32) {
         self.update(|state| {
             let changed = state.chord != chord || state.held != held;
             state.chord = chord;
             state.held = held;
-            changed
+            let stale = state
+                .preview
+                .as_ref()
+                .is_some_and(|preview| preview.chord != chord);
+            if stale {
+                state.preview = None;
+            }
+            changed || stale
         });
+    }
+
+    /// What the chord held would type (see [`super::preview`]). Kept only while those very keys
+    /// are the chord: one for keys no longer held is dropped.
+    pub fn set_preview(&self, preview: Preview) {
+        self.update(|state| {
+            if state.chord != preview.chord || state.chord == 0 {
+                return false;
+            }
+            if state.preview.as_ref() == Some(&preview) {
+                return false;
+            }
+            state.preview = Some(preview);
+            true
+        });
+    }
+
+    /// An overlay subscribed: counted until the guard is dropped.
+    pub fn watch(&self) -> Watching<'_> {
+        self.watchers.fetch_add(1, Ordering::AcqRel);
+        Watching(self)
+    }
+
+    /// Whether any overlay is subscribed.
+    #[must_use]
+    pub fn watched(&self) -> bool {
+        self.watchers.load(Ordering::Acquire) > 0
     }
 
     /// A view command (`{:overlay:hide}`, ...) for the running overlays to apply. Changes no
@@ -333,9 +385,10 @@ impl OverlayHub {
     /// adding a line.
     pub fn clear_keys(&self) {
         self.update(|state| {
-            let changed = state.chord != 0 || state.held != 0;
+            let changed = state.chord != 0 || state.held != 0 || state.preview.is_some();
             state.chord = 0;
             state.held = 0;
+            state.preview = None;
             changed
         });
     }
@@ -391,6 +444,7 @@ impl OverlayHub {
             state.refresh_gone();
             state.chord = 0;
             state.held = 0;
+            state.preview = None;
             true
         });
     }
@@ -413,6 +467,7 @@ impl OverlayHub {
             state.refresh_gone();
             state.chord = 0;
             state.held = 0;
+            state.preview = None;
             true
         });
         if !counted {

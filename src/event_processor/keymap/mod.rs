@@ -118,7 +118,9 @@ impl KeymapProcessor {
                 &layer.0,
                 runtime,
             ) {
-                Ok(engine) => {
+                Ok(mut engine) => {
+                    let overlay = &config.overlay;
+                    engine.set_preview(overlay.enabled && overlay.tape && overlay.preview);
                     steno_engines.insert(layer.clone(), engine);
                 }
                 // Left out of steno_engines, so the layer behaves as a plain remap layer

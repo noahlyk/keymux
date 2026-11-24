@@ -563,6 +563,7 @@
     //     tape_transparent: true, // transparent strokes (a lookup, ...) show dimmed on the tape; false = left out
     //     tape_read_marker: "~",  // drawn before a line a plugin read (not a dictionary entry); "" = none
     //     tape_read_color: Some([150, 205, 235, 255]), // that line's text colour (RGBA); None = the usual colour
+    //     preview: true,      // while keys are held, the live tape line shows, dimmed, what letting go would type (never runs a command)
     //     font: None,         // None = bundled Atkinson Hyperlegible
     //     layers: [],         // empty = every steno layer
     //     hide_delay_ms: 40,  // how long it stays up after leaving the steno layer, a click or a window switch, so a screenshot key on another keyboard still catches it; 0 = hide at once. {:overlay:hide} is never delayed

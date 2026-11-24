@@ -114,6 +114,21 @@ pub struct StenoEngine {
     epoch: u64,
     /// Runs the commands `{:run:NAME}` and `{:shell:CMD}` ask for (see [`super::run_control`])
     launcher: Launcher,
+    /// Shows on the overlay what the chord held would type (see [`super::preview`])
+    preview: Preview,
+}
+
+/// Whether and where the chord held is previewed.
+#[derive(Debug, Default)]
+enum Preview {
+    /// Not at all (`overlay: (preview: false)`)
+    #[default]
+    Off,
+    /// On the preview thread, while an overlay is subscribed
+    Thread(super::preview::Previewer),
+    /// Here, at once, whether or not an overlay is subscribed: for tests
+    #[cfg(test)]
+    Inline,
 }
 
 /// What a layer's dictionaries are loaded from.
@@ -261,6 +276,7 @@ impl StenoEngine {
             unloaded,
             source: Some(source),
             launcher: runtime.launcher,
+            preview: Preview::Off,
         })
     }
 
@@ -355,6 +371,7 @@ impl StenoEngine {
     fn use_dictionary(&mut self, dict: Arc<Chain>) {
         self.translator.set_shared(dict);
         self.load_notation();
+        self.rebase_preview();
         self.too_small = !self
             .translator
             .has_entries(super::setup::MIN_REAL_DICTIONARY);
@@ -415,6 +432,7 @@ impl StenoEngine {
             self.wake();
             self.held_keys.insert(key);
             let before = self.chord.held();
+            let pending = self.chord.pending();
             self.chord.press(bit);
             if self.chord.held() != before {
                 // Another key ends a repeat. It starts a new one only if this is the last
@@ -423,7 +441,73 @@ impl StenoEngine {
                 self.arming = self.double_tap(now);
             }
             self.publish_keys();
+            if self.chord.pending() != pending {
+                self.request_preview();
+            }
         }
+    }
+
+    /// Preview what the chord held would type if let go now (see [`super::preview`]): only
+    /// with the preview on, an overlay subscribed to see it showing the tape (no lookup open),
+    /// the dictionaries in, and a stroke of its own in progress (not one already sent early, nor
+    /// one following an outline, which types notation instead).
+    fn request_preview(&mut self) {
+        let chord = self.chord.pending();
+        let wanted = chord != 0
+            && self.chord.is_fresh()
+            && self.lookup.is_none()
+            && !self.loading
+            && matches!(self.outline, super::outline_control::Mode::Off);
+        match &mut self.preview {
+            Preview::Off => {}
+            Preview::Thread(previewer) => {
+                if wanted && self.hub.watched() {
+                    previewer.request(&self.translator, &self.notation, chord);
+                } else {
+                    previewer.cancel();
+                }
+            }
+            #[cfg(test)]
+            Preview::Inline => {
+                if wanted {
+                    self.hub.set_preview(super::preview::compute(
+                        &self.translator,
+                        &self.notation,
+                        chord,
+                    ));
+                }
+            }
+        }
+    }
+
+    /// A preview being made is for a chord that is gone.
+    fn cancel_preview(&self) {
+        if let Preview::Thread(previewer) = &self.preview {
+            previewer.cancel();
+        }
+    }
+
+    /// The translator's dictionaries, notation or settings changed: previews start from them.
+    const fn rebase_preview(&mut self) {
+        if let Preview::Thread(previewer) = &mut self.preview {
+            previewer.rebase();
+        }
+    }
+
+    /// Turn the overlay's preview of the chord held on or off (`overlay: (preview: ..)`, with
+    /// the overlay and its tape on). On, it runs on a thread of its own.
+    pub fn set_preview(&mut self, on: bool) {
+        self.preview = if on {
+            super::preview::Previewer::spawn(self.hub).map_or(Preview::Off, Preview::Thread)
+        } else {
+            Preview::Off
+        };
+    }
+
+    /// Preview here and at once, for tests.
+    #[cfg(test)]
+    pub fn set_preview_inline(&mut self) {
+        self.preview = Preview::Inline;
     }
 
     /// Show the stroke in progress on the overlay.
@@ -470,6 +554,7 @@ impl StenoEngine {
             self.publish_keys();
             return None;
         };
+        self.cancel_preview();
         self.last = Some((stroke, now));
         self.on_stroke(stroke, false)
     }
@@ -522,9 +607,12 @@ impl StenoEngine {
     pub fn tick(&mut self, now: Instant) -> Option<StenoOutput> {
         self.sync_unload();
         if let Some(output) = self.poll_dictionary() {
+            self.request_preview();
             return Some(output);
         }
         if let Some(output) = self.settle_late() {
+            // The text before the chord held changed: what it would type may have too
+            self.request_preview();
             return Some(output);
         }
         self.repeat_tick(now)
@@ -687,6 +775,7 @@ impl StenoEngine {
         // An open lookup is closed: its search holds a copy of the dictionary, and is cancelled
         self.close_lookup();
         self.translator.set_shared(Arc::new(Chain::default()));
+        self.rebase_preview();
         self.updates = None;
         self.loading = false;
         self.too_small = false;
@@ -920,17 +1009,7 @@ impl StenoEngine {
     }
 
     fn split_of(&self, strokes: &[u32]) -> Vec<Option<Split>> {
-        if let Some(split) = self.notation.outline_split(strokes) {
-            return split.iter().cloned().map(Some).collect();
-        }
-        if let Some((_, groups)) = self
-            .translator
-            .plugin_groups()
-            .filter(|(read, _)| read == strokes)
-        {
-            return groups.iter().cloned().map(Some).collect();
-        }
-        vec![None; strokes.len()]
+        super::preview::splits_of(&self.notation, strokes, self.translator.plugin_groups())
     }
 
     /// `{:outline:last}`, `{:outline:next}` and `{:outline:explain}` (see
@@ -1114,6 +1193,7 @@ impl StenoEngine {
                     uid: None,
                 }),
             ),
+            preview: Preview::Off,
         }
     }
 
@@ -1676,6 +1756,38 @@ mod tests {
             !tape[0].read && tape[1].read,
             "only the plugin's line is a reading: {tape:?}"
         );
+    }
+
+    #[test]
+    fn the_overlay_previews_the_chord_held_and_the_release_types_it() {
+        use super::super::preview::Kind;
+        let mut engine = engine_with_dict(r#"{"KA": "ka", "KAT": "cat", "TP-PL": "{.}"}"#);
+        let hub: &'static OverlayHub = Box::leak(Box::default());
+        engine.set_hub(hub);
+        engine.set_preview_inline();
+        let [k, a, t] = kat_keys(&engine);
+        let t0 = Instant::now();
+        let shown = |hub: &OverlayHub| hub.snapshot().preview.map(|p| (p.kind, p.text));
+        engine.press(k, t0);
+        assert_eq!(
+            shown(hub),
+            Some((Kind::Unmatched, String::new())),
+            "K- alone is nothing"
+        );
+        engine.press(a, t0);
+        assert_eq!(shown(hub), Some((Kind::Text, "ka".into())));
+        engine.press(t, t0);
+        assert_eq!(shown(hub), Some((Kind::Text, "cat".into())));
+        // Letting go of a key keeps the chord, and its preview
+        assert_eq!(engine.release_at(t, t0), None);
+        assert_eq!(shown(hub), Some((Kind::Text, "cat".into())));
+        let mut out = None;
+        for key in [k, a] {
+            out = engine.release_at(key, t0).or(out);
+        }
+        assert_eq!(typed(out), "cat", "the release types what was previewed");
+        assert_eq!(shown(hub), None, "the stroke went, and its preview with it");
+        assert_eq!(hub.snapshot().chord, 0);
     }
 
     #[test]
