@@ -30,7 +30,7 @@ mod pump;
 mod steno_tests;
 
 #[cfg(test)]
-pub(crate) use output::{char_to_key, retype_keystrokes, Pacer, SAFE_EVENTS, UNREAD_WINDOW};
+pub(crate) use output::{char_to_key, retype_taps, tap_events, Pacer, SAFE_EVENTS, UNREAD_WINDOW};
 
 /// Run the event processor loop for a single keyboard event file.
 ///

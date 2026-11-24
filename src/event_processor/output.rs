@@ -48,7 +48,14 @@ fn retype<S: Sink + ?Sized>(
     backspaces: usize,
     text: &str,
 ) -> io::Result<()> {
-    emit_keystrokes(sink, pacer, &retype_keystrokes(backspaces, text))
+    let taps = retype_taps(backspaces, text);
+    for (at, range) in pacer.schedule_taps(Instant::now(), &taps) {
+        if let Some(wait) = at.checked_duration_since(Instant::now()) {
+            std::thread::sleep(wait);
+        }
+        sink.emit(&tap_events(&taps[range]))?;
+    }
+    Ok(())
 }
 
 /// Do what a steno stroke asked for, in order: delete, type, press keys.
@@ -104,32 +111,56 @@ fn emit_keystrokes<S: Sink + ?Sized>(
     Ok(())
 }
 
-/// The keystrokes that delete `backspaces` characters then type `text`.
-pub fn retype_keystrokes(backspaces: usize, text: &str) -> Vec<Vec<InputEvent>> {
-    let deletes = (0..backspaces).map(|_| keystroke(Key::KEY_BACKSPACE, false));
-    let typed = text.chars().filter_map(|ch| {
-        let (key, shift) = char_to_key(ch);
-        key.map(|key| keystroke(key, shift))
-    });
-    deletes.chain(typed).collect()
+/// One key pressed and released, with shift held for it or not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tap {
+    key: Key,
+    shift: bool,
 }
 
-/// One key press and release, each followed by a SYN_REPORT, with shift held around it if needed.
-fn keystroke(key: Key, shift: bool) -> Vec<InputEvent> {
-    let tap = |key: Key, pressed: bool| {
+/// What one tap costs in events: its press and release, each with a SYN_REPORT. Holding shift
+/// costs the same again, once for a whole run of shifted taps sent together.
+const TAP_EVENTS: usize = 4;
+
+/// The taps that delete `backspaces` characters then type `text`.
+pub fn retype_taps(backspaces: usize, text: &str) -> Vec<Tap> {
+    let delete = Tap {
+        key: Key::KEY_BACKSPACE,
+        shift: false,
+    };
+    let typed = text.chars().filter_map(|ch| {
+        let (key, shift) = char_to_key(ch);
+        key.map(|key| Tap { key, shift })
+    });
+    std::iter::repeat_n(delete, backspaces)
+        .chain(typed)
+        .collect()
+}
+
+/// The events of taps sent together: each key pressed and released, every event followed by a
+/// SYN_REPORT. Shift goes down once before a run of shifted taps and comes up once after it,
+/// as a hand types capitals, so a capital costs no more events than a small letter (the kernel's
+/// queue is what limits how much goes out at once, see [`SAFE_EVENTS`]). Shift is never left
+/// down at the end.
+pub fn tap_events(taps: &[Tap]) -> Vec<InputEvent> {
+    let key = |key: Key, pressed: bool| {
         [
             InputEvent::new_now(EventType::KEY, key.code(), i32::from(pressed)),
             syn_report(),
         ]
     };
-    let mut events = Vec::with_capacity(8);
-    if shift {
-        events.extend(tap(Key::KEY_LEFTSHIFT, true));
+    let mut events = Vec::with_capacity((taps.len() + 2) * TAP_EVENTS);
+    let mut held = false;
+    for tap in taps {
+        if tap.shift != held {
+            events.extend(key(Key::KEY_LEFTSHIFT, tap.shift));
+            held = tap.shift;
+        }
+        events.extend(key(tap.key, true));
+        events.extend(key(tap.key, false));
     }
-    events.extend(tap(key, true));
-    events.extend(tap(key, false));
-    if shift {
-        events.extend(tap(Key::KEY_LEFTSHIFT, false));
+    if held {
+        events.extend(key(Key::KEY_LEFTSHIFT, false));
     }
     events
 }
@@ -149,7 +180,8 @@ fn syn_report() -> InputEvent {
 /// The most input events allowed unread at once. The kernel keeps 63 per reader of a
 /// keyboard (measured with a test device), and when one more arrives it throws away
 /// everything queued for that reader, so letters vanish from the middle of a word. A keystroke
-/// is 4 events, so this is 12 of them, with room left for keys sent elsewhere (modifiers).
+/// is 4 events, so this is 12 of them (a run of capitals shares one press of shift: 11 of
+/// them), with room left for keys sent elsewhere (modifiers).
 pub const SAFE_EVENTS: usize = 48;
 
 /// How long an event counts as possibly unread. An app or compositor busy for longer than
@@ -169,11 +201,46 @@ pub struct Pacer {
 impl Pacer {
     /// Plan when to send keystrokes of `sizes` events each, starting at `now`. Each part is
     /// the time to send and the keystrokes to send together. A keystroke is never split
-    /// across two parts, so shift is never left held between them.
+    /// across two parts.
     pub fn schedule(
         &mut self,
         now: Instant,
         sizes: &[usize],
+    ) -> Vec<(Instant, std::ops::Range<usize>)> {
+        self.plan(now, sizes, |_| 0)
+    }
+
+    /// Plan when to send `taps`, starting at `now`: each part is the time to send and the taps
+    /// to send together, as [`tap_events`] makes them. A run of shifted taps shares one press
+    /// and release of shift, and a part that starts inside a run pays for its own, so shift is
+    /// never left held between two parts.
+    pub fn schedule_taps(
+        &mut self,
+        now: Instant,
+        taps: &[Tap],
+    ) -> Vec<(Instant, std::ops::Range<usize>)> {
+        let continues = |i: usize| taps[i].shift && i > 0 && taps[i - 1].shift;
+        // Shift is paid for by the tap that starts a run
+        let sizes: Vec<usize> = (0..taps.len())
+            .map(|i| {
+                if taps[i].shift && !continues(i) {
+                    TAP_EVENTS * 2
+                } else {
+                    TAP_EVENTS
+                }
+            })
+            .collect();
+        // A part starting inside a run presses and releases shift again
+        self.plan(now, &sizes, |i| if continues(i) { TAP_EVENTS } else { 0 })
+    }
+
+    /// [`Self::schedule`], where a part starting at keystroke `i` costs `opening(i)` events
+    /// more than its keystrokes' sizes.
+    fn plan(
+        &mut self,
+        now: Instant,
+        sizes: &[usize],
+        opening: impl Fn(usize) -> usize,
     ) -> Vec<(Instant, std::ops::Range<usize>)> {
         let mut parts = Vec::new();
         // Never before something already planned, so output stays in order
@@ -188,7 +255,7 @@ impl Pacer {
                 self.sent.pop_front();
             }
             let in_flight: usize = self.sent.iter().map(|&(_, events)| events).sum();
-            let (mut end, mut used) = (next, 0);
+            let (mut end, mut used) = (next, opening(next));
             while end < sizes.len() && in_flight + used + sizes[end] <= SAFE_EVENTS {
                 used += sizes[end];
                 end += 1;
@@ -200,7 +267,7 @@ impl Pacer {
                     continue;
                 }
                 // A keystroke bigger than the whole budget still has to go
-                (end, used) = (next + 1, sizes[next]);
+                (end, used) = (next + 1, used + sizes[next]);
             }
             parts.push((at, next..end));
             self.sent.push_back((at, used));

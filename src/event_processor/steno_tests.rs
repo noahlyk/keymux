@@ -932,11 +932,8 @@ fn key_events(writes: &[Vec<evdev::InputEvent>]) -> Vec<(u16, i32)> {
         .collect()
 }
 
-fn sizes(backspaces: usize, text: &str) -> Vec<usize> {
-    super::retype_keystrokes(backspaces, text)
-        .iter()
-        .map(Vec::len)
-        .collect()
+fn taps(backspaces: usize, text: &str) -> Vec<super::output::Tap> {
+    super::retype_taps(backspaces, text)
 }
 
 #[test]
@@ -944,17 +941,59 @@ fn a_word_goes_out_at_once_with_nothing_to_wait_for() {
     let now = std::time::Instant::now();
     // 12 keystrokes is the most that fits, and still goes out together
     for (backspaces, text) in [(0, "about"), (3, "increase"), (0, "abcdefghijkl")] {
-        let parts = super::Pacer::default().schedule(now, &sizes(backspaces, text));
+        let parts = super::Pacer::default().schedule_taps(now, &taps(backspaces, text));
         assert_eq!(parts.len(), 1, "{text}");
         assert_eq!(parts[0].0, now, "{text}");
     }
+}
+
+/// A word in capitals (`{<}`, a stroke's own notation from `{:outline:next}`) holds shift once
+/// for the run, so it costs one keystroke more than the word in small letters, not twice as
+/// much: it goes out at once where the small word does.
+#[test]
+fn a_word_in_capitals_goes_out_at_once_like_one_in_small_letters() {
+    let now = std::time::Instant::now();
+    for text in [" STREAM", " STRAOEFPL", " PHRO*PBT", "ABCDEFGHIJK"] {
+        let taps = taps(0, text);
+        let parts = super::Pacer::default().schedule_taps(now, &taps);
+        assert_eq!(parts, vec![(now, 0..taps.len())], "{text}");
+        assert!(
+            super::tap_events(&taps).len() <= super::SAFE_EVENTS,
+            "{text}"
+        );
+    }
+    // One press and one release of shift for the whole run
+    let shifts = key_events(&[super::tap_events(&taps(0, " STREAM"))])
+        .into_iter()
+        .filter(|&(code, _)| code == evdev::Key::KEY_LEFTSHIFT.code())
+        .count();
+    assert_eq!(shifts, 2);
+}
+
+#[test]
+fn shift_comes_up_before_a_key_that_is_not_shifted() {
+    let shift = evdev::Key::KEY_LEFTSHIFT.code();
+    let key = |key: evdev::Key| [(key.code(), 1), (key.code(), 0)];
+    let mut expected = vec![(shift, 1)];
+    expected.extend(key(evdev::Key::KEY_K));
+    expected.extend(key(evdev::Key::KEY_8));
+    expected.push((shift, 0));
+    expected.extend(key(evdev::Key::KEY_SLASH));
+    expected.extend(key(evdev::Key::KEY_MINUS));
+    expected.push((shift, 1));
+    expected.extend(key(evdev::Key::KEY_S));
+    expected.push((shift, 0));
+    assert_eq!(
+        key_events(&[super::tap_events(&taps(0, "K*/-S"))]),
+        expected
+    );
 }
 
 #[test]
 fn a_long_word_waits_only_as_long_as_it_must() {
     let now = std::time::Instant::now();
     let word = "supercalifragilisticexpialidocious";
-    let parts = super::Pacer::default().schedule(now, &sizes(0, word));
+    let parts = super::Pacer::default().schedule_taps(now, &taps(0, word));
     // 12 letters now, 12 once those have been read, then the last 10
     assert_eq!(parts.len(), 3);
     assert_eq!(parts[0].0, now);
@@ -976,16 +1015,18 @@ fn nothing_in_flight_ever_goes_over_the_budget() {
         "supercalifragilisticexpialidocious",
         "ab",
         "XYZXYZXYZ",
+        "STKPWHRAO*EUFRPBLGTSDZ/KAT",
     ]
     .iter()
     .cycle()
-    .take(40)
+    .take(50)
     .enumerate()
     {
-        let sizes = sizes(i % 7, text);
+        let taps = taps(i % 7, text);
         let at = now + std::time::Duration::from_millis(i as u64);
-        for (time, range) in pacer.schedule(at, &sizes) {
-            all.push((time, sizes[range].iter().sum::<usize>()));
+        for (time, range) in pacer.schedule_taps(at, &taps) {
+            // What is really sent, shift and all
+            all.push((time, super::tap_events(&taps[range]).len()));
         }
     }
     for &(time, _) in &all {
@@ -1005,9 +1046,9 @@ fn nothing_in_flight_ever_goes_over_the_budget() {
 fn a_second_word_straight_after_waits_for_the_first_to_be_read() {
     let now = std::time::Instant::now();
     let mut pacer = super::Pacer::default();
-    pacer.schedule(now, &sizes(0, "abcdefghijkl"));
+    pacer.schedule_taps(now, &taps(0, "abcdefghijkl"));
     let later = now + std::time::Duration::from_millis(1);
-    let parts = pacer.schedule(later, &sizes(0, "next"));
+    let parts = pacer.schedule_taps(later, &taps(0, "next"));
     assert_eq!(parts.len(), 1);
     assert_eq!(parts[0].0, now + super::UNREAD_WINDOW);
 }
@@ -1016,40 +1057,55 @@ fn a_second_word_straight_after_waits_for_the_first_to_be_read() {
 fn after_a_quiet_moment_a_full_burst_goes_out_at_once_again() {
     let now = std::time::Instant::now();
     let mut pacer = super::Pacer::default();
-    pacer.schedule(now, &sizes(0, "abcdefghijkl"));
+    pacer.schedule_taps(now, &taps(0, "abcdefghijkl"));
     let later = now + super::UNREAD_WINDOW;
-    let parts = pacer.schedule(later, &sizes(0, "abcdefghijkl"));
+    let parts = pacer.schedule_taps(later, &taps(0, "abcdefghijkl"));
     assert_eq!(parts, vec![(later, 0..12)]);
+}
+
+/// The key presses and releases without shift's own.
+fn unshifted(events: Vec<(u16, i32)>) -> Vec<(u16, i32)> {
+    let shift = evdev::Key::KEY_LEFTSHIFT.code();
+    events
+        .into_iter()
+        .filter(|&(code, _)| code != shift)
+        .collect()
 }
 
 #[test]
 fn pacing_never_changes_the_keys_or_their_order() {
-    let keystrokes = super::retype_keystrokes(30, "Hello, World");
-    let sizes: Vec<usize> = keystrokes.iter().map(Vec::len).collect();
-    let parts = super::Pacer::default().schedule(std::time::Instant::now(), &sizes);
+    let taps = taps(30, "Hello, WORLD AND MORE CAPITALS");
+    let parts = super::Pacer::default().schedule_taps(std::time::Instant::now(), &taps);
+    assert!(parts.len() > 1);
     let paced: Vec<Vec<evdev::InputEvent>> = parts
         .iter()
-        .map(|(_, range)| keystrokes[range.clone()].concat())
+        .map(|(_, range)| super::tap_events(&taps[range.clone()]))
         .collect();
-    assert_eq!(key_events(&paced), key_events(&[keystrokes.concat()]));
+    assert_eq!(
+        unshifted(key_events(&paced)),
+        unshifted(key_events(&[super::tap_events(&taps)]))
+    );
 }
 
 #[test]
 fn shift_is_never_held_across_two_parts() {
-    let keystrokes = super::retype_keystrokes(5, "ABCDEFGHIJKLMNOPQRSTUVWXYZ");
-    let sizes: Vec<usize> = keystrokes.iter().map(Vec::len).collect();
-    let parts = super::Pacer::default().schedule(std::time::Instant::now(), &sizes);
+    let taps = taps(5, "ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+    let parts = super::Pacer::default().schedule_taps(std::time::Instant::now(), &taps);
     assert!(parts.len() > 1);
+    let shift = evdev::Key::KEY_LEFTSHIFT.code();
     for (_, range) in parts {
-        let shifts: Vec<i32> = key_events(&[keystrokes[range].concat()])
-            .into_iter()
-            .filter(|&(code, _)| code == evdev::Key::KEY_LEFTSHIFT.code())
-            .map(|(_, value)| value)
-            .collect();
-        assert_eq!(
-            shifts.iter().filter(|&&v| v == 1).count(),
-            shifts.iter().filter(|&&v| v == 0).count()
-        );
+        let events = key_events(&[super::tap_events(&taps[range.clone()])]);
+        // Every letter of the part is typed with shift down, and the part ends with it up
+        let mut held = false;
+        for &(code, value) in &events {
+            if code == shift {
+                held = value == 1;
+            } else if code != evdev::Key::KEY_BACKSPACE.code() {
+                assert!(held, "{range:?}");
+            }
+        }
+        assert!(!held, "{range:?}");
+        assert!(events.len() * 2 <= super::SAFE_EVENTS, "{range:?}");
     }
 }
 

@@ -109,7 +109,7 @@ fn ops_with_backspaces_then_text_emit_the_same_as_a_retype() {
 }
 
 #[test]
-fn a_shifted_character_holds_shift_around_its_own_keystroke_only() {
+fn a_shifted_character_holds_shift_around_its_own_keystroke() {
     let events = emitted(ProcessResult::TypeString("aB".into()));
     let mut expected = tap(Key::KEY_A);
     expected.push((EventType::KEY, Key::KEY_LEFTSHIFT.code(), 1));
