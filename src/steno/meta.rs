@@ -562,12 +562,12 @@ pub(crate) static KNOWN: &[KnownMeta] = &[
         whole_entry: false,
         check: check_no_argument,
     },
-    // keymux's own `{:outline:last}` and `{:outline:next}` (see `outline_control`; they type
+    // keymux's own `{:outline:last}`, `{:outline:next}` and `{:outline:explain}` (see `outline_control`; they type
     // their text through the engine, not here)
     KnownMeta {
         name: super::outline_control::NAME,
         run: super::outline_control::meta_action,
-        verbs: &["last", "next"],
+        verbs: &["last", "next", "explain"],
         bare_ok: false,
         whole_entry: false,
         check: fine,

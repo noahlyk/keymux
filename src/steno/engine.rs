@@ -91,9 +91,9 @@ pub struct StenoEngine {
     lookup_search: Option<LookupSearch>,
     /// The layout stroke notation is read and written in, extra keys included, for the lookup
     layout: Layout,
-    /// `{:outline:next}` is armed: the next stroke types its own notation (see
-    /// [`super::outline_control`])
-    outline_armed: bool,
+    /// `{:outline:next}` or `{:outline:explain}` is armed: the next stroke types its own
+    /// notation, and with `Explain` what it looks up to (see [`super::outline_control`])
+    outline_armed: Option<super::outline_control::Verb>,
     /// A stroke wrote `{:engine:toggle}` or `{:engine:suspend}` (or their legacy spellings): the layer should be left
     leave_requested: bool,
     fresh_on_enter: bool,
@@ -246,7 +246,7 @@ impl StenoEngine {
             lookup: None,
             lookup_search: (!cfg!(test)).then(|| LookupSearch::new(OverlayHub::global())),
             layout,
-            outline_armed: false,
+            outline_armed: None,
             leave_requested: false,
             fresh_on_enter: config.fresh_on_enter,
             discard_on_leave: config.leave_mid_stroke == crate::config::LeaveMidStroke::Discard,
@@ -264,7 +264,7 @@ impl StenoEngine {
     pub fn enter(&mut self) {
         // A lookup left open before leaving the layer isn't carried over
         self.lookup = None;
-        self.outline_armed = false;
+        self.outline_armed = None;
         if self.fresh_on_enter {
             self.start_fresh();
         }
@@ -700,12 +700,17 @@ impl StenoEngine {
 
     /// Translate a stroke. A repeat counts on the stroke's tape line instead of adding lines.
     fn translate(&mut self, stroke: u32, repeated: bool) -> Option<StenoOutput> {
-        // Armed by `{:outline:next}`: the stroke types its notation instead of translating, unless
-        // it is the arming stroke itself, which goes on to disarm
-        let output = if self.outline_armed && !self.translator.arms_outline(stroke) {
-            self.outline_armed = false;
+        // Armed by `{:outline:next}` or `{:outline:explain}`: the stroke, whatever it is (the
+        // arming stroke too), types its notation instead of translating or acting
+        let output = if let Some(verb) = self.outline_armed.take() {
             let notation = self.layout.render_strokes(&[stroke]);
-            self.translator.type_text(&notation)
+            let text = if verb == super::outline_control::Verb::Explain {
+                let entry = self.translator.explain(stroke);
+                super::outline_control::explanation(&notation, &entry)
+            } else {
+                notation
+            };
+            self.translator.type_text(&text)
         } else {
             self.translator.stroke(stroke)
         };
@@ -788,13 +793,13 @@ impl StenoEngine {
         StenoOutput::from_ops(rest)
     }
 
-    /// `{:outline:last}` and `{:outline:next}` (see [`super::outline_control`]), as the engine
-    /// command `outline:last` or `outline:next`: `next` arms or disarms the mode, `last` returns
-    /// what typing the last outline made.
+    /// `{:outline:last}`, `{:outline:next}` and `{:outline:explain}` (see
+    /// [`super::outline_control`]), as the engine command `outline:VERB`: `next` and `explain`
+    /// arm the one-shot mode, `last` returns what typing the last outline made.
     fn run_outline_control(&mut self, args: &str) -> Option<StenoOutput> {
         use super::outline_control::{verb_of, Verb};
         match verb_of(args) {
-            Some(Verb::Next) => self.outline_armed = !self.outline_armed,
+            Some(verb @ (Verb::Next | Verb::Explain)) => self.outline_armed = Some(verb),
             Some(Verb::Last) => {
                 let strokes = self.translator.last_outline();
                 if !strokes.is_empty() {
@@ -950,7 +955,7 @@ impl StenoEngine {
             lookup: None,
             lookup_search: None,
             layout: Layout::plover(),
-            outline_armed: false,
+            outline_armed: None,
             leave_requested: false,
             fresh_on_enter: false,
             discard_on_leave: false,
@@ -1901,7 +1906,8 @@ mod tests {
     }
 
     const OUTLINE_DICT: &str = r#"{"KAT": "cat", "TKOG": "dog", "KAT/TKOG": "catdog", "-L": "{:outline:last}",
-        "-B": "{:outline:next}", "-T": "{:overlay:toggle}", "SKWRO*EUBGS": "joy", "*": "=undo"}"#;
+        "-B": "{:outline:next}", "-T": "{:overlay:toggle}", "SKWRO*EUBGS": "joy", "*": "=undo",
+        "-D": "{:outline:explain}", "-G": "{^ing}"}"#;
 
     #[test]
     fn outline_last_types_the_outline_of_the_last_translation() {
@@ -1950,12 +1956,65 @@ mod tests {
     }
 
     #[test]
-    fn outline_next_pressed_again_disarms_it() {
+    fn outline_next_struck_twice_types_its_own_notation() {
         let (mut engine, _hub) = engine_with_hub(OUTLINE_DICT);
         strike(&mut engine, "-B");
         strike(&mut engine, "-B");
+        assert_eq!(engine.translator.text(), "-B");
+        // The mode cleared: the next stroke translates
         strike(&mut engine, "KAT");
-        assert_eq!(engine.translator.text(), "cat");
+        assert_eq!(engine.translator.text(), "-B cat");
+        // Cancelling is striking anything and undoing it
+        strike(&mut engine, "-B");
+        strike(&mut engine, "TKOG");
+        strike(&mut engine, "*");
+        assert_eq!(engine.translator.text(), "-B cat");
+    }
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // dictionary entries, not formats
+    fn outline_explain_types_the_stroke_and_its_entry_unexecuted() {
+        let (mut engine, hub) = engine_with_hub(OUTLINE_DICT);
+        strike(&mut engine, "KAT");
+        assert_eq!(strike(&mut engine, "-D"), None);
+        strike(&mut engine, "-G");
+        assert_eq!(engine.translator.text(), "cat -G -> {^ing}");
+        // One-shot: the next stroke translates
+        strike(&mut engine, "-G");
+        assert_eq!(engine.translator.text(), "cat -G -> {^ing}ing");
+        strike(&mut engine, "*");
+        // A command is shown, not run; the explain stroke itself, struck twice, explains itself
+        strike(&mut engine, "-D");
+        strike(&mut engine, "-T");
+        assert_eq!(
+            hub.snapshot().control_seq,
+            0,
+            "the overlay control did not run"
+        );
+        strike(&mut engine, "-D");
+        strike(&mut engine, "-D");
+        strike(&mut engine, "-D");
+        strike(&mut engine, "*");
+        assert_eq!(
+            engine.translator.text(),
+            "cat -G -> {^ing} -T -> {:overlay:toggle} -D -> {:outline:explain} * -> =undo"
+        );
+        // Only the stroke's own entry, never the longer one it starts; nothing for an unknown one
+        strike(&mut engine, "-D");
+        strike(&mut engine, "KAT");
+        strike(&mut engine, "-D");
+        strike(&mut engine, "-Z");
+        assert!(
+            engine
+                .translator
+                .text()
+                .ends_with("=undo KAT -> cat -Z -> (none)"),
+            "{}",
+            engine.translator.text()
+        );
+        // Undone like a word
+        strike(&mut engine, "*");
+        assert!(engine.translator.text().ends_with("KAT -> cat"));
     }
 
     #[test]

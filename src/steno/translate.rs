@@ -741,13 +741,25 @@ impl Translator {
             })
     }
 
-    /// Whether the stroke alone arms `{:outline:next}`: striking it again disarms the mode.
-    #[must_use]
-    pub fn arms_outline(&self, stroke: u32) -> bool {
-        self.dict
-            .as_dictionary()
-            .lookup(&[stroke])
-            .is_some_and(super::outline_control::is_next)
+    /// What `stroke` on its own would look up to if it were struck now, for
+    /// `{:outline:explain}`: one lookup as a stroke makes it (the dictionaries, then a plugin's
+    /// reading after the text on screen, then a suffix key folded off), never a longer
+    /// multi-stroke entry. Nothing runs and nothing is typed. Starts a fresh wait on plugins, as
+    /// a stroke does.
+    pub fn explain(&mut self, stroke: u32) -> super::outline_control::Entry {
+        use super::outline_control::Entry;
+        self.begin_stroke();
+        let before = self.asked(Some(self.hist.screen.len()), 0);
+        let found = self.lookup(&[stroke], &SUFFIX_KEYS, before);
+        let late = self.budget.take_late().is_some();
+        match found {
+            Some(text) => match self.budget.reader_of(&[stroke], &text) {
+                Some(plugin) => Entry::Plugin { text, plugin },
+                None => Entry::Dictionary(text),
+            },
+            None if late => Entry::Late,
+            None => Entry::None,
+        }
     }
 
     /// The strokes of the last translation that strokes made (`{:outline:last}`): not text typed
@@ -1846,6 +1858,41 @@ pub extern "C" fn joins(bits: i64) -> i32 {
             std::thread::yield_now();
         }
         t.settle_late()
+    }
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // a suffix entry, not a format
+    fn explain_names_the_entry_or_the_plugin_reading_and_types_nothing() {
+        use crate::steno::outline_control::Entry;
+        let (mut t, go) = with_gated_plugin(
+            r#"{"KAT": "cat", "KAT/TKOG": "catdog", "-G": "{^ing}"}"#,
+            Duration::from_secs(10),
+        );
+        drop(go);
+        t.stroke(stroke("KAT"));
+        // Only the stroke's own entry, not the longer one it starts
+        assert_eq!(t.explain(stroke("KAT")), Entry::Dictionary("cat".into()));
+        assert_eq!(t.explain(stroke("-G")), Entry::Dictionary("{^ing}".into()));
+        assert_eq!(
+            t.explain(stroke("TOP")),
+            Entry::Plugin {
+                text: "top".into(),
+                plugin: "reader".into()
+            }
+        );
+        assert_eq!(t.text(), "cat", "nothing typed");
+        assert_eq!(t.plugin_read(), None);
+    }
+
+    #[test]
+    fn explain_says_when_a_plugin_is_late_and_when_nothing_reads_a_stroke() {
+        use crate::steno::outline_control::Entry;
+        let (mut t, go) = with_gated_plugin(r#"{"KAT": "cat"}"#, Duration::from_millis(5));
+        assert_eq!(t.explain(stroke("TOP")), Entry::Late);
+        assert!(!t.has_late(), "a late explanation is nothing to put right");
+        drop(go);
+        let mut plain = Translator::new(Dictionary::default());
+        assert_eq!(plain.explain(stroke("TOP")), Entry::None);
     }
 
     #[test]
