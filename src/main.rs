@@ -52,6 +52,11 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    if cli.version {
+        print_version();
+        return Ok(());
+    }
+
     match &cli.command {
         Some(cli::Commands::Daemon { config, user }) => {
             tracing_subscriber::fmt()
@@ -78,10 +83,16 @@ fn main() -> Result<()> {
             }
         }
         Some(cli::Commands::NiriDaemon) => {
+            announce("niri-daemon");
             keymux::niri::run_niri_daemon()?;
         }
         #[cfg(feature = "overlay")]
         Some(cli::Commands::Overlay { dump, demo, always }) => {
+            // Only the overlay that follows the daemon: a dump or a demo is a second,
+            // short-lived one and must not take over its version file
+            if !*dump && !*demo {
+                announce("overlay");
+            }
             if let Err(e) = keymux::overlay::run(*dump, *demo, *always) {
                 if e.downcast_ref::<keymux::overlay::CannotDraw>().is_some() {
                     eprintln!("Error: {e:#}");
@@ -95,15 +106,19 @@ fn main() -> Result<()> {
             anyhow::bail!("this keymux was built without the overlay feature");
         }
         Some(cli::Commands::HyprlandDaemon) => {
+            announce("hyprland-daemon");
             keymux::hyprland::run_hyprland_daemon()?;
         }
         Some(cli::Commands::SwayDaemon) => {
+            announce("sway-daemon");
             keymux::hyprland::run_sway_daemon()?;
         }
         Some(cli::Commands::I3Daemon) => {
+            announce("i3-daemon");
             keymux::x11::run_i3_daemon()?;
         }
         Some(cli::Commands::BspwmDaemon) => {
+            announce("bspwm-daemon");
             keymux::x11::run_bspwm_daemon()?;
         }
         Some(cli::Commands::Init { full, force }) => {
@@ -265,6 +280,26 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// `keymux --version`: the version on the first line, exactly as clap printed it (packaging
+/// compares that line), then a line for each running keymux process that is another build.
+fn print_version() {
+    println!("keymux {}", keymux::running::VERSION);
+    for line in keymux::running::stale_report() {
+        println!("{line}");
+    }
+}
+
+/// A long-running helper records which build it is, for `keymux --version`. Not being able
+/// to is no reason not to run.
+fn announce(role: &str) {
+    if let Err(e) = keymux::running::announce(role) {
+        eprintln!(
+            "keymux: could not write {}: {e}",
+            keymux::running::version_file(role).display()
+        );
+    }
 }
 
 fn run_reload() -> Result<()> {

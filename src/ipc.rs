@@ -60,6 +60,12 @@ pub enum IpcRequest {
     /// Keep the connection open and stream [`OverlaySnapshot`] frames on every change.
     /// Handled by the IPC thread itself, never reaches the daemon's main loop.
     SubscribeOverlay,
+    /// Which build the daemon is (`keymux --version` compares it with its own). Answered by
+    /// the IPC thread itself, so it does not wait for the daemon's main loop.
+    ///
+    /// New requests go at the end: an older daemon decodes requests by position, and one it
+    /// does not know makes it drop the connection, which the client reads as "older daemon".
+    Version,
 }
 
 /// IPC response from daemon to client
@@ -79,6 +85,8 @@ pub enum IpcResponse {
     WindowOverrides(Vec<(String, WindowOverride)>),
     /// Current global override
     GlobalOverrideStatus(GlobalOverride),
+    /// The daemon's version string, the same one its `keymux --version` prints
+    Version(String),
 }
 
 /// Information about a detected keyboard
@@ -110,12 +118,16 @@ pub fn get_root_socket_path() -> PathBuf {
     Path::new("/run").join("keymux.sock")
 }
 
+/// The user's runtime folder (`$XDG_RUNTIME_DIR`, or `/run/user/<uid>` under `sudo`)
+pub(crate) fn user_runtime_dir() -> PathBuf {
+    let (uid, _) = crate::get_actual_user_uid();
+    std::env::var("XDG_RUNTIME_DIR")
+        .map_or_else(|_| PathBuf::from(format!("/run/user/{uid}")), PathBuf::from)
+}
+
 /// Get the IPC socket path for user daemon (legacy, for compatibility)
 pub(crate) fn get_user_socket_path() -> PathBuf {
-    let (uid, _) = crate::get_actual_user_uid();
-    let runtime_dir =
-        std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| format!("/run/user/{}", uid));
-    Path::new(&runtime_dir).join("keymux.sock")
+    user_runtime_dir().join("keymux.sock")
 }
 
 /// Get the IPC socket path (tries root first, falls back to user)
@@ -165,6 +177,43 @@ fn read_reply(stream: &mut UnixStream) -> Result<IpcResponse> {
     let mut response_buf = vec![0u8; len];
     stream.read_exact(&mut response_buf)?;
     Ok(bincode::deserialize(&response_buf)?)
+}
+
+/// One quiet request/response round trip on the socket at `path`, bounded by `timeout`.
+///
+/// The timeout applies to sending and to receiving, and nothing is reported on failure: for
+/// callers that must stay fast and silent whatever the daemon does, such as
+/// `keymux --version`.
+pub fn request_with_timeout(
+    path: &Path,
+    request: &IpcRequest,
+    timeout: Duration,
+) -> Option<IpcResponse> {
+    let mut stream = UnixStream::connect(path).ok()?;
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    stream.set_write_timeout(Some(timeout)).ok()?;
+    write_frame(&mut stream, request).ok()?;
+    read_frame(&mut stream)
+}
+
+/// The requests the daemon's IPC thread answers by itself, without the main loop: the answer
+/// does not depend on the daemon's state, so it comes back at once even during a reload.
+pub fn local_reply(request: &IpcRequest) -> Option<IpcResponse> {
+    match request {
+        IpcRequest::Version => Some(IpcResponse::Version(crate::running::VERSION.to_string())),
+        _ => None,
+    }
+}
+
+/// Daemon side: send one response.
+pub fn reply(stream: &mut impl Write, response: &IpcResponse) -> Result<()> {
+    write_frame(stream, response)
+}
+
+/// Daemon side: read one request, `None` when the stream ends or the request is not one this
+/// build knows.
+pub fn read_request(stream: &mut impl Read) -> Option<IpcRequest> {
+    read_frame(stream)
 }
 
 /// Write one length-prefixed bincode frame, the same framing as requests and responses.

@@ -1036,6 +1036,11 @@ impl Daemon {
 
         info!("IPC server listening on: {:?}", socket_path);
 
+        // Lets `keymux --version` tell which build this daemon is even when it cannot ask
+        if let Err(e) = crate::running::announce(crate::running::DAEMON) {
+            warn!("Failed to write the daemon's version file: {}", e);
+        }
+
         thread::spawn(move || {
             for stream in listener.incoming() {
                 match stream {
@@ -1064,6 +1069,11 @@ impl Daemon {
                                                 crate::steno::overlay::OverlayHub::global(),
                                             );
                                         });
+                                        continue;
+                                    }
+                                    // Answered here, without the main loop
+                                    if let Some(response) = crate::ipc::local_reply(&request) {
+                                        let _ = crate::ipc::reply(&mut stream, &response);
                                         continue;
                                     }
                                     // Create response channel
@@ -1773,6 +1783,8 @@ impl Daemon {
                 });
                 IpcResponse::Ok
             }
+            // The IPC thread answers this itself; here only so the match stays complete
+            IpcRequest::Version => IpcResponse::Version(crate::running::VERSION.to_string()),
             // The IPC thread hands subscriptions to their own thread before they get here
             IpcRequest::SubscribeOverlay => {
                 IpcResponse::Error("overlay subscriptions are streamed, not answered".into())

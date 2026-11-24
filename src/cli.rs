@@ -111,8 +111,13 @@ pub enum GlobalGamemodeAction {
 #[derive(Parser)]
 #[command(name = "keymux")]
 #[command(about = "QMK-inspired keyboard middleware for Linux", long_about = None)]
-#[command(version = env!("KEYMUX_VERSION"))]
+#[command(disable_version_flag = true)]
 pub struct Cli {
+    /// Print version, and which running keymux processes are another build
+    // Not clap's own flag: that one can only print the version and exit (see `main`).
+    #[arg(short = 'V', long)]
+    pub version: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

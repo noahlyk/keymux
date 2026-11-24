@@ -27,7 +27,7 @@
 ### System Integration
 - **Systemd Service**: Runs as user service with automatic startup
 - **Desktop Notifications**: Config reload success/error notifications
-- **IPC Architecture**: Manage keyboards without restarting daemon; after upgrading keymux, restart the daemon (`systemctl restart keymux`), because a running daemon stays the old binary and a newer command it does not know fails with a message saying so
+- **IPC Architecture**: Manage keyboards without restarting daemon; after upgrading keymux, restart the daemon (`systemctl restart keymux`), because a running daemon stays the old binary and a newer command it does not know fails with a message saying so; `keymux --version` names the processes that are still the old build (see [Which build is running](#which-build-is-running))
 - **RON Configuration**: Human-readable config with extensive comments
 
 ## 🔧 Installation
@@ -161,6 +161,50 @@ flaps, a start limit would otherwise leave them `failed` for good. The steno ove
 exception to "every failure restarts": it exits with status 78 when the session cannot show
 it (no layer-shell, as on GNOME, or no Wayland), and `RestartPreventExitStatus=78` keeps
 that from being retried. OpenRC and runit have no steno service script.
+
+#### Which build is running
+
+A running keymux process keeps the binary it was started from, so after an upgrade the
+daemon and its helpers are the old build until they are restarted. `keymux --version` (or
+`-V`) prints its own version on the first line, as always, and under it one line for each
+build that is still running and is not this one:
+
+```
+$ keymux --version
+keymux 1.19.0+5.g7549a38
+(daemon, overlay out-of-date, running 1.18.1+5.gf686c17)
+```
+
+| Second line | Meaning |
+|---|---|
+| none | every running keymux process is this build, or none is running |
+| `(daemon out-of-date, running 1.18.1+5.gf686c17)` | the daemon is that version; restart it (`sudo systemctl restart keymux`), the helpers restart with it |
+| `(overlay, niri-daemon out-of-date, running ...)` | only helpers are stale: `systemctl --user restart keymux-steno keymux-niri` |
+| `(overlay out-of-date, running an older build)` | its version cannot be read: its binary has been replaced since it started, or it was started by a keymux from before this check existed |
+| several lines | the stale processes are on different builds, one line per build |
+
+The processes are named by their subcommand: `daemon`, `overlay`, `niri-daemon`,
+`hyprland-daemon`, `sway-daemon`, `i3-daemon`, `bspwm-daemon`. Versions are compared as
+exact strings, so a test build (`1.19.0+5.g7549a38`), the same commit with uncommitted
+changes (`...+5.g7549a38.dirty`) and the release (`1.19.0`) are three different builds, and
+a running process that is *newer* than the binary you ran is listed too.
+
+How each process is asked, first answer wins:
+
+1. **The daemon, over its socket** (`/run/keymux.sock`, a `Version` request). A daemon from
+   before the request existed drops the connection, which costs nothing and logs nothing.
+2. **The version file** each process writes when it starts: the daemon's
+   `/run/keymux-daemon.version` (readable by everyone), a helper's
+   `$XDG_RUNTIME_DIR/keymux-<name>.version` (for example `keymux-overlay.version`). It
+   holds the version, the pid and the process's start time; a file whose pid and start time
+   do not belong to a running process is ignored, so a leftover file never misleads. This is
+   the only source for the helpers, and the fallback for a daemon too busy to answer.
+3. **No version to read** (a process from before version files): a process running the very
+   file you ran is the same build and is not listed; any other is `running an older build`.
+
+It never fails and adds at most about 25 ms to `--version` (the wait for a daemon that
+does not answer; normally well under a millisecond). Only your own helpers are checked,
+plus the daemon; `overlay --dump` and `overlay --demo` write no version file.
 
 ## 📖 Configuration Guide
 
@@ -1304,6 +1348,9 @@ journalctl -u keymux -f
 
 # Restart daemon
 systemctl restart keymux
+
+# After an upgrade: is anything still running the old build?
+keymux --version
 ```
 
 ### Keyboard Management

@@ -39,6 +39,7 @@ pub mod keycode;
 pub mod niri;
 #[cfg(feature = "overlay")]
 pub mod overlay;
+pub mod running;
 pub mod session_manager;
 pub mod steno;
 #[cfg(test)]
