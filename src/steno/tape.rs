@@ -583,6 +583,9 @@ mod tests {
             ("engine_control:engine:unload", "{:engine:unload}"),
             ("overlay_control:tape:clear", "{:tape:clear}"),
             ("overlay_control:lookup:toggle", "{:lookup:toggle}"),
+            ("outline_control:outline:last", "{:outline:last}"),
+            ("outline_control:outline:next", "{:outline:next}"),
+            ("outline_control:outline:explain", "{:outline:explain}"),
             ("focus", "{:command:focus}"),
         ] {
             assert_eq!(tape(command), shown, "{command}");

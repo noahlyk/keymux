@@ -303,7 +303,7 @@ fn check_undo_or(param: &str, _: &Layout) -> Option<String> {
 /// The engine commands, as written after the legacy `{PLOVER:` and with the ones the native metas
 /// make. Which have a counterpart in keymux is [`StenoEngine`](super::StenoEngine)'s to say, and
 /// [`native_spelling`] gives the native name of those that do.
-pub(crate) const ENGINE_COMMANDS: [&str; 15] = [
+pub(crate) const ENGINE_COMMANDS: [&str; 16] = [
     "suspend",
     "toggle",
     "resume",
@@ -317,6 +317,7 @@ pub(crate) const ENGINE_COMMANDS: [&str; 15] = [
     "deleted",
     super::engine_control::COMMAND,
     super::overlay_control::COMMAND,
+    super::outline_control::COMMAND,
     super::run_control::RUN,
     super::run_control::SHELL,
 ];
@@ -345,9 +346,9 @@ pub(crate) fn native_spelling(command: &str) -> Option<String> {
         "lookup" => Some("{:lookup}".to_string()),
         "deleted" => Some("{:deleted}".to_string()),
         "run" | "shell" => Some(format!("{{:{name}:{args}}}")),
-        super::engine_control::COMMAND | super::overlay_control::COMMAND => {
-            Some(format!("{{:{args}}}"))
-        }
+        super::engine_control::COMMAND
+        | super::overlay_control::COMMAND
+        | super::outline_control::COMMAND => Some(format!("{{:{args}}}")),
         _ => None,
     }
 }
