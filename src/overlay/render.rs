@@ -19,6 +19,7 @@ use super::ViewState;
 use crate::config::{Half, KeyColor, OverlayConfig};
 use crate::steno::erasure::{self, Ink};
 use crate::steno::layout::Layout;
+use crate::steno::notation::Notation;
 use crate::steno::overlay::{
     LookupMode, LookupRow, LookupView, OverlaySnapshot, TapeEntry, TAPE_CAPACITY,
 };
@@ -151,6 +152,9 @@ struct RunKey {
     ch: char,
     color: [u8; 4],
     pair: Option<u32>,
+    /// Part of a written piece that stands for several keys (a theory notation's `N` for
+    /// `TPH`): underlined as one even when it is a single letter
+    whole: bool,
 }
 
 /// One stroke as drawn: its keys in order
@@ -162,6 +166,9 @@ type Unit = Vec<Run>;
 /// own, offset by that key's slot so each such key is a group of its own. The layout's own group
 /// ids are the theory's data, so this is kept clear of anything a sane config would use.
 const SPLIT_GROUP_BASE: u32 = 1_000_000;
+/// The pair number given to the letters of one written piece of a theory notation, offset by
+/// the piece's place in its stroke, so each piece is underlined on its own.
+const PIECE_GROUP_BASE: u32 = 2_000_000;
 
 /// A merge group's fused outline and where its label is centred.
 struct MergeShape {
@@ -214,6 +221,13 @@ pub struct Renderer {
     /// The strokes' letters at each of [`STROKE_TIERS`], largest first
     stroke_tiers: Vec<GlyphCache>,
     words: GlyphCache,
+    /// The steno layer's theory notation, when it ships one (see [`Self::set_notation`]):
+    /// strokes are written in it and the keyboard's groups follow how each stroke is split.
+    /// `None`: Plover's notation and the merge groups, exactly as without it
+    notation: Option<Notation>,
+    /// The fused shape of each key group the notation has drawn so far, by its keys, made the
+    /// first time it is needed
+    note_shapes: std::collections::HashMap<u32, MergeShape>,
 }
 
 /// A lookup row laid out: its outline in lines of units (empty when the outline is not steno and
@@ -391,22 +405,6 @@ impl Renderer {
         // A key split in two (`S-` with the join key on its top half) squares the corners where
         // the halves meet, like the two keys of any other column.
         // The top and bottom corner radii of a standard key's pad (the `#` bar excepted)
-        let pad_radii = |k: &Keyboard, slot: usize| -> (f32, f32) {
-            let soft = k.keys[0].w * PAD_TOP_ROUND;
-            let taken = k
-                .splits
-                .iter()
-                .flatten()
-                .find(|(idx, _)| *idx == slot)
-                .map(|(_, half)| *half);
-            // The extra key took one half, so this slot is the other one
-            let square_top = has_square_top(slot) || taken == Some(Half::Top);
-            let square_bottom = has_square_bottom(slot) || taken == Some(Half::Bottom);
-            (
-                if square_top { 0.0 } else { soft },
-                if square_bottom { 0.0 } else { f32::MAX },
-            )
-        };
         let key_shapes = keyboard.as_ref().map_or_else(Vec::new, |k| {
             let soft = k.keys[0].w * PAD_TOP_ROUND;
             k.keys
@@ -427,27 +425,9 @@ impl Renderer {
             for problem in problems {
                 tracing::warn!("overlay: {problem}");
             }
-            let soft = k.keys[0].w * PAD_TOP_ROUND;
-            let tol = k.keys[1].w * merge::NEIGHBOUR_GAP;
             merges
                 .into_iter()
-                .filter_map(|merge| {
-                    let members: Vec<merge::Member> = merge
-                        .slots
-                        .iter()
-                        .map(|&slot| {
-                            let (top, bottom) = pad_radii(k, slot);
-                            merge::Member::new(k.keys[slot], top, bottom)
-                        })
-                        .collect();
-                    let corners = merge::outline(&members, tol, soft);
-                    let path = merge::path(&corners)?;
-                    Some(MergeShape {
-                        center: merge::label_spot(&members, &corners, tol),
-                        merge,
-                        path,
-                    })
-                })
+                .filter_map(|merge| group_shape(k, merge))
                 .collect()
         });
         let extra_shapes = keyboard.as_ref().map_or_else(Vec::new, |k| {
@@ -514,7 +494,43 @@ impl Renderer {
             strokes,
             stroke_tiers,
             words,
+            notation: None,
+            note_shapes: std::collections::HashMap::new(),
         })
+    }
+
+    /// Write strokes in the steno layer's theory notation from now on: `text` is its notation
+    /// file (see [`crate::steno::notation`]), read against this renderer's layout; `None`, or a
+    /// file that cannot be read, is Plover's notation, which draws exactly as with no file.
+    pub fn set_notation(&mut self, text: Option<&str>) {
+        self.notation = text.and_then(|text| {
+            Notation::from_json(self.layout.clone(), text)
+                .map_err(|e| tracing::warn!("overlay: theory notation not used: {e}"))
+                .ok()
+                .filter(|notation| !notation.is_plain())
+        });
+        self.note_shapes.clear();
+    }
+
+    /// How the lookup's lit stroke splits: the best row's outline is an entry, so its own way of
+    /// writing that outline, if the notation file has one; otherwise the table (`None`).
+    fn hint_split(&self, snapshot: &OverlaySnapshot) -> Option<Vec<u32>> {
+        let notation = self.notation.as_ref()?;
+        let lookup = snapshot.lookup.as_ref()?;
+        let row = lookup.rows.first()?;
+        let strokes = notation.parse_strokes_trimmed(&row.outline)?;
+        let split = notation.outline_split(&strokes)?;
+        let lit = Self::lookup_strokes(lookup);
+        split.get(self.step % lit.len().max(1)).cloned()
+    }
+
+    /// How a stroke being pressed splits: the notation file's own way for that one stroke as a
+    /// whole outline, if it has one; otherwise the table (`None`).
+    fn chord_split(&self, bits: u32) -> Option<Vec<u32>> {
+        self.notation
+            .as_ref()?
+            .outline_split(&[bits])
+            .and_then(|split| split.first().cloned())
     }
 
     /// Buffer size in physical pixels.
@@ -803,41 +819,83 @@ impl Renderer {
                 None
             }
         };
-        // Groups of keys all in the stroke fuse into one shape (the biggest group wins where
-        // they overlap); the fused keys are lit by it, not on their own
-        let fused = if self.config.merge_keys {
-            merge::select(&self.merge_shapes, snapshot.held | snapshot.chord | hint)
-        } else {
-            Vec::new()
+        let lit = snapshot.held | snapshot.chord | hint;
+        // With a theory notation, the hands' groups are how the stroke is written: its entry's
+        // own split when known, else the table's (see `Notation::diagram_groups`). Each group's
+        // shape is made the first time it is drawn.
+        let note_groups = match &self.notation {
+            Some(notation) if self.config.merge_keys && lit != 0 => {
+                let split = if snapshot.chord == 0 && hint != 0 {
+                    self.hint_split(snapshot)
+                } else {
+                    self.chord_split(lit)
+                };
+                notation.diagram_groups(lit, split.as_deref())
+            }
+            _ => Vec::new(),
         };
-        let fused_bits = fused
-            .iter()
-            .fold(0, |bits, &i| bits | self.merge_shapes[i].merge.bits);
-        let relabelled_bits = fused.iter().fold(0, |bits, &i| {
-            let merge = &self.merge_shapes[i].merge;
-            if merge.label.is_some() {
-                bits | merge.bits
+        let number_slot = self.layout.number_slot();
+        for (bits, label) in &note_groups {
+            if self.note_shapes.contains_key(bits) {
+                continue;
+            }
+            let slots: Vec<usize> = (0..number_slot).filter(|s| bits & (1 << s) != 0).collect();
+            let rects: Vec<Rect> = slots.iter().map(|&slot| keyboard.keys[slot]).collect();
+            if merge::links(&rects, keyboard.keys[1].w * merge::NEIGHBOUR_GAP).is_none() {
+                continue; // too far apart to join: its keys light on their own
+            }
+            let group = merge::Merge {
+                slots,
+                bits: *bits,
+                label: Some(label.clone()),
+                bridge: true,
+            };
+            if let Some(shape) = group_shape(keyboard, group) {
+                self.note_shapes.insert(*bits, shape);
+            }
+        }
+        // Groups of keys all in the stroke fuse into one shape (the biggest group wins where
+        // they overlap); the fused keys are lit by it, not on their own. With a theory notation
+        // the hands' groups are its own, and only the thumbs and star fuse by the merge groups
+        let fused: Vec<&MergeShape> = if !self.config.merge_keys {
+            Vec::new()
+        } else if self.notation.is_some() {
+            let middle = (self.layout.left_end()..self.layout.right_start())
+                .fold(0u32, |bits, slot| bits | (1 << slot));
+            note_groups
+                .iter()
+                .filter_map(|(bits, _)| self.note_shapes.get(bits))
+                .chain(
+                    merge::select(&self.merge_shapes, lit & middle)
+                        .into_iter()
+                        .map(|i| &self.merge_shapes[i]),
+                )
+                .collect()
+        } else {
+            merge::select(&self.merge_shapes, lit)
+                .into_iter()
+                .map(|i| &self.merge_shapes[i])
+                .collect()
+        };
+        let fused_bits = fused.iter().fold(0, |bits, shape| bits | shape.merge.bits);
+        let relabelled_bits = fused.iter().fold(0, |bits, shape| {
+            if shape.merge.label.is_some() {
+                bits | shape.merge.bits
             } else {
                 bits
             }
         });
         // Whole group held: full strength; otherwise some of it is only still in the stroke
-        let fused_look = |i: usize| {
-            let merge = &self.merge_shapes[i].merge;
+        let fused_look = |shape: &MergeShape| {
+            let merge = &shape.merge;
             let accent = self.theme.accent(Keyboard::group(merge.slots[0]));
             let held = snapshot.held & merge.bits == merge.bits;
             (accent, held)
         };
-        for &i in &fused {
-            let (accent, held) = fused_look(i);
+        for shape in &fused {
+            let (accent, held) = fused_look(shape);
             let strength = if held { 1.0 } else { GLOW_DIM };
-            glow(
-                pixmap,
-                &self.merge_shapes[i].path,
-                accent,
-                strength,
-                self.scale,
-            );
+            glow(pixmap, &shape.path, accent, strength, self.scale);
         }
         for (slot, shape) in self.key_shapes.iter().enumerate() {
             if fused_bits & (1 << slot) != 0 {
@@ -854,11 +912,11 @@ impl Renderer {
                 glow(pixmap, shape, accent, strength, self.scale);
             }
         }
-        for &i in &fused {
-            let (accent, held) = fused_look(i);
+        for shape in &fused {
+            let (accent, held) = fused_look(shape);
             fill(
                 pixmap,
-                &self.merge_shapes[i].path,
+                &shape.path,
                 if held {
                     accent
                 } else {
@@ -904,8 +962,8 @@ impl Renderer {
         }
 
         // A fused shape's label, centred on it
-        for &i in &fused {
-            let MergeShape { merge, center, .. } = &self.merge_shapes[i];
+        for shape in &fused {
+            let MergeShape { merge, center, .. } = shape;
             let Some(text) = &merge.label else {
                 continue;
             };
@@ -978,6 +1036,7 @@ impl Renderer {
             transparent: false,
             gone: Vec::new(),
             read: false,
+            split: None,
         });
 
         let room = self.words_right - self.words_left;
@@ -1079,6 +1138,17 @@ impl Renderer {
     /// the same pair number so they can be underlined as one. This is how every stroke is drawn
     /// anywhere in the overlay: the tape and the lookup alike.
     fn stroke_run(&self, stroke: u32) -> Run {
+        self.stroke_run_split(stroke, None)
+    }
+
+    /// [`Self::stroke_run`] for a stroke whose hands split as `split` says (see
+    /// [`crate::steno::notation::Split`]). With a theory notation the stroke is its written
+    /// pieces: each piece in the colour of its first key, a piece standing for several keys
+    /// underlined as one; a single key keeps its pair. Without one, `split` changes nothing.
+    fn stroke_run_split(&self, stroke: u32, split: Option<&[u32]>) -> Run {
+        if let Some(notation) = &self.notation {
+            return self.notation_run(notation, stroke, split);
+        }
         let mut run = Vec::new();
         let splits = self.keyboard.as_ref().map(|k| &k.splits);
         for index in 0..self.layout.extra_keys().len() {
@@ -1103,6 +1173,7 @@ impl Renderer {
                 ch: Keyboard::extra_label(&self.layout, index),
                 color: self.theme.accent(self.extra_group(index)),
                 pair,
+                whole: false,
             });
         }
         let number_slot = self.layout.number_slot();
@@ -1120,6 +1191,7 @@ impl Renderer {
                     ch: '-',
                     color: self.theme.strokes,
                     pair: None,
+                    whole: false,
                 });
                 dashed = true;
             }
@@ -1127,7 +1199,51 @@ impl Renderer {
                 ch: Keyboard::label(&self.layout, slot),
                 color: self.theme.accent(Keyboard::group(slot)),
                 pair: self.layout.key_group(slot),
+                whole: false,
             });
+        }
+        run
+    }
+
+    /// A stroke as the theory notation writes it (see [`Self::stroke_run_split`]).
+    fn notation_run(&self, notation: &Notation, stroke: u32, split: Option<&[u32]>) -> Run {
+        let extra_start = self.layout.extra_start();
+        let number_slot = self.layout.number_slot();
+        let mut run = Vec::new();
+        for (n, piece) in notation
+            .render_stroke_pieces_split(stroke, split)
+            .into_iter()
+            .enumerate()
+        {
+            if piece.keys == 0 {
+                run.extend(piece.text.chars().map(|ch| RunKey {
+                    ch,
+                    color: self.theme.strokes,
+                    pair: None,
+                    whole: false,
+                }));
+                continue;
+            }
+            let slot = piece.keys.trailing_zeros() as usize;
+            let color = if slot >= extra_start {
+                self.theme.accent(self.extra_group(slot - extra_start))
+            } else if slot == number_slot {
+                self.theme.accent(KeyGroup::Misc)
+            } else {
+                self.theme.accent(Keyboard::group(slot))
+            };
+            let several = piece.keys.count_ones() > 1;
+            let pair = if several {
+                Some(PIECE_GROUP_BASE + n as u32)
+            } else {
+                self.layout.key_group(slot)
+            };
+            run.extend(piece.text.chars().map(|ch| RunKey {
+                ch,
+                color,
+                pair,
+                whole: several,
+            }));
         }
         run
     }
@@ -1136,6 +1252,26 @@ impl Renderer {
     /// strokes: one unit per word, split on the spaced slashes, its strokes on the bare ones.
     /// `None` when it is not steno at all (a raw row), which is then drawn as plain text.
     fn outline_units(&self, outline: &str) -> Option<Vec<Unit>> {
+        if let Some(notation) = &self.notation {
+            // Each word's outline in the theory notation, split as its own entry says
+            return outline
+                .split(" / ")
+                .map(|group| {
+                    let strokes = notation.parse_strokes_trimmed(group)?;
+                    let split = notation.outline_split(&strokes);
+                    Some(
+                        strokes
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &s)| {
+                                let own = split.and_then(|split| split.get(i));
+                                self.notation_run(notation, s, own.map(Vec::as_slice))
+                            })
+                            .collect(),
+                    )
+                })
+                .collect();
+        }
         outline
             .split(" / ")
             .map(|group| {
@@ -1240,6 +1376,18 @@ impl Renderer {
             let next_same = run.get(i + 1).and_then(|n| n.pair) == key.pair && key.pair.is_some();
             match (key.pair, span_start) {
                 (Some(_), None) if next_same => span_start = Some(at),
+                // One letter that stands for several keys: a line under it alone
+                (Some(_), None) if key.whole => {
+                    if let Some(rect) =
+                        tiny_skia::Rect::from_xywh(at, underline_y, advance, thickness)
+                    {
+                        fill(
+                            pixmap,
+                            &PathBuilder::from_rect(rect),
+                            fade_color(key.color, fade),
+                        );
+                    }
+                }
                 (Some(_), Some(from)) if !next_same => {
                     if let Some(rect) = tiny_skia::Rect::from_xywh(
                         from,
@@ -1486,7 +1634,13 @@ impl Renderer {
         // The stroke is a run of coloured letters, set flush against the words it spelt so the
         // eye goes straight from one to the other; a long stroke is set smaller and then
         // fitted to the paper (the same drawing the lookup uses for its outlines).
-        let run = self.stroke_run(entry.stroke);
+        // A line still being pressed has no entry yet: the stroke's own way, if the notation
+        // writes it as a word of its own
+        let live_split = (entry.seq == 0 && self.notation.is_some())
+            .then(|| self.chord_split(entry.stroke))
+            .flatten();
+        let split = entry.split.as_deref().or(live_split.as_deref());
+        let run = self.stroke_run_split(entry.stroke, split);
         if !run.is_empty() {
             let (right, max) = (self.paper_right, self.paper_right - self.paper_left);
             self.draw_line(pixmap, &[vec![run]], right, max, baseline, fade, 0, None);
@@ -1534,6 +1688,45 @@ impl Renderer {
             self.scale,
         );
     }
+}
+
+/// The top and bottom corner radii of a standard key's pad (the `#` bar excepted).
+fn pad_radii(k: &Keyboard, slot: usize) -> (f32, f32) {
+    let soft = k.keys[0].w * PAD_TOP_ROUND;
+    let taken = k
+        .splits
+        .iter()
+        .flatten()
+        .find(|(idx, _)| *idx == slot)
+        .map(|(_, half)| *half);
+    // The extra key took one half, so this slot is the other one
+    let square_top = has_square_top(slot) || taken == Some(Half::Top);
+    let square_bottom = has_square_bottom(slot) || taken == Some(Half::Bottom);
+    (
+        if square_top { 0.0 } else { soft },
+        if square_bottom { 0.0 } else { f32::MAX },
+    )
+}
+
+/// The fused shape of a group of keys drawn as one, or `None` when its keys cannot be joined.
+fn group_shape(k: &Keyboard, merge: merge::Merge) -> Option<MergeShape> {
+    let soft = k.keys[0].w * PAD_TOP_ROUND;
+    let tol = k.keys[1].w * merge::NEIGHBOUR_GAP;
+    let members: Vec<merge::Member> = merge
+        .slots
+        .iter()
+        .map(|&slot| {
+            let (top, bottom) = pad_radii(k, slot);
+            merge::Member::new(k.keys[slot], top, bottom)
+        })
+        .collect();
+    let corners = merge::outline(&members, tol, soft);
+    let path = merge::path(&corners)?;
+    Some(MergeShape {
+        center: merge::label_spot(&members, &corners, tol),
+        merge,
+        path,
+    })
 }
 
 /// The end of `text` that fits in `max` pixels, so the caret stays visible while a long query
@@ -1927,6 +2120,7 @@ mod tests {
             transparent: false,
             gone: Vec::new(),
             read: false,
+            split: None,
         }
     }
 
@@ -2092,6 +2286,138 @@ mod tests {
             .unwrap()
             .demultiply();
         assert_eq!([pixel.red(), pixel.green(), pixel.blue()], [232, 162, 74]);
+    }
+
+    /// A stand-in for a theory's notation file (the shape lyk's has): `TPHR` is the compound
+    /// `FL`, and the outline `ORB` is written its own way (O, R and B, not the table's `SH`)
+    const NOTATION: &str = r#"{
+        "number": "letters",
+        "left": {"TPH": "N", "TP": "F", "HR": "L", "TPHR": "FL", "PH": "M"},
+        "right": {"PB": "N", "PL": "M", "RB": "SH"},
+        "outlines": {"ORB": "ORB"}
+    }"#;
+
+    fn letters(run: &Run) -> String {
+        run.iter().map(|key| key.ch).collect()
+    }
+
+    fn bits(text: &str) -> u32 {
+        crate::steno::layout::parse_stroke(text).unwrap()
+    }
+
+    #[test]
+    fn with_a_theory_notation_strokes_are_written_short_and_a_piece_is_underlined_as_one() {
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        assert_eq!(letters(&renderer.stroke_run(bits("TPHAEPL"))), "TPHAEPL");
+        renderer.set_notation(Some(NOTATION));
+        let enemy = renderer.stroke_run(bits("TPHAEPL"));
+        assert_eq!(letters(&enemy), "NAEM");
+        let whole: Vec<bool> = enemy.iter().map(|key| key.whole).collect();
+        assert_eq!(whole, [true, false, false, true]);
+        assert_eq!(letters(&renderer.stroke_run(bits("TPHROUR"))), "FLOUR");
+        // `FL` is one piece of two letters: one pair, underlined together
+        let flower = renderer.stroke_run(bits("TPHROUR"));
+        assert_eq!(flower[0].pair, flower[1].pair);
+        assert!(flower[0].pair.is_some());
+        assert_eq!(letters(&renderer.stroke_run(bits("2R-R8"))), "#TR-RL");
+        // A lookup row is written short, its own entry's way, and a query typed short reads
+        let units = renderer.outline_units("ORB/TPHAEPL").unwrap();
+        let written: Vec<String> = units[0].iter().map(letters).collect();
+        assert_eq!(
+            written,
+            ["OSH", "NAEM"],
+            "no entry of its own for this outline"
+        );
+        let alone: Vec<String> = renderer.outline_units("ORB").unwrap()[0]
+            .iter()
+            .map(letters)
+            .collect();
+        assert_eq!(alone, ["ORB"], "its own entry: O, R, B");
+        assert_eq!(
+            letters(&renderer.stroke_run(bits("ORB"))),
+            "OSH",
+            "the table"
+        );
+        assert!(renderer.outline_units("NAEM / FLOUR").is_some());
+        // A tape line takes its split from the daemon
+        assert_eq!(
+            letters(&renderer.stroke_run_split(bits("ORB"), Some(&[]))),
+            "ORB"
+        );
+        // Back to none: Plover's notation again
+        renderer.set_notation(None);
+        assert_eq!(letters(&renderer.stroke_run(bits("TPHAEPL"))), "TPHAEPL");
+    }
+
+    #[test]
+    fn the_keyboard_groups_follow_how_the_stroke_is_written() {
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        renderer.set_notation(Some(NOTATION));
+        let (w, h) = renderer.size();
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        let flower = bits("TPHROUR");
+        let snapshot = OverlaySnapshot {
+            layer: Some("steno".into()),
+            held: flower,
+            chord: flower,
+            ..OverlaySnapshot::default()
+        };
+        renderer.draw(&snapshot, &mut pixmap.as_mut());
+        // flower: F (TP) and L (HR), not the biggest fixed group N (TPH) and R
+        let mut drawn: Vec<(u32, Option<String>)> = renderer
+            .note_shapes
+            .values()
+            .map(|shape| (shape.merge.bits, shape.merge.label.clone()))
+            .collect();
+        drawn.sort_unstable();
+        assert_eq!(
+            drawn,
+            [
+                (bits("TP"), Some("F".to_string())),
+                (bits("HR"), Some("L".to_string()))
+            ]
+        );
+        // An outline written its own way splits its own way: ORB is O, R, B (no SH group)
+        renderer.note_shapes.clear();
+        let orb = bits("ORB");
+        let snapshot = OverlaySnapshot {
+            held: orb,
+            chord: orb,
+            ..snapshot
+        };
+        renderer.draw(&snapshot, &mut pixmap.as_mut());
+        assert!(renderer.note_shapes.is_empty());
+    }
+
+    #[test]
+    fn without_a_notation_file_a_frame_is_drawn_exactly_as_before() {
+        let config = OverlayConfig::default();
+        let mut snapshot = OverlaySnapshot {
+            layer: Some("steno".into()),
+            held: bits("TPHR"),
+            chord: bits("TPHROUR"),
+            ..OverlaySnapshot::default()
+        };
+        snapshot
+            .tape
+            .push_back(tape_entry(1, "TPHAEPL", "\"enemy\""));
+        snapshot.tape.push_back(tape_entry(2, "ORB", "\"orb\""));
+        let frame = |renderer: &mut Renderer| {
+            let (w, h) = renderer.size();
+            let mut pixmap = Pixmap::new(w, h).unwrap();
+            renderer.draw(&snapshot, &mut pixmap.as_mut());
+            pixmap.data().to_vec()
+        };
+        let before = frame(&mut Renderer::new(&config, 1, 900).unwrap());
+        let mut renderer = Renderer::new(&config, 1, 900).unwrap();
+        renderer.set_notation(Some(NOTATION));
+        let short = frame(&mut renderer);
+        assert_ne!(before, short, "the notation changes the drawing");
+        renderer.set_notation(None);
+        assert_eq!(frame(&mut renderer), before);
+        // A file that cannot be read is no notation at all
+        renderer.set_notation(Some("not json"));
+        assert_eq!(frame(&mut renderer), before);
     }
 
     #[test]
@@ -2603,6 +2929,7 @@ mod tests {
             transparent: false,
             gone: Vec::new(),
             read: false,
+            split: None,
         };
         let baseline = 100.0;
         renderer.draw_tape_line(&mut pixmap.as_mut(), &entry, baseline, 1.0);
@@ -2681,6 +3008,7 @@ mod tests {
             transparent,
             gone: Vec::new(),
             read: false,
+            split: None,
         };
         let draw = |config: &OverlayConfig, entries: Vec<TapeEntry>| {
             let mut renderer = Renderer::new(config, 1, 900).unwrap();
@@ -2725,6 +3053,7 @@ mod tests {
             transparent: false,
             gone: Vec::new(),
             read,
+            split: None,
         };
         let draw = |config: &OverlayConfig, read: bool| {
             let mut renderer = Renderer::new(config, 1, 900).unwrap();
@@ -2774,6 +3103,7 @@ mod tests {
             transparent: false,
             gone: Vec::new(),
             read: false,
+            split: None,
         };
         renderer.draw_tape_line(&mut pixmap.as_mut(), &entry, 100.0, fade);
         let theme = renderer.theme;
@@ -2853,6 +3183,7 @@ mod tests {
                 transparent: false,
                 gone: Vec::new(),
                 read: false,
+                split: None,
             };
             let baseline = 100.0;
             renderer.draw_tape_line(&mut pixmap.as_mut(), &entry, baseline, 1.0);
@@ -3343,6 +3674,7 @@ mod tests {
                 transparent: false,
                 gone: Vec::new(),
                 read: false,
+                split: None,
             });
         }
         let write = |name: &str, renderer: &mut Renderer, snapshot: &OverlaySnapshot| {

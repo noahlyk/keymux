@@ -31,7 +31,18 @@ impl KeymapProcessor {
     /// press that switches into steno, not on the next stroke. The hub ignores a repeat of
     /// what it already has, so the common case is one uncontended lock and a comparison.
     pub(super) fn publish_overlay_layer(&self) {
-        self.overlay_hub.set_layer(self.overlay_layer_name());
+        let layer = self.overlay_layer_name();
+        self.overlay_hub.set_layer(layer);
+        // The layer's theory notation goes with it (the hub keeps the last one while no steno
+        // layer is up, so leaving steno and coming back sends nothing again)
+        if let Some(name) = layer {
+            let notation = self
+                .steno_engines
+                .iter()
+                .find(|(layer, _)| layer.0 == name)
+                .and_then(|(_, engine)| engine.notation_source());
+            self.overlay_hub.set_notation(notation);
+        }
     }
 
     /// Publish to `hub` instead of the daemon's, from here on. Tests use this so they

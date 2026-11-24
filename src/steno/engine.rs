@@ -7,7 +7,7 @@ use super::journal::{MachineId, SharedHistory};
 use super::layout::{preset, Layout};
 use super::live;
 use super::lookup::{Lookup, LookupKey, LookupSearch};
-use super::notation::Notation;
+use super::notation::{Notation, Split};
 use super::overlay::OverlayHub;
 use super::plugin::Chain;
 use super::run_control::{Launcher, Runtime, Trust};
@@ -583,6 +583,9 @@ impl StenoEngine {
         // On the overlay too, under the line it greys, so what is in full colour is what is on
         // screen
         self.hub.push_late(unmarked, unmatched);
+        if let Some((strokes, splits)) = self.split_of_last() {
+            self.hub.set_splits(&strokes, &splits);
+        }
         Some(output)
     }
 
@@ -754,6 +757,8 @@ impl StenoEngine {
         }
         let unmatched = self.translator.was_unmatched();
         let description = tape::describe(output.as_ref(), unmatched);
+        // How the translation this stroke ends splits, with a theory notation (see `split_of`)
+        let split = self.split_of_last();
         if let Some(tape) = &mut self.tape {
             // The tape file says which plugin read the word, and as what; the overlay only flags that one did
             let read = self.translator.plugin_read();
@@ -762,11 +767,11 @@ impl StenoEngine {
                 read.as_ref()
                     .map(|(name, text)| (name.as_str(), text.as_str())),
             );
-            if repeated {
-                tape.repeat(stroke, &marked);
-            } else {
-                tape.stroke(stroke, &marked);
-            }
+            let own = split
+                .as_ref()
+                .filter(|(strokes, _)| strokes.last() == Some(&stroke))
+                .and_then(|(_, splits)| splits.last().cloned().flatten());
+            tape.stroke_with(stroke, &marked, repeated, own.as_deref());
         }
         // Same description as the tape file, so the overlay and `keymux steno tape` agree
         let read = self.translator.plugin_read().is_some();
@@ -777,6 +782,9 @@ impl StenoEngine {
             self.hub.push_read_stroke(stroke, description, unmatched);
         } else {
             self.hub.push_stroke(stroke, description, unmatched);
+        }
+        if let Some((strokes, splits)) = split {
+            self.hub.set_splits(&strokes, &splits);
         }
         output
     }
@@ -879,8 +887,50 @@ impl StenoEngine {
 
     /// Strokes as the outline commands write them, in the layer's notation (see
     /// [`super::notation`]): the theory's when it ships one, Plover's otherwise.
+    /// A word a plugin read is written as the plugin reported it split (see [`Self::split_of`]).
     fn render_notation(&self, strokes: &[u32]) -> String {
-        self.notation.render_strokes(strokes)
+        let reported = self
+            .translator
+            .plugin_groups()
+            .filter(|(read, _)| read == strokes)
+            .map(|(_, groups)| groups.as_slice());
+        self.notation.render_strokes_split(strokes, reported)
+    }
+
+    /// The theory notation file's text, for the overlay; `None` for Plover's notation.
+    #[must_use]
+    pub const fn notation_source(&self) -> Option<&Arc<str>> {
+        self.notation.source()
+    }
+
+    /// The last translation's strokes and how each one splits for people (see
+    /// [`super::notation::Split`]), by precedence: the notation file's own entry for that
+    /// outline, then what the plugin that read it reported, then the table (`None`). Nothing
+    /// without a notation file, so Plover's notation costs nothing here.
+    fn split_of_last(&self) -> Option<(Vec<u32>, Vec<Option<Split>>)> {
+        if self.notation.is_plain() {
+            return None;
+        }
+        let strokes = self.translator.last_outline();
+        if strokes.is_empty() {
+            return None;
+        }
+        let splits = self.split_of(&strokes);
+        Some((strokes, splits))
+    }
+
+    fn split_of(&self, strokes: &[u32]) -> Vec<Option<Split>> {
+        if let Some(split) = self.notation.outline_split(strokes) {
+            return split.iter().cloned().map(Some).collect();
+        }
+        if let Some((_, groups)) = self
+            .translator
+            .plugin_groups()
+            .filter(|(read, _)| read == strokes)
+        {
+            return groups.iter().cloned().map(Some).collect();
+        }
+        vec![None; strokes.len()]
     }
 
     /// `{:outline:last}`, `{:outline:next}` and `{:outline:explain}` (see
@@ -1653,6 +1703,37 @@ mod tests {
         let tape = hub.snapshot().tape;
         assert_eq!(tape.len(), 1, "{tape:?}");
         assert!(tape[0].read && tape[0].output().contains("kat"), "{tape:?}");
+    }
+
+    #[test]
+    fn an_outline_the_notation_writes_its_own_way_splits_all_its_tape_lines() {
+        let splits = |hub: &OverlayHub| -> Vec<Option<Vec<u32>>> {
+            hub.snapshot()
+                .tape
+                .iter()
+                .map(|e| e.split.clone())
+                .collect()
+        };
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        for file in [None, Some(r#"{"outlines": {"KAT/KAT": "KAT/KAT"}}"#)] {
+            let mut engine = engine_with_dict(r#"{"KAT": "cat", "KAT/KAT": "cats"}"#);
+            let hub: &'static OverlayHub = Box::leak(Box::default());
+            engine.set_hub(hub);
+            if let Some(file) = file {
+                engine.notation = Notation::from_json(Layout::plover(), file).unwrap();
+            }
+            let keys = kat_keys(&engine);
+            let _ = tap(&mut engine, keys, t0, t0 + ms(30));
+            assert_eq!(splits(hub), [None], "a lone KAT is the table's");
+            let _ = tap(&mut engine, keys, t0 + ms(400), t0 + ms(430));
+            if file.is_some() {
+                // KAT/KAT is an entry of the file's own: both of its lines take its split
+                assert_eq!(splits(hub), [Some(vec![]), Some(vec![])]);
+            } else {
+                assert_eq!(splits(hub), [None, None], "no file: nothing is split");
+            }
+        }
     }
 
     #[test]

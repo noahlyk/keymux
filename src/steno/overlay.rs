@@ -44,6 +44,12 @@ pub struct TapeEntry {
     /// the line in a style of its own (`tape_read_marker`, `tape_read_color`)
     #[serde(default)]
     pub read: bool,
+    /// How the stroke's hands split into key groups when that is not the theory notation's
+    /// table alone: the outline it belongs to is written its own way in the notation file, or a
+    /// plugin reported how it read it (see [`super::notation::Split`]). `None`: the table's.
+    /// Always `None` with no notation file.
+    #[serde(default)]
+    pub split: Option<Vec<u32>>,
 }
 
 impl TapeEntry {
@@ -102,7 +108,25 @@ pub struct LookupView {
     pub mode: LookupMode,
 }
 
-/// Everything the overlay draws. Sent whole on every change: it's a few hundred bytes.
+/// A theory notation file's text, shared: cloning it is a reference count, so a snapshot that
+/// carries one costs nothing more to copy. Written on the wire as the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotationText(pub Arc<str>);
+
+impl Serialize for NotationText {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for NotationText {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(|text| Self(Arc::from(text)))
+    }
+}
+
+/// Everything the overlay draws. Sent whole on every change: it's a few hundred bytes, plus the
+/// layer's notation file only on the frames where that changed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverlaySnapshot {
     /// Bumped on every change
@@ -126,6 +150,15 @@ pub struct OverlaySnapshot {
     /// and applies none of the older ones, so a restart goes back to the configured start.
     #[serde(default)]
     pub controls: VecDeque<(u64, ViewCommand)>,
+    /// Bumped each time the layer's theory notation changes (another layer on top, a reload
+    /// that read the file again); 0 is Plover's notation, before any
+    #[serde(default)]
+    pub notation_seq: u64,
+    /// The layer's theory notation file (see [`super::notation`]), `None` for Plover's notation
+    /// alone. A subscriber is sent it only on the first frame and on frames where `notation_seq`
+    /// moved; on every other frame it travels as `None` and the overlay keeps what it has.
+    #[serde(default)]
+    pub notation: Option<NotationText>,
     /// The tape replayed: which characters of each line are still on screen. The daemon's own
     /// bookkeeping for `TapeEntry::gone`; never sent to an overlay.
     #[serde(skip)]
@@ -176,6 +209,61 @@ impl OverlayHub {
             state.held = 0;
             state.lookup = None;
             true
+        });
+    }
+
+    /// [`Self::set_layer`], with the layer's theory notation file (`None`: Plover's notation).
+    /// A notation that is the same file text as before changes nothing.
+    pub fn set_layer_with(&self, layer: Option<&str>, notation: Option<&Arc<str>>) {
+        self.set_layer(layer);
+        self.set_notation(notation);
+    }
+
+    /// The theory notation the overlay writes strokes in (see [`OverlaySnapshot::notation`]).
+    pub fn set_notation(&self, notation: Option<&Arc<str>>) {
+        self.update(|state| {
+            let same = match (&state.notation, notation) {
+                (None, None) => true,
+                (Some(have), Some(new)) => Arc::ptr_eq(&have.0, new) || *have.0 == **new,
+                _ => false,
+            };
+            if same {
+                return false;
+            }
+            state.notation = notation.map(|text| NotationText(Arc::clone(text)));
+            state.notation_seq += 1;
+            true
+        });
+    }
+
+    /// The tape lines of the last translation say how their strokes split (see
+    /// [`TapeEntry::split`]): `strokes` are its strokes, oldest first, and `splits` one per
+    /// stroke. Matched from the newest line back, past transparent lines and late readings; it
+    /// stops at the first line that is not the stroke expected. Wakes the overlay only if a line
+    /// changed.
+    pub fn set_splits(&self, strokes: &[u32], splits: &[Option<Vec<u32>>]) {
+        if strokes.len() != splits.len() {
+            return;
+        }
+        self.update(|state| {
+            let mut wanted = strokes.iter().zip(splits).rev();
+            let mut changed = false;
+            for entry in state.tape.iter_mut().rev() {
+                if entry.transparent || entry.stroke == 0 {
+                    continue;
+                }
+                let Some((&stroke, split)) = wanted.next() else {
+                    break;
+                };
+                if entry.stroke != stroke {
+                    break;
+                }
+                if entry.split != *split {
+                    entry.split.clone_from(split);
+                    changed = true;
+                }
+            }
+            changed
         });
     }
 
@@ -291,6 +379,7 @@ impl OverlayHub {
                 transparent,
                 gone: Vec::new(),
                 read,
+                split: None,
             };
             let screen = Arc::make_mut(&mut state.screen);
             if let Some(first) = state.tape.front() {
@@ -598,8 +687,11 @@ mod tests {
             transparent: false,
             gone,
             read: false,
+            split: Some(vec![0b11]),
         };
         let sent = OverlaySnapshot {
+            notation_seq: 3,
+            notation: Some(NotationText(Arc::from("{}"))),
             generation: 7,
             tape: VecDeque::from([line(Vec::new()), line(vec![[0, 1]]), line(Vec::new())]),
             ..OverlaySnapshot::default()
@@ -625,6 +717,55 @@ mod tests {
             .tape
             .iter()
             .all(|line| line.repeats == 0 || line.read));
+    }
+
+    #[test]
+    fn a_notation_is_set_once_and_the_same_text_again_changes_nothing() {
+        let hub = OverlayHub::default();
+        let text: Arc<str> = Arc::from(r#"{"left": {"TPH": "N"}}"#);
+        hub.set_layer_with(Some("steno"), None);
+        let before = hub.snapshot();
+        assert_eq!((before.notation_seq, before.notation.is_none()), (0, true));
+        hub.set_layer_with(Some("steno"), Some(&text));
+        let set = hub.snapshot();
+        assert_eq!(set.notation_seq, 1);
+        assert_eq!(set.notation.as_ref().map(|n| &*n.0), Some(&*text));
+        // Every key event publishes it again: the same text is no change
+        let copy: Arc<str> = Arc::from(&*text);
+        hub.set_layer_with(Some("steno"), Some(&copy));
+        assert_eq!(hub.snapshot().generation, set.generation);
+        hub.set_layer_with(Some("steno"), None);
+        assert_eq!(hub.snapshot().notation_seq, 2);
+    }
+
+    #[test]
+    fn a_translations_lines_take_its_split_back_to_the_first_stroke_that_differs() {
+        let hub = OverlayHub::default();
+        hub.push_stroke(1, "\"a\"".into(), false);
+        hub.push_stroke(2, "\"b\"".into(), false);
+        hub.push_transparent(8, "lookup".into());
+        hub.push_stroke(4, "\"c\"".into(), false);
+        let before = hub.snapshot().generation;
+        hub.set_splits(&[2, 4], &[Some(vec![]), Some(vec![4])]);
+        let splits: Vec<Option<Vec<u32>>> = hub
+            .snapshot()
+            .tape
+            .iter()
+            .map(|e| e.split.clone())
+            .collect();
+        assert_eq!(splits, [None, Some(vec![]), None, Some(vec![4])]);
+        assert_eq!(hub.snapshot().generation, before + 1);
+        // The same again changes nothing; a stroke that is not there stops it
+        hub.set_splits(&[2, 4], &[Some(vec![]), Some(vec![4])]);
+        assert_eq!(hub.snapshot().generation, before + 1);
+        hub.set_splits(&[9, 4], &[Some(vec![1]), None]);
+        let splits: Vec<Option<Vec<u32>>> = hub
+            .snapshot()
+            .tape
+            .iter()
+            .map(|e| e.split.clone())
+            .collect();
+        assert_eq!(splits, [None, Some(vec![]), None, None]);
     }
 
     #[test]

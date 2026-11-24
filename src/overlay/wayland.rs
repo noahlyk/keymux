@@ -153,6 +153,7 @@ pub fn run(config: OverlayConfig, source: Source, always: bool) -> Result<()> {
         presence: Presence::default(),
         view: ViewState::default(),
         controls_seen: 0,
+        notation: Notation::default(),
     };
     // With `--always` it shows right away, without waiting for the daemon's first frame
     if always {
@@ -212,6 +213,31 @@ struct Overlay {
     view: ViewState,
     /// Number of the last view command applied (see [`super::take_controls`])
     controls_seen: u64,
+    /// The steno layer's theory notation, kept across frames and renderer rebuilds
+    notation: Notation,
+}
+
+/// The theory notation the daemon last sent (see `OverlaySnapshot::notation`): it comes only on
+/// the frames where it changed, so the overlay keeps it.
+#[derive(Default)]
+struct Notation {
+    seq: u64,
+    text: Option<std::sync::Arc<str>>,
+}
+
+impl Notation {
+    /// Take a frame's notation if it is a new one. Returns whether it changed.
+    fn take(&mut self, snapshot: &OverlaySnapshot) -> bool {
+        if snapshot.notation_seq == self.seq {
+            return false;
+        }
+        self.seq = snapshot.notation_seq;
+        self.text = snapshot
+            .notation
+            .as_ref()
+            .map(|text| std::sync::Arc::clone(&text.0));
+        true
+    }
 }
 
 /// What a snapshot should do to the surface.
@@ -342,6 +368,10 @@ impl Overlay {
     }
 
     fn on_snapshot(&mut self, snapshot: OverlaySnapshot) {
+        let notation_changed = self.notation.take(&snapshot);
+        if notation_changed {
+            self.renderer.set_notation(self.notation.text.as_deref());
+        }
         let before = self.controls_seen;
         let view_changed = super::take_controls(&mut self.view, &mut self.controls_seen, &snapshot);
         let commanded = snapshot.controls.iter().any(|(seq, _)| *seq > before);
@@ -354,12 +384,17 @@ impl Overlay {
         let has_content = super::has_content(&self.config, self.view, &snapshot);
         // Skip frames that change nothing on screen, such as a repeat after a reconnect
         let unchanged = !view_changed
+            && !notation_changed
             && self.latest.layer == snapshot.layer
             && self.latest.chord == snapshot.chord
             && self.latest.held == snapshot.held
             && self.latest.lookup == snapshot.lookup
-            && self.latest.tape.back().map(|e| (e.seq, e.repeats))
-                == snapshot.tape.back().map(|e| (e.seq, e.repeats));
+            && self
+                .latest
+                .tape
+                .back()
+                .map(|e| (e.seq, e.repeats, &e.split))
+                == snapshot.tape.back().map(|e| (e.seq, e.repeats, &e.split));
         self.latest = snapshot;
         self.follow_lookup();
         let action = self.presence.on_snapshot(
@@ -464,7 +499,10 @@ impl Overlay {
             return;
         }
         match Renderer::with_layout(&config, self.scale as u32, self.height, layout_for(&config)) {
-            Ok(renderer) => self.renderer = renderer,
+            Ok(renderer) => {
+                self.renderer = renderer;
+                self.renderer.set_notation(self.notation.text.as_deref());
+            }
             Err(e) => {
                 tracing::warn!("keeping the old overlay settings: {e:#}");
                 return;
@@ -608,7 +646,10 @@ impl CompositorHandler for Overlay {
             self.height,
             layout_for(&self.config),
         ) {
-            Ok(renderer) => self.renderer = renderer,
+            Ok(renderer) => {
+                self.renderer = renderer;
+                self.renderer.set_notation(self.notation.text.as_deref());
+            }
             Err(e) => return tracing::warn!("overlay scale {new_factor}: {e:#}"),
         }
         if let Some(layer) = &self.surface {
@@ -678,6 +719,7 @@ impl LayerShellHandler for Overlay {
             ) {
                 Ok(renderer) => {
                     self.renderer = renderer;
+                    self.renderer.set_notation(self.notation.text.as_deref());
                     self.height = height;
                 }
                 Err(e) => tracing::warn!("overlay layout for height {height}: {e:#}"),

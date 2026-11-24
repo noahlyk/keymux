@@ -248,7 +248,14 @@ pub fn serve_overlay(mut stream: UnixStream, hub: &OverlayHub) {
         });
 
         let mut state = hub.snapshot();
+        // The notation file goes with the first frame and when it changes, never with every one
+        let mut notation_sent = None;
         'serving: loop {
+            if notation_sent == Some(state.notation_seq) {
+                state.notation = None;
+            } else {
+                notation_sent = Some(state.notation_seq);
+            }
             if write_frame(&mut stream, &state).is_err() {
                 break;
             }
@@ -463,6 +470,29 @@ mod tests {
 
             // Closing our end must stop the stream thread on its own, with no further change
             // to wake it, so the scope can end. If it didn't, this test would hang.
+            drop(client);
+        });
+    }
+
+    #[test]
+    fn the_notation_file_is_sent_on_the_first_frame_and_when_it_changes_only() {
+        let hub = OverlayHub::default();
+        let text: std::sync::Arc<str> = std::sync::Arc::from(r#"{"left": {"TPH": "N"}}"#);
+        hub.set_layer_with(Some("steno"), Some(&text));
+        let (mut client, server) = UnixStream::pair().unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| serve_overlay(server, &hub));
+            let first: OverlaySnapshot = read_frame(&mut client).unwrap();
+            assert_eq!(first.notation.as_ref().map(|n| &*n.0), Some(&*text));
+            hub.set_keys(0b1, 0b1);
+            let next: OverlaySnapshot = read_frame(&mut client).unwrap();
+            assert_eq!(next.notation, None, "unchanged: not sent again");
+            assert_eq!(next.notation_seq, first.notation_seq);
+            let other: std::sync::Arc<str> = std::sync::Arc::from("{}");
+            hub.set_notation(Some(&other));
+            let changed: OverlaySnapshot = read_frame(&mut client).unwrap();
+            assert_eq!(changed.notation.as_ref().map(|n| &*n.0), Some("{}"));
+            assert!(changed.notation_seq > first.notation_seq);
             drop(client);
         });
     }

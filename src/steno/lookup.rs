@@ -112,8 +112,8 @@ impl LookupInput {
 /// in (so an extra key such as the `+` join key, in `ED/+-D`, parses, lights and prints).
 ///
 /// A query is read in the layer's notation too (`NAEM` as well as `TPHAEPL`, see
-/// [`super::notation`]). The rows' outlines stay in Plover's notation: the overlay draws them
-/// key by key, and it reads them back with nothing but the layout.
+/// [`super::notation`]). The rows' outlines are sent in Plover's notation: the overlay reads them
+/// back and writes them in the notation it was sent (see `OverlaySnapshot::notation`).
 #[derive(Debug)]
 pub struct Lookup {
     query: String,

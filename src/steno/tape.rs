@@ -154,8 +154,15 @@ impl Tape {
         self.notation = Some(notation);
     }
 
-    fn shown(&self, stroke: u32) -> String {
+    fn shown(&self, stroke: u32, split: Option<&[u32]>) -> String {
         if let Some(notation) = &self.notation {
+            if split.is_some() {
+                return notation
+                    .render_stroke_pieces_split(stroke, split)
+                    .into_iter()
+                    .map(|piece| piece.text)
+                    .collect();
+            }
             return notation.render_stroke(stroke);
         }
         self.layout.as_ref().map_or_else(
@@ -169,7 +176,7 @@ impl Tape {
     pub fn stroke(&mut self, stroke: u32, description: &str) {
         self.send(Entry::Stroke {
             stroke,
-            shown: self.shown(stroke),
+            shown: self.shown(stroke, None),
             description: description.to_owned(),
             secs: now_secs(),
         });
@@ -180,9 +187,39 @@ impl Tape {
     pub fn repeat(&mut self, stroke: u32, description: &str) {
         self.send(Entry::Repeat {
             stroke,
-            shown: self.shown(stroke),
+            shown: self.shown(stroke, None),
             description: description.to_owned(),
             secs: now_secs(),
+        });
+    }
+
+    /// [`Self::stroke`] or, `repeated`, [`Self::repeat`], the stroke written with its hands
+    /// split as `split` says when the theory's notation has one for it (the outline's own entry
+    /// in the notation file, or a plugin's report; see [`super::notation::Split`]).
+    pub fn stroke_with(
+        &mut self,
+        stroke: u32,
+        description: &str,
+        repeated: bool,
+        split: Option<&[u32]>,
+    ) {
+        let shown = self.shown(stroke, split);
+        let description = description.to_owned();
+        let secs = now_secs();
+        self.send(if repeated {
+            Entry::Repeat {
+                stroke,
+                shown,
+                description,
+                secs,
+            }
+        } else {
+            Entry::Stroke {
+                stroke,
+                shown,
+                description,
+                secs,
+            }
         });
     }
 
