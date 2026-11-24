@@ -560,6 +560,7 @@
     //     tape_read_color: Some([150, 205, 235, 255]), // that line's text colour (RGBA); None = the usual colour
     //     font: None,         // None = bundled Atkinson Hyperlegible
     //     layers: [],         // empty = every steno layer
+    //     hide_delay_ms: 40,  // how long it stays up after leaving the steno layer, a click or a window switch, so a screenshot key on another keyboard still catches it; 0 = hide at once. {:overlay:hide} is never delayed
     //     // Keys one finger plays together, underlined as one on the tape: a number per key
     //     // name, any number of keys per number. Entries replace that key's group; the
     //     // defaults are the pairs T K, P W, H R, A O, E U, F R, P B, L G, T S, D Z. An extra

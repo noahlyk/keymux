@@ -1,4 +1,4 @@
-//! Hides the overlay the moment you're not actively steno-typing any more: a niri window
+//! Hides the overlay (after `hide_delay_ms`) once you're not actively steno-typing any more: a niri window
 //! switch, or a mouse click, each forwarded to the Wayland loop as a plain "stop showing"
 //! signal. Real steno activity (a stroke, a layer change) un-suppresses it again; see
 //! `Overlay::on_snapshot` in `wayland.rs`.

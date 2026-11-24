@@ -150,7 +150,7 @@ pub fn run(config: OverlayConfig, source: Source, always: bool) -> Result<()> {
         animation: None,
         exit: false,
         always,
-        suppressed: false,
+        presence: Presence::default(),
         view: ViewState::default(),
         controls_seen: 0,
     };
@@ -204,10 +204,9 @@ struct Overlay {
     exit: bool,
     /// `--always`: show on every layer, not only steno ones
     always: bool,
-    /// A click or a window switch happened since the last real steno activity: stay hidden
-    /// even if the steno layer is still on, until a genuine change (a stroke, a layer
-    /// change) proves you're back to steno-typing. See [`Self::on_activity_interrupted`].
-    suppressed: bool,
+    /// Whether a click or a window switch put the panel away, and when a hide that is waiting
+    /// out `hide_delay_ms` is due
+    presence: Presence,
     /// What `{:overlay:hide}`, `{:tape:hide}` and friends have done since this overlay started.
     /// Runtime only: never saved, not part of the config, and a config reload leaves it alone.
     view: ViewState,
@@ -250,7 +249,98 @@ const fn next_action(
     (action, suppressed)
 }
 
+/// What one snapshot says about whether the panel should be up.
+#[derive(Debug, Clone, Copy)]
+struct Seen {
+    /// The snapshot's layer is one the overlay shows on ([`super::is_visible`])
+    on_layer: bool,
+    /// The view commands and the config leave something to draw ([`super::has_content`])
+    has_content: bool,
+    /// Nothing on screen differs from the snapshot before
+    unchanged: bool,
+}
+
+/// When the panel goes up and down, apart from the Wayland surface itself so it can be tested
+/// without one: the caller says whether a surface exists and what time it is, and carries out the
+/// [`Action`] it gets back.
+///
+/// A hide the user did not ask for (the steno layer was left, a click, a window switch) waits
+/// `delay` first, so the panel is still in the frame when the key that took you off steno is a
+/// screenshot key; steno activity inside that wait calls the hide off. A hide that was asked for
+/// (`{:overlay:hide}`, nothing left to draw) is immediate, and so is every show.
+#[derive(Debug, Default)]
+struct Presence {
+    /// A click or a window switch happened since the last real steno activity: stay hidden
+    /// even if the steno layer is still on, until a genuine change (a stroke, a layer
+    /// change) proves you're back to steno-typing.
+    suppressed: bool,
+    /// When the waiting hide is due. `None` when none waits, which lets the loop sleep.
+    hide_at: Option<Instant>,
+}
+
+impl Presence {
+    fn on_snapshot(
+        &mut self,
+        seen: Seen,
+        has_surface: bool,
+        delay: Duration,
+        now: Instant,
+    ) -> Action {
+        let visible = seen.on_layer && seen.has_content;
+        let (action, suppressed) =
+            next_action(visible, has_surface, seen.unchanged, self.suppressed);
+        self.suppressed = suppressed;
+        if visible && !suppressed {
+            // Back on steno before the wait ran out: the panel stays
+            self.hide_at = None;
+        }
+        match action {
+            // Only the layer was left: there is still something to draw, so wait
+            Action::Hide if seen.has_content => self.hide_after(delay, now),
+            action => action,
+        }
+    }
+
+    /// A click or a window switch: put the panel away (after the wait) and keep it away until
+    /// real steno activity.
+    fn on_interrupt(&mut self, has_surface: bool, delay: Duration, now: Instant) -> Action {
+        self.suppressed = true;
+        if has_surface {
+            self.hide_after(delay, now)
+        } else {
+            Action::Idle
+        }
+    }
+
+    /// Hide now with no delay, else note when. A hide already waiting keeps its time: more
+    /// reasons to hide (each key typed on the other keyboard) must not push it back.
+    fn hide_after(&mut self, delay: Duration, now: Instant) -> Action {
+        if delay.is_zero() {
+            return Action::Hide;
+        }
+        self.hide_at.get_or_insert(now + delay);
+        Action::Idle
+    }
+
+    /// The loop woke: is the waiting hide due?
+    fn on_tick(&self, now: Instant) -> Action {
+        match self.hide_at {
+            Some(due) if now >= due => Action::Hide,
+            _ => Action::Idle,
+        }
+    }
+
+    /// How long until the waiting hide is due, for the loop's sleep
+    fn until_hide(&self, now: Instant) -> Option<Duration> {
+        self.hide_at.map(|due| due.saturating_duration_since(now))
+    }
+}
+
 impl Overlay {
+    const fn hide_delay(&self) -> Duration {
+        Duration::from_millis(self.config.hide_delay_ms)
+    }
+
     fn on_snapshot(&mut self, snapshot: OverlaySnapshot) {
         let before = self.controls_seen;
         let view_changed = super::take_controls(&mut self.view, &mut self.controls_seen, &snapshot);
@@ -258,10 +348,10 @@ impl Overlay {
         if commanded && !self.view.hidden {
             // A show (even of what already shows) brings it back after a click or a window
             // switch put it away: the user asked for it
-            self.suppressed = false;
+            self.presence.suppressed = false;
         }
-        let visible = super::is_visible(&self.config, self.always, snapshot.layer.as_deref())
-            && super::has_content(&self.config, self.view, &snapshot);
+        let on_layer = super::is_visible(&self.config, self.always, snapshot.layer.as_deref());
+        let has_content = super::has_content(&self.config, self.view, &snapshot);
         // Skip frames that change nothing on screen, such as a repeat after a reconnect
         let unchanged = !view_changed
             && self.latest.layer == snapshot.layer
@@ -272,9 +362,20 @@ impl Overlay {
                 == snapshot.tape.back().map(|e| (e.seq, e.repeats));
         self.latest = snapshot;
         self.follow_lookup();
-        let (action, suppressed) =
-            next_action(visible, self.surface.is_some(), unchanged, self.suppressed);
-        self.suppressed = suppressed;
+        let action = self.presence.on_snapshot(
+            Seen {
+                on_layer,
+                has_content,
+                unchanged,
+            },
+            self.surface.is_some(),
+            self.hide_delay(),
+            Instant::now(),
+        );
+        self.act(action);
+    }
+
+    fn act(&mut self, action: Action) {
         match action {
             Action::Show => self.show(),
             Action::Hide => self.hide(),
@@ -312,16 +413,26 @@ impl Overlay {
         }
     }
 
-    /// How long the loop may sleep: `None` (until an event) unless an outline is playing on a
-    /// panel that is showing, then until its next stroke is due.
+    /// How long the loop may sleep: `None` (until an event) unless a hide is waiting out its
+    /// delay, or an outline is playing on a panel that is showing; then until the sooner of the
+    /// two is due.
     fn next_wake(&self) -> Option<Duration> {
-        let animation = self.animation.as_ref()?;
-        self.surface.as_ref()?;
-        anim::until_next_step(animation.strokes, animation.started.elapsed())
+        let hide = self.presence.until_hide(Instant::now());
+        let step = self.animation.as_ref().and_then(|animation| {
+            self.surface.as_ref()?;
+            anim::until_next_step(animation.strokes, animation.started.elapsed())
+        });
+        match (hide, step) {
+            (Some(hide), Some(step)) => Some(hide.min(step)),
+            (hide, step) => hide.or(step),
+        }
     }
 
-    /// Light the stroke whose turn it is, redrawing only when that changed.
+    /// Carry out a hide whose delay ran out, and light the stroke whose turn it is, redrawing
+    /// only when that changed.
     fn tick(&mut self) {
+        let due = self.presence.on_tick(Instant::now());
+        self.act(due);
         let Some(animation) = &self.animation else {
             return;
         };
@@ -337,13 +448,13 @@ impl Overlay {
     }
 
     /// A click or a window switch arrived from [`activity`]: you've stepped away from
-    /// steno-typing, so hide the overlay (if it's up) until real steno activity says
-    /// otherwise, even though the steno layer may still be on.
+    /// steno-typing, so hide the overlay (if it's up, and after `hide_delay_ms`) until real
+    /// steno activity says otherwise, even though the steno layer may still be on.
     fn on_activity_interrupted(&mut self) {
-        self.suppressed = true;
-        if self.surface.is_some() {
-            self.hide();
-        }
+        let action =
+            self.presence
+                .on_interrupt(self.surface.is_some(), self.hide_delay(), Instant::now());
+        self.act(action);
     }
 
     /// The config file changed. Layout, size and visibility rules may all differ, so rebuild
@@ -405,6 +516,8 @@ impl Overlay {
         // Dropping the last handle destroys the surface
         self.surface = None;
         self.configured = false;
+        // Whatever hid it, no hide is waiting any more
+        self.presence.hide_at = None;
     }
 
     /// The output named in config, if it's connected. `None` lets the compositor pick.
@@ -649,5 +762,178 @@ mod tests {
             next_action(false, false, true, false),
             (Action::Idle, false)
         );
+    }
+
+    const DELAY: Duration = Duration::from_millis(40);
+    const fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+    /// A stroke on a steno layer
+    const STROKE: Seen = Seen {
+        on_layer: true,
+        has_content: true,
+        unchanged: false,
+    };
+    /// A key on another keyboard: the steno layer is no longer the active one
+    const LEFT_STENO: Seen = Seen {
+        on_layer: false,
+        has_content: true,
+        unchanged: false,
+    };
+    /// `{:overlay:hide}` struck on the steno layer
+    const COMMANDED_HIDE: Seen = Seen {
+        on_layer: true,
+        has_content: false,
+        unchanged: false,
+    };
+
+    /// The panel as `Overlay` drives it, without the surface: `up` stands in for it.
+    struct Panel {
+        presence: Presence,
+        up: bool,
+        delay: Duration,
+        start: Instant,
+    }
+
+    impl Panel {
+        /// Up after a first stroke at time 0
+        fn showing(delay: Duration) -> Self {
+            let mut panel = Self {
+                presence: Presence::default(),
+                up: false,
+                delay,
+                start: Instant::now(),
+            };
+            assert_eq!(panel.snapshot(STROKE, 0), Action::Show);
+            panel
+        }
+        fn act(&mut self, action: Action) -> Action {
+            match action {
+                Action::Show => self.up = true,
+                Action::Hide => {
+                    self.up = false;
+                    self.presence.hide_at = None; // as `Overlay::hide` does
+                }
+                Action::Redraw | Action::Idle => {}
+            }
+            action
+        }
+        fn snapshot(&mut self, seen: Seen, at_ms: u64) -> Action {
+            let now = self.start + ms(at_ms);
+            let action = self.presence.on_snapshot(seen, self.up, self.delay, now);
+            self.act(action)
+        }
+        fn interrupt(&mut self, at_ms: u64) -> Action {
+            let now = self.start + ms(at_ms);
+            let action = self.presence.on_interrupt(self.up, self.delay, now);
+            self.act(action)
+        }
+        fn tick(&mut self, at_ms: u64) -> Action {
+            let action = self.presence.on_tick(self.start + ms(at_ms));
+            self.act(action)
+        }
+        fn sleep(&self, at_ms: u64) -> Option<Duration> {
+            self.presence.until_hide(self.start + ms(at_ms))
+        }
+    }
+
+    #[test]
+    fn leaving_steno_keeps_the_panel_up_until_the_delay_runs_out() {
+        let mut panel = Panel::showing(DELAY);
+        assert_eq!(panel.sleep(50), None, "nothing waits: the loop sleeps");
+        assert_eq!(panel.snapshot(LEFT_STENO, 100), Action::Idle);
+        assert!(panel.up);
+        // The loop sleeps exactly until the hide is due, and waking early changes nothing
+        assert_eq!(panel.sleep(100), Some(DELAY));
+        assert_eq!(panel.tick(139), Action::Idle);
+        assert!(panel.up);
+        assert_eq!(panel.sleep(139), Some(ms(1)));
+        assert_eq!(panel.tick(140), Action::Hide);
+        assert!(!panel.up);
+        assert_eq!(panel.sleep(140), None, "hidden: the loop sleeps again");
+        assert_eq!(panel.tick(500), Action::Idle);
+    }
+
+    #[test]
+    fn more_keys_off_steno_do_not_push_the_hide_back() {
+        let mut panel = Panel::showing(DELAY);
+        panel.snapshot(LEFT_STENO, 100);
+        assert_eq!(panel.snapshot(LEFT_STENO, 130), Action::Idle);
+        assert_eq!(panel.interrupt(135), Action::Idle);
+        assert_eq!(panel.sleep(135), Some(ms(5)));
+        assert_eq!(panel.tick(140), Action::Hide);
+    }
+
+    #[test]
+    fn a_stroke_inside_the_delay_calls_the_hide_off() {
+        let mut panel = Panel::showing(DELAY);
+        panel.snapshot(LEFT_STENO, 100);
+        assert_eq!(panel.snapshot(STROKE, 120), Action::Redraw);
+        assert_eq!(panel.sleep(120), None);
+        assert_eq!(panel.tick(1000), Action::Idle);
+        assert!(panel.up);
+    }
+
+    #[test]
+    fn a_click_hides_after_the_delay_and_a_stroke_inside_it_calls_that_off() {
+        let mut panel = Panel::showing(DELAY);
+        assert_eq!(panel.interrupt(100), Action::Idle);
+        assert!(panel.up);
+        // A repeat of the same snapshot is not steno activity: the hide still waits
+        let repeat = Seen {
+            unchanged: true,
+            ..STROKE
+        };
+        assert_eq!(panel.snapshot(repeat, 110), Action::Idle);
+        assert_eq!(panel.sleep(110), Some(ms(30)));
+        assert_eq!(panel.snapshot(STROKE, 120), Action::Redraw);
+        assert_eq!(panel.tick(1000), Action::Idle);
+        assert!(panel.up);
+
+        // Left alone, the click does hide it, and it stays away until a real change
+        panel.interrupt(2000);
+        assert_eq!(panel.tick(2040), Action::Hide);
+        assert_eq!(panel.snapshot(repeat, 2050), Action::Idle);
+        assert!(!panel.up);
+        assert_eq!(panel.snapshot(STROKE, 2060), Action::Show);
+    }
+
+    #[test]
+    fn a_commanded_hide_is_never_delayed() {
+        let mut panel = Panel::showing(DELAY);
+        assert_eq!(panel.snapshot(COMMANDED_HIDE, 100), Action::Hide);
+        assert!(!panel.up);
+
+        // Nor while another hide is waiting, and nothing is left waiting after it
+        let mut panel = Panel::showing(DELAY);
+        panel.snapshot(LEFT_STENO, 100);
+        let hidden_off_layer = Seen {
+            on_layer: false,
+            ..COMMANDED_HIDE
+        };
+        assert_eq!(panel.snapshot(hidden_off_layer, 110), Action::Hide);
+        assert_eq!(panel.sleep(110), None);
+    }
+
+    #[test]
+    fn no_delay_hides_at_once_as_before() {
+        let mut panel = Panel::showing(Duration::ZERO);
+        assert_eq!(panel.snapshot(LEFT_STENO, 100), Action::Hide);
+        assert!(!panel.up);
+        assert_eq!(panel.sleep(100), None);
+
+        let mut panel = Panel::showing(Duration::ZERO);
+        assert_eq!(panel.interrupt(100), Action::Hide);
+        assert!(!panel.up);
+        assert_eq!(panel.sleep(100), None);
+    }
+
+    #[test]
+    fn showing_is_never_delayed() {
+        let mut panel = Panel::showing(DELAY);
+        panel.snapshot(LEFT_STENO, 100);
+        panel.tick(140);
+        assert_eq!(panel.snapshot(STROKE, 141), Action::Show);
+        assert!(panel.up);
     }
 }

@@ -1124,6 +1124,7 @@ overlay: (
     tape_read_color: Some([150, 205, 235, 255]), // that line's text colour (RGBA); None = the usual colour
     font: None,          // path to a .ttf/.otf; None uses the bundled Atkinson Hyperlegible
     layers: [],          // steno layers that show it; empty means all of them
+    hide_delay_ms: 40,   // how long it stays up after it would hide by itself (see below); 0 = at once
     // Which keys one finger plays together; the tape underlines each lit group as one. Number
     // per key name, any number of keys per number (a pair, a trio, more). Each entry replaces
     // that key's group; keys left out keep the default pairs T K, P W, H R, A O, E U on the
@@ -1228,6 +1229,8 @@ each draw one wide paddle.
 
 An extra key drawn over a standard key (`overlay_overrides`, `SplitKey`) is in that key's group
 unless `key_groups` names it (one in a column of its own has no group); run `keymux check` to see entries that name no key.
+
+**Staying up for a screenshot (`hide_delay_ms`).** The overlay goes away by itself when you leave the steno layer (a key on another keyboard is enough), click, or switch windows. It waits `hide_delay_ms` milliseconds first (default 40), so a screenshot key on a keyboard that is not in steno still has the overlay in the picture: without the wait, the key that takes the screenshot is also the key that hides the overlay, and which of the two the compositor sees first is a race. Steno activity inside the wait (a stroke, coming back to the steno layer) calls the hide off. Showing is never delayed, and neither is a hide you asked for: `{:overlay:hide}`, `{:tape:hide}` and `{:keyboard:hide}`, or a config edit. `0` hides at once, as before. 40 ms is over two frames at 60 Hz and too short to see; lower it if you like (a few milliseconds usually still wins the race while the compositor is idle), and raise it if the screenshot key is delayed on its way out, as a tap-hold key is by its tapping term.
 
 Every field is optional, and edits to the config file apply without restarting the overlay.
 In niri, style it with `layer-rule { match namespace="^keymux-steno$" }`.

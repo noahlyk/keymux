@@ -902,6 +902,12 @@ pub struct OverlayConfig {
     pub font: Option<String>,
     /// Steno layers that show the overlay. Empty means every steno layer.
     pub layers: Vec<Layer>,
+    /// How long, in milliseconds, the overlay stays on screen after something other than a
+    /// command would hide it: the steno layer was left (a key on another keyboard), a click, a
+    /// window switch. Long enough that a screenshot key on another keyboard still catches it;
+    /// steno activity inside the wait keeps it up. 0 hides at once. `{:overlay:hide}` and the
+    /// other commands are never delayed, and showing never is.
+    pub hide_delay_ms: u64,
     /// Keys beyond keymux's own standard 23, exactly as the steno layer's own `extra_keys`
     /// says - the overlay process never reads a steno layer's config directly (it runs
     /// separately from the daemon), so it needs its own copy to know such a key exists at all,
@@ -988,6 +994,7 @@ impl Default for OverlayConfig {
             merges: Vec::new(),
             font: None,
             layers: Vec::new(),
+            hide_delay_ms: 40,
         }
     }
 }
