@@ -1793,6 +1793,113 @@ mod tests {
         assert_eq!(hub.snapshot().chord, 0);
     }
 
+    /// Real key timing, through the real preview thread: T, P, H, A, O, E, U, -T pressed one by
+    /// one about 19 ms apart (about 150 ms in all), an overlay subscribed the way `keymux
+    /// overlay` is. Every key's preview reaches the hub before the next key goes down, and the
+    /// overlay draws it (its frame skip counts the preview), all before any key comes up.
+    #[test]
+    fn each_key_held_is_previewed_and_drawn_before_the_next_key_and_before_any_release() {
+        use super::super::overlay::OverlaySnapshot;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Mutex;
+        const GAP: Duration = Duration::from_millis(19);
+        let mut engine = engine_with_dict(
+            r#"{"T": "it", "TP": "if", "TPH": "in", "TPHAO": "no", "TPHAOE": "knee",
+                "TPHAOEU": "nigh", "TPHAOEUT": "night"}"#,
+        );
+        let hub: &'static OverlayHub = Box::leak(Box::default());
+        engine.set_hub(hub);
+        engine.set_preview(true);
+        let layout = Layout::plover();
+        let keys = ["T", "P", "H", "A", "O", "E", "U", "-T"]
+            .map(|key| layout.parse_stroke(key).unwrap())
+            .map(|bit| (bit, key_for(&engine, bit)));
+        // (chord, what the live line shows) for each key down so far
+        let expected = ["it", "if", "in", "?", "no", "knee", "nigh", "night"];
+
+        // The overlay's subscription (see `ipc::serve_overlay`): every newer frame, as it comes
+        let frames: Mutex<Vec<(Instant, OverlaySnapshot)>> = Mutex::default();
+        let stop = AtomicBool::new(false);
+        let watching = hub.watch();
+        let mut pressed_at = Vec::new();
+        let released_at = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut seen = hub.snapshot().generation;
+                while !stop.load(Ordering::Acquire) {
+                    if let Some(frame) = hub.wait_newer(seen, Duration::from_millis(5), &stop) {
+                        seen = frame.generation;
+                        frames.lock().unwrap().push((Instant::now(), frame));
+                    }
+                }
+            });
+            for (_, key) in keys {
+                pressed_at.push(Instant::now());
+                engine.press(key, Instant::now());
+                std::thread::sleep(GAP);
+            }
+            let released_at = Instant::now();
+            let mut out = None;
+            for (_, key) in keys {
+                out = engine.release_at(key, Instant::now()).or(out);
+            }
+            assert_eq!(typed(out), "night", "the release types the last preview");
+            std::thread::sleep(GAP);
+            stop.store(true, Ordering::Release);
+            hub.wake();
+            released_at
+        });
+        drop(watching);
+        let frames = frames.into_inner().unwrap();
+
+        let mut chord = 0;
+        for (i, ((bit, _), want)) in keys.iter().zip(expected).enumerate() {
+            chord |= bit;
+            let pressed = pressed_at[i];
+            let next = pressed_at.get(i + 1).copied().unwrap_or(released_at);
+            let shown = frames.iter().find(|(_, f)| {
+                f.chord == chord
+                    && f.preview
+                        .as_ref()
+                        .is_some_and(|p| p.chord == chord && p.shown() == want)
+            });
+            let Some((at, _)) = shown else {
+                panic!("no frame previewed key {i} ({want}): {frames:#?}");
+            };
+            assert!(
+                *at < next,
+                "key {i}'s preview came {:?} after it went down, after the next key ({GAP:?})",
+                *at - pressed
+            );
+            assert!(*at < released_at, "before any release");
+        }
+
+        // The overlay's side: a frame it would skip as unchanged is never drawn. Each key's
+        // preview must be on a frame that is drawn, before the release.
+        #[cfg(feature = "overlay")]
+        {
+            let mut latest = OverlaySnapshot::default();
+            let mut drawn = Vec::new();
+            for (at, frame) in &frames {
+                if !crate::overlay::same_on_screen(&latest, frame) {
+                    drawn.push((*at, frame.clone()));
+                }
+                latest = frame.clone();
+            }
+            let mut chord = 0;
+            for (i, ((bit, _), want)) in keys.iter().zip(expected).enumerate() {
+                chord |= bit;
+                assert!(
+                    drawn.iter().any(|(at, f)| *at < released_at
+                        && f.chord == chord
+                        && f.preview
+                            .as_ref()
+                            .is_some_and(|p| p.chord == chord && p.shown() == want)),
+                    "the overlay never draws key {i}'s preview ({want}) while it is held"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_stroke_a_plugin_read_is_flagged_on_the_overlay_tape_and_a_dictionary_entry_is_not() {
         let mut dict = Dictionary::default();

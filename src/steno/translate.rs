@@ -846,8 +846,16 @@ impl Translator {
     /// waiting no longer than a stroke would. Nothing runs and nothing is typed.
     #[must_use]
     pub fn preview(&self, stroke: u32) -> super::preview::Struck {
+        self.preview_within(stroke, self.plugin_deadline)
+    }
+
+    /// [`Self::preview`], waiting on a plugin's reading no longer than `wait`: a reading not in
+    /// by then is [`super::preview::Kind::Late`], and keeps being read for the next look.
+    #[must_use]
+    pub fn preview_within(&self, stroke: u32, wait: Duration) -> super::preview::Struck {
         use super::preview::{Kind, Struck};
         let mut copy = self.clone();
+        copy.plugin_deadline = wait;
         copy.budget.set_preview();
         let before = journal::lock(&copy.shared).screen.clone();
         let output = copy.stroke(stroke);
@@ -2373,6 +2381,45 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         t.stroke(stroke("TOP"));
         assert!(!t.has_late(), "the reading was waiting for the stroke");
         assert_eq!(t.text(), "cat top");
+    }
+
+    /// A word only a plugin reads: the preview thread shows `…` at once, not after the stroke's
+    /// deadline (ten seconds here), then the word the moment the reading is in.
+    #[test]
+    fn the_preview_thread_shows_late_at_once_then_the_plugins_word() {
+        use crate::steno::notation::Notation;
+        use crate::steno::overlay::OverlayHub;
+        use crate::steno::preview::{Kind, Previewer};
+        let (mut t, go) = with_gated_plugin(r#"{"KAT": "cat"}"#, Duration::from_secs(10));
+        t.stroke(stroke("KAT"));
+        let notation = Notation::plain(Layout::plover());
+        let hub: &'static OverlayHub = Box::leak(Box::default());
+        let mut previewer = Previewer::spawn(hub).unwrap();
+        let top = stroke("TOP");
+        let shown = |want: Kind| {
+            let started = std::time::Instant::now();
+            loop {
+                if let Some(p) = hub.snapshot().preview.filter(|p| p.kind == want) {
+                    return (p, started.elapsed());
+                }
+                assert!(started.elapsed() < Duration::from_secs(5), "never {want:?}");
+                std::thread::sleep(Duration::from_micros(200));
+            }
+        };
+        hub.set_keys(top, top);
+        let asked = std::time::Instant::now();
+        previewer.request(&t, &notation, top);
+        let (late, _) = shown(Kind::Late);
+        let took = asked.elapsed();
+        assert_eq!(late.shown(), "…");
+        assert!(
+            took < Duration::from_secs(1),
+            "`…` waited {took:?}, as if for the stroke's deadline"
+        );
+        go.send(()).unwrap();
+        let (word, _) = shown(Kind::Text);
+        assert_eq!(word.text, "top");
+        assert!(word.read);
     }
 
     #[test]

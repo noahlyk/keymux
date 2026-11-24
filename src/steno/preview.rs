@@ -126,10 +126,27 @@ pub fn splits_of(
     vec![None; strokes.len()]
 }
 
-/// The preview of `chord` struck on `base`.
+/// The preview of `chord` struck on `base`, waiting on a plugin as long as a stroke would.
 #[must_use]
 pub fn compute(base: &Translator, notation: &Notation, chord: u32) -> Preview {
     let struck = base.preview(chord);
+    made(notation, chord, struck)
+}
+
+/// [`compute`], waiting on a plugin's reading no longer than `wait` (see
+/// [`Translator::preview_within`]).
+#[must_use]
+pub fn compute_within(
+    base: &Translator,
+    notation: &Notation,
+    chord: u32,
+    wait: Duration,
+) -> Preview {
+    let struck = base.preview_within(chord, wait);
+    made(notation, chord, struck)
+}
+
+fn made(notation: &Notation, chord: u32, struck: Struck) -> Preview {
     let split = (!notation.is_plain()
         && struck.outline.last() == Some(&chord)
         && matches!(struck.kind, Kind::Text))
@@ -147,7 +164,15 @@ pub fn compute(base: &Translator, notation: &Notation, chord: u32) -> Preview {
 /// How long a late preview keeps looking for the plugin's reading before it gives up.
 const LATE_PATIENCE: Duration = Duration::from_secs(2);
 
-/// How often a late preview looks again.
+/// How long the first look at a chord waits on a plugin: next to nothing, so a word only a
+/// plugin reads shows `…` at once instead of after the stroke's whole deadline, while a reading
+/// already in (or one that takes a millisecond) shows straight away. A dictionary word never
+/// waits on a plugin at all.
+const FIRST_WAIT: Duration = Duration::from_millis(2);
+
+/// How long each later look waits on the plugin's reading: it returns the moment the reading
+/// is in, and a newer chord is seen between looks, so this bounds how late a new key's preview
+/// can be while a plugin reads.
 const LATE_POLL: Duration = Duration::from_millis(10);
 
 enum Job {
@@ -264,17 +289,28 @@ fn run(queue: &mpsc::Receiver<Job>, hub: &OverlayHub, seen: &AtomicU64, gate: &M
             continue;
         }
         let started = Instant::now();
-        let mut preview = compute(translator, notation, bits);
+        let mut preview = compute_within(translator, notation, bits, FIRST_WAIT);
         tracing::trace!(
             "preview of {bits:#x}: {:?} in {:?}",
             preview.kind,
             started.elapsed()
         );
         publish(hub, gate, &current, &preview);
-        // A plugin still reading: look again until its reading is in, unless a newer chord comes
+        // A plugin still reading (`…` shows meanwhile): look again until its reading is in,
+        // unless a newer chord comes. Each look returns as soon as the reading lands.
         let late_since = Instant::now();
+        let mut quick = false;
         while preview.kind == Kind::Late && late_since.elapsed() < LATE_PATIENCE {
-            match queue.recv_timeout(LATE_POLL) {
+            // A look that came back at once did not wait: wait here instead, never spin
+            let newer = if quick {
+                queue.recv_timeout(LATE_POLL)
+            } else {
+                queue.try_recv().map_err(|e| match e {
+                    mpsc::TryRecvError::Empty => mpsc::RecvTimeoutError::Timeout,
+                    mpsc::TryRecvError::Disconnected => mpsc::RecvTimeoutError::Disconnected,
+                })
+            };
+            match newer {
                 Ok(job) => {
                     next = Some(job);
                     break;
@@ -285,7 +321,9 @@ fn run(queue: &mpsc::Receiver<Job>, hub: &OverlayHub, seen: &AtomicU64, gate: &M
             if !current() {
                 break;
             }
-            preview = compute(translator, notation, bits);
+            let looked = Instant::now();
+            preview = compute_within(translator, notation, bits, LATE_POLL);
+            quick = looked.elapsed() < LATE_POLL / 2;
             if preview.kind != Kind::Late {
                 publish(hub, gate, &current, &preview);
             }

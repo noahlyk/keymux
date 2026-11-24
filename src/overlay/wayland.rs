@@ -383,18 +383,8 @@ impl Overlay {
         let on_layer = super::is_visible(&self.config, self.always, snapshot.layer.as_deref());
         let has_content = super::has_content(&self.config, self.view, &snapshot);
         // Skip frames that change nothing on screen, such as a repeat after a reconnect
-        let unchanged = !view_changed
-            && !notation_changed
-            && self.latest.layer == snapshot.layer
-            && self.latest.chord == snapshot.chord
-            && self.latest.held == snapshot.held
-            && self.latest.lookup == snapshot.lookup
-            && self
-                .latest
-                .tape
-                .back()
-                .map(|e| (e.seq, e.repeats, &e.split))
-                == snapshot.tape.back().map(|e| (e.seq, e.repeats, &e.split));
+        let unchanged =
+            !view_changed && !notation_changed && super::same_on_screen(&self.latest, &snapshot);
         self.latest = snapshot;
         self.follow_lookup();
         let action = self.presence.on_snapshot(

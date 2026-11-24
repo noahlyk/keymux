@@ -113,6 +113,20 @@ const fn has_content(config: &OverlayConfig, view: ViewState, snapshot: &Overlay
             || snapshot.lookup.is_some())
 }
 
+/// Whether `next` draws the same as `drawn`, so its frame can be skipped (a repeat after a
+/// reconnect, say). Everything the panel draws from a snapshot counts: the layer, the keys, the
+/// lookup, the newest tape line, and the live line's preview, which arrives on a snapshot of its
+/// own after the key that asked for it, with the keys unchanged.
+pub(crate) fn same_on_screen(drawn: &OverlaySnapshot, next: &OverlaySnapshot) -> bool {
+    drawn.layer == next.layer
+        && drawn.chord == next.chord
+        && drawn.held == next.held
+        && drawn.lookup == next.lookup
+        && drawn.tape.back().map(|e| (e.seq, e.repeats, &e.split))
+            == next.tape.back().map(|e| (e.seq, e.repeats, &e.split))
+        && drawn.preview == next.preview
+}
+
 fn config_path() -> Option<std::path::PathBuf> {
     Config::default_path().ok()
 }
@@ -153,6 +167,29 @@ mod tests {
     use super::*;
     use crate::config::Layer;
     use crate::steno::overlay_control::{Part, Verb, ViewCommand};
+
+    #[test]
+    fn a_preview_arriving_alone_is_drawn_not_skipped_as_unchanged() {
+        use crate::steno::preview::Preview;
+        let keys = OverlaySnapshot {
+            chord: 0b110,
+            held: 0b110,
+            ..OverlaySnapshot::default()
+        };
+        assert!(same_on_screen(&keys, &keys.clone()), "a repeat is skipped");
+        let previewed = OverlaySnapshot {
+            preview: Some(Preview {
+                chord: 0b110,
+                text: "if".into(),
+                ..Preview::default()
+            }),
+            ..keys.clone()
+        };
+        assert!(
+            !same_on_screen(&keys, &previewed),
+            "the preview comes after its keys, on a frame of its own"
+        );
+    }
 
     #[test]
     fn it_shows_only_on_steno_layers_unless_always_is_set() {
