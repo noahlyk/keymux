@@ -10,6 +10,17 @@ use rustc_hash::FxHashMap;
 
 pub const BOLD: &[u8] = include_bytes!("../../assets/fonts/AtkinsonHyperlegible-Bold.ttf");
 
+/// Letters a theory's notation may use that the main font may lack (`Ō`, `Ʊ`, `Ŋ`...): a subset
+/// of Noto Sans Bold, drawn only for a character the main font has no glyph for.
+pub const FALLBACK: &[u8] = include_bytes!("../../assets/fonts/NotoSans-Bold-Notation.ttf");
+
+/// The fallback face, loaded once.
+fn fallback() -> Option<&'static FontArc> {
+    static FONT: std::sync::OnceLock<Option<FontArc>> = std::sync::OnceLock::new();
+    FONT.get_or_init(|| FontArc::try_from_slice(FALLBACK).ok())
+        .as_ref()
+}
+
 /// The embedded face, or the user's font file from `overlay: (font: Some(..))`.
 pub fn load_font(path: Option<&str>, embedded: &'static [u8]) -> Result<FontArc> {
     match path {
@@ -154,6 +165,11 @@ impl GlyphCache {
 
 /// Draw `c` with its pen `shift` pixels (0 to under 1) to the right of a whole-pixel position.
 fn rasterize(font: &FontArc, scale: PxScale, c: char, shift: f32) -> Glyph {
+    // A character the font has no glyph for, from the fallback face when it has one
+    let font = match fallback() {
+        Some(other) if font.glyph_id(c).0 == 0 && other.glyph_id(c).0 != 0 => other,
+        _ => font,
+    };
     let id = font.glyph_id(c);
     let advance = font.as_scaled(scale).h_advance(id);
     let Some(outline) = font.outline_glyph(id.with_scale_and_position(scale, point(shift, 0.0)))
@@ -267,6 +283,26 @@ mod tests {
             assert_eq!(cache.get(' ').width, 0);
             assert!(cache.measure("STKPW") > 0.0);
         }
+    }
+
+    #[test]
+    fn every_letter_a_notation_may_use_draws_a_glyph() {
+        let mut cache = GlyphCache::new(load_font(None, BOLD).unwrap(), 16.0);
+        for c in "ĀĒĪŌŪÔƱŠČŽŊÞāēīōūôʊšážŋþ".chars() {
+            let glyph = cache.get(c);
+            assert!(
+                glyph.width > 0 && glyph.mask.iter().any(|&a| a > 0) && glyph.advance > 0.0,
+                "{c:?} is blank"
+            );
+        }
+        // The fallback only fills a gap: a letter the main font has is the main font's
+        let main = FontArc::try_from_slice(BOLD).unwrap();
+        assert_ne!(main.glyph_id('Ā').0, 0);
+        assert_eq!(
+            main.glyph_id('Ʊ').0,
+            0,
+            "the main font lacks Ʊ: the fallback draws it"
+        );
     }
 
     #[test]

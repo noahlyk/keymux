@@ -102,6 +102,19 @@ License:   SIL Open Font License, Version 1.1; the license text is in
            modified here. The OFL allows bundling the font with software under
            another license, as long as the font itself is not sold alone.
 
+4a. Noto Sans Bold, a subset (embedded fallback font)
+----------------------------------------------------
+
+File:      assets/fonts/NotoSans-Bold-Notation.ttf, embedded into the binary
+Source:    NotoSans-Bold.ttf version 2.015 (the noto-fonts package), cut with
+           fontTools' subsetter to the 24 letters a theory's notation may use
+           that Atkinson Hyperlegible lacks or may lack (Ā Ē Ī Ō Ū Ô Ʊ Š Č Ž Ŋ Þ
+           and their lowercase); the glyphs themselves are not changed.
+Copyright: 2022 The Noto Project Authors
+License:   SIL Open Font License, Version 1.1; the license text is in
+           assets/fonts/OFL-Noto.txt and must stay with the font. The overlay
+           draws a letter with it only when the main font has no glyph for it.
+
 5. Rust crates
 --------------
 
