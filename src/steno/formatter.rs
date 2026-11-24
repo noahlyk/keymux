@@ -6,7 +6,7 @@
 
 use super::action::{
     apply_case, apply_mode, has_word_boundary, is_digits, last_text, last_word, rightmost_word,
-    Action, Case, SPACE,
+    Action, Case, Surround, SPACE,
 };
 use super::layout::{render_raw_stroke, render_stroke};
 use super::meta::meta_to_action;
@@ -129,6 +129,15 @@ impl<'a> Context<'a> {
         last_word(&self.last_actions())
     }
 
+    /// The text typed since the last whitespace, with whitespace after it.
+    #[must_use]
+    pub fn last_fragment(&self) -> Option<String> {
+        super::action::last_fragments_in_order(&self.last_actions(), 1)
+            .pop()
+            .map(|fragment| fragment.trim_start().to_string())
+            .filter(|fragment| !fragment.trim_end().is_empty())
+    }
+
     /// The last `count` words typed, in order.
     #[must_use]
     pub fn last_words(&self, count: usize) -> Vec<String> {
@@ -192,6 +201,56 @@ fn raw_to_actions(rtfcre: &str, shown: &str, ctx: &mut Context) -> Vec<Action> {
     };
     ctx.translated(action.clone());
     vec![action]
+}
+
+/// Put the marks a `{:surround:next:...}` armed around the text of the translation that follows
+/// it: the open mark before its first text (after the space), the close mark attached after its
+/// last. A translation that types nothing and only changes the state (`{-|}`) passes the marks
+/// on to the next one; one that presses keys or runs a command (`{#Return}`) drops them.
+fn surround_translation(
+    surround: &Surround,
+    formatting: &mut Vec<Action>,
+    ctx: &mut Context,
+    first_action: usize,
+) {
+    let types =
+        |a: &Action| a.look_ahead.is_none() && a.text.as_deref().is_some_and(|t| !t.is_empty());
+    let first = formatting.iter().position(types);
+    let last = formatting.iter().rposition(types);
+    if let (Some(first), Some(last)) = (first, last) {
+        if let Some(text) = formatting[first].text.as_mut() {
+            text.insert_str(0, &surround.open);
+        }
+        let base = &formatting[last];
+        let close = Action {
+            prev_attach: true,
+            text: Some(surround.close.clone()),
+            space_char: base.space_char.clone(),
+            case: base.case,
+            trailing_space: base.space_char.clone(),
+            ..Action::default()
+        };
+        formatting.insert(last + 1, close);
+    } else {
+        let acts = |a: &Action| {
+            a.combo.as_ref().is_some_and(|c| !c.is_empty())
+                || a.command.as_ref().is_some_and(|c| !c.is_empty())
+        };
+        if formatting.iter().any(acts) {
+            return;
+        }
+        match formatting.last_mut() {
+            // A new `{:surround:next:...}` in it wins
+            Some(last) if last.look_ahead.is_none() && last.surround_next.is_none() => {
+                last.surround_next = Some(Box::new(surround.clone()));
+            }
+            _ => return,
+        }
+    }
+    ctx.translated.truncate(first_action);
+    for action in formatting.iter() {
+        ctx.translated(action.clone());
+    }
 }
 
 fn atom_to_action(atom: &str, ctx: &Context) -> Action {
@@ -479,6 +538,7 @@ impl Formatter {
                     continue;
                 }
                 let first_action = ctx.translated.len();
+                let surround = ctx.last_action.surround_next.take();
                 translation.formatting = match translation.english.as_deref() {
                     Some(english) if !english.is_empty() => {
                         translation_to_actions(english, &mut ctx)
@@ -488,6 +548,14 @@ impl Formatter {
                         raw_to_actions(&render_stroke(stroke), &render_raw_stroke(stroke), &mut ctx)
                     }
                 };
+                if let Some(surround) = surround {
+                    surround_translation(
+                        &surround,
+                        &mut translation.formatting,
+                        &mut ctx,
+                        first_action,
+                    );
+                }
                 // A command runs once per translation: the first time it is formatted. Redoing
                 // it, or putting it back after a longer entry that replaced it is undone, is
                 // not the user striking it again.

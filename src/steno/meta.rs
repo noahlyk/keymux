@@ -4,7 +4,9 @@
 //! `{^ing}` is the attach meta with `^ing`, `{-|}` the case meta with `cap_first_word`, and so on.
 //! The parser tries the shapes in Plover's order, and the first that fits the whole text wins.
 
-use super::action::{apply_case, has_word_boundary, is_space, rightmost_word, Action, Case, SPACE};
+use super::action::{
+    apply_case, has_word_boundary, is_space, rightmost_word, Action, Case, Surround, SPACE,
+};
 use super::formatter::Context;
 use super::layout::Layout;
 
@@ -276,6 +278,12 @@ fn check_first_up(param: &str, layout: &Layout) -> Option<String> {
     })
 }
 
+fn check_surround(param: &str, _: &Layout) -> Option<String> {
+    surround_args(param).is_none().then(|| {
+        format!("`{param}` is not `next:OPEN:CLOSE` or `last:OPEN:CLOSE` (CLOSE may be left out)")
+    })
+}
+
 fn check_no_argument(param: &str, _: &Layout) -> Option<String> {
     (!param.trim().is_empty()).then(|| format!("takes no argument, but has `{param}`"))
 }
@@ -453,6 +461,16 @@ pub(crate) static KNOWN: &[KnownMeta] = &[
         bare_ok: true,
         whole_entry: false,
         check: fine,
+    },
+    // keymux's own: `{:surround:next:OPEN:CLOSE}` types the next text between the marks,
+    // `{:surround:last:OPEN:CLOSE}` puts them around the text since the last space
+    KnownMeta {
+        name: "surround",
+        run: meta_surround,
+        verbs: &[],
+        bare_ok: true,
+        whole_entry: false,
+        check: check_surround,
     },
     KnownMeta {
         name: "word_end",
@@ -732,6 +750,67 @@ fn meta_stitch_last_word(ctx: &Context, cmdline: &str) -> Action {
         action.prev_attach = true;
         action.word = None;
     }
+    action
+}
+
+/// `next:OPEN:CLOSE` or `last:OPEN:CLOSE` read as (is it `next`, the marks). The marks are split
+/// on `:`; `\:` is a colon and `\\` a backslash in a mark (a brace is `\{` / `\}`, as in any
+/// text). With no CLOSE the mark goes on both sides (`{:surround:next:"}`).
+pub(crate) fn surround_args(param: &str) -> Option<(bool, Surround)> {
+    let mut parts = vec![String::new()];
+    let mut chars = param.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                let next = chars.next();
+                let part = parts.last_mut()?;
+                match next {
+                    Some(escaped @ (':' | '\\')) => part.push(escaped),
+                    Some(other) => {
+                        part.push('\\');
+                        part.push(other);
+                    }
+                    None => part.push('\\'),
+                }
+            }
+            ':' => parts.push(String::new()),
+            other => parts.last_mut()?.push(other),
+        }
+    }
+    let next = match parts[0].trim().to_lowercase().as_str() {
+        "next" => true,
+        "last" => false,
+        _ => return None,
+    };
+    let (open, close) = match &parts[1..] {
+        [open] => (open.clone(), open.clone()),
+        [open, close] => (open.clone(), close.clone()),
+        _ => return None,
+    };
+    (!open.is_empty() || !close.is_empty()).then_some((next, Surround { open, close }))
+}
+
+/// `{:surround:next:OPEN:CLOSE}` arms the marks for the next text, which the formatter types
+/// between them (see `formatter::surround_translation`). `{:surround:last:OPEN:CLOSE}` rewrites
+/// the text since the last space, `word` as `OPENwordCLOSE`; undoing it puts the word back.
+fn meta_surround(ctx: &Context, param: &str) -> Action {
+    let Some((next, surround)) = surround_args(param) else {
+        return ctx.new_action();
+    };
+    let mut action = ctx.copy_last_action();
+    if next {
+        action.surround_next = Some(Box::new(surround));
+        return action;
+    }
+    let Some(fragment) = ctx.last_fragment() else {
+        return action;
+    };
+    let word = fragment.trim_end();
+    let after = &fragment[word.len()..];
+    action.prev_attach = true;
+    action.text = Some(format!("{}{word}{}{after}", surround.open, surround.close));
+    action.prev_replace = fragment;
+    action.word = None;
     action
 }
 

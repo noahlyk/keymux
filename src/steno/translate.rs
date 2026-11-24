@@ -135,7 +135,9 @@ impl Translation {
         }
         self.formatting.iter().any(|a| {
             let a = a.effective();
-            a.text.as_deref().is_some_and(|t| !t.is_empty()) || !a.prev_replace.is_empty()
+            a.text.as_deref().is_some_and(|t| !t.is_empty())
+                || !a.prev_replace.is_empty()
+                || a.surround_next.is_some()
         })
     }
 }

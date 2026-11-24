@@ -91,6 +91,13 @@ fn compiled(pattern: &str) -> Option<fancy_regex::Regex> {
         .clone()
 }
 
+/// A pair of marks to put around text: `{:surround:next:(:)}` waits with one for the next text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Surround {
+    pub open: String,
+    pub close: String,
+}
+
 /// Instructions and resulting state for one atom of a translation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Action {
@@ -129,6 +136,8 @@ pub struct Action {
     pub next_case: Option<Case>,
     /// Set for a look-ahead action: it stands for whichever of two actions the next text picks
     pub look_ahead: Option<Box<LookAhead>>,
+    /// The marks the next text is typed between (`{:surround:next:...}`), until text comes
+    pub surround_next: Option<Box<Surround>>,
 }
 
 impl Default for Action {
@@ -150,6 +159,7 @@ impl Default for Action {
             next_attach: false,
             next_case: None,
             look_ahead: None,
+            surround_next: None,
         }
     }
 }

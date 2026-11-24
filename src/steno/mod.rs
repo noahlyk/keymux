@@ -55,5 +55,7 @@ mod lapwing_tests;
 mod plover_tests;
 #[cfg(test)]
 mod soak_tests;
+#[cfg(test)]
+mod surround_tests;
 
 pub use engine::StenoEngine;
