@@ -5,7 +5,7 @@
 
 use super::control::{Controlled, Doorbell, Signal};
 use super::debounce::Debounce;
-use super::output::{self, Pacer, Sink};
+use super::output::{self, Pacer, Sink, Unicode};
 use super::KeymapProcessor;
 use crate::keycode::KeyCode;
 use evdev::{Device, EventType, InputEvent, Key};
@@ -115,6 +115,11 @@ impl Pump {
         sink: &mut O,
     ) -> io::Result<Step> {
         let mut keymap = crate::lock(shared);
+        let helper = crate::unicode::UserHelper(self.user_id);
+        let unicode = Unicode {
+            mode: keymap.unicode_output(),
+            helper: Some(&helper),
+        };
         while let Some(signal) = self.control.take() {
             match signal {
                 // Asked to stop, or no one left to ask: the keyboard is given back either way
@@ -148,11 +153,11 @@ impl Pump {
                 // held past its term, a one-shot modifier no key used, a held stroke
                 // repeating
                 let tap_dance = keymap.check_dt_timeouts();
-                output::emit_result(sink, &mut self.pacer, tap_dance)?;
+                output::emit_result(sink, &mut self.pacer, unicode, tap_dance)?;
                 let one_shot = keymap.check_osm_timeouts();
-                output::emit_result(sink, &mut self.pacer, one_shot)?;
+                output::emit_result(sink, &mut self.pacer, unicode, one_shot)?;
                 let steno = keymap.check_steno_timeouts();
-                output::emit_result(sink, &mut self.pacer, steno)?;
+                output::emit_result(sink, &mut self.pacer, unicode, steno)?;
                 let stats_due = keymap
                     .has_unsaved_adaptive_stats()
                     .then(|| self.last_stats_save + STATS_SAVE_INTERVAL);
@@ -196,7 +201,7 @@ impl Pump {
                         continue;
                     }
                     let result = keymap.process_key_at(key, pressed, at);
-                    output::emit_result(sink, &mut self.pacer, result)?;
+                    output::emit_result(sink, &mut self.pacer, unicode, result)?;
                     continue;
                 }
             }

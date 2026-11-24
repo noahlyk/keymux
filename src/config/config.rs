@@ -799,6 +799,33 @@ pub struct Config {
     /// a set list replaces them, so an empty one trusts nothing.
     #[serde(default)]
     pub trusted_dictionaries: Option<Vec<String>>,
+
+    /// How text with characters the keyboard has no key for (`—`, `é`, `Ī`, `™`) is typed.
+    /// Text whose characters all have a key on the US layout is typed as keys, whatever this
+    /// says. See [`UnicodeOutput`].
+    #[serde(default)]
+    pub unicode_output: UnicodeOutput,
+}
+
+/// How keymux types a character the virtual keyboard has no key for.
+///
+/// Characters with a key on the US layout (letters, digits, ASCII punctuation, space, Enter,
+/// Tab) are always typed as keys; this only decides the rest.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnicodeOutput {
+    /// The Wayland helper when one is connected, otherwise as `Off` with a warning in the log.
+    /// The same as `Wayland` today; kept as the default so a later fallback (X11) can join it.
+    #[default]
+    Auto,
+    /// Through the helper in the user's session (`keymux overlay`), which types with the
+    /// Wayland virtual-keyboard protocol. With no helper connected: as `Off`, with a warning.
+    Wayland,
+    /// Ctrl+Shift+U, the code point in hex, then Space, as keys: the Unicode entry of GTK and
+    /// IBus. Only apps that understand it get the character; others get the hex digits.
+    CtrlShiftU,
+    /// Each such character is typed as `?`, so that undo still deletes the right number of
+    /// characters.
+    Off,
 }
 
 /// The dictionaries trusted to run inline shell commands when `trusted_dictionaries` is unset:
@@ -1436,6 +1463,7 @@ impl Config {
                     overlay: self.overlay.clone(), // The overlay is one per screen, not per keyboard
                     commands: self.commands.clone(), // Named commands and trust are global
                     trusted_dictionaries: self.trusted_dictionaries.clone(),
+                    unicode_output: self.unicode_output, // One per user, like the overlay
                 }
             }
         } else {
@@ -2024,6 +2052,26 @@ mod tests {
 
     fn parse(text: &str) -> Config {
         ron::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn unicode_output_defaults_to_auto_and_reads_each_choice() {
+        assert_eq!(parse("()").unicode_output, UnicodeOutput::Auto);
+        for (text, mode) in [
+            ("Auto", UnicodeOutput::Auto),
+            ("Wayland", UnicodeOutput::Wayland),
+            ("CtrlShiftU", UnicodeOutput::CtrlShiftU),
+            ("Off", UnicodeOutput::Off),
+        ] {
+            let config = parse(&format!("(unicode_output: {text})"));
+            assert_eq!(config.unicode_output, mode);
+            // A keyboard's own config keeps it, whether it inherits the global one or not
+            let alone = parse(&format!(
+                "(unicode_output: {text}, per_keyboard_inherits_global_layout: false, \
+                 per_keyboard_overrides: {{\"kb\": ()}})"
+            ));
+            assert_eq!(alone.for_keyboard("kb").unicode_output, mode);
+        }
     }
 
     #[test]

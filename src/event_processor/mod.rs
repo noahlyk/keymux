@@ -28,6 +28,8 @@ mod output;
 mod pump;
 #[cfg(test)]
 mod steno_tests;
+#[cfg(test)]
+mod unicode_tests;
 
 #[cfg(test)]
 pub(crate) use output::{char_to_key, retype_taps, tap_events, Pacer, SAFE_EVENTS, UNREAD_WINDOW};

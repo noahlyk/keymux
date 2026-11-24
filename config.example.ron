@@ -489,6 +489,11 @@
     // A set list replaces that; [] trusts nothing.
     // trusted_dictionaries: ["00-user.json", "user"],
 
+    // Characters with no key on the US layout (—, é, ™, °): Auto (default) and Wayland type
+    // them through `keymux overlay` (the Wayland virtual-keyboard protocol); CtrlShiftU types
+    // GTK/IBus Unicode entry (Ctrl+Shift+U, hex, Space); Off types each as '?'.
+    // unicode_output: Auto,
+
     // Hot config reload: automatically reload config when file changes (default: false)
     // When enabled, changes to config.ron are immediately applied without restarting daemon
     // Useful for: Testing configs, live tuning, rapid iteration

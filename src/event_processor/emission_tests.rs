@@ -68,7 +68,7 @@ fn tap(key: Key) -> Vec<(EventType, u16, i32)> {
 fn emitted(result: ProcessResult) -> Vec<(EventType, u16, i32)> {
     let mut out = Recorder::default();
     let mut pacer = Pacer::default();
-    output::emit_result(&mut out, &mut pacer, result).unwrap();
+    output::emit_result(&mut out, &mut pacer, output::Unicode::default(), result).unwrap();
     out.events
 }
 
@@ -478,6 +478,7 @@ fn uinput_round_trip_emits_exactly_the_backspaces_asked_for() {
     output::emit_result(
         &mut virtual_device,
         &mut pacer,
+        output::Unicode::default(),
         ProcessResult::Retype {
             backspaces: 7,
             text: "course".into(),

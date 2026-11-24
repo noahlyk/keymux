@@ -129,7 +129,9 @@ install the one matching your compositor/WM.
 
 **Steno overlay (optional):** `keymux overlay` draws the steno keyboard and tape on
 screen while a steno layer is on. Needs a Wayland compositor with layer-shell (niri,
-Hyprland, Sway; not GNOME). See [On-screen overlay](#on-screen-overlay).
+Hyprland, Sway; not GNOME). See [On-screen overlay](#on-screen-overlay). It is also what
+types characters with no key (`—`, `é`, `™`) for the daemon; with `overlay: (enabled:
+false)` it does only that. See [Characters with no key](#characters-with-no-key).
 - Path: `/usr/lib/systemd/user/keymux-steno.service`
 - Enable: `systemctl --user enable --now keymux-steno.service`
 
@@ -510,6 +512,45 @@ A steno stroke can run a command too, by name: see [Running your own commands fr
     ),
 )
 ```
+
+### Characters with no key
+
+The daemon types through a virtual keyboard with the US layout's keys, so a letter, digit,
+ASCII punctuation, space, Enter or Tab is typed as its key, exactly as always. A character
+with no key on it (`—`, `–`, `é`, `Ī`, `™`, `°`, `²`, emoji) cannot be typed that way;
+`unicode_output` says what happens to text that has one:
+
+| `unicode_output` | Text with a character that has no key |
+|---|---|
+| `Auto` (default) | as `Wayland` |
+| `Wayland` | the whole text, backspaces included, is typed by the helper in your session (`keymux overlay`) with the Wayland virtual-keyboard protocol (`zwp_virtual_keyboard_v1`, as `wtype` does). With no helper connected: as `Off`, plus one warning in the daemon's log |
+| `CtrlShiftU` | each such character as Ctrl+Shift+U, its code point in hex, Space: the Unicode entry of GTK and IBus apps. Other apps get the hex digits |
+| `Off` | each such character is typed as `?` |
+
+```ron
+unicode_output: Auto,
+```
+
+- **Needs the helper.** It runs inside `keymux overlay`
+  (`systemctl --user enable --now keymux-steno.service`), on its own Wayland connection; with
+  `overlay: (enabled: false)` the process stays up for this alone. Its compositor must offer
+  `zwp_virtual_keyboard_v1`: niri, Sway, Hyprland and other wlroots compositors do, GNOME
+  does not. The daemon logs `unicode helper connected for user N` when it is there.
+- **In order.** Keys typed before the text get 15 ms (the pacer's unread window) to reach
+  the compositor before the helper types, and the daemon waits for the helper to report
+  the compositor has handled every key of it before sending anything after. A whole piece
+  of output (`NĪT -> night`, or the backspaces of a correction and the text that replaces
+  them) is one job, so nothing inside it can be reordered.
+- **Undo stays exact.** A backspace deletes one character however it was typed, and the
+  steno engine counts characters, not bytes; a character that cannot be typed becomes one
+  `?`, never nothing, so undo still deletes the right number.
+- **Only text with such a character changes path.** Text whose characters all have keys
+  never goes near the helper: same keys, same speed.
+- **Never silent.** Without a helper (X11, a TTY, the overlay stopped) the daemon warns once
+  in its log (`journalctl -u keymux`), until a helper connects again.
+- **Your layout is untouched.** The helper uploads a small keymap of its own with only the
+  characters it needs; the compositor applies it to the helper's keys only, and the app
+  gets your keyboard's keymap back with your next key.
 
 ### Timing Configuration
 

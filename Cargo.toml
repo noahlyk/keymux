@@ -43,11 +43,13 @@ wasmtime = { version = "50", default-features = false, features = ["runtime", "c
 smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"], optional = true }
 tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"], optional = true }
 ab_glyph = { version = "0.2", optional = true }
+# The Unicode helper in `keymux overlay`: types characters with no key (zwp_virtual_keyboard_v1)
+wayland-protocols-misc = { version = "0.3", features = ["client"], optional = true }
 fancy-regex = "0.14"
 
 [features]
 default = ["overlay"]
-overlay = ["dep:smithay-client-toolkit", "dep:tiny-skia", "dep:ab_glyph"]
+overlay = ["dep:smithay-client-toolkit", "dep:tiny-skia", "dep:ab_glyph", "dep:wayland-protocols-misc"]
 
 [dev-dependencies]
 criterion = "0.8"

@@ -66,6 +66,10 @@ pub enum IpcRequest {
     /// New requests go at the end: an older daemon decodes requests by position, and one it
     /// does not know makes it drop the connection, which the client reads as "older daemon".
     Version,
+    /// Keep the connection open as the user's Unicode helper: the daemon sends
+    /// [`TypeJob`](crate::unicode::TypeJob)s on it and the helper answers each with
+    /// [`Typed`](crate::unicode::Typed). Handled by the IPC thread itself. See [`crate::unicode`].
+    ServeUnicode,
 }
 
 /// IPC response from daemon to client
@@ -217,7 +221,7 @@ pub fn read_request(stream: &mut impl Read) -> Option<IpcRequest> {
 }
 
 /// Write one length-prefixed bincode frame, the same framing as requests and responses.
-fn write_frame(stream: &mut impl Write, value: &impl Serialize) -> Result<()> {
+pub(crate) fn write_frame(stream: &mut impl Write, value: &impl Serialize) -> Result<()> {
     let encoded = bincode::serialize(value)?;
     stream.write_all(&(encoded.len() as u32).to_le_bytes())?;
     stream.write_all(&encoded)?;
@@ -284,6 +288,15 @@ pub fn subscribe_overlay() -> Result<impl Iterator<Item = OverlaySnapshot>> {
         .context("Failed to connect to daemon. Is it running?")?;
     write_frame(&mut stream, &IpcRequest::SubscribeOverlay)?;
     Ok(std::iter::from_fn(move || read_frame(&mut stream)))
+}
+
+/// Helper side of [`IpcRequest::ServeUnicode`]: connect and offer to type for the daemon. The
+/// daemon then sends jobs on the returned stream.
+pub fn serve_unicode() -> Result<UnixStream> {
+    let mut stream = UnixStream::connect(get_socket_path())
+        .context("Failed to connect to daemon. Is it running?")?;
+    write_frame(&mut stream, &IpcRequest::ServeUnicode)?;
+    Ok(stream)
 }
 
 /// How often a helper checks that the daemon is still there.
@@ -411,7 +424,7 @@ impl DaemonWatch {
 }
 
 /// The next length-prefixed frame, or `None` when the stream ends or breaks.
-fn read_frame<T: serde::de::DeserializeOwned>(stream: &mut impl Read) -> Option<T> {
+pub(crate) fn read_frame<T: serde::de::DeserializeOwned>(stream: &mut impl Read) -> Option<T> {
     let mut len = [0u8; 4];
     stream.read_exact(&mut len).ok()?;
     let mut frame = vec![0u8; u32::from_le_bytes(len) as usize];

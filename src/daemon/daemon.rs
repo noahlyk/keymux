@@ -1071,6 +1071,11 @@ impl Daemon {
                                         });
                                         continue;
                                     }
+                                    // The user's Unicode helper: kept for the output path
+                                    if matches!(request, IpcRequest::ServeUnicode) {
+                                        crate::unicode::Helpers::global().register(stream);
+                                        continue;
+                                    }
                                     // Answered here, without the main loop
                                     if let Some(response) = crate::ipc::local_reply(&request) {
                                         let _ = crate::ipc::reply(&mut stream, &response);
@@ -1788,6 +1793,10 @@ impl Daemon {
             // The IPC thread hands subscriptions to their own thread before they get here
             IpcRequest::SubscribeOverlay => {
                 IpcResponse::Error("overlay subscriptions are streamed, not answered".into())
+            }
+            // The IPC thread keeps helper connections before they get here
+            IpcRequest::ServeUnicode => {
+                IpcResponse::Error("a unicode helper is kept, not answered".into())
             }
         }
     }

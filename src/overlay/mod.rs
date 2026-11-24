@@ -4,6 +4,9 @@
 //! socket. It subscribes to the daemon's [`OverlayHub`](crate::steno::overlay::OverlayHub)
 //! and draws a layer-shell panel on the right edge of the screen while a steno layer is
 //! on. The panel takes no input and no focus. See `docs/overlay-plan.md`.
+//!
+//! It also hosts the Unicode helper ([`crate::unicode::wayland`]), which types the characters
+//! the daemon's keyboard has no key for; with drawing disabled in the config it runs that alone.
 
 mod activity;
 pub mod anim;
@@ -62,10 +65,15 @@ pub fn run(dump: bool, demo: bool, always: bool) -> Result<()> {
     }
     let config = load_config();
     if !config.enabled {
-        tracing::info!("overlay is disabled in config (overlay: (enabled: false))");
-        return Ok(());
+        // Drawing is off, but the daemon may still need this session to type characters
+        // with no key (`—`, `é`): serve it alone until it goes away, to be restarted with it
+        tracing::info!("overlay is disabled in config (overlay: (enabled: false)); only the unicode helper runs");
+        return crate::unicode::wayland::run(true);
     }
     let source = if demo { Source::Demo } else { Source::Daemon };
+    if source == Source::Daemon {
+        crate::unicode::wayland::spawn();
+    }
     wayland::run(config, source, always)
 }
 

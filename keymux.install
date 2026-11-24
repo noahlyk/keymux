@@ -22,6 +22,8 @@ post_install() {
         if pacman -Qq bspwm &>/dev/null; then
             echo "    systemctl --user enable --now keymux-bspwm.service"
         fi
+        echo "    systemctl --user enable --now keymux-steno.service"
+        echo "    (steno overlay; on Wayland it also types characters with no key: — é ™)"
     elif [ -d "/etc/openrc" ] || [ -d "/etc/init.d" ]; then
         echo "    rc-update add keymux default && rc-service keymux start"
         if pacman -Qq niri &>/dev/null; then

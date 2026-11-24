@@ -2,13 +2,16 @@
 //! paced so that nothing the kernel queues for a slow reader is ever thrown away.
 
 use super::{KeymapProcessor, ProcessResult};
+use crate::config::UnicodeOutput;
 use crate::keycode::KeyCode;
 use crate::steno::translate::OutputOp;
+use crate::unicode::{self, Failure, Helper};
 use evdev::uinput::VirtualDevice;
 use evdev::{EventType, InputEvent, Key};
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tracing::info;
+use tracing::{error, info};
 
 const SYN_REPORT: i32 = 0;
 const SYN_CODE: u16 = 0;
@@ -24,32 +27,92 @@ impl Sink for VirtualDevice {
     }
 }
 
+/// How text with a character the virtual keyboard has no key for is typed: the user's
+/// `unicode_output` setting, and their helper if the daemon has one.
+#[derive(Clone, Copy, Default)]
+pub struct Unicode<'a> {
+    pub mode: UnicodeOutput,
+    pub helper: Option<&'a dyn Helper>,
+}
+
 /// Send what the keymap decided.
 pub fn emit_result<S: Sink + ?Sized>(
     sink: &mut S,
     pacer: &mut Pacer,
+    unicode: Unicode<'_>,
     result: ProcessResult,
 ) -> io::Result<()> {
     match result {
         // One event of an ordinary key: straight out, nothing to pace
         ProcessResult::EmitKey(key, pressed) => sink.emit(&[key_event(key, pressed)]),
         ProcessResult::MultipleEvents(events) => emit_key_events(sink, pacer, &events),
-        ProcessResult::TypeString(text) => retype(sink, pacer, 0, &text),
-        ProcessResult::Retype { backspaces, text } => retype(sink, pacer, backspaces, &text),
-        ProcessResult::Ops(ops) => emit_ops(sink, pacer, &ops),
+        ProcessResult::TypeString(text) => retype(sink, pacer, unicode, 0, &text),
+        ProcessResult::Retype { backspaces, text } => {
+            retype(sink, pacer, unicode, backspaces, &text)
+        }
+        ProcessResult::Ops(ops) => emit_ops(sink, pacer, unicode, &ops),
         ProcessResult::None => Ok(()),
     }
 }
 
 /// Delete `backspaces` characters before the cursor, then type `text`.
+///
+/// Text whose characters all have a key goes out as keys, as it always has. Text with one
+/// that has none (`—`, `Ī`) goes as `unicode.mode` says; through the helper, the whole of it,
+/// backspaces included, is one job, so nothing in it can be reordered. A backspace deletes one
+/// character (`char`) however it was typed, which is what the steno engine counts in.
 fn retype<S: Sink + ?Sized>(
     sink: &mut S,
     pacer: &mut Pacer,
+    unicode: Unicode<'_>,
     backspaces: usize,
     text: &str,
 ) -> io::Result<()> {
-    let taps = retype_taps(backspaces, text);
-    for (at, range) in pacer.schedule_taps(Instant::now(), &taps) {
+    if text.chars().all(has_key) {
+        return type_taps(sink, pacer, &retype_taps(backspaces, text));
+    }
+    match unicode.mode {
+        UnicodeOutput::Auto | UnicodeOutput::Wayland => {
+            let why = match unicode.helper {
+                None => "no helper",
+                Some(helper) => {
+                    // The helper's keys reach the compositor by another road than ours, so
+                    // ours go first: wait until what was sent can have been read
+                    pacer.wait_until_read();
+                    match helper.type_text(backspaces, text) {
+                        Ok(()) => return Ok(()),
+                        Err(Failure::NoHelper) => "no helper is connected",
+                        Err(Failure::NothingTyped) => "the helper could not type it",
+                        // Part of it may be on screen: typing it again could double it
+                        Err(Failure::Unknown) => {
+                            error!(
+                                "unicode helper failed mid-text; {} characters may be missing",
+                                text.chars().count()
+                            );
+                            return Ok(());
+                        }
+                    }
+                }
+            };
+            unicode::warn_unavailable(why);
+            type_taps(sink, pacer, &retype_taps(backspaces, &placeholders(text)))
+        }
+        UnicodeOutput::CtrlShiftU => {
+            emit_keystrokes(sink, pacer, &ctrl_shift_u_keystrokes(backspaces, text))
+        }
+        UnicodeOutput::Off => {
+            static SAID: AtomicBool = AtomicBool::new(false);
+            if !SAID.swap(true, Ordering::Relaxed) {
+                info!("unicode_output is Off: characters with no key are typed as '?'");
+            }
+            type_taps(sink, pacer, &retype_taps(backspaces, &placeholders(text)))
+        }
+    }
+}
+
+/// Send taps as the pacer allows.
+fn type_taps<S: Sink + ?Sized>(sink: &mut S, pacer: &mut Pacer, taps: &[Tap]) -> io::Result<()> {
+    for (at, range) in pacer.schedule_taps(Instant::now(), taps) {
         if let Some(wait) = at.checked_duration_since(Instant::now()) {
             std::thread::sleep(wait);
         }
@@ -58,21 +121,115 @@ fn retype<S: Sink + ?Sized>(
     Ok(())
 }
 
+/// What is typed in place of a character with no key when it cannot be typed: one character,
+/// so that undo still deletes as many as the steno engine counts.
+pub const PLACEHOLDER: char = '?';
+
+/// `text` with every character that has no key replaced by [`PLACEHOLDER`].
+pub fn placeholders(text: &str) -> String {
+    text.chars()
+        .map(|ch| if has_key(ch) { ch } else { PLACEHOLDER })
+        .collect()
+}
+
+/// Whether the virtual keyboard has a key for `ch` (on the US layout).
+pub const fn has_key(ch: char) -> bool {
+    char_to_key(ch).0.is_some()
+}
+
+/// A stretch of text that is typed one way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Run<'t> {
+    /// Characters that all have a key
+    Keys(&'t str),
+    /// Characters none of which has a key
+    Unicode(&'t str),
+}
+
+/// `text` cut into the longest runs of characters with a key and without one, in order.
+pub fn runs(text: &str) -> Vec<Run<'_>> {
+    let mut runs = Vec::new();
+    let mut start = 0;
+    let mut keyed = None;
+    for (at, ch) in text.char_indices() {
+        let this = has_key(ch);
+        if keyed.is_some_and(|run| run != this) {
+            runs.push(run_of(&text[start..at], keyed == Some(true)));
+            start = at;
+        }
+        keyed = Some(this);
+    }
+    if start < text.len() {
+        runs.push(run_of(&text[start..], keyed == Some(true)));
+    }
+    runs
+}
+
+const fn run_of(text: &str, keyed: bool) -> Run<'_> {
+    if keyed {
+        Run::Keys(text)
+    } else {
+        Run::Unicode(text)
+    }
+}
+
+/// The keystrokes that delete `backspaces` characters then type `text`, a character with no
+/// key as GTK and IBus take one: Ctrl+Shift+U, its code point in hex, Space.
+pub fn ctrl_shift_u_keystrokes(backspaces: usize, text: &str) -> Vec<Vec<InputEvent>> {
+    let key = |key: Key, pressed: bool| {
+        [
+            InputEvent::new_now(EventType::KEY, key.code(), i32::from(pressed)),
+            syn_report(),
+        ]
+    };
+    let taps_of = |taps: Vec<Tap>| -> Vec<Vec<InputEvent>> {
+        taps.iter()
+            .map(|tap| tap_events(std::slice::from_ref(tap)))
+            .collect()
+    };
+    let mut keystrokes = taps_of(retype_taps(backspaces, ""));
+    for run in runs(text) {
+        match run {
+            Run::Keys(keys) => keystrokes.extend(taps_of(retype_taps(0, keys))),
+            Run::Unicode(chars) => {
+                for ch in chars.chars() {
+                    let mut start = Vec::with_capacity(12);
+                    start.extend(key(Key::KEY_LEFTCTRL, true));
+                    start.extend(key(Key::KEY_LEFTSHIFT, true));
+                    start.extend(key(Key::KEY_U, true));
+                    start.extend(key(Key::KEY_U, false));
+                    start.extend(key(Key::KEY_LEFTSHIFT, false));
+                    start.extend(key(Key::KEY_LEFTCTRL, false));
+                    keystrokes.push(start);
+                    let hex = format!("{:x} ", u32::from(ch));
+                    keystrokes.extend(taps_of(retype_taps(0, &hex)));
+                }
+            }
+        }
+    }
+    keystrokes
+}
+
 /// Do what a steno stroke asked for, in order: delete, type, press keys.
-fn emit_ops<S: Sink + ?Sized>(sink: &mut S, pacer: &mut Pacer, ops: &[OutputOp]) -> io::Result<()> {
+fn emit_ops<S: Sink + ?Sized>(
+    sink: &mut S,
+    pacer: &mut Pacer,
+    unicode: Unicode<'_>,
+    ops: &[OutputOp],
+) -> io::Result<()> {
     let mut i = 0;
     while i < ops.len() {
         match &ops[i] {
             OutputOp::Backspaces(count) => {
                 // The text that replaces what was deleted goes out with it
                 if let Some(OutputOp::Text(text)) = ops.get(i + 1) {
-                    retype(sink, pacer, *count, text)?;
+                    retype(sink, pacer, unicode, *count, text)?;
                     i += 1;
                 } else {
-                    retype(sink, pacer, *count, "")?;
+                    retype(sink, pacer, unicode, *count, "")?;
                 }
             }
-            OutputOp::Text(text) => retype(sink, pacer, 0, text)?,
+            OutputOp::Text(text) => retype(sink, pacer, unicode, 0, text)?,
             OutputOp::Keys(events) => emit_key_events(sink, pacer, events)?,
             // Commands were run by the steno engine
             OutputOp::Command(_) => {}
@@ -232,6 +389,17 @@ impl Pacer {
             .collect();
         // A part starting inside a run presses and releases shift again
         self.plan(now, &sizes, |i| if continues(i) { TAP_EVENTS } else { 0 })
+    }
+
+    /// Sleep until everything sent so far can have been read: [`UNREAD_WINDOW`] after the
+    /// last of it. Returns at once when that has passed.
+    pub fn wait_until_read(&self) {
+        let Some(&(last, _)) = self.sent.back() else {
+            return;
+        };
+        if let Some(wait) = (last + UNREAD_WINDOW).checked_duration_since(Instant::now()) {
+            std::thread::sleep(wait);
+        }
     }
 
     /// [`Self::schedule`], where a part starting at keystroke `i` costs `opening(i)` events

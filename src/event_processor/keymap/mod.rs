@@ -15,7 +15,7 @@ mod typing;
 use self::lookup::LookupCapture;
 use self::remap::Remap;
 use self::typing::TypingWatch;
-use crate::config::{Config, Layer, LayerKind};
+use crate::config::{Config, Layer, LayerKind, UnicodeOutput};
 use crate::event_processor::actions::{HeldAction, ProcessResult, RollingStats};
 use crate::event_processor::layer_stack::LayerStack;
 use crate::keycode::KeyCode;
@@ -47,6 +47,8 @@ pub struct KeymapProcessor {
     /// every keyboard: the overlay follows whichever was touched last.
     overlay_hub: &'static OverlayHub,
     typing: TypingWatch,
+    /// How text with a character no key types is typed
+    unicode_output: UnicodeOutput,
 }
 
 impl KeymapProcessor {
@@ -134,6 +136,7 @@ impl KeymapProcessor {
             lookup: LookupCapture::new(layout.unwrap_or_default()),
             overlay_hub: OverlayHub::global(),
             typing: TypingWatch::new(typist, history, home.as_deref().map(tape::default_path)),
+            unicode_output: config.unicode_output,
         };
         // A keyboard that starts on a steno layer (`default_layer`) shows the overlay now,
         // not on its first key press. One that starts on base publishes nothing yet, so it
@@ -143,6 +146,12 @@ impl KeymapProcessor {
             processor.publish_overlay_layer();
         }
         processor
+    }
+
+    /// How text with a character no key types is typed: the config's `unicode_output`.
+    #[must_use]
+    pub const fn unicode_output(&self) -> UnicodeOutput {
+        self.unicode_output
     }
 
     pub fn set_game_mode(&mut self, active: bool) {
