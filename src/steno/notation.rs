@@ -1470,6 +1470,28 @@ mod tests {
         );
     }
 
+    /// How long a theory's full notation file takes to read: `KEYMUX_NOTATION_FILE=path cargo
+    /// test --release --lib -- --ignored --nocapture a_full_notation_file`.
+    #[test]
+    #[ignore = "needs KEYMUX_NOTATION_FILE"]
+    fn a_full_notation_file_loads_quickly() {
+        let Some(path) = std::env::var_os("KEYMUX_NOTATION_FILE") else {
+            return;
+        };
+        let text = std::fs::read_to_string(path).unwrap();
+        let started = std::time::Instant::now();
+        let n = Notation::from_json(Layout::plover_with(&['+']).unwrap(), &text).unwrap();
+        let took = started.elapsed();
+        let table = n.table.as_ref().unwrap();
+        println!(
+            "{} bytes read in {took:?}: {} known outlines, {} written their own way",
+            text.len(),
+            table.agree.len(),
+            table.outlines.len()
+        );
+        assert!(took.as_secs_f64() < 2.0, "{took:?}");
+    }
+
     #[test]
     fn the_source_is_kept_for_the_overlay_and_plain_has_none() {
         assert_eq!(table(TABLE).source().map(|s| &**s), Some(TABLE));
