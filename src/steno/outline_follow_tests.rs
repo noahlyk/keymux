@@ -183,3 +183,47 @@ fn a_mod_continues_the_outline_past_the_engines_grouping() {
         "TPHAT/+-Z -> national {^ize} cat nationalize"
     );
 }
+
+/// A stand-in for a theory's notation file: `TPH` is `N`, `-PL` is `M`, number strokes in letters.
+const NOTATION: &str = r#"{"number": "letters", "left": {"TPH": "N"}, "right": {"PL": "M"}}"#;
+
+#[test]
+fn the_outline_commands_write_the_theorys_notation_when_its_folder_has_one() {
+    let rig = Rig::new("outline-notation");
+    let mut e = engine(
+        &rig,
+        false,
+        &[(crate::steno::notation::FILE_NAME, NOTATION)],
+    );
+    assert_eq!(typed(&mut e, "PHRO*PBT TPHAT"), "NAT");
+    assert_eq!(
+        typed(&mut e, "PHRO*EPBT KPA TKAOEU"),
+        "NAT KPA/TKAOEU -> today"
+    );
+    let rig = Rig::new("outline-notation-explain");
+    let mut e = engine(
+        &rig,
+        false,
+        &[(crate::steno::notation::FILE_NAME, NOTATION)],
+    );
+    assert_eq!(
+        typed(&mut e, "PHRO*EPBT #TR-RL"),
+        "#TR-RL -> {:surround:next:`}"
+    );
+    // The tape writes strokes the same way
+    let path = rig.dict_dir.join("tape.txt");
+    e.tape = Some(tape::Tape::with_layout(path.clone(), e.layout.clone()));
+    e.load_notation();
+    e.translate(e.layout.parse_stroke("TPHAT").unwrap(), false);
+    e.tape.as_ref().unwrap().flush();
+    let text = fs::read_to_string(&path).unwrap();
+    assert_eq!(text.split_whitespace().nth(1), Some("NAT"), "{text}");
+}
+
+#[test]
+fn without_a_notation_file_the_outline_commands_write_plovers_notation() {
+    let rig = Rig::new("outline-plover");
+    let mut e = engine(&rig, false, &[]);
+    assert_eq!(typed(&mut e, "PHRO*PBT TPHAT"), "TPHAT");
+    assert_eq!(typed(&mut e, "PHRO*PBT #TR-RL"), "TPHAT 2R-R8");
+}

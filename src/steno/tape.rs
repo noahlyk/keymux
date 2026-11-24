@@ -7,6 +7,7 @@
 use super::dict::Dictionary;
 use super::erasure::{self, Ink, Screen};
 use super::layout::{render_stroke, Layout};
+use super::notation::Notation;
 use super::translate::{OutputOp, StenoOutput};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -94,6 +95,9 @@ pub struct Tape {
     writer: Sender<Entry>,
     /// What strokes are written in: the layer's own layout, extra keys (a join key) included
     layout: Option<Layout>,
+    /// The theory's notation, when it ships one: strokes are written in it (`NAEM`), ahead of
+    /// `layout`
+    notation: Option<Notation>,
 }
 
 /// One thing to put on the tape, done in the order asked.
@@ -127,6 +131,7 @@ impl Tape {
             path,
             writer,
             layout: None,
+            notation: None,
         }
     }
 
@@ -140,7 +145,16 @@ impl Tape {
         }
     }
 
+    /// Write strokes in `notation` from now on (see [`super::notation`]); the lines already
+    /// written stay as they are.
+    pub fn set_notation(&mut self, notation: Notation) {
+        self.notation = Some(notation);
+    }
+
     fn shown(&self, stroke: u32) -> String {
+        if let Some(notation) = &self.notation {
+            return notation.render_stroke(stroke);
+        }
         self.layout.as_ref().map_or_else(
             || render_stroke(stroke),
             |layout| layout.render_stroke(stroke),
@@ -699,6 +713,27 @@ mod tests {
         tape.flush();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.lines().nth(3).unwrap().contains("late"), "{text}");
+    }
+
+    #[test]
+    fn a_stroke_is_written_in_the_theorys_notation_once_it_has_one() {
+        let dir = crate::test_dir::TestDir::new("keymux-tape-notation");
+        let path = dir.join("tape.txt");
+        let layout = Layout::plover();
+        let enemy = layout.parse_stroke("TPHAEPL").unwrap();
+        let mut tape = Tape::with_layout(path.clone(), layout.clone());
+        tape.stroke(enemy, "\" enemy\"");
+        let notation =
+            Notation::from_json(layout, r#"{"left": {"TPH": "N"}, "right": {"PL": "M"}}"#).unwrap();
+        tape.set_notation(notation);
+        tape.stroke(enemy, "\" enemy\"");
+        tape.flush();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let shown: Vec<&str> = text
+            .lines()
+            .filter_map(|line| line.split_whitespace().nth(1))
+            .collect();
+        assert_eq!(shown, ["TPHAEPL", "NAEM"], "{text}");
     }
 
     #[test]

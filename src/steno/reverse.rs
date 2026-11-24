@@ -36,11 +36,22 @@ pub fn classify(input: &str) -> Query {
 /// key: `ED/+-D`) resolves outlines that use them.
 #[must_use]
 pub fn classify_with(layout: &Layout, input: &str) -> Query {
+    classify_by(input, |text| layout.parse_strokes_trimmed(text))
+}
+
+/// [`classify`] reading stroke notation in a theory's notation as well as Plover's (`NAEM` as
+/// well as `TPHAEPL`, see [`super::notation`]).
+#[must_use]
+pub fn classify_in(notation: &super::notation::Notation, input: &str) -> Query {
+    classify_by(input, |text| notation.parse_strokes_trimmed(text))
+}
+
+fn classify_by(input: &str, parse: impl Fn(&str) -> Option<Vec<u32>>) -> Query {
     let trimmed = input.trim();
     let looks_like_a_stroke =
         !trimmed.is_empty() && !trimmed.chars().any(|c| c.is_ascii_lowercase());
     if looks_like_a_stroke {
-        if let Some(strokes) = layout.parse_strokes_trimmed(trimmed) {
+        if let Some(strokes) = parse(trimmed) {
             return Query::Stroke(strokes);
         }
     }

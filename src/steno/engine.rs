@@ -7,6 +7,7 @@ use super::journal::{MachineId, SharedHistory};
 use super::layout::{preset, Layout};
 use super::live;
 use super::lookup::{Lookup, LookupKey, LookupSearch};
+use super::notation::Notation;
 use super::overlay::OverlayHub;
 use super::plugin::Chain;
 use super::run_control::{Launcher, Runtime, Trust};
@@ -91,6 +92,9 @@ pub struct StenoEngine {
     lookup_search: Option<LookupSearch>,
     /// The layout stroke notation is read and written in, extra keys included, for the lookup
     layout: Layout,
+    /// How strokes are written for people and read back: the layout, and the theory's notation
+    /// file when its dictionary folders have one (read again each time the dictionaries load)
+    notation: Notation,
     /// Whether `{:outline:next}` or `{:outline:explain}` is armed or following an outline (see
     /// [`super::outline_control`])
     outline: super::outline_control::Mode,
@@ -245,6 +249,7 @@ impl StenoEngine {
             hub: OverlayHub::global(),
             lookup: None,
             lookup_search: (!cfg!(test)).then(|| LookupSearch::new(OverlayHub::global())),
+            notation: Notation::plain(layout.clone()),
             layout,
             outline: super::outline_control::Mode::Off,
             leave_requested: false,
@@ -313,7 +318,7 @@ impl StenoEngine {
     }
 
     fn open_lookup(&mut self) {
-        self.lookup = Some(Lookup::new(self.layout.clone()));
+        self.lookup = Some(Lookup::with_notation(self.notation.clone()));
         // The stroke that opened it is done: nothing is lit while you type a word
         self.hub.set_keys(0, 0);
         self.publish_lookup();
@@ -349,9 +354,23 @@ impl StenoEngine {
     /// Translate with `dict` from here on.
     fn use_dictionary(&mut self, dict: Arc<Chain>) {
         self.translator.set_shared(dict);
+        self.load_notation();
         self.too_small = !self
             .translator
             .has_entries(super::setup::MIN_REAL_DICTIONARY);
+    }
+
+    /// Read the theory's notation file again, as the dictionaries load: the outline commands,
+    /// the tape and the lookup write and read strokes in it. Plain Plover notation without one.
+    fn load_notation(&mut self) {
+        let Some(source) = &self.source else {
+            return;
+        };
+        let notation = Notation::load(self.layout.clone(), &source.roots, &source.cache_dir);
+        if let Some(tape) = &mut self.tape {
+            tape.set_notation(notation.clone());
+        }
+        self.notation = notation;
     }
 
     /// Whether this physical key is a stroke key on this layer.
@@ -858,9 +877,10 @@ impl StenoEngine {
         }
     }
 
-    /// Strokes as the outline commands write them, in the layer's layout.
+    /// Strokes as the outline commands write them, in the layer's notation (see
+    /// [`super::notation`]): the theory's when it ships one, Plover's otherwise.
     fn render_notation(&self, strokes: &[u32]) -> String {
-        self.layout.render_strokes(strokes)
+        self.notation.render_strokes(strokes)
     }
 
     /// `{:outline:last}`, `{:outline:next}` and `{:outline:explain}` (see
@@ -1026,6 +1046,7 @@ impl StenoEngine {
             hub: OverlayHub::global(),
             lookup: None,
             lookup_search: None,
+            notation: Notation::plain(Layout::plover()),
             layout: Layout::plover(),
             outline: super::outline_control::Mode::Off,
             leave_requested: false,

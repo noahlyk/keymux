@@ -9,6 +9,7 @@
 
 use super::commands::proper_outlines_in;
 use super::layout::Layout;
+use super::notation::Notation;
 use super::overlay::{LookupMode, LookupRow, LookupView, OverlayHub, TAPE_CAPACITY};
 use super::reverse::{self, Query};
 use super::translate::Translator;
@@ -109,10 +110,14 @@ impl LookupInput {
 
 /// An open lookup: the text typed so far, and the layout its stroke notation is read and written
 /// in (so an extra key such as the `+` join key, in `ED/+-D`, parses, lights and prints).
+///
+/// A query is read in the layer's notation too (`NAEM` as well as `TPHAEPL`, see
+/// [`super::notation`]). The rows' outlines stay in Plover's notation: the overlay draws them
+/// key by key, and it reads them back with nothing but the layout.
 #[derive(Debug)]
 pub struct Lookup {
     query: String,
-    layout: Layout,
+    notation: Notation,
 }
 
 impl Default for Lookup {
@@ -125,10 +130,20 @@ impl Lookup {
     /// A lookup with nothing typed yet, in `layout`'s stroke notation.
     #[must_use]
     pub const fn new(layout: Layout) -> Self {
+        Self::with_notation(Notation::plain(layout))
+    }
+
+    /// A lookup with nothing typed yet, reading queries in `notation` as well as Plover's.
+    #[must_use]
+    pub const fn with_notation(notation: Notation) -> Self {
         Self {
             query: String::new(),
-            layout,
+            notation,
         }
+    }
+
+    const fn layout(&self) -> &Layout {
+        self.notation.layout()
     }
 
     /// Apply a key. Returns `false` when the lookup should close.
@@ -180,17 +195,17 @@ impl Lookup {
         if query.is_empty() {
             return Some(self.blank());
         }
-        let (rows, mode) = match reverse::classify_with(&self.layout, query) {
+        let (rows, mode) = match reverse::classify_in(&self.notation, query) {
             Query::Stroke(strokes) => (
-                stroke_rows(&self.layout, base, &strokes),
+                stroke_rows(self.layout(), base, &strokes),
                 LookupMode::Stroke,
             ),
             Query::Text(text) if text.contains(char::is_whitespace) => (
-                vec![phrase_row(&self.layout, base, &text)],
+                vec![phrase_row(self.layout(), base, &text)],
                 LookupMode::Phrase,
             ),
             Query::Text(text) => (
-                word_rows(&self.layout, base, &text, cancelled)?,
+                word_rows(self.layout(), base, &text, cancelled)?,
                 LookupMode::Word,
             ),
         };
@@ -201,14 +216,14 @@ impl Lookup {
             row.outline
                 .split('/')
                 .next()
-                .and_then(|stroke| self.layout.parse_stroke(stroke))
+                .and_then(|stroke| self.layout().parse_stroke(stroke))
                 .unwrap_or(0)
         });
         // A phrase's outline is one group per word, not one stroke sequence to play through
         let strokes = match (mode, rows.first()) {
             (LookupMode::Phrase, _) | (_, None) => Vec::new(),
             (_, Some(row)) => self
-                .layout
+                .layout()
                 .parse_strokes_trimmed(&row.outline)
                 .unwrap_or_default(),
         };
@@ -293,7 +308,7 @@ impl LookupSearch {
         drop(gate);
         let query = Lookup {
             query: lookup.query.clone(),
-            layout: lookup.layout.clone(),
+            notation: lookup.notation.clone(),
         };
         let _ = self.jobs.send(Job {
             generation,
@@ -691,6 +706,20 @@ mod tests {
         assert_ne!(view.strokes[1] & join, 0, "+-D lights the join key");
         assert_eq!(view.strokes[1], layout.parse_stroke("+-D").unwrap());
         assert_eq!(view.hint, view.strokes[0]);
+    }
+
+    #[test]
+    fn a_query_in_the_theorys_notation_resolves_and_rows_stay_plover_for_the_overlay() {
+        let (layout, base) = joined();
+        let notation = Notation::from_json(layout.clone(), r#"{"right": {"PB": "N"}}"#).unwrap();
+        let mut lookup = Lookup::with_notation(notation);
+        for c in "EN".chars() {
+            assert!(lookup.apply(LookupKey::Char(c)));
+        }
+        let view = lookup.view(&base);
+        assert_eq!(view.mode, LookupMode::Stroke);
+        assert_eq!(view.rows[0].outline, "EPB");
+        assert_eq!(view.strokes, [layout.parse_stroke("EPB").unwrap()]);
     }
 
     #[test]
