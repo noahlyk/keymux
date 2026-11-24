@@ -92,6 +92,46 @@ fn walk(dir: &Path, skip: &Path, depth: usize, files: &mut Vec<PathBuf>) {
     }
 }
 
+/// The first file called `name` in `roots`' folders, searched in the order dictionaries are found.
+///
+/// Each folder's own file comes before anything in its subfolders, subfolders in priority
+/// order, as deep as [`expand`] goes. Hidden, `disabled` and `skip` folders are left out, as
+/// they are for dictionaries; a root that is a file has no folder to search. For a hidden file
+/// a theory ships beside its dictionaries, such as [`super::notation::FILE_NAME`].
+#[must_use]
+pub fn find_in_folders(roots: &[PathBuf], skip: &Path, name: &str) -> Option<PathBuf> {
+    roots
+        .iter()
+        .filter(|root| root.is_dir())
+        .find_map(|root| find_in(root, skip, name, 0))
+}
+
+fn find_in(dir: &Path, skip: &Path, name: &str, depth: usize) -> Option<PathBuf> {
+    let own = dir.join(name);
+    if own.is_file() {
+        return Some(own);
+    }
+    if depth >= MAX_DEPTH {
+        return None;
+    }
+    let mut folders: Vec<(OrderKey, PathBuf)> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let entry_name = entry.file_name();
+            let hidden = entry_name.to_str().is_some_and(|n| n.starts_with('.'));
+            let folder = std::fs::metadata(&path).is_ok_and(|meta| meta.is_dir());
+            (folder && !hidden && !is_disabled(&entry_name) && path != skip)
+                .then(|| (order_key(&entry_name, true), path))
+        })
+        .collect();
+    folders.sort_by(|a, b| a.0.cmp(&b.0));
+    folders
+        .into_iter()
+        .find_map(|(_, folder)| find_in(&folder, skip, name, depth + 1))
+}
+
 /// Where a file or folder ranks among the entries of its folder. Smaller is earlier: the group
 /// (numbered, plain file, plain folder), its number, the rest of the name without case, and the
 /// exact name, which settles anything the others leave tied.
@@ -366,5 +406,32 @@ mod tests {
         let found = expand(&[dir.to_path_buf()], &dir.join("cache"));
         assert_eq!(found.first().map(|f| f.ends_with("a.json")), Some(true));
         assert!(found.len() <= MAX_DEPTH + 1);
+    }
+
+    #[test]
+    fn a_folders_own_hidden_file_is_found_before_its_subfolders_in_priority_order() {
+        let name = ".keymux-notation.json";
+        let dir = tree(
+            "find-hidden",
+            &[
+                "lapwing/.keymux-notation.json",
+                "10-lyk/.keymux-notation.json",
+                "disabled_x/.keymux-notation.json",
+            ],
+        );
+        let roots = [dir.to_path_buf()];
+        let skip = dir.join("cache");
+        // Numbered folders come before plain ones, as dictionaries do
+        assert_eq!(
+            find_in_folders(&roots, &skip, name),
+            Some(dir.join("10-lyk").join(name))
+        );
+        // The root's own file comes first of all
+        fs::write(dir.join(name), "{}").unwrap();
+        assert_eq!(find_in_folders(&roots, &skip, name), Some(dir.join(name)));
+        // Hidden files are never dictionaries
+        assert!(expand(&roots, &skip).iter().all(|f| !f.ends_with(name)));
+        let none = tree("find-none", &["a.json", "disabled_b/.keymux-notation.json"]);
+        assert_eq!(find_in_folders(&[none.to_path_buf()], &skip, name), None);
     }
 }

@@ -24,6 +24,7 @@ pub mod layout;
 pub mod live;
 pub mod lookup;
 pub mod meta;
+pub mod notation;
 pub mod numbers;
 pub mod orthography;
 pub mod outline_control;

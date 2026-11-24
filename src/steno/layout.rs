@@ -490,7 +490,8 @@ impl Layout {
         (bits != 0).then_some(bits)
     }
 
-    fn parse_stroke_bits(&self, text: &str) -> Option<u32> {
+    /// [`Self::parse_stroke`], a stroke with no keys (a lone `-`) included as `0`.
+    pub(crate) fn parse_stroke_bits(&self, text: &str) -> Option<u32> {
         let flat = self.flat();
         let number_slot = self.number_slot();
         let after_hyphen = self.after_hyphen();
@@ -603,7 +604,7 @@ impl Layout {
         let right_start = self.right_start();
         let down = |slot: usize| bits & (1 << slot) != 0;
         let number = down(number_slot);
-        let digits = number && self.number_keys.iter().any(|(slot, _)| down(*slot));
+        let digits = self.can_be_digits(bits);
         let key = |slot: usize| {
             if digits {
                 if let Some(&(_, digit)) = self.number_keys.iter().find(|(s, _)| *s == slot) {
@@ -641,6 +642,17 @@ impl Layout {
             .map(|&bits| self.render_stroke(bits))
             .collect::<Vec<_>>()
             .join("/")
+    }
+
+    /// Whether a stroke could be written with digits: it has the number key and a key that
+    /// doubles as a digit (`2R-R8` rather than `#TR-RL`).
+    #[must_use]
+    pub fn can_be_digits(&self, bits: u32) -> bool {
+        bits & (1 << self.number_slot()) != 0
+            && self
+                .number_keys
+                .iter()
+                .any(|(slot, _)| bits & (1 << slot) != 0)
     }
 
     /// A stroke as typed text when it has no translation, such as `STPHA-UBGS`.
