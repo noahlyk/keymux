@@ -95,7 +95,17 @@ pub struct Translation {
     /// when it was made: what a plugin is told precedes an outline starting here. `None` when
     /// not known.
     pub begins: Option<usize>,
+    /// The held run it belongs to (see [`Translator::repeat_stroke`]): a stroke repeated by
+    /// holding its keys, the tap before the hold included. Undo takes a run back as one.
+    pub run: Option<RunId>,
 }
+
+/// Names one run of a stroke repeated by holding its keys. Unique across translators, since
+/// they share a history.
+pub type RunId = u64;
+
+/// Hands out [`RunId`]s.
+static NEXT_RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Translation {
     #[must_use]
@@ -110,6 +120,7 @@ impl Translation {
             machine: 0,
             origin: Origin::Stroke,
             begins: None,
+            run: None,
         }
     }
 
@@ -466,6 +477,11 @@ pub struct Translator {
     /// Where the text before the stroke being translated ends on screen (a byte offset into the
     /// history's `screen`): what a plugin is told precedes an outline starting with it
     stroke_start: usize,
+    /// The held run the last stroke was part of, if it was a repeat (see [`Self::repeat_stroke`])
+    run: Option<RunId>,
+    /// How many translations the last stroke put on the end of the history: none for a macro,
+    /// a transparent stroke or text typed some other way. A run that starts takes them in.
+    last_added: usize,
 }
 
 /// A copy of a translator has a copy of the history too, so trying strokes on it (a lookup
@@ -490,6 +506,8 @@ impl Clone for Translator {
             plugin_read: None,
             plugin_groups: None,
             stroke_start: 0,
+            run: None,
+            last_added: 0,
         }
     }
 }
@@ -533,6 +551,8 @@ impl Translator {
             plugin_read: None,
             plugin_groups: None,
             stroke_start: 0,
+            run: None,
+            last_added: 0,
         }
     }
 
@@ -613,6 +633,8 @@ impl Translator {
         let mut ops = Vec::new();
         self.untranslate_translation(&last);
         self.translate_stroke(late.stroke, &mut ops);
+        // Still part of the held run it was in
+        self.tag_added(last.run);
         ops.extend(self.flush(None));
         let output = self.finish(ops);
         self.check_in();
@@ -621,6 +643,8 @@ impl Translator {
 
     /// A new stroke: a fresh wait on plugins, and nothing late any more.
     fn begin_stroke(&mut self) {
+        self.run = None;
+        self.last_added = 0;
         self.unmatched = false;
         self.transparent = false;
         self.ran_macro = false;
@@ -810,6 +834,8 @@ impl Translator {
             plugin_read: None,
             plugin_groups: None,
             stroke_start: 0,
+            run: None,
+            last_added: 0,
         }
     }
 
@@ -1003,15 +1029,85 @@ impl Translator {
     /// outline context. Every other stroke is *normal*; a stroke that only types whitespace
     /// separates a continuation from what came before.
     pub fn stroke(&mut self, stroke: u32) -> Option<StenoOutput> {
+        self.strike(stroke, None, 0)
+    }
+
+    /// [`Self::stroke`], for a stroke repeated by holding its keys (the engine's hold to
+    /// repeat). The repeats of one hold make a *run*, and so does the tap before the hold, as
+    /// the tape shows them on one line: undo takes the whole run back at once. Any other stroke
+    /// ends the run. A macro (undo, redo, ...) or a transparent stroke adds nothing to a run, so
+    /// holding `*` still takes back one thing, or one run, per repeat.
+    pub fn repeat_stroke(&mut self, stroke: u32) -> Option<StenoOutput> {
+        if let Some(run) = self.run {
+            return self.strike(stroke, Some(run), 0);
+        }
+        let run = NEXT_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // The tap the hold repeats is the run's first stroke
+        let tap = self.last_added;
+        self.strike(stroke, Some(run), tap)
+    }
+
+    /// Translate a stroke, as part of the held run `run` if it is one, which takes in the last
+    /// `earlier` translations too when they are still the end of the history and came from
+    /// this stroke.
+    fn strike(&mut self, stroke: u32, run: Option<RunId>, earlier: usize) -> Option<StenoOutput> {
         self.begin_stroke();
+        self.run = run;
         self.check_out();
+        if let Some(run) = run {
+            self.tag_earlier(stroke, run, earlier);
+        }
         self.stroke_start = self.hist.screen.len();
         let mut ops = Vec::new();
         self.translate_stroke(stroke, &mut ops);
+        self.last_added = self.added();
+        self.tag_added(run);
         ops.extend(self.flush(None));
         let output = self.finish(ops);
         self.check_in();
         output
+    }
+
+    /// How many translations the stroke just translated put on the end of the history.
+    const fn added(&self) -> usize {
+        if self.ran_macro || self.transparent {
+            0
+        } else {
+            self.hist.to_do
+        }
+    }
+
+    /// Mark the translations the stroke just translated put on as part of the run `run`.
+    fn tag_added(&mut self, run: Option<RunId>) {
+        if run.is_none() {
+            return;
+        }
+        let added = self.added();
+        let translations = &mut self.hist.state.translations;
+        let from = translations.len().saturating_sub(added);
+        for translation in &mut translations[from..] {
+            translation.run = run;
+        }
+    }
+
+    /// Take the last `count` translations into the run `run`: what the tap before a hold
+    /// typed. Only if they are still the end of the history, made by strokes, the last of
+    /// them by `stroke` (not text typed by hand or on another keyboard since).
+    fn tag_earlier(&mut self, stroke: u32, run: RunId, count: usize) {
+        let translations = &mut self.hist.state.translations;
+        let Some(from) = translations.len().checked_sub(count) else {
+            return;
+        };
+        let tail = &mut translations[from..];
+        let ours = tail
+            .last()
+            .is_some_and(|last| last.strokes.last() == Some(&stroke))
+            && tail.iter().all(|t| t.origin.is_stroke() && t.run.is_none());
+        if ours {
+            for translation in tail {
+                translation.run = Some(run);
+            }
+        }
     }
 
     /// Take the shared history to work on. Nothing else uses it until [`Self::check_in`].
@@ -1301,20 +1397,25 @@ impl Translator {
     }
 
     /// Take translations back from the end, last first, until `stop` says so for one that had an
-    /// effect. What was taken back can be put back by redo. Returns whether anything had an effect.
+    /// effect. A held run (see [`Self::repeat_stroke`]) goes as one: `stop` is asked only once
+    /// the whole run is taken back. What was taken back can be put back by redo. Returns whether
+    /// anything had an effect.
     fn take_back(&mut self, mut stop: impl FnMut(&Translation) -> bool) -> bool {
-        let all: Vec<Translation> = self.hist.state.translations.clone();
         let mut group = Vec::new();
         let mut effective = false;
-        for translation in all.iter().rev() {
+        // Whether the translations taken back since `stop` was last asked had an effect
+        let mut unit_effective = false;
+        // The end of the history as it is now: taking back a translation that replaced others
+        // puts those back, and they are the next to go
+        while let Some(translation) = self.hist.state.translations.last().cloned() {
             // Undo stops at a barrier: what is before it is no longer next to the cursor, so
             // taking it back would delete the wrong text. With nothing taken back yet, the
             // barrier is the end of the history and what is before it is forgotten.
-            if self.classes_enabled && self.undo_stops_at_barrier && is_barrier(translation) {
+            if self.classes_enabled && self.undo_stops_at_barrier && is_barrier(&translation) {
                 if translation.has_undo() {
                     // It changed text itself (`{:back}`): taking it back is what undo is for
-                    self.untranslate_translation(translation);
-                    group.push(translation.clone());
+                    self.untranslate_translation(&translation);
+                    group.push(translation);
                     effective = true;
                 } else if !effective {
                     let state = &mut self.hist.state;
@@ -1324,13 +1425,26 @@ impl Translator {
                 }
                 break;
             }
-            self.untranslate_translation(translation);
-            group.push(translation.clone());
+            self.untranslate_translation(&translation);
             if translation.has_undo() {
                 effective = true;
-                if stop(translation) {
-                    break;
-                }
+                unit_effective = true;
+            }
+            // The rest of its held run, if it is in one, goes with it
+            let run_goes_on = translation.run.is_some()
+                && self
+                    .hist
+                    .state
+                    .translations
+                    .last()
+                    .is_some_and(|next| next.run == translation.run);
+            let stops = unit_effective && !run_goes_on && stop(&translation);
+            if unit_effective && !run_goes_on {
+                unit_effective = false;
+            }
+            group.push(translation);
+            if stops {
+                break;
             }
         }
         if effective {
@@ -2776,6 +2890,119 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         // Nothing more to redo
         t.stroke(stroke("R*"));
         assert_eq!(t.text(), "cat dog");
+    }
+
+    /// Tap `outline`, then hold it for `repeats` repeats, as the engine strikes them.
+    fn hold(t: &mut Translator, outline: &str, repeats: usize) {
+        t.stroke(stroke(outline));
+        for _ in 0..repeats {
+            t.repeat_stroke(stroke(outline));
+        }
+    }
+
+    #[test]
+    fn one_undo_takes_back_a_held_run_and_the_tap_before_it() {
+        let mut t = translator(HISTORY_DICT);
+        t.stroke(stroke("TKOG"));
+        hold(&mut t, "KAT", 4);
+        assert_eq!(t.text(), "dog cat cat cat cat cat");
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "dog");
+        // The next undo goes on to the stroke before the run
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "");
+    }
+
+    #[test]
+    fn a_stroke_after_a_held_run_ends_it() {
+        let mut t = translator(HISTORY_DICT);
+        hold(&mut t, "KAT", 3);
+        t.stroke(stroke("TKOG"));
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "cat cat cat cat");
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "");
+        // Tapping the stroke again after a run is a stroke of its own, and holding it again
+        // makes a new run
+        hold(&mut t, "KAT", 2);
+        t.stroke(stroke("KAT"));
+        hold(&mut t, "KAT", 1);
+        assert_eq!(t.text(), "cat cat cat cat cat cat");
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "cat cat cat cat");
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "cat cat cat");
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "");
+    }
+
+    #[test]
+    fn redo_puts_a_held_run_back_whole() {
+        let mut t = translator(HISTORY_DICT);
+        t.stroke(stroke("TKOG"));
+        hold(&mut t, "KAT", 2);
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "dog");
+        t.stroke(stroke("R*"));
+        assert_eq!(t.text(), "dog cat cat cat");
+        // Still one run: undo takes it back as one again
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "dog");
+    }
+
+    #[test]
+    fn a_counted_undo_counts_a_held_run_once() {
+        let mut t = translator(HISTORY_DICT);
+        t.stroke(stroke("TKOG"));
+        t.stroke(stroke("PWEUPBG"));
+        hold(&mut t, "KAT", 3);
+        // `A*` is `=undo:2`: the run, then "big"
+        t.stroke(stroke("A*"));
+        assert_eq!(t.text(), "dog");
+    }
+
+    #[test]
+    fn a_held_suffix_run_is_undone_as_one_and_undo_word_takes_the_word_with_it() {
+        let mut t = translator(HISTORY_DICT);
+        t.stroke(stroke("TKOG"));
+        hold(&mut t, "-G", 2);
+        assert_eq!(t.text(), "dogginginging");
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "dog");
+        t.stroke(stroke("R*"));
+        t.stroke(stroke("*U"));
+        assert_eq!(t.text(), "");
+    }
+
+    #[test]
+    fn a_run_that_makes_a_longer_outline_is_undone_whole() {
+        // KAT/KAT is an entry: the first repeat replaces the tap's "cat", the second starts
+        // over; undoing puts the tap back and takes it too
+        let mut t = translator(r#"{"KAT": "cat", "KAT/KAT": "kitty", "TKOG": "dog"}"#);
+        t.stroke(stroke("TKOG"));
+        hold(&mut t, "KAT", 3);
+        let held = t.text();
+        assert_ne!(held, "dog");
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "dog", "after {held:?}");
+    }
+
+    #[test]
+    fn holding_undo_takes_back_one_run_or_translation_per_repeat() {
+        let mut t = translator(HISTORY_DICT);
+        t.stroke(stroke("TKOG"));
+        t.stroke(stroke("PWEUPBG"));
+        hold(&mut t, "KAT", 3);
+        t.stroke(stroke("TKOG"));
+        // Holding `*`: the tap takes back "dog", each repeat one thing more
+        t.stroke(stroke("*"));
+        assert_eq!(t.text(), "dog big cat cat cat cat");
+        t.repeat_stroke(stroke("*"));
+        assert_eq!(t.text(), "dog big");
+        t.repeat_stroke(stroke("*"));
+        assert_eq!(t.text(), "dog");
+        t.repeat_stroke(stroke("*"));
+        assert_eq!(t.text(), "");
     }
 
     #[test]

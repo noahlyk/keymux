@@ -814,6 +814,8 @@ impl StenoEngine {
         // Armed by `{:outline:next}` or `{:outline:explain}`, or following the outline one
         // started: the stroke types notation instead of translating or acting
         let output = match std::mem::take(&mut self.outline) {
+            // A repeat from holding the keys joins the held run undo takes back as one
+            super::outline_control::Mode::Off if repeated => self.translator.repeat_stroke(stroke),
             super::outline_control::Mode::Off => self.translator.stroke(stroke),
             super::outline_control::Mode::Armed(verb) => self.begin_outline(verb, stroke),
             super::outline_control::Mode::Following(following) => {
@@ -1291,6 +1293,7 @@ pub fn resolve_dictionary_path(raw: &str, config_dir: &Path, home: Option<&Path>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::steno::translate::UNDO_STROKE;
 
     fn engine_with_dict(json: &str) -> StenoEngine {
         engine_with_dict_and_overrides(json, &HashMap::new())
@@ -1900,6 +1903,94 @@ mod tests {
         }
         tap(&mut engine, keys, second + ms(1000), second + ms(1050));
         assert_eq!(hub.snapshot().tape.len(), 2);
+    }
+
+    /// Strike `keys` at `at`: down, and up 30 ms later.
+    fn strike_keys(engine: &mut StenoEngine, keys: &[KeyCode], at: Instant) {
+        for &key in keys {
+            engine.press(key, at);
+        }
+        for &key in keys {
+            let _ = engine.release_at(key, at + Duration::from_millis(30));
+        }
+    }
+
+    /// Tap `keys` at `at`, press them again and hold them for `repeats` repeats, then let go.
+    /// Returns when they came up.
+    fn hold_keys(engine: &mut StenoEngine, keys: &[KeyCode], at: Instant, repeats: u64) -> Instant {
+        let ms = Duration::from_millis;
+        strike_keys(engine, keys, at);
+        let second = at + ms(150);
+        for &key in keys {
+            engine.press(key, second);
+        }
+        // The first repeat once held for the repeat delay, then one every 40 ms
+        let mut now = second;
+        for n in 0..repeats {
+            now = second + ms(310 + 40 * n);
+            assert!(engine.tick(now).is_some(), "repeat {n} was not sent");
+        }
+        let up = now + ms(5);
+        for &key in keys {
+            assert_eq!(engine.release_at(key, up), None);
+        }
+        up
+    }
+
+    #[test]
+    fn one_undo_takes_back_a_held_repeat_whole() {
+        let mut engine = engine_with_dict(r#"{"KAT": "cat", "A": "ay"}"#);
+        let kat = kat_keys(&engine);
+        let a = [key_for(&engine, 1 << 7)];
+        let star = [key_for(&engine, UNDO_STROKE)];
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        strike_keys(&mut engine, &a, t0);
+        let up = hold_keys(&mut engine, &kat, t0 + ms(1000), 4);
+        assert_eq!(engine.translator.text(), "ay cat cat cat cat cat");
+        // The tap and its four repeats are one tape line, and one undo
+        strike_keys(&mut engine, &star, up + ms(1000));
+        assert_eq!(engine.translator.text(), "ay");
+        // The next undo goes on to the stroke before
+        strike_keys(&mut engine, &star, up + ms(2000));
+        assert_eq!(engine.translator.text(), "");
+    }
+
+    #[test]
+    fn a_stroke_after_a_held_repeat_is_undone_alone() {
+        let mut engine = engine_with_dict(r#"{"KAT": "cat", "A": "ay"}"#);
+        let kat = kat_keys(&engine);
+        let a = [key_for(&engine, 1 << 7)];
+        let star = [key_for(&engine, UNDO_STROKE)];
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        let up = hold_keys(&mut engine, &kat, t0, 3);
+        strike_keys(&mut engine, &a, up + ms(1000));
+        assert_eq!(engine.translator.text(), "cat cat cat cat ay");
+        strike_keys(&mut engine, &star, up + ms(2000));
+        assert_eq!(engine.translator.text(), "cat cat cat cat");
+        strike_keys(&mut engine, &star, up + ms(3000));
+        assert_eq!(engine.translator.text(), "");
+    }
+
+    #[test]
+    fn holding_undo_still_takes_back_one_thing_per_repeat() {
+        let mut engine = engine_with_dict(r#"{"KAT": "cat", "A": "ay"}"#);
+        let kat = kat_keys(&engine);
+        let a = [key_for(&engine, 1 << 7)];
+        let star = [key_for(&engine, UNDO_STROKE)];
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        for n in 0..4 {
+            strike_keys(&mut engine, &a, t0 + ms(1000 * n));
+        }
+        let up = hold_keys(&mut engine, &kat, t0 + ms(5000), 2);
+        strike_keys(&mut engine, &a, up + ms(1000));
+        assert_eq!(engine.translator.text(), "ay ay ay ay cat cat cat ay");
+        // Tap `*` (the last "ay"), then hold it for three repeats: the run of cats, then two
+        // of the "ay"s, one each
+        hold_keys(&mut engine, &star, up + ms(2000), 3);
+        assert_eq!(engine.translator.text(), "ay ay");
     }
 
     #[test]

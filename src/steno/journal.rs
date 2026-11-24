@@ -42,6 +42,9 @@ impl Origin {
     }
 }
 
+/// How many more translations than usual the history keeps to keep a held run whole.
+const RUN_KEPT_WHOLE: usize = 1000;
+
 /// The translations still undoable, and the one before them for context.
 #[derive(Debug, Clone, Default)]
 pub struct State {
@@ -62,7 +65,19 @@ impl State {
                 break;
             }
         }
-        let index = self.translations.len() - count;
+        let mut index = self.translations.len() - count;
+        // A held run is undone as one, so it is kept whole (up to a bound, for a key held down
+        // for minutes): cut before it, not through it
+        let run = self.translations.get(index).and_then(|t| t.run);
+        let mut kept = 0;
+        while index > 0
+            && run.is_some()
+            && self.translations[index - 1].run == run
+            && kept < RUN_KEPT_WHOLE
+        {
+            index -= 1;
+            kept += 1;
+        }
         if index > 0 {
             self.tail = Some(self.translations[index - 1].clone());
         }
@@ -333,5 +348,27 @@ mod tests {
         h.fence();
         assert!(h.is_empty());
         assert_eq!(h.screen, "");
+    }
+
+    #[test]
+    fn a_held_run_is_kept_whole_when_the_history_is_cut() {
+        let one = |run| Translation {
+            run,
+            ..Translation::new(vec![1], Some("cat".into()))
+        };
+        let mut state = State {
+            translations: (0..10).map(|_| one(None)).collect(),
+            tail: None,
+        };
+        state.translations.extend((0..150).map(|_| one(Some(7))));
+        state.restrict_size(100);
+        // Cut before the run, never through it
+        assert_eq!(state.translations.len(), 150);
+        assert!(state.translations.iter().all(|t| t.run == Some(7)));
+        assert!(state.tail.as_ref().is_some_and(|t| t.run.is_none()));
+        // A run past the bound is cut at the bound
+        state.translations = (0..2000).map(|_| one(Some(8))).collect();
+        state.restrict_size(100);
+        assert_eq!(state.translations.len(), 100 + RUN_KEPT_WHOLE);
     }
 }
