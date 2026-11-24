@@ -136,6 +136,34 @@ the stroke part of the outline even where the engine starts a new translation wi
 shown is then each translation's entry, in order, separated by spaces. It changes nothing about
 how strokes translate. `outline-join.rs` makes a theory's join key `+` continue every outline.
 
+### `groups` (optional)
+
+For a theory that ships a notation file (key groups written as short spellings: `TPHROUR` as
+`FLOUR`; see the README's *Theory notation*), a plugin can say how it split the strokes of a word
+it read into sound groups, so keymux writes and draws that word the way it was read:
+
+```rust
+#[no_mangle]
+pub extern "C" fn groups(ptr: i32, len: i32) -> i64 { /* ... */ }
+```
+
+- **When:** on the reading instance, right after a `fallback` that gave a reading, with the same
+  outline (written at an address `alloc` returned, as for `fallback`). Never asked of a plugin that
+  does not export it, so it costs nothing otherwise; nothing else calls it.
+- **Answer:** packed pointer and length as `fallback`'s (negative: no report), pointing at
+  little-endian `u32` key sets in stroke bits (the bits `joins` gets): each a group of two keys or
+  more of one hand that the plugin read as one sound, and a `0` after each stroke's groups. For
+  `TPHROUR` read as *flower*: `T P` and `H R` (F and L), then `0`. Keys in no group are single.
+- **Not used** if it does not fit: a different number of strokes, a group not all in its stroke,
+  across both hands, or sharing a key with another group. Then the word is written by the table.
+- **Where it shows:** the overlay's tape (every line of the word), `{:outline:...}`, and the tape
+  file's line for the stroke that ends the word. Precedence: the notation file's own `outlines`
+  entry for the outline, then this report, then the notation's table. The keyboard diagram shows
+  a stroke while it is pressed, before any plugin read it, so a report never changes it.
+
+The cheapest way to answer is to keep, in `fallback`, how the reading it returned was made, and
+hand that back here (both run on the same instance, one right after the other).
+
 ### `init` (optional)
 
 ```rust
@@ -201,7 +229,7 @@ extern "C" {
   negative, or past the oldest stroke or the wall.
 
 Both answer `0` / `-1` anywhere but inside a `fallback` call: in `joins`, `send_early`, `init`,
-`context` and in `alloc`, and in a `fallback` for a lookup that carries no history (for example
+`context`, `groups` and in `alloc`, and in a `fallback` for a lookup that carries no history (for example
 a reverse lookup). Each call is O(1); reading `k` strokes is `k` calls, whatever the history's
 length, and nothing is copied.
 

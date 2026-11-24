@@ -134,6 +134,23 @@
 //! first (`k = 0` the stroke right before the run), `-1` past the oldest, a wall or outside a
 //! `fallback`. The strokes are a [`super::strokes::StrokeLog`]; see `docs/plugins/README.md`.
 //!
+//! # The groups interface (optional)
+//!
+//! ```ignore
+//! #[no_mangle]
+//! pub extern "C" fn groups(ptr: i32, len: i32) -> i64;
+//! ```
+//!
+//! For a theory notation (see [`super::notation`]): how the plugin split the strokes of the
+//! outline it just read into sound groups, so a word it read is written (`{:outline:...}`, the
+//! tape) and drawn (the overlay) the way it read it. Called on the reading instance right after
+//! a `fallback` that gave a reading, with the same outline, only when the plugin exports it.
+//! Answers like `fallback` (packed pointer and length, negative for none) with little-endian
+//! `u32` key sets in stroke bits, each a group of two keys or more of one hand that sound as
+//! one, a `0` after each stroke's groups. A report that does not fit the strokes (a group not
+//! all in its stroke, across both hands, overlapping another) is not used. Precedence: the
+//! notation file's own entry for the outline, then this report, then the notation's table.
+//!
 //! # Mods
 //!
 //! `alloc` and `fallback` are required only of a plugin that reads words. One that only changes
@@ -297,6 +314,11 @@ pub(crate) struct Plugin {
     /// What `joins` answered for each stroke asked so far. A pure function of the stroke, and
     /// the longest-match search asks about the same few strokes many times per stroke typed.
     joins_known: rustc_hash::FxHashMap<u32, bool>,
+    /// `groups(ptr, len) -> packed`, if this plugin exports one: how it split the strokes of the
+    /// outline it last read into sound groups (see the module doc)
+    groups: Option<TypedFunc<(i32, i32), i64>>,
+    /// Where the reading instance keeps what `groups` answered, for the engine to find
+    reported: Option<Reports>,
     /// `send_early(held, stroke) -> bool`, if this plugin exports one: see the module doc.
     send_early: Option<TypedFunc<(i64, i64), i32>>,
     /// `outline_continues(stroke) -> bool`, if this plugin exports one: see the module doc.
@@ -390,6 +412,12 @@ impl Plugin {
         if context.is_none() && instance.get_func(&mut store, "context").is_some() {
             bail!("plugin {name:?} has context, but not context(ptr, len)");
         }
+        let groups = instance
+            .get_typed_func::<(i32, i32), i64>(&mut store, "groups")
+            .ok();
+        if groups.is_none() && instance.get_func(&mut store, "groups").is_some() {
+            bail!("plugin {name:?} has groups, but not groups(ptr, len) -> packed");
+        }
         Ok(Self {
             name,
             module,
@@ -403,6 +431,8 @@ impl Plugin {
             outline_continues,
             init,
             context,
+            groups,
+            reported: None,
         })
     }
 
@@ -427,11 +457,13 @@ impl Plugin {
                 reader: None,
                 context: false,
                 history: false,
+                reported: None,
             };
         }
         let context = plugin.context.is_some();
         let history = plugin.history;
         let module = plugin.module.clone();
+        let reported = plugin.groups.is_some().then(Reports::default);
         let mods = (plugin.joins.is_some()
             || plugin.send_early.is_some()
             || plugin.outline_continues.is_some())
@@ -440,21 +472,27 @@ impl Plugin {
             Mutex::new(plugin)
         });
         let reader_name = name.clone();
-        let reader = Worker::spawn_with(&name, Box::new(move || Self::reader(reader_name, module)));
+        let theirs = reported.clone();
+        let reader = Worker::spawn_with(
+            &name,
+            Box::new(move || Self::reader(reader_name, module, theirs)),
+        );
         PluginStep {
             name,
             mods,
             reader,
             context,
             history,
+            reported,
         }
     }
 
     /// What reads words on a plugin's own thread: an instance of `module` made there, `init`ed
     /// before it reads anything. One that cannot be made, or whose `init` fails, reads nothing.
-    fn reader(name: String, module: Module) -> Read {
+    fn reader(name: String, module: Module, reported: Option<Reports>) -> Read {
         let made = Self::instantiate(name.clone(), module).and_then(|mut plugin| {
             plugin.init()?;
+            plugin.reported = reported;
             Ok(plugin)
         });
         match made {
@@ -505,7 +543,42 @@ impl Plugin {
                 let _ = context.call(&mut self.store, at);
             }
         }
-        self.fallback_after(outline, window)
+        let text = self.fallback_after(outline, window)?;
+        self.report_groups(outline, &text);
+        Some(text)
+    }
+
+    /// After a reading, ask `groups` (if the plugin has it) how the outline's strokes split, and
+    /// keep the answer for the engine (see [`Chain::plugin_groups`]). Only a plugin that exports
+    /// it is asked: for any other this costs nothing.
+    fn report_groups(&mut self, outline: &str, text: &str) {
+        let (Some(groups), Some(reported), Some(memory)) =
+            (self.groups.clone(), self.reported.clone(), self.memory)
+        else {
+            return;
+        };
+        let Some((ptr, len)) = self.write(outline.as_bytes()).filter(|(ptr, _)| *ptr != 0) else {
+            return;
+        };
+        let answer = groups
+            .call(&mut self.store, (ptr, len))
+            .ok()
+            .filter(|&packed| packed >= 0)
+            .and_then(|packed| {
+                let at = usize::try_from((packed >> 32) & 0xFFFF_FFFF).ok()?;
+                let len = usize::try_from(packed & 0xFFFF_FFFF).ok()?;
+                let mut buf = vec![0u8; len];
+                memory.read(&self.store, at, &mut buf).ok()?;
+                Some(split_groups(&buf))
+            });
+        let Some(answer) = answer else {
+            return;
+        };
+        let mut kept = lock(&reported.0);
+        if kept.len() == REPORTS_KEPT {
+            kept.pop_front();
+        }
+        kept.push_back((outline.to_owned(), text.to_owned(), answer));
     }
 
     /// Ask this plugin for a reading of a stroke outline that missed every dictionary, in
@@ -608,6 +681,37 @@ struct PluginStep {
     context: bool,
     /// Whether it reads the strokes before each outline (it imports the history functions)
     history: bool,
+    /// What `groups` answered for the readings made last, for a plugin that exports it
+    reported: Option<Reports>,
+}
+
+/// Readings' sound groups kept for the engine to pick up.
+const REPORTS_KEPT: usize = 16;
+
+/// What a plugin's `groups` answered after its newest readings: the outline it read, the reading,
+/// and each stroke's groups (in stroke bits). Shared by the reading thread and the chain.
+#[derive(Clone, Default)]
+struct Reports(Arc<Mutex<std::collections::VecDeque<Report>>>);
+
+/// One reading's report: the outline read, the reading, and each stroke's groups.
+type Report = (String, String, Vec<Vec<u32>>);
+
+/// A `groups` answer, little-endian `u32` key sets, `0` between strokes, as one list of groups
+/// per stroke (a trailing `0` ends the last stroke; it is not one more, empty).
+fn split_groups(bytes: &[u8]) -> Vec<Vec<u32>> {
+    let mut strokes = vec![Vec::new()];
+    for word in bytes.as_chunks::<4>().0 {
+        let keys = u32::from_le_bytes(*word);
+        if keys == 0 {
+            strokes.push(Vec::new());
+        } else if let Some(last) = strokes.last_mut() {
+            last.push(keys);
+        }
+    }
+    if strokes.len() > 1 && strokes.last().is_some_and(Vec::is_empty) {
+        strokes.pop();
+    }
+    strokes
 }
 
 impl PluginStep {
@@ -743,6 +847,7 @@ impl Chain {
                     reader: Worker::spawn("reader", read),
                     context,
                     history: false,
+                    reported: None,
                 })),
             ],
             dict,
@@ -845,6 +950,49 @@ impl Chain {
             steps,
             layout: layout.clone(),
         }
+    }
+
+    /// How a plugin split the strokes of an outline it read as `text` into sound groups, if it
+    /// reported one (it exports `groups`; see the module doc): one [`Split`] per stroke, each
+    /// group a set of two keys or more of one hand that is all in its stroke. `None` when no
+    /// plugin reported, or the report does not fit the strokes (then it is not used at all).
+    ///
+    /// [`Split`]: super::notation::Split
+    #[must_use]
+    pub fn plugin_groups(&self, strokes: &[u32], text: &str) -> Option<Vec<Vec<u32>>> {
+        let mut reports = self.steps.iter().filter_map(|step| match step {
+            Step::Plugin(plugin) => plugin.reported.as_ref(),
+            Step::Dict(_) => None,
+        });
+        let first = reports.next()?;
+        let outline = self.layout.render_strokes(strokes);
+        let found = std::iter::once(first).chain(reports).find_map(|reported| {
+            lock(&reported.0)
+                .iter()
+                .rev()
+                .find(|(asked, read, _)| *asked == outline && read == text)
+                .map(|(_, _, groups)| groups.clone())
+        })?;
+        let layout = &self.layout;
+        let hand = |range: std::ops::Range<usize>| range.fold(0u32, |m, slot| m | (1 << slot));
+        let left = hand(0..layout.left_end());
+        let right = hand(layout.right_start()..layout.number_slot());
+        let fits = found.len() == strokes.len()
+            && found.iter().zip(strokes).all(|(groups, &stroke)| {
+                let mut taken = 0u32;
+                groups.iter().all(|&group| {
+                    let ok = group.count_ones() > 1
+                        && group & !stroke == 0
+                        && group & taken == 0
+                        && (group & !left == 0 || group & !right == 0);
+                    taken |= group;
+                    ok
+                })
+            });
+        if !fits {
+            tracing::debug!("plugin groups for {outline} do not fit its strokes; not used");
+        }
+        fits.then_some(found)
     }
 
     /// How many plugins are running in this chain. Fewer than the plugin files there are means
@@ -1604,6 +1752,69 @@ pub extern "C" fn joins(bits: i64) -> i32 {
             ),
             "its questions carry no text"
         );
+    }
+
+    /// `DOUBLER` that also reports its strokes' sound groups: `T P` and `H R` of the one stroke.
+    fn doubler_with_groups() -> String {
+        format!(
+            "{DOUBLER}{}",
+            r#"
+#[no_mangle]
+pub extern "C" fn groups(_ptr: i32, _len: i32) -> i64 {
+    let mut out: Vec<u8> = Vec::new();
+    for keys in [0b1010u32, 0b110_0000, 0] {
+        out.extend(keys.to_le_bytes());
+    }
+    let out_len = out.len();
+    let out_ptr = out.as_mut_ptr();
+    std::mem::forget(out);
+    (i64::from(out_ptr as i32) << 32) | i64::from(out_len as i32)
+}
+"#
+        )
+    }
+
+    #[test]
+    fn a_plugins_groups_are_kept_for_the_reading_and_used_only_when_they_fit() {
+        let chain = chain_of("groups", "grouper.rs", &doubler_with_groups());
+        let layout = Layout::plover();
+        let budget = Budget::default();
+        let read = |stroke: u32| {
+            budget.start(std::time::Instant::now() + std::time::Duration::from_secs(10));
+            chain
+                .lookup_within(&[stroke], Before::default(), &budget)
+                .unwrap()
+        };
+        let flower = layout.parse_stroke("TPHROUR").unwrap();
+        let text = read(flower);
+        assert_eq!(text, "TTPPHHRROOUURR");
+        assert_eq!(
+            chain.plugin_groups(&[flower], &text),
+            Some(vec![vec![0b1010, 0b110_0000]])
+        );
+        // Not the reading it reported for, or another outline: nothing
+        assert_eq!(chain.plugin_groups(&[flower], "flower"), None);
+        // A report whose groups are not all in the stroke is not used
+        let cat = layout.parse_stroke("KAT").unwrap();
+        let text = read(cat);
+        assert_eq!(chain.plugin_groups(&[cat], &text), None);
+        // A plugin without `groups` reports nothing
+        let plain = chain_of("groups_none", "doubler.rs", DOUBLER);
+        budget.start(std::time::Instant::now() + std::time::Duration::from_secs(10));
+        let text = plain
+            .lookup_within(&[flower], Before::default(), &budget)
+            .unwrap();
+        assert_eq!(plain.plugin_groups(&[flower], &text), None);
+    }
+
+    #[test]
+    fn a_groups_answer_is_split_into_strokes() {
+        let bytes: Vec<u8> = [3u32, 12, 0, 48, 0]
+            .iter()
+            .flat_map(|k| k.to_le_bytes())
+            .collect();
+        assert_eq!(split_groups(&bytes), [vec![3, 12], vec![48]]);
+        assert_eq!(split_groups(&[]), [Vec::<u32>::new()]);
     }
 
     #[test]

@@ -460,6 +460,9 @@ pub struct Translator {
     /// The plugin, and its reading, that the last stroke typed, if a plugin's reading is what it
     /// typed
     plugin_read: Option<(String, String)>,
+    /// The strokes the plugin read, and the sound groups it reported for them (see
+    /// [`Chain::plugin_groups`]), when it reported any
+    plugin_groups: Option<(Vec<u32>, Vec<Vec<u32>>)>,
     /// Where the text before the stroke being translated ends on screen (a byte offset into the
     /// history's `screen`): what a plugin is told precedes an outline starting with it
     stroke_start: usize,
@@ -485,6 +488,7 @@ impl Clone for Translator {
             budget: Budget::default(),
             late: None,
             plugin_read: None,
+            plugin_groups: None,
             stroke_start: 0,
         }
     }
@@ -527,6 +531,7 @@ impl Translator {
             budget: Budget::default(),
             late: None,
             plugin_read: None,
+            plugin_groups: None,
             stroke_start: 0,
         }
     }
@@ -567,6 +572,13 @@ impl Translator {
         self.plugin_read.clone()
     }
 
+    /// The strokes a plugin read for the last stroke (or the last [`Self::settle_late`]), and
+    /// how it reported they split into sound groups, if it did (see [`Chain::plugin_groups`]).
+    #[must_use]
+    pub const fn plugin_groups(&self) -> Option<&(Vec<u32>, Vec<Vec<u32>>)> {
+        self.plugin_groups.as_ref()
+    }
+
     /// Put right a stroke typed without a plugin's reading that came too late (see
     /// [`Self::has_late`]): if what it made is still the last thing typed, take it back and
     /// translate the stroke again, the reading now in hand, and say what to type to match.
@@ -577,6 +589,7 @@ impl Translator {
         self.unmatched = false;
         self.transparent = false;
         self.plugin_read = None;
+        self.plugin_groups = None;
         self.check_out();
         let last = self
             .hist
@@ -613,6 +626,7 @@ impl Translator {
         self.ran_macro = false;
         self.late = None;
         self.plugin_read = None;
+        self.plugin_groups = None;
         self.budget.start(Instant::now() + self.plugin_deadline);
     }
 
@@ -1072,6 +1086,10 @@ impl Translator {
         self.plugin_read = translation.english.as_ref().and_then(|text| {
             let plugin = self.budget.reader_of(&translation.strokes, text)?;
             Some((plugin, text.clone()))
+        });
+        self.plugin_groups = self.plugin_read.as_ref().and_then(|(_, text)| {
+            let groups = self.dict.plugin_groups(&translation.strokes, text)?;
+            Some((translation.strokes.clone(), groups))
         });
         let late = self.budget.take_late();
         self.translate_translation(translation);
