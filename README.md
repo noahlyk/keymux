@@ -728,7 +728,7 @@ A dictionary written for Plover types the same text here. keymux reads Plover's 
 | Python programmatic dictionaries (`.py`) | **not run.** They are code, and a keyboard daemon that runs as root won't execute files from your config folder. Lapwing's `jeff-phrasing.py` and the Emily and Abby modifier dictionaries are of this kind. |
 | Other plugin formats (`.sgdct`, `.dct`, `.dix`, Lapwing's `.modal`) | **not read.** Export them to RTF/CRE or JSON from the software that made them. |
 
-Outlines use Plover's notation, with number keys written as digits (`1-9`, `12K`, `-69`), and a leading slash for a word boundary (`/S`, used when the word before is finished).
+Outlines use Plover's notation, with number keys written as digits (`1-9`, `12K`, `-69`), and a leading slash for a word boundary (`/S`, used when the word before is finished). Dictionary keys are always read this way; a theory can have keymux *print* strokes in a shorter notation of its own, see [Theory notation](#theory-notation).
 
 **Translation language**: every operator on [Plover's page](https://plover.readthedocs.io/en/latest/translation_language.html):
 
@@ -765,6 +765,46 @@ Outlines use Plover's notation, with number keys written as digits (`1-9`, `12K`
 A stroke with no translation types its keys (`STPHA-UBGS`), not Plover's `STPHAUBGS`, and a first word attaches to what is already written unless `start_attached: false`. A key combination can only press keys of a US keyboard: Plover's names for accented letters (`eacute`) aren't sent.
 
 **How it is checked.** `tools/plover-golden` runs Plover's own code and records what it does: 4,400 stroke sequences through every operator, in every start mode and with spaces before and after (`spaces_after: true` is Plover's "After Output", which Lapwing is written for); 7,900 suffixes added to words; 21,500 stroke spellings read and written; RTF files Plover writes and hand-made ones with the format's corners; and 1,800 random sequences over Plover's shipped `main.json` and `commands.json`. keymux must give the same text after every stroke, the same key combinations and the same commands.
+
+### Theory notation
+
+A theory can tell keymux how to write strokes for people: key groups as one short spelling, vowels as they are. With lyk's table, `TPHAEPL` (enemy) is written `NAEM` and `TPHROUR` (flower) `FLOUR`. keymux knows no theory's groups; they are only data in a file the theory ships. **No file: Plover's notation, digits for number strokes, exactly as before.**
+
+**The file.** `.keymux-notation.json` in the layer's dictionary folders (hidden, so it is never read as a dictionary). keymux uses the first one found, searched in the order dictionaries are found: each root folder's own file before its subfolders, subfolders in priority order, `disabled…` and hidden folders skipped. A root that is a single file has no folder to search.
+
+```json
+{
+  "number": "letters",
+  "left":  {"TPH": "N", "TP": "F", "HR": "L", "TPHR": "FL", "PHR": "PL"},
+  "right": {"PB": "N", "PL": "M", "BG": "K", "FP": "CH", "PBLG": "J"},
+  "outlines": {"TPHR-R": "NR-R"}
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `number` | `"letters"`: a stroke with the number key is written `#` and letters (`#TR-RL`). `"digits"` (the default, also when absent): Plover's digits (`2R-R8`) for a stroke that can be written with them |
+| `left` | a set of left-hand keys (in key order, as in a stroke) → its spelling: ASCII letters, at least one (lowercase is uppercased) |
+| `right` | the same for the right hand, keys written **without** the leading `-` (`"PB"` is `-PB`) |
+| `outlines` | a whole outline (as a dictionary key, `/` between strokes) → how to write it. Ahead of the table for that exact outline |
+
+Unknown fields are ignored. An entry is dropped, with a warning in the daemon log, when its keys are not keys of that hand, its spelling is not letters or holds a vowel key's letter (`A`, `O`, `E`, `U`: they split the hands), or its spelling is already taken in that hand (the first is kept). An `outlines` entry is dropped when its short form does not read back as the same strokes. A file that is not a JSON object is not used (warning). When some set of one hand's keys does not read back as itself once written (a spelling that is also another key's letter, say), the log says so once, with an example; the rest still works.
+
+**Writing a stroke.** Extra keys first (as ever), then `#` (unless `number` keeps digits and the stroke has a key that doubles as a digit: then the whole stroke is Plover's, `2R-R8`), the left hand, the vowels and star as they are, a `-` when there is no vowel or star and the right hand has keys, then the right hand. A hand is written in tokens: take the lowest key not yet written; among the table's entries whose lowest key it is, that are all down, and that are contiguous among the keys still to write (no key still to write between the entry's lowest and highest key that is not part of it), use the one with the most keys and write its spelling; with none, write the key's own letter. Tokens come out in the order of their lowest key. So with `TPHR` = `FL` in the table `TPHR` is `FL`, and without it `N` then `R`: `NR`; with `SR` = `V`, `SR` is `V` but `STR` stays `STR`. An entry whose spelling is its own keys' letters (`"FRB": "FRB"`) only stops a shorter entry from applying. A whole outline: its `outlines` entry if it has one, otherwise stroke by stroke, joined with `/`. **Precedence: `outlines` entry > table > Plover's notation.**
+
+**Reading.** Wherever keymux reads an outline you typed, both forms work. A stroke that is exactly Plover's notation of what it parses to is Plover's (`TPHAEPL`, `KAT`, `2R-R8`); otherwise it is read as the short form: extra keys and `#` anywhere, the left hand up to the first vowel, star or `-`, those as they are, then the right hand, each hand read greedily, longest first, from the table's spellings and that hand's own key letters; otherwise Plover's notation read leniently. `NAEM` is `TPHAEPL`, `-N` is `-PB`, and `PL` is `PHR` (Plover writes `P-L` with its hyphen, so `PL` is not Plover's). A whole outline that is an `outlines` short form is read back to its outline first.
+
+**Where it applies.** Read each time the layer's dictionaries load (a reload reads it again; editing only the notation file does not trigger a reload by itself, so touch a dictionary or restart).
+
+| Place | |
+|---|---|
+| `{:outline:last}`, `{:outline:next}`, `{:outline:explain}` | type outlines in it, `outlines` entries included (`NAEM -> enemy`) |
+| the tape file (`keymux steno tape`) | strokes written in it |
+| `keymux steno lookup`, `stroke`, `keys` | print outlines in it (coloured by each piece's first key, a piece standing for several keys underlined as one) and read queries in it as well as Plover's |
+| `keymux steno add` | reads the outline in either form; the dictionary key it writes is always Plover's (`Added TPHAEPL/KAT (NAEM/KAT) → …`) |
+| the live lookup (`{:lookup}`) | reads queries in either form |
+
+**Not yet.** The overlay still draws Plover's notation: its tape, its keyboard labels and the live lookup's rows (the overlay draws them key by key from its own layout, and does not know the theory's notation). A stroke with no translation still types its raw keys (`STPHA-UBGS`), the tape's `could be …` hint for a word typed by hand is in Plover's notation, and what plugins are asked (`fallback`) stays Plover's notation, as does every dictionary key. A way for a solver plugin to report how it split a run it read (to label the overlay by the entry's own split) is not there either.
 
 ### Config
 
@@ -837,7 +877,7 @@ Add a steno layer. Its name doesn't matter; `kind` is what makes it a steno laye
   | `{:lookup:open}` / `{:lookup:close}` / `{:lookup:toggle}` | Open, close or flip the live lookup (the bare `{:lookup}` is the same as `open`) |
 
   These are **runtime only**. They change what is on screen now and nothing else: not the `overlay:` section of the config, not whether or how the overlay starts, nothing is written to a file or remembered. Restart the overlay (or the daemon) and it comes back as the config says; a config reload applies the new config but keeps a hide you made (`{:overlay:hide}` stays hidden after you save the config). They act only on an overlay that is already running: with none running, or with `enabled: false`, they do nothing (not an error, and never a way to start one). `show` cannot put the overlay up where it would not be anyway, such as off the steno layers (`layers`); it undoes a hide, and it also brings the overlay back after a click or window switch put it away. The hidden state is separate for the panel, the tape and the keyboard, so `{:overlay:hide}` then `{:overlay:show}` brings back the same parts that were showing. When a hide leaves nothing to draw (the whole panel hidden, or both the tape and the keyboard with no lookup open) keymux releases the overlay's screen surface instead of drawing a blank one, so a hidden overlay costs nothing and `show` is a single commit. A text that is not one of these (`{:tape:sideways}`) does nothing.
-- **Typing a stroke's notation: `{:outline:last}`, `{:outline:next}` and `{:outline:explain}`.** Three transparent commands that type steno notation as text, to paste into notes. The notation is the layout's own, as the overlay and the lookup write it (`SKWRO*EUBGS`, strokes joined with `/`). None adds to the history as a stroke; the text they type is a translation of its own with no strokes, spaced and capitalised like a word, typed literally (braces in it are text, not metas), taken back by undo like one, and it never counts as the last outline. None repeats when held. An unknown verb (`{:outline:sideways}`) does nothing.
+- **Typing a stroke's notation: `{:outline:last}`, `{:outline:next}` and `{:outline:explain}`.** Three transparent commands that type steno notation as text, to paste into notes. The notation is the layout's own (`SKWRO*EUBGS`, strokes joined with `/`), or the theory's when it ships a notation file (`NAEM`, see [Theory notation](#theory-notation)). None adds to the history as a stroke; the text they type is a translation of its own with no strokes, spaced and capitalised like a word, typed literally (braces in it are text, not metas), taken back by undo like one, and it never counts as the last outline. None repeats when held. An unknown verb (`{:outline:sideways}`) does nothing.
 
   | Entry | What it does |
   |---|---|
@@ -913,6 +953,8 @@ already has it as `PHRUP` and `PHR*UP`, and you can add your own to any dictiona
   lookup: `ED/+-D` is shown with its `+`, the join key's key on the overlay lights on the
   `+-D` stroke, and typing `ED/+-D` or just `+-D` (in capitals, no lowercase) resolves it forward.
   The lookup reads and writes notation in the steno layer's own layout (its `extra_keys`).
+  With a [theory notation](#theory-notation) file it also reads queries in the theory's short
+  form (`NAEM`); its rows stay in Plover's notation, which the overlay draws key by key.
   The command line does the same: `keymux steno lookup`, `stroke`, `keys` and `add` read your
   config's steno layer `extra_keys` too, so `keymux steno lookup "ED/+-D"` parses and prints the
   `+` exactly as the daemon does (with no config or no `extra_keys`, the plain 23 keys).

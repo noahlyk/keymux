@@ -2,7 +2,8 @@
 //! notation as text, to paste into notes, and what it looks up to.
 //!
 //! `{:outline:last}` types the outline of the last translation: every stroke of it, in the
-//! layout's notation, joined with `/` (`SKWRO*EUBGS`, `KAT/-S`). That is the translation the
+//! layer's notation (the layout's, or the theory's own when it ships one, see
+//! [`super::notation`]), joined with `/` (`SKWRO*EUBGS`, `KAT/-S`). That is the translation the
 //! text on screen comes from: the last one in the history that strokes made, so an undo moves it
 //! back and these commands themselves never count. With nothing to name it types nothing.
 //!

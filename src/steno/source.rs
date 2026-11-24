@@ -20,7 +20,7 @@
 //!   renaming `lapwing/` to `disabled_lapwing/` turns it off without deleting it.
 //! - Dictionaries are `.json` and `.rtf` (RTF/CRE) files, and the orthography word list
 //!   (`american_english_words.txt`) is found the same way. Hidden files (`.name`) and anything
-//!   else are skipped.
+//!   else are skipped; a theory's hidden notation file is found by [`find_in_folders`] instead.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

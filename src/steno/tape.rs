@@ -1,6 +1,9 @@
 //! The steno tape: one line per stroke, showing what each stroke typed. This is
 //! how a learner sees what a stroke was, and which strokes matched nothing.
 //!
+//! Strokes are written in the layer's notation: the layout's, or the theory's own once its
+//! dictionaries have loaded with a notation file (see [`super::notation`]).
+//!
 //! Each tape file has a thread of its own that does the writing, so a stroke never waits on
 //! the disk: the typing path hands the line over and carries on.
 
