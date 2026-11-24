@@ -4,7 +4,6 @@
 use super::*;
 use crate::steno::journal;
 use std::fs;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 const DICT: &str = r#"{
     "KAT": "cat", "TKOG": "dog", "-S": "{^s}", "*": "=undo", "SKWR": "{:engine:unload}",
@@ -13,27 +12,22 @@ const DICT: &str = r#"{
 
 /// A folder to itself, with a config folder inside it so the cache lands inside too.
 pub(super) struct Rig {
-    pub(super) root: PathBuf,
+    /// Held so the folder is removed with the rig
+    _root: crate::test_dir::TestDir,
     pub(super) config_dir: PathBuf,
     pub(super) dict_dir: PathBuf,
 }
 
 impl Rig {
     pub(super) fn new(name: &str) -> Self {
-        static N: AtomicU32 = AtomicU32::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "keymux-unload-{name}-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&root);
+        let root = crate::test_dir::TestDir::new(&format!("keymux-unload-{name}"));
         let config_dir = root.join("cfg");
         let dict_dir = root.join("dicts");
         fs::create_dir_all(&config_dir).unwrap();
         fs::create_dir_all(&dict_dir).unwrap();
         fs::write(dict_dir.join("01.json"), DICT).unwrap();
         Self {
-            root,
+            _root: root,
             config_dir,
             dict_dir,
         }
@@ -77,12 +71,6 @@ impl Rig {
     fn engine_with(&self, history: &journal::SharedHistory) -> StenoEngine {
         StenoEngine::from_config(&self.config(), true, &self.config_dir, None, history, "t")
             .unwrap()
-    }
-}
-
-impl Drop for Rig {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
     }
 }
 

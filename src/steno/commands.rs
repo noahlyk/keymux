@@ -804,8 +804,7 @@ mod tests {
     #[test]
     fn show_keys_names_the_physical_keys_in_the_output() {
         // End to end through the view the commands print
-        let dict_dir =
-            std::env::temp_dir().join(format!("keymux-commands-keys-{}", std::process::id()));
+        let dict_dir = crate::test_dir::TestDir::new("keymux-commands-keys");
         std::fs::create_dir_all(dict_dir.join("steno")).unwrap();
         std::fs::write(dict_dir.join("steno/d.json"), r#"{"KWEUG": "quick"}"#).unwrap();
         std::fs::write(dict_dir.join("config.ron"), "(layers: {})").unwrap();

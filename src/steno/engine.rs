@@ -1475,8 +1475,7 @@ mod tests {
         engine
             .translator
             .set_plugin_deadline(Duration::from_millis(5));
-        let dir = std::env::temp_dir().join(format!("keymux-engine-late-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::test_dir::TestDir::new("keymux-engine-late");
         let path = dir.join("tape.txt");
         engine.tape = Some(tape::Tape::with_layout(path.clone(), Layout::plover()));
         let hub: &'static OverlayHub = Box::leak(Box::default());
@@ -1529,7 +1528,6 @@ mod tests {
             !tape[0].read && tape[1].read,
             "only the plugin's line is a reading: {tape:?}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

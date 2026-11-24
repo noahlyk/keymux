@@ -1140,13 +1140,12 @@ mod tests {
     }
 
     /// A fresh temp directory holding one dictionary file with `json`, plus its cache directory.
-    fn cache_fixture(name: &str, json: &str) -> (PathBuf, PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("keymux-dict-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+    fn cache_fixture(name: &str, json: &str) -> (crate::test_dir::TestDir, PathBuf, PathBuf) {
+        let dir = crate::test_dir::TestDir::new(&format!("keymux-dict-{name}"));
         let file = dir.join("main.json");
         fs::write(&file, json).unwrap();
-        (dir.clone(), file, dir.join("cache"))
+        let cache = dir.join("cache");
+        (dir, file, cache)
     }
 
     /// Copies in the cache: one per dictionary file.
@@ -1156,7 +1155,7 @@ mod tests {
 
     #[test]
     fn a_cached_dictionary_is_restored_until_its_file_changes() {
-        let (dir, file, cache) = cache_fixture("restore", r#"{"KAT": "cat"}"#);
+        let (_dir, file, cache) = cache_fixture("restore", r#"{"KAT": "cat"}"#);
         let first = Dictionary::load_cached(&[&file], &cache, &Layout::plover());
         assert_eq!(first.strokes_for("cat"), vec![vec![KAT]]);
         assert_eq!(cache_files(&cache), 1, "the first load saves a cache");
@@ -1180,7 +1179,6 @@ mod tests {
             1,
             "the changed file overwrites its cache"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1202,19 +1200,17 @@ mod tests {
             2,
             "a copy per file, not per combination"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_corrupt_cache_is_replaced_by_parsing_the_json() {
-        let (dir, file, cache) = cache_fixture("corrupt", r#"{"KAT": "cat"}"#);
+        let (_dir, file, cache) = cache_fixture("corrupt", r#"{"KAT": "cat"}"#);
         let _ = Dictionary::load_cached(&[&file], &cache, &Layout::plover());
         for entry in fs::read_dir(cache.join("parts")).unwrap() {
             fs::write(entry.unwrap().path(), b"not a dictionary").unwrap();
         }
         let dict = Dictionary::load_cached(&[&file], &cache, &Layout::plover());
         assert_eq!(dict.strokes_for("cat"), vec![vec![KAT]]);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1241,9 +1237,7 @@ mod tests {
 
     #[test]
     fn an_rtf_dictionary_loads_like_a_json_one_and_the_word_list_from_the_same_place() {
-        let dir = std::env::temp_dir().join(format!("keymux-dict-rtf-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_dir::TestDir::new("keymux-dict-rtf");
         let rtf = dir.join("pro.rtf");
         fs::write(
             &rtf,
@@ -1275,7 +1269,6 @@ mod tests {
         let other_way = Dictionary::load(&[rtf.as_path(), json.as_path()], &Layout::plover());
         assert_eq!(other_way.lookup(&[KAT]), Some("cat"));
         assert!(!other_way.orthography().has_words());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

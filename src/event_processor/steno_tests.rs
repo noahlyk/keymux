@@ -4,7 +4,7 @@
 use crate::config::{Config, Layer};
 use crate::event_processor::{KeymapProcessor, ProcessResult};
 use crate::keycode::KeyCode;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const CONFIG: &str = r#"(
     remaps: {
@@ -29,13 +29,12 @@ const CONFIG: &str = r#"(
 
 /// Writes a config and dictionary into a unique temp directory and builds a processor.
 struct Fixture {
-    dir: PathBuf,
+    dir: crate::test_dir::TestDir,
 }
 
 impl Fixture {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("keymux-steno-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_dir::TestDir::new(&format!("keymux-steno-{name}"));
         Self { dir }
     }
 
@@ -61,12 +60,6 @@ impl Fixture {
         let mut keymap = KeymapProcessor::new(&config, config_path, 0);
         keymap.wait_for_steno_dictionaries();
         keymap
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 

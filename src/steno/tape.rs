@@ -658,9 +658,8 @@ mod tests {
 
     #[test]
     fn append_writes_one_line_per_stroke() {
-        let dir = std::env::temp_dir().join(format!("keymux-tape-test-{}", std::process::id()));
+        let dir = crate::test_dir::TestDir::new("keymux-tape-test");
         let path = dir.join("tape.txt");
-        let _ = std::fs::remove_dir_all(&dir);
         let kat = crate::steno::layout::parse_stroke("KAT").unwrap();
         let mut tape = Tape::new(path.clone());
         tape.stroke(kat, "\" cat\"");
@@ -671,14 +670,12 @@ mod tests {
         let first = text.lines().next().unwrap();
         assert!(first.contains("KAT"));
         assert!(first.ends_with("\" cat\""));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_stroke_is_written_with_the_layouts_extra_keys_a_join_key_alone_too() {
-        let dir = std::env::temp_dir().join(format!("keymux-tape-extra-{}", std::process::id()));
+        let dir = crate::test_dir::TestDir::new("keymux-tape-extra");
         let path = dir.join("tape.txt");
-        let _ = std::fs::remove_dir_all(&dir);
         let layout = Layout::plover_with_joins(&['+'], &['+']).unwrap();
         let joined = layout.parse_stroke("+-G").unwrap();
         let alone = layout.parse_stroke("+").unwrap();
@@ -699,7 +696,6 @@ mod tests {
         tape.flush();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.lines().nth(3).unwrap().contains("late"), "{text}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -713,9 +709,8 @@ mod tests {
 
     #[test]
     fn repeats_count_on_the_line_of_the_stroke_instead_of_adding_lines() {
-        let dir = std::env::temp_dir().join(format!("keymux-tape-repeat-{}", std::process::id()));
+        let dir = crate::test_dir::TestDir::new("keymux-tape-repeat");
         let path = dir.join("tape.txt");
-        let _ = std::fs::remove_dir_all(&dir);
         let kat = crate::steno::layout::parse_stroke("KAT").unwrap();
         let the = crate::steno::layout::parse_stroke("-T").unwrap();
         let mut tape = Tape::new(path.clone());
@@ -739,14 +734,12 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text.lines().count(), 4, "{text}");
         assert!(text.lines().nth(1).unwrap().ends_with("x5 \" cat\""));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_line_appended_by_hand_behind_the_writers_back_is_left_alone() {
-        let dir = std::env::temp_dir().join(format!("keymux-tape-hand-{}", std::process::id()));
+        let dir = crate::test_dir::TestDir::new("keymux-tape-hand");
         let path = dir.join("tape.txt");
-        let _ = std::fs::remove_dir_all(&dir);
         let kat = crate::steno::layout::parse_stroke("KAT").unwrap();
         let mut tape = Tape::new(path.clone());
         tape.stroke(kat, "\" cat\"");
@@ -765,7 +758,6 @@ mod tests {
             lines[2].ends_with("\" cat\"") && !lines[2].contains("x2"),
             "{text}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `paint`ed lines with what is dimmed in `[...]`.

@@ -454,8 +454,7 @@ pub extern "C" fn joins(bits: i64) -> i32 { i32::from(bits & (1 << 23) != 0) }
 
     #[test]
     fn a_plugins_join_key_is_used_instead_of_the_attach_stroke() {
-        let dir = std::env::temp_dir().join(format!("keymux-compose-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_dir::TestDir::new("keymux-compose-test");
         let (dict_path, plugin_path) = (dir.join("01-dict.json"), dir.join("02-join.rs"));
         std::fs::write(&dict_path, DICT).unwrap();
         std::fs::write(&plugin_path, JOIN_PLUGIN).unwrap();
@@ -485,9 +484,7 @@ pub extern "C" fn joins(bits: i64) -> i32 { i32::from(bits & (1 << 23) != 0) }
 
     #[test]
     fn a_config_join_key_is_the_glue_with_no_plugin_and_matches_a_plugins() {
-        let dir =
-            std::env::temp_dir().join(format!("keymux-compose-joinkey-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_dir::TestDir::new("keymux-compose-joinkey");
         let dict_path = dir.join("01-dict.json");
         std::fs::write(&dict_path, DICT).unwrap();
         let layout = Layout::plover_with_joins(&['+'], &['+']).unwrap();

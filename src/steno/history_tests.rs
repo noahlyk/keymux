@@ -13,15 +13,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// A folder for one test, gone when the test is.
-struct Dir(PathBuf);
+struct Dir(crate::test_dir::TestDir);
 
 impl Dir {
     fn new(test: &str) -> Self {
-        let dir =
-            std::env::temp_dir().join(format!("keymux-history-test-{}-{test}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        Self(dir)
+        Self(crate::test_dir::TestDir::new(&format!(
+            "keymux-history-test-{test}"
+        )))
     }
 
     fn file(&self, name: &str, text: &str) -> PathBuf {
@@ -32,12 +30,6 @@ impl Dir {
 
     fn chain(&self, files: &[PathBuf]) -> Chain {
         Chain::load_cached(files, &self.0.join("cache"), &Layout::plover())
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
     }
 }
 

@@ -139,12 +139,12 @@ pub fn is_plugin_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_dir::TestDir;
     use std::fs;
 
     /// A fresh folder with these files in it (empty contents), and its path.
-    fn tree(name: &str, files: &[&str]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("keymux-source-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+    fn tree(name: &str, files: &[&str]) -> TestDir {
+        let dir = TestDir::new(&format!("keymux-source-{name}"));
         for file in files {
             let path = dir.join(file);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -166,12 +166,11 @@ mod tests {
             "order",
             &["b.json", "A.json", "lapwing/x.json", "zeta/y.json"],
         );
-        let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
+        let found = expand(&[dir.to_path_buf()], &dir.join("cache"));
         assert_eq!(
             names(&dir, &found),
             ["A.json", "b.json", "lapwing/x.json", "zeta/y.json"]
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -187,7 +186,7 @@ mod tests {
                 "lapwing/x.json",
             ],
         );
-        let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
+        let found = expand(&[dir.to_path_buf()], &dir.join("cache"));
         // The folder is one unit at its own number. What is inside only orders the inside.
         assert_eq!(
             names(&dir, &found),
@@ -200,7 +199,6 @@ mod tests {
                 "lapwing/x.json",
             ]
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -209,12 +207,11 @@ mod tests {
             "natural",
             &["10-b.json", "2-a.json", "100-c.json", "1-z.json"],
         );
-        let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
+        let found = expand(&[dir.to_path_buf()], &dir.join("cache"));
         assert_eq!(
             names(&dir, &found),
             ["1-z.json", "2-a.json", "10-b.json", "100-c.json"]
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -223,14 +220,13 @@ mod tests {
             "same-number",
             &["10-b.json", "10-A.json", "010-c.json", "10/x.json"],
         );
-        let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
+        let found = expand(&[dir.to_path_buf()], &dir.join("cache"));
         // 10 and 010 are the same number, so the rest of the name decides, ignoring case. A
         // folder called just "10" has nothing after the number, so it is first.
         assert_eq!(
             names(&dir, &found),
             ["10/x.json", "10-A.json", "10-b.json", "010-c.json"]
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -247,7 +243,7 @@ mod tests {
                 "100-after.json",
             ],
         );
-        let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
+        let found = expand(&[dir.to_path_buf()], &dir.join("cache"));
         // Even 10002 beats a plain name: no number is the lowest priority there is
         assert_eq!(
             names(&dir, &found),
@@ -261,7 +257,6 @@ mod tests {
                 "zeta/y.json",
             ]
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -270,12 +265,11 @@ mod tests {
             "only-numbered",
             &["00-lapwing/base.json", "a.json", "b/c.json", "z.json"],
         );
-        let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
+        let found = expand(&[dir.to_path_buf()], &dir.join("cache"));
         assert_eq!(
             names(&dir, &found),
             ["00-lapwing/base.json", "a.json", "z.json", "b/c.json"]
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -284,32 +278,29 @@ mod tests {
             "word",
             &["3dprinting.json", "7.json", "a.json", "2024-notes.json"],
         );
-        let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
+        let found = expand(&[dir.to_path_buf()], &dir.join("cache"));
         // 7 and 2024 are numbers, 3dprinting is just a plain name
         assert_eq!(
             names(&dir, &found),
             ["7.json", "2024-notes.json", "3dprinting.json", "a.json"]
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn names_the_same_but_for_case_are_ordered_by_the_exact_name_not_by_the_disk() {
         let dir = tree("case", &["b.json", "B.json", "a.json", "A.json"]);
-        let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
+        let found = expand(&[dir.to_path_buf()], &dir.join("cache"));
         assert_eq!(
             names(&dir, &found),
             ["A.json", "a.json", "B.json", "b.json"]
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn folders_nest_as_deep_as_you_like() {
         let dir = tree("deep", &["a/b/c/d/e/f/g.json", "a/b/top.json"]);
-        let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
+        let found = expand(&[dir.to_path_buf()], &dir.join("cache"));
         assert_eq!(names(&dir, &found), ["a/b/top.json", "a/b/c/d/e/f/g.json"]);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -326,9 +317,8 @@ mod tests {
                 "a/keep.json",
             ],
         );
-        let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
+        let found = expand(&[dir.to_path_buf()], &dir.join("cache"));
         assert_eq!(names(&dir, &found), ["keep.json", "a/keep.json"]);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -346,12 +336,11 @@ mod tests {
                 "american_english_words.txt",
             ],
         );
-        let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
+        let found = expand(&[dir.to_path_buf()], &dir.join("cache"));
         assert_eq!(
             names(&dir, &found),
             ["a.json", "american_english_words.txt", "d.RTF"]
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -360,7 +349,6 @@ mod tests {
         let roots = [dir.join("disabled_mine.json"), dir.join("missing.json")];
         let found = expand(&roots, &dir.join("cache"));
         assert_eq!(names(&dir, &found), ["disabled_mine.json"]);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -369,16 +357,14 @@ mod tests {
         let roots = [dir.join("two"), dir.join("one"), dir.join("two/b.json")];
         let found = expand(&roots, &dir.join("cache"));
         assert_eq!(names(&dir, &found), ["two/b.json", "one/a.json"]);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_link_back_to_a_parent_folder_does_not_loop_forever() {
         let dir = tree("loop", &["a.json"]);
         std::os::unix::fs::symlink(&dir, dir.join("again")).unwrap();
-        let found = expand(std::slice::from_ref(&dir), &dir.join("cache"));
+        let found = expand(&[dir.to_path_buf()], &dir.join("cache"));
         assert_eq!(found.first().map(|f| f.ends_with("a.json")), Some(true));
         assert!(found.len() <= MAX_DEPTH + 1);
-        let _ = fs::remove_dir_all(&dir);
     }
 }

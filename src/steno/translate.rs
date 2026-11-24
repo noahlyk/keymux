@@ -1788,11 +1788,8 @@ pub extern "C" fn joins(bits: i64) -> i32 {
     /// A translator over a folder with one dictionary file and, after it (lower priority, a
     /// fallback), one plugin: the same shape a real steno folder is in, built the same way.
     fn with_shout_plugin(dict: &str, test_name: &str) -> Translator {
-        let dir = std::env::temp_dir().join(format!(
-            "keymux-translate-plugin-test-{}-{test_name}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        let dir =
+            crate::test_dir::TestDir::new(&format!("keymux-translate-plugin-test-{test_name}"));
         let dict_path = dir.join("01-dict.json");
         let plugin_path = dir.join("02-shout.rs");
         fs::write(&dict_path, dict).unwrap();
@@ -1901,11 +1898,8 @@ pub extern "C" fn joins(bits: i64) -> i32 {
     /// A translator over `dict` and, after it, a real plugin that reads each outline as
     /// `(TEXT|OUTLINE)`, `TEXT` being what its `context` export was given just before.
     fn with_context_plugin(dict: &str, test_name: &str) -> Translator {
-        let dir = std::env::temp_dir().join(format!(
-            "keymux-translate-context-test-{}-{test_name}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        let dir =
+            crate::test_dir::TestDir::new(&format!("keymux-translate-context-test-{test_name}"));
         let dict_path = dir.join("01-dict.json");
         let plugin_path = dir.join("02-echo.rs");
         fs::write(&dict_path, dict).unwrap();
@@ -2127,11 +2121,8 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
 
     #[test]
     fn undo_still_fires_when_a_plugin_would_otherwise_answer_the_bare_star_with_nothing_useful() {
-        let dir = std::env::temp_dir().join(format!(
-            "keymux-translate-plugin-test-{}-undo_survives_a_plugin",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        let dir =
+            crate::test_dir::TestDir::new("keymux-translate-plugin-test-undo_survives_a_plugin");
         let dict_path = dir.join("01-dict.json");
         let plugin_path = dir.join("02-blank-for-symbols.rs");
         fs::write(&dict_path, r#"{"KAT": "cat"}"#).unwrap();
@@ -2163,11 +2154,8 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         // A dictionary's longest real key ("KPA/TKAOEU/-S/-D/-G/-Z", 6 strokes) is what the
         // engine's ordinary search is bounded by; a held join-key repeat has to grow past it
         // regardless, the same way a real word like "hahahahaha..." does on a real keyboard.
-        let dir = std::env::temp_dir().join(format!(
-            "keymux-translate-plugin-test-{}-held_join_key_repeat",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        let dir =
+            crate::test_dir::TestDir::new("keymux-translate-plugin-test-held_join_key_repeat");
         let source = dir.join("orthographic-fallback.rs");
         fs::copy(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2211,11 +2199,7 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
     /// how fast anyone can actually stroke.
     #[test]
     fn joining_stays_fast_with_a_real_plugin_loaded() {
-        let dir = std::env::temp_dir().join(format!(
-            "keymux-translate-plugin-test-{}-bench_joins",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_dir::TestDir::new("keymux-translate-plugin-test-bench_joins");
         let source = dir.join("orthographic-fallback.rs");
         fs::copy(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2316,11 +2300,7 @@ pub extern "C" fn joins(bits: i64) -> i32 {
         let kat = Layout::plover().parse_stroke("KAT").unwrap();
         let joined_g = Layout::plover().parse_stroke("-G").unwrap() | (1 << 23);
         dict.insert(vec![kat, joined_g], "catting");
-        let dir = std::env::temp_dir().join(format!(
-            "keymux-translate-plugin-test-{}-join_dict",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_dir::TestDir::new("keymux-translate-plugin-test-join_dict");
         let plugin_path = dir.join("01-join-only.rs");
         fs::write(&plugin_path, JOIN_ONLY_PLUGIN).unwrap();
         let chain = Chain::test_with_plugin(dict, &plugin_path, &dir.join("cache"));
@@ -2912,11 +2892,7 @@ pub extern "C" fn joins(bits: i64) -> i32 {
 
     /// A translator over `json` with the shout plugin's join key (`+`, bit 23).
     fn class_translator(json: &str, name: &str) -> Translator {
-        let dir = std::env::temp_dir().join(format!(
-            "keymux-translate-class-test-{}-{name}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_dir::TestDir::new(&format!("keymux-translate-class-test-{name}"));
         let layout = Layout::plover_with(&['+']).unwrap();
         let dict_path = dir.join("01-dict.json");
         fs::write(&dict_path, json).unwrap();
@@ -2938,11 +2914,7 @@ pub extern "C" fn joins(bits: i64) -> i32 {
     /// A translator over `json` with NO plugin: the join key comes from the layout's
     /// `join_keys` (an empty list declares none).
     fn config_join_translator(json: &str, name: &str, join_keys: &[char]) -> Translator {
-        let dir = std::env::temp_dir().join(format!(
-            "keymux-translate-joinkey-test-{}-{name}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_dir::TestDir::new(&format!("keymux-translate-joinkey-test-{name}"));
         let layout = Layout::plover_with_joins(&['+'], join_keys).unwrap();
         let dict_path = dir.join("01-dict.json");
         fs::write(&dict_path, json).unwrap();

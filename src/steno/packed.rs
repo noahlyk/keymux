@@ -692,11 +692,11 @@ mod tests {
         let packed = packed(&[(&[5], "cat"), (&[5, 9], "catty")]);
         let mut body = Vec::new();
         let layout = packed.save(&mut body);
-        let path = std::env::temp_dir().join(format!("keymux-packed-{}", std::process::id()));
+        let dir = crate::test_dir::TestDir::new("keymux-packed");
+        let path = dir.join("table.bin");
         std::fs::write(&path, &body).unwrap();
         let map = Map::new(&std::fs::File::open(&path).unwrap()).unwrap();
         let back = Packed::open(&layout, &map, 0).unwrap();
-        let _ = std::fs::remove_file(&path);
         assert_eq!(back.get(&[5, 9]), Some("catty"));
         assert_eq!(back.strokes_typing("cat").count(), 1);
         assert_eq!(back.len(), 2);

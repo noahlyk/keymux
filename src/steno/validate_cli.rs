@@ -199,14 +199,11 @@ pub fn command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_dir::TestDir;
     use std::fs;
 
-    fn folder(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("keymux-validate-cli-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn folder(name: &str) -> TestDir {
+        TestDir::new(&format!("keymux-validate-cli-{name}"))
     }
 
     fn exit_code(files: &[PathBuf], strict: bool) -> Result<i32> {

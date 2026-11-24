@@ -1028,7 +1028,6 @@ impl Chain {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::sync::OnceLock;
 
     /// A real, minimal plugin, in ordinary `std` Rust (heap allocation on `wasm32-unknown-
     /// unknown` just works): doubles every letter it is given, so the test proves the whole
@@ -1090,20 +1089,14 @@ pub extern "C" fn joins(bits: i64) -> i32 {
 }
 "#;
 
-    fn tmp_dir() -> &'static std::path::Path {
-        static DIR: OnceLock<PathBuf> = OnceLock::new();
-        DIR.get_or_init(|| {
-            let dir =
-                std::env::temp_dir().join(format!("keymux-plugin-test-{}", std::process::id()));
-            fs::create_dir_all(&dir).unwrap();
-            dir
-        })
+    /// A fresh folder for the test named `test`, removed when the test ends.
+    fn tmp_dir(test: &str) -> crate::test_dir::TestDir {
+        crate::test_dir::TestDir::new(&format!("keymux-plugin-test-{test}"))
     }
 
     #[test]
     fn a_real_plugin_compiles_runs_and_is_cached() {
-        let dir = tmp_dir().join("a_real_plugin_compiles_runs_and_is_cached");
-        fs::create_dir_all(&dir).unwrap();
+        let dir = tmp_dir("a_real_plugin_compiles_runs_and_is_cached");
         let source = dir.join("doubler.rs");
         fs::write(&source, DOUBLER).unwrap();
         let cache = dir.join("cache");
@@ -1145,8 +1138,7 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
 
     #[test]
     fn an_empty_reading_is_no_reading_at_all() {
-        let dir = tmp_dir().join("an_empty_reading_is_no_reading_at_all");
-        fs::create_dir_all(&dir).unwrap();
+        let dir = tmp_dir("an_empty_reading_is_no_reading_at_all");
         let source = dir.join("blank_for_symbols.rs");
         fs::write(&source, BLANK_FOR_SYMBOLS).unwrap();
         let wasm = compiled(&source, &dir.join("cache")).unwrap();
@@ -1167,8 +1159,7 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
             .join("docs")
             .join("plugins")
             .join("orthographic-fallback.rs");
-        let cache =
-            tmp_dir().join("the_documented_example_plugin_compiles_and_gives_a_plausible_reading");
+        let cache = tmp_dir("the_documented_example_plugin_compiles_and_gives_a_plausible_reading");
         let chain = Chain::load_cached(&[source], &cache, &Layout::plover());
         assert_eq!(
             chain.lookup(&[Layout::plover().parse_stroke("KAT").unwrap()]),
@@ -1190,8 +1181,7 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
             .join("docs")
             .join("plugins")
             .join("sticky-key.rs");
-        let cache =
-            tmp_dir().join("the_documented_mod_loads_without_fallback_and_answers_send_early");
+        let cache = tmp_dir("the_documented_mod_loads_without_fallback_and_answers_send_early");
         let chain = Chain::load_cached(&[source], &cache, &Layout::plover());
         assert_eq!(
             chain.plugin_count(),
@@ -1217,9 +1207,8 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
 
     #[test]
     fn a_chain_skips_a_plugin_that_does_not_compile_and_still_uses_the_one_after_it() {
-        let dir = tmp_dir()
-            .join("a_chain_skips_a_plugin_that_does_not_compile_and_still_uses_the_one_after_it");
-        fs::create_dir_all(&dir).unwrap();
+        let dir =
+            tmp_dir("a_chain_skips_a_plugin_that_does_not_compile_and_still_uses_the_one_after_it");
         let broken = dir.join("01-broken.rs");
         let good = dir.join("02-good.rs");
         fs::write(&broken, "this is not rust").unwrap();
@@ -1238,8 +1227,7 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         // for every one of them (it never really runs out of letters to double), swallowing
         // whatever came before into one guess instead of leaving each stroke to be judged on
         // its own.
-        let dir = tmp_dir().join("a_plugin_is_never_asked_about_unrelated_strokes_together");
-        fs::create_dir_all(&dir).unwrap();
+        let dir = tmp_dir("a_plugin_is_never_asked_about_unrelated_strokes_together");
         let source = dir.join("doubler.rs");
         fs::write(&source, DOUBLER).unwrap();
         let chain = Chain::load_cached(&[source], &dir.join("cache"), &Layout::plover());
@@ -1259,8 +1247,7 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
 
     #[test]
     fn config_join_keys_and_a_plugins_joins_are_unioned() {
-        let dir = tmp_dir().join("config_join_keys_and_a_plugins_joins_are_unioned");
-        fs::create_dir_all(&dir).unwrap();
+        let dir = tmp_dir("config_join_keys_and_a_plugins_joins_are_unioned");
         let source = dir.join("doubler.rs");
         fs::write(&source, DOUBLER_WITH_JOIN).unwrap();
         // '~' is bit 23 (the plugin's join bit); '+' is bit 24, declared in config only
@@ -1295,8 +1282,7 @@ pub extern "C" fn fallback(ptr: i32, len: i32) -> i64 {
         // across several strokes on purpose. That is still one word as far as a
         // phonetic-fallback plugin is concerned, unlike an arbitrary window the engine's own
         // search tried out of unrelated strokes.
-        let dir = tmp_dir().join("a_plugin_is_asked_about_a_run_the_join_key_declares_as_one_word");
-        fs::create_dir_all(&dir).unwrap();
+        let dir = tmp_dir("a_plugin_is_asked_about_a_run_the_join_key_declares_as_one_word");
         let source = dir.join("doubler.rs");
         fs::write(&source, DOUBLER_WITH_JOIN).unwrap();
         let chain = Chain::load_cached(&[source], &dir.join("cache"), &Layout::plover());
@@ -1358,8 +1344,7 @@ pub extern "C" fn joins(_bits: i64) -> i32 {{
     }
 
     fn chain_of(test: &str, file: &str, source: &str) -> Chain {
-        let dir = tmp_dir().join(test);
-        fs::create_dir_all(&dir).unwrap();
+        let dir = tmp_dir(test);
         let path = dir.join(file);
         fs::write(&path, source).unwrap();
         Chain::load_cached(&[path], &dir.join("cache"), &Layout::plover())

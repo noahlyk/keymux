@@ -329,12 +329,10 @@ enum Update {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_dir::TestDir;
 
-    fn folder(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("keymux-parts-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn folder(name: &str) -> TestDir {
+        TestDir::new(&format!("keymux-parts-{name}"))
     }
 
     /// Write `json` to `path` with a modification time `hours` hours ago, so it is not racy.
@@ -385,7 +383,6 @@ mod tests {
             "a.json is earlier, so it keeps KAT"
         );
         assert!(dict.strokes_for("kitten").is_empty(), "expected none");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -404,7 +401,6 @@ mod tests {
         assert!(!again.changed, "{again:?}");
         assert_eq!((again.parsed, again.restored, again.unchanged), (0, 0, 1));
         assert!(parts.is_current(&files), "the new time is remembered");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -427,7 +423,6 @@ mod tests {
         let mut parts = Parts::default();
         let report = parts.refresh(&files, &cache, &Layout::plover());
         assert_eq!((report.parsed, report.restored), (1, 1));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -445,7 +440,6 @@ mod tests {
         assert!(!report.changed);
         assert!(!parts.is_current(&files), "it is tried again next time");
         assert_eq!(parts.layered(&files).strokes_for("cat").len(), 1);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -469,7 +463,6 @@ mod tests {
         assert!(removed.changed);
         assert_eq!(parts.layered(&ba[..1]).lookup(&[KAT]), Some("kitten"));
         assert_eq!(parts.by_path.len(), 1);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     const KAT: u32 = (1 << 2) | (1 << 7) | (1 << 18);
@@ -490,7 +483,6 @@ mod tests {
         assert_eq!(dict.lookup(&[KAT]), None);
         assert!(dict.strokes_for("cat").is_empty(), "expected none");
         assert_eq!(dict.strokes_for("dog").len(), 1);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -505,7 +497,6 @@ mod tests {
         }
         let report = Parts::default().refresh(&files, &cache, &Layout::plover());
         assert_eq!((report.parsed, report.restored), (1, 0));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -520,7 +511,6 @@ mod tests {
         assert_eq!(parts.layered(&files).len(), 1);
         put(&dir.join("z.rs"), "// changed", 4);
         assert!(!parts.is_current(&files));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -540,7 +530,6 @@ mod tests {
         let report = parts.refresh(&files, &dir.join("cache"), &Layout::plover());
         assert!(report.changed);
         assert_eq!(parts.layered(&files).strokes_for("dog").len(), 1);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -575,7 +564,6 @@ mod tests {
         let mut listed: Vec<&str> = dict.iter().map(|(_, text)| text).collect();
         listed.sort_unstable();
         assert_eq!(listed, ["cat", "catalog"]);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Timing on a real theory folder: `KEYMUX_BENCH_DIR=/path cargo test --release bench_ -- --ignored --nocapture`
@@ -633,6 +621,5 @@ mod tests {
         time("... and merge", &mut || {
             let _ = fresh.layered(&files);
         });
-        let _ = fs::remove_dir_all(&copy);
     }
 }

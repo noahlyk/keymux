@@ -1137,14 +1137,11 @@ fn distance(a: &str, b: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_dir::TestDir;
     use std::fs;
 
-    fn folder(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("keymux-validate-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn folder(name: &str) -> TestDir {
+        TestDir::new(&format!("keymux-validate-{name}"))
     }
 
     fn put(dir: &Path, name: &str, text: &str) -> PathBuf {
@@ -1618,7 +1615,7 @@ mod tests {
         put(&dir, WORDLIST_FILE, "word\nlist");
         let target = Target {
             layers: vec!["steno".into()],
-            roots: vec![dir.clone()],
+            roots: vec![dir.to_path_buf()],
             layout: plover(),
             rules: Rules::default(),
         };
@@ -1633,7 +1630,7 @@ mod tests {
         put(&dir, "01.json", r#"{"KAT": "{:tape:togle}"}"#);
         let target = |name: &str| Target {
             layers: vec![name.to_string()],
-            roots: vec![dir.clone()],
+            roots: vec![dir.to_path_buf()],
             layout: plover(),
             rules: Rules::default(),
         };

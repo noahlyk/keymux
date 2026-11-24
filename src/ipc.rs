@@ -448,16 +448,16 @@ mod tests {
         ));
     }
 
-    fn temp_socket(name: &str) -> PathBuf {
-        let path =
-            std::env::temp_dir().join(format!("keymux-test-{}-{name}.sock", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        path
+    /// A socket path in a fresh folder of its own; the folder goes when the guard does.
+    fn temp_socket(name: &str) -> (crate::test_dir::TestDir, PathBuf) {
+        let dir = crate::test_dir::TestDir::new(&format!("keymux-test-{name}"));
+        let path = dir.join("s.sock");
+        (dir, path)
     }
 
     #[test]
     fn probe_sees_a_live_daemon_and_not_a_stale_socket_file() {
-        let path = temp_socket("probe");
+        let (_dir, path) = temp_socket("probe");
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
         let server = std::thread::spawn(move || {
             let (mut conn, _) = listener.accept().unwrap();
@@ -478,7 +478,7 @@ mod tests {
 
     #[test]
     fn a_connection_that_never_answers_is_not_a_daemon() {
-        let path = temp_socket("silent");
+        let (_dir, path) = temp_socket("silent");
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
         let started = std::time::Instant::now();
         assert!(!probe_socket(&path));

@@ -41,6 +41,8 @@ pub mod niri;
 pub mod overlay;
 pub mod session_manager;
 pub mod steno;
+#[cfg(test)]
+mod test_dir;
 pub mod ui;
 pub mod window_manager;
 pub mod x11;

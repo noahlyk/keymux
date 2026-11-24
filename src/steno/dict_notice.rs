@@ -285,9 +285,7 @@ mod tests {
     #[test]
     fn a_file_with_a_bad_outline_notifies_once_the_reload_worker_sees_it() {
         use std::os::unix::fs::MetadataExt;
-        let dir = std::env::temp_dir().join(format!("keymux-notice-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_dir::TestDir::new("keymux-notice");
         // Delivery goes to the files' owner, and nobody is told about root's files
         if std::fs::metadata(&dir).unwrap().uid() == 0 {
             return;
@@ -295,7 +293,7 @@ mod tests {
         let file = dir.join("words.json");
         std::fs::write(&file, r#"{"KAT": "cat"}"#).unwrap();
         let updates = super::super::live::subscribe(
-            vec![dir.clone()],
+            vec![dir.to_path_buf()],
             dir.join("cache"),
             super::super::layout::Layout::plover(),
         );

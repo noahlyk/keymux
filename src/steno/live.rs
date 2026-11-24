@@ -516,14 +516,12 @@ fn watch_roots(state: &mut State, key: &Key, jobs: &Sender<Job>, interest: &Arc<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_dir::TestDir;
     use std::fs;
     use std::time::Instant;
 
-    fn folder(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("keymux-live-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn folder(name: &str) -> TestDir {
+        TestDir::new(&format!("keymux-live-{name}"))
     }
 
     fn next(updates: &Receiver<Arc<Chain>>) -> Arc<Chain> {
@@ -555,7 +553,7 @@ mod tests {
     fn a_layer_gets_its_dictionary_and_then_every_change_to_the_files() {
         let dir = folder("changes");
         fs::write(dir.join("a.json"), r#"{"KAT": "cat"}"#).unwrap();
-        let updates = subscribe(vec![dir.clone()], dir.join("cache"), Layout::plover());
+        let updates = subscribe(vec![dir.to_path_buf()], dir.join("cache"), Layout::plover());
         assert!(says(&until(&updates, |d| says(d, "cat")), "cat"));
 
         // Edited in place
@@ -573,26 +571,24 @@ mod tests {
         until(&updates, |d| !says(d, "hound"));
         fs::rename(dir.join("disabled_more"), dir.join("more")).unwrap();
         until(&updates, |d| says(d, "hound"));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn layers_with_the_same_files_share_one_dictionary() {
         let dir = folder("shared");
         fs::write(dir.join("a.json"), r#"{"KAT": "cat"}"#).unwrap();
-        let first = subscribe(vec![dir.clone()], dir.join("cache"), Layout::plover());
-        let second = subscribe(vec![dir.clone()], dir.join("cache"), Layout::plover());
+        let first = subscribe(vec![dir.to_path_buf()], dir.join("cache"), Layout::plover());
+        let second = subscribe(vec![dir.to_path_buf()], dir.join("cache"), Layout::plover());
         let one = until(&first, |d| says(d, "cat"));
         let two = until(&second, |d| says(d, "cat"));
         assert!(Arc::ptr_eq(&one, &two), "one copy in memory, not one each");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_file_saved_half_finished_leaves_the_working_dictionary_in_place() {
         let dir = folder("broken");
         fs::write(dir.join("a.json"), r#"{"KAT": "cat"}"#).unwrap();
-        let updates = subscribe(vec![dir.clone()], dir.join("cache"), Layout::plover());
+        let updates = subscribe(vec![dir.to_path_buf()], dir.join("cache"), Layout::plover());
         until(&updates, |d| says(d, "cat"));
 
         fs::write(dir.join("a.json"), r#"{"KAT": "ca"#).unwrap();
@@ -602,18 +598,16 @@ mod tests {
         );
         fs::write(dir.join("a.json"), r#"{"KAT": "kitten"}"#).unwrap();
         until(&updates, |d| says(d, "kitten"));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn writing_the_cache_does_not_trigger_a_reload() {
         let dir = folder("cache");
         fs::write(dir.join("a.json"), r#"{"KAT": "cat"}"#).unwrap();
-        let updates = subscribe(vec![dir.clone()], dir.join("cache"), Layout::plover());
+        let updates = subscribe(vec![dir.to_path_buf()], dir.join("cache"), Layout::plover());
         until(&updates, |d| says(d, "cat"));
         // The first load wrote a cache file inside the watched folder. Nothing more comes.
         assert!(updates.recv_timeout(Duration::from_secs(2)).is_err());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// How many threads this module runs, and the CPU time in clock ticks they have used so far.
@@ -643,7 +637,7 @@ mod tests {
     fn watching_an_idle_dictionary_folder_uses_no_cpu() {
         let dir = folder("idle");
         fs::write(dir.join("a.json"), r#"{"KAT": "cat"}"#).unwrap();
-        let updates = subscribe(vec![dir.clone()], dir.join("cache"), Layout::plover());
+        let updates = subscribe(vec![dir.to_path_buf()], dir.join("cache"), Layout::plover());
         until(&updates, |d| says(d, "cat"));
         // Let the load and the cache write finish, then count what five idle seconds cost
         std::thread::sleep(Duration::from_secs(1));
@@ -658,7 +652,6 @@ mod tests {
             used, 0,
             "{used} ticks (1/100 s each) of CPU while nothing changed"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -11,7 +11,6 @@ use crate::steno::translate::OutputOp;
 use evdev::{EventType, InputEvent, Key};
 use std::collections::VecDeque;
 use std::io;
-use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -167,14 +166,12 @@ fn the_pacer_keeps_in_flight_events_under_the_kernel_queue_and_never_splits_a_ke
 /// A keyboard that starts on a steno layer whose dictionary knows one word, `KAT` = cat, in a
 /// temp directory of its own.
 pub(super) struct Fixture {
-    dir: PathBuf,
+    dir: crate::test_dir::TestDir,
 }
 
 impl Fixture {
     pub(super) fn new(name: &str) -> Self {
-        let dir =
-            std::env::temp_dir().join(format!("keymux-emission-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_dir::TestDir::new(&format!("keymux-emission-{name}"));
         Self { dir }
     }
 
@@ -216,12 +213,6 @@ impl Fixture {
         let mut keymap = KeymapProcessor::new(&config, config_path, 0);
         keymap.wait_for_steno_dictionaries();
         keymap
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 

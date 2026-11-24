@@ -457,6 +457,7 @@ mod tests {
     use super::*;
     use crate::steno::dict::Dictionary;
     use crate::steno::layout::preset;
+    use crate::test_dir::TestDir;
 
     const DICT: &str = r#"{
         "-T": "the",
@@ -610,10 +611,8 @@ mod tests {
     }
 
     /// A config directory with `config` as its config.ron and `files` in its steno folder.
-    fn config_dir(name: &str, config: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("keymux-answer-test-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+    fn config_dir(name: &str, config: &str, files: &[(&str, &str)]) -> TestDir {
+        let dir = TestDir::new(&format!("keymux-answer-test-{name}"));
         std::fs::create_dir_all(dir.join("steno")).unwrap();
         std::fs::write(dir.join("config.ron"), config).unwrap();
         for (file, text) in files {

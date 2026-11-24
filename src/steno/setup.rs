@@ -695,13 +695,11 @@ impl Cooldown {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_dir::TestDir;
     use std::fs;
 
-    fn config(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("keymux-setup-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn config(name: &str) -> TestDir {
+        TestDir::new(&format!("keymux-setup-{name}"))
     }
 
     /// Stands in for a download: a folder with one file in it
@@ -737,7 +735,6 @@ mod tests {
         fs::write(dir.join("cache/mine.json"), "{}").unwrap();
         prepare_dir(&config);
         assert!(dir.join("cache/mine.json").exists());
-        fs::remove_dir_all(&config).unwrap();
     }
 
     #[test]
@@ -748,7 +745,6 @@ mod tests {
         assert!(deep.is_dir());
         // Already there: nothing to do
         create_dir_owned(&deep).unwrap();
-        fs::remove_dir_all(&config).unwrap();
     }
 
     #[test]
@@ -776,7 +772,6 @@ mod tests {
         prepare_dir(&config);
         assert!(!dir.join(USER_DICTIONARY).exists());
         assert!(dir.join("mine.json").exists());
-        fs::remove_dir_all(&config).unwrap();
     }
 
     #[test]
@@ -801,7 +796,6 @@ mod tests {
             fs::read_to_string(dir.join(USER_DICTIONARY)).unwrap(),
             r#"{"TKOG": "dog"}"#
         );
-        fs::remove_dir_all(&config).unwrap();
     }
 
     #[test]
@@ -830,7 +824,6 @@ mod tests {
         assert!(dir.join("plover/fake.json").is_file());
         assert!(dir.join("disabled_lapwing/fake.json").is_file());
         assert!(!dir.join("lapwing").exists());
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -852,7 +845,6 @@ mod tests {
         switch_theory(&dir, "plover", |_| bail!("must not download")).unwrap();
         assert!(dir.join("mine/10-my-steno/fake.json").is_file());
         assert_eq!(install_state(&dir, "lapwing"), Install::Parked);
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -865,7 +857,6 @@ mod tests {
 
         switch_theory(&dir, "plover", |_| bail!("must not download")).unwrap();
         assert!(dir.join("plover/fake.json").is_file());
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -876,7 +867,6 @@ mod tests {
         fs::write(dir.join("plover/mine.json"), "{}").unwrap();
         stamp_older_folders(&dir);
         assert_eq!(install_state(&dir, "plover"), Install::Missing);
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -891,7 +881,6 @@ mod tests {
             .to_string()
             .contains("Remove or rename one"));
         assert!(dir.join("plover/fake.json").is_file(), "nothing was moved");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -912,7 +901,6 @@ mod tests {
             !dir.join("disabled_lapwing.part").exists(),
             "no half download left"
         );
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -934,7 +922,6 @@ mod tests {
             dir.join("lapwing/lapwing-base.json").is_file(),
             "back under its own name"
         );
-        fs::remove_dir_all(&config).unwrap();
     }
 
     #[test]
@@ -960,7 +947,6 @@ mod tests {
         assert!(!dir.join("main.json").exists());
         assert_eq!(install_state(&dir, "plover"), Install::Active);
         assert_eq!(install_state(&dir, "lapwing"), Install::Parked);
-        fs::remove_dir_all(&config).unwrap();
     }
 
     #[test]
@@ -976,7 +962,6 @@ mod tests {
         assert!(dir.join("lapwing").is_dir());
         assert!(dir.join("disabled_plover/main.json").is_file());
         assert!(!dir.join("plover").exists());
-        fs::remove_dir_all(&config).unwrap();
     }
 
     #[test]
@@ -996,7 +981,6 @@ mod tests {
         assert!(dir.join("main.json").is_file());
         assert!(dir.join("user.json").is_file());
         assert!(!dir.join("plover").exists());
-        fs::remove_dir_all(&config).unwrap();
     }
 
     #[test]
@@ -1011,7 +995,6 @@ mod tests {
         assert!(dir.join("plover/main.json").is_file());
         assert!(dir.join("disabled_lapwing").is_dir());
         assert!(!dir.join("lapwing").exists());
-        fs::remove_dir_all(&config).unwrap();
     }
 
     #[test]
