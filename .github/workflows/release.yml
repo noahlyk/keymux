@@ -196,7 +196,7 @@ jobs:
       - name: Push to AUR
         run: |
           VERSION=${{ needs.version.outputs.new_version }}
-          pacman -Syu --noconfirm openssh git sudo base-devel
+          pacman -Syu --noconfirm openssh git sudo base-devel pacman-contrib
 
           useradd -m builduser
           echo "builduser ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
@@ -210,6 +210,14 @@ jobs:
 
           cp -r aur /home/builduser/aur
           chown -R builduser:builduser /home/builduser/aur
+
+          # real checksums of the release files and the files from the tag, then a check that every
+          # source downloads and matches them
+          sudo -u builduser bash -c 'cd /home/builduser/aur && updpkgsums && makepkg --verifysource --noconfirm'
+          if grep -q SKIP /home/builduser/aur/PKGBUILD; then
+            echo "a checksum is still SKIP: not pushing"
+            exit 1
+          fi
 
           sudo -u builduser VERSION="$VERSION" GIT_SSH_COMMAND="ssh -i /home/builduser/.ssh/aur -o StrictHostKeyChecking=no" bash -c '
             cd /home/builduser
