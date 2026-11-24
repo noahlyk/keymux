@@ -10,6 +10,7 @@ use super::commands::proper_outlines_in;
 use super::engine::resolve_dictionary_path;
 use super::formatter::Options;
 use super::layout::{preset, without_extra_keys, Layout, EXTRA_KEY_SEPARATOR};
+use super::notation::Notation;
 use super::plugin::Chain;
 use super::reverse::{self, Query};
 use super::setup::{cache_dir, default_dictionaries};
@@ -45,6 +46,9 @@ pub struct EngineSetup {
     pub roots: Vec<PathBuf>,
     /// The overlay's colour for each extra key, by its name
     pub extra_colors: HashMap<String, KeyColor>,
+    /// How outlines are printed and read: `layout`, and the theory's notation file when the
+    /// layer's dictionary folders have one (see [`super::notation`])
+    pub notation: Notation,
     config_dir: PathBuf,
 }
 
@@ -75,6 +79,7 @@ impl EngineSetup {
             overrides: HashMap::new(),
             roots: default_dictionaries(config_dir),
             extra_colors: overlay.map_or_else(HashMap::new, |o| o.extra_colors.clone()),
+            notation: Notation::plain(Layout::plover()),
             config_dir: config_dir.to_path_buf(),
         };
         if let Some((layer, steno)) = chosen {
@@ -100,6 +105,11 @@ impl EngineSetup {
                 let _ = setup.layout.set_key_group(name, *group);
             }
         }
+        setup.notation = Notation::load(
+            setup.layout.clone(),
+            &setup.roots,
+            &cache_dir(&setup.config_dir),
+        );
         setup
     }
 
@@ -219,8 +229,8 @@ impl Lookup {
     /// The answer to `query` (see [`answer`]).
     #[must_use]
     pub fn answer(&self, query: &str, ask: Ask, cancelled: &dyn Fn() -> bool) -> Answer {
-        answer(
-            &self.setup.layout,
+        answer_in(
+            &self.setup.notation,
             &self.base.fresh(),
             query,
             ask,
@@ -232,7 +242,7 @@ impl Lookup {
     #[must_use]
     pub const fn view(&self, show_keys: bool, color: bool) -> super::view::View<'_> {
         super::view::View {
-            layout: &self.setup.layout,
+            notation: &self.setup.notation,
             keys_by_bit: &self.keys_by_bit,
             extra_colors: &self.setup.extra_colors,
             show_keys,
@@ -331,12 +341,31 @@ pub fn answer(
     ask: Ask,
     cancelled: &dyn Fn() -> bool,
 ) -> Answer {
+    answer_in(
+        &Notation::plain(layout.clone()),
+        base,
+        query,
+        ask,
+        cancelled,
+    )
+}
+
+/// [`answer`], stroke notation read in `notation` as well as Plover's (`NAEM` as well as
+/// `TPHAEPL`, see [`super::notation`]).
+#[must_use]
+pub fn answer_in(
+    notation: &Notation,
+    base: &Translator,
+    query: &str,
+    ask: Ask,
+    cancelled: &dyn Fn() -> bool,
+) -> Answer {
     let query = query.trim();
     if query.is_empty() {
         return Answer::default();
     }
     let parsed = if ask.stroke_mode {
-        match layout.parse_strokes_trimmed(&query.to_uppercase()) {
+        match notation.parse_strokes_trimmed(&query.to_uppercase()) {
             Some(strokes) => Query::Stroke(strokes),
             None => {
                 return Answer {
@@ -346,7 +375,7 @@ pub fn answer(
             }
         }
     } else {
-        reverse::classify_with(layout, query)
+        reverse::classify_in(notation, query)
     };
     match parsed {
         Query::Stroke(strokes) => forward(base, &strokes, ask),
@@ -742,6 +771,59 @@ mod tests {
         assert_ne!(
             lookup.answer("dog", ALL, &|| false).rows[0].mark,
             Mark::Entry
+        );
+    }
+
+    #[test]
+    fn the_cli_prints_outlines_in_the_theorys_notation_and_reads_both() {
+        let dir = config_dir(
+            "notation",
+            r#"(layers: { "steno": (kind: Steno(())) })"#,
+            &[
+                ("main.json", r#"{"TPHAEPL": "enemy", "KAT": "cat"}"#),
+                (
+                    crate::steno::notation::FILE_NAME,
+                    r#"{"left": {"TPH": "N"}, "right": {"PL": "M"}}"#,
+                ),
+            ],
+        );
+        let lookup = Lookup::load(setup_in(&dir));
+        assert!(!lookup.setup.notation.is_plain());
+        let view = lookup.view(false, false);
+        let printed = view.lines(&lookup.answer("enemy", ALL, &|| false));
+        assert!(
+            printed.iter().any(|line| line.contains("NAEM")),
+            "{printed:?}"
+        );
+        assert!(
+            !printed.iter().any(|line| line.contains("TPHAEPL")),
+            "{printed:?}"
+        );
+        for query in ["NAEM", "TPHAEPL"] {
+            let found = lookup.answer(query, ALL, &|| false);
+            assert_eq!(found.rows[0].mark, Mark::Forward, "{query}");
+            assert_eq!(found.rows[0].word, "\"enemy\"", "{query}");
+        }
+        // Coloured, a piece that stands for several keys is one underlined run
+        let coloured = lookup
+            .view(false, true)
+            .lines(&lookup.answer("enemy", ALL, &|| false));
+        assert!(coloured
+            .iter()
+            .any(|line| console::strip_ansi_codes(line).contains("NAEM")));
+        // Without the file, the same folder prints Plover's notation
+        std::fs::remove_file(dir.join("steno").join(crate::steno::notation::FILE_NAME)).unwrap();
+        let lookup = Lookup::load(setup_in(&dir));
+        let printed = lookup
+            .view(false, false)
+            .lines(&lookup.answer("enemy", ALL, &|| false));
+        assert!(
+            printed.iter().any(|line| line.contains("TPHAEPL")),
+            "{printed:?}"
+        );
+        assert_ne!(
+            lookup.answer("NAEM", ALL, &|| false).rows[0].mark,
+            Mark::Forward
         );
     }
 

@@ -11,6 +11,7 @@ use super::dict::Dictionary;
 use super::formatter::leaves_attached;
 use super::interactive::{self, Session};
 use super::layout::{parse_stroke, Layout};
+use super::notation::Notation;
 use super::setup::{prepare_dir, steno_dir, USER_DICTIONARY};
 use super::tape;
 use super::translate::Translator;
@@ -446,10 +447,19 @@ fn key_label(key: KeyCode) -> String {
 }
 
 /// Add or replace a translation in your own dictionary, which comes before every other one.
+///
+/// The outline may be written in Plover's notation or the theory's (see [`super::notation`]); the
+/// dictionary key is always Plover's.
 pub fn add(config_path: &Path, config_dir: &Path, stroke: &str, text: &str) -> Result<()> {
-    let layout = engine_setup(config_path, config_dir).layout;
-    let strokes = parse_strokes(&layout, stroke)?;
-    let key = format_strokes(&layout, &strokes);
+    let notation = engine_setup(config_path, config_dir).notation;
+    let strokes = parse_strokes(&notation, stroke)?;
+    let key = format_strokes(notation.layout(), &strokes);
+    let short = notation.render_strokes(&strokes);
+    let shown = if short == key {
+        key.clone()
+    } else {
+        format!("{key} ({short})")
+    };
 
     prepare_dir(config_dir);
     let dir = steno_dir(config_dir);
@@ -462,7 +472,7 @@ pub fn add(config_path: &Path, config_dir: &Path, stroke: &str, text: &str) -> R
             Err(_) => serde_json::Map::new(),
         };
     let replaced = entries
-        .insert(key.clone(), serde_json::Value::String(text.to_string()))
+        .insert(key, serde_json::Value::String(text.to_string()))
         .is_some();
 
     // Write to a temp file and rename, so a crash can't leave a half-written dictionary
@@ -473,7 +483,7 @@ pub fn add(config_path: &Path, config_dir: &Path, stroke: &str, text: &str) -> R
     std::fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))?;
 
     let verb = if replaced { "Replaced" } else { "Added" };
-    println!("{verb} {key} → {text:?} in {}", path.display());
+    println!("{verb} {shown} → {text:?} in {}", path.display());
     Ok(())
 }
 
@@ -636,11 +646,17 @@ impl TapeView {
     }
 }
 
-/// Parse `KPA/TKAOEU` into its stroke bitmasks.
-fn parse_strokes(layout: &Layout, text: &str) -> Result<Vec<u32>> {
+/// Parse `KPA/TKAOEU` (or the theory's own notation for it) into its stroke bitmasks.
+fn parse_strokes(notation: &Notation, text: &str) -> Result<Vec<u32>> {
+    if let Some(strokes) = notation
+        .parse_strokes(text)
+        .filter(|strokes| !strokes.is_empty() && !strokes.contains(&0))
+    {
+        return Ok(strokes);
+    }
     text.split('/')
         .map(|part| {
-            layout
+            notation
                 .parse_stroke(part)
                 .with_context(|| format!("\"{part}\" is not a steno stroke"))
         })
@@ -677,13 +693,35 @@ mod tests {
 
     #[test]
     fn strokes_round_trip_through_their_text() {
-        let strokes = parse_strokes(&Layout::plover(), "KPA/TKAOEU").unwrap();
+        let strokes = parse_strokes(&Layout::plover().into(), "KPA/TKAOEU").unwrap();
         assert_eq!(format_strokes(&Layout::plover(), &strokes), "KPA/TKAOEU");
     }
 
     #[test]
+    fn add_takes_the_theorys_notation_and_writes_plovers_key() {
+        let dir = crate::test_dir::TestDir::new("keymux-commands-add-notation");
+        let steno = steno_dir(&dir);
+        std::fs::create_dir_all(&steno).unwrap();
+        std::fs::write(
+            steno.join(crate::steno::notation::FILE_NAME),
+            r#"{"left": {"TPH": "N"}, "right": {"PL": "M"}}"#,
+        )
+        .unwrap();
+        let config = dir.join("config.ron");
+        std::fs::write(&config, r#"(layers: { "steno": (kind: Steno(())) })"#).unwrap();
+        add(&config, &dir, "NAEM/KAT", "enemy cat").unwrap();
+        add(&config, &dir, "TPHO", "no").unwrap();
+        let written = std::fs::read_to_string(steno.join(USER_DICTIONARY)).unwrap();
+        let entries: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&written).unwrap();
+        assert_eq!(entries["TPHAEPL/KAT"], "enemy cat");
+        assert_eq!(entries["TPHO"], "no");
+        assert!(add(&config, &dir, "NAEQ", "x").is_err());
+    }
+
+    #[test]
     fn invalid_strokes_are_rejected() {
-        assert!(parse_strokes(&Layout::plover(), "not a stroke").is_err());
+        assert!(parse_strokes(&Layout::plover().into(), "not a stroke").is_err());
     }
 
     fn qwerty_keys_by_bit() -> HashMap<u32, KeyCode> {

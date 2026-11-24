@@ -7,7 +7,7 @@
 //! finger plays together underlined as one.
 
 use super::answer::{Answer, Mark, Row};
-use super::layout::Layout;
+use super::notation::Notation;
 use crate::config::KeyColor;
 use crate::keycode::KeyCode;
 use console::{measure_text_width, style, Color, Style};
@@ -20,7 +20,8 @@ const WORD_WIDTH: usize = 4;
 
 /// Everything a view needs besides the answer.
 pub struct View<'a> {
-    pub layout: &'a Layout,
+    /// How outlines are written: Plover's notation, or the theory's (see [`super::notation`])
+    pub notation: &'a Notation,
     /// The physical key for each stroke key, for the keys column
     pub keys_by_bit: &'a HashMap<u32, KeyCode>,
     /// The overlay's colour for each extra key
@@ -136,9 +137,10 @@ impl View<'_> {
             let text = "no stroke";
             return (self.paint(style(text).red().dim()), text.len());
         }
-        let plain = self.layout.render_strokes(&row.strokes);
+        let plain = self.notation.render_strokes(&row.strokes);
         let width = measure_text_width(&plain);
-        if !self.color {
+        // An outline the theory writes its own way as a whole has no pieces to colour
+        if !self.color || self.notation.outline_override(&row.strokes).is_some() {
             return (plain, width);
         }
         let strokes: Vec<String> = row
@@ -153,17 +155,30 @@ impl View<'_> {
     }
 
     /// One stroke, a colour a key by part of the keyboard, keys one finger plays together
-    /// underlined as one run.
+    /// underlined as one run. A piece of the theory's notation that stands for several keys
+    /// (`N` for `TPH`) is coloured by its first key and underlined as one.
     #[must_use]
     pub fn stroke_text(&self, bits: u32) -> String {
-        let parts = self.layout.render_stroke_parts(bits);
-        let group = |slot: Option<usize>| slot.and_then(|slot| self.layout.key_group(slot));
+        let layout = self.notation.layout();
+        let parts: Vec<(String, Option<usize>, bool)> = self
+            .notation
+            .render_stroke_pieces(bits)
+            .into_iter()
+            .map(|piece| {
+                let slot = (piece.keys != 0).then(|| piece.keys.trailing_zeros() as usize);
+                (piece.text, slot, piece.keys.count_ones() > 1)
+            })
+            .collect();
+        let group = |slot: Option<usize>| slot.and_then(|slot| layout.key_group(slot));
         let mut out = String::new();
-        for (i, (text, slot)) in parts.iter().enumerate() {
+        for (i, (text, slot, several)) in parts.iter().enumerate() {
             let this = group(*slot);
-            let joined = this.is_some()
-                && (i > 0 && group(parts[i - 1].1) == this
-                    || parts.get(i + 1).is_some_and(|next| group(next.1) == this));
+            let joined = *several
+                || this.is_some()
+                    && (i > 0 && !parts[i - 1].2 && group(parts[i - 1].1) == this
+                        || parts
+                            .get(i + 1)
+                            .is_some_and(|next| !next.2 && group(next.1) == this));
             let mut part = Style::new().force_styling(true);
             if let Some(color) = self.color_of(*slot) {
                 part = part.fg(color);
@@ -183,7 +198,7 @@ impl View<'_> {
     /// otherwise.
     fn color_of(&self, slot: Option<usize>) -> Option<Color> {
         let slot = slot?;
-        let layout = self.layout;
+        let layout = self.notation.layout();
         let named = |color: KeyColor| match color {
             KeyColor::Left => Color::Green,
             KeyColor::Vowel => Color::Yellow,
