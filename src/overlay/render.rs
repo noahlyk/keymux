@@ -227,7 +227,7 @@ pub struct Renderer {
     notation: Option<Notation>,
     /// The fused shape of each key group the notation has drawn so far, by its keys, made the
     /// first time it is needed
-    note_shapes: std::collections::HashMap<u32, MergeShape>,
+    note_shapes: std::collections::HashMap<(u32, String), MergeShape>,
 }
 
 /// A lookup row laid out: its outline in lines of units (empty when the outline is not steno and
@@ -820,9 +820,11 @@ impl Renderer {
             }
         };
         let lit = snapshot.held | snapshot.chord | hint;
-        // With a theory notation, the hands' groups are how the stroke is written: its entry's
-        // own split when known, else the table's (see `Notation::diagram_groups`). Each group's
-        // shape is made the first time it is drawn.
+        // With a theory notation, the groups are how the stroke is written: its entry's own split
+        // when known, else the table's, or (a file that lists its known splits) none, every key
+        // on its own (see `Notation::diagram_groups`). Each group's shape is made the first time
+        // it is drawn; a group whose keys do not touch (`A` and `EU` of `AEU`, the star between)
+        // is drawn as its keys, each with the group's label.
         let note_groups = match &self.notation {
             Some(notation) if self.config.merge_keys && lit != 0 => {
                 let split = if snapshot.chord == 0 && hint != 0 {
@@ -835,23 +837,31 @@ impl Renderer {
             _ => Vec::new(),
         };
         let number_slot = self.layout.number_slot();
+        let mut note_keys: Vec<(u32, String)> = Vec::new();
         for (bits, label) in &note_groups {
-            if self.note_shapes.contains_key(bits) {
-                continue;
-            }
             let slots: Vec<usize> = (0..number_slot).filter(|s| bits & (1 << s) != 0).collect();
             let rects: Vec<Rect> = slots.iter().map(|&slot| keyboard.keys[slot]).collect();
-            if merge::links(&rects, keyboard.keys[1].w * merge::NEIGHBOUR_GAP).is_none() {
-                continue; // too far apart to join: its keys light on their own
-            }
-            let group = merge::Merge {
-                slots,
-                bits: *bits,
-                label: Some(label.clone()),
-                bridge: true,
-            };
-            if let Some(shape) = group_shape(keyboard, group) {
-                self.note_shapes.insert(*bits, shape);
+            let parts: Vec<Vec<usize>> =
+                if merge::links(&rects, keyboard.keys[1].w * merge::NEIGHBOUR_GAP).is_some() {
+                    vec![slots]
+                } else {
+                    slots.into_iter().map(|slot| vec![slot]).collect()
+                };
+            for slots in parts {
+                let part = slots.iter().fold(0u32, |b, &slot| b | (1 << slot));
+                let key = (part, label.clone());
+                if !self.note_shapes.contains_key(&key) {
+                    let group = merge::Merge {
+                        slots,
+                        bits: part,
+                        label: Some(label.clone()),
+                        bridge: true,
+                    };
+                    if let Some(shape) = group_shape(keyboard, group) {
+                        self.note_shapes.insert(key.clone(), shape);
+                    }
+                }
+                note_keys.push(key);
             }
         }
         // Groups of keys all in the stroke fuse into one shape (the biggest group wins where
@@ -859,14 +869,18 @@ impl Renderer {
         // the hands' groups are its own, and only the thumbs and star fuse by the merge groups
         let fused: Vec<&MergeShape> = if !self.config.merge_keys {
             Vec::new()
-        } else if self.notation.is_some() {
+        } else if let Some(notation) = &self.notation {
             let middle = (self.layout.left_end()..self.layout.right_start())
                 .fold(0u32, |bits, slot| bits | (1 << slot));
-            note_groups
+            // A file that lists its known splits fuses the vowel keys by them too; one that does
+            // not fuses its hands' groups, and the thumbs and star by the merge groups
+            let strict = notation.is_strict();
+            note_keys
                 .iter()
-                .filter_map(|(bits, _)| self.note_shapes.get(bits))
+                .filter(|(bits, _)| strict || bits & middle == 0)
+                .filter_map(|key| self.note_shapes.get(key))
                 .chain(
-                    merge::select(&self.merge_shapes, lit & middle)
+                    merge::select(&self.merge_shapes, if strict { 0 } else { lit & middle })
                         .into_iter()
                         .map(|i| &self.merge_shapes[i]),
                 )
@@ -1264,7 +1278,7 @@ impl Renderer {
                             .iter()
                             .enumerate()
                             .map(|(i, &s)| {
-                                let own = split.and_then(|split| split.get(i));
+                                let own = split.as_ref().and_then(|split| split.get(i));
                                 self.notation_run(notation, s, own.map(Vec::as_slice))
                             })
                             .collect(),
@@ -2303,6 +2317,101 @@ mod tests {
 
     fn bits(text: &str) -> u32 {
         crate::steno::layout::parse_stroke(text).unwrap()
+    }
+
+    /// lyk's shape with vowel marks and the outlines whose split it knows (`agree`).
+    const KNOWN: &str = r#"{
+        "number": "letters",
+        "left": {"TPH": "N", "TP": "F", "HR": "L", "TPHR": "FL"},
+        "right": {"PB": "N", "RB": "Š", "GS": "ŠN"},
+        "middle": {"AEU": "Ā", "AOEU": "Ī", "EU": "I", "OE": "Ō"},
+        "agree": ["TPHAOEUT", "TPHAO*EUT", "AEU", "AOEU", "WEURB"]
+    }"#;
+
+    /// What the keyboard diagram fused for `stroke` held down: each shape's keys and label.
+    fn fused_for(renderer: &mut Renderer, stroke: u32) -> Vec<(String, String)> {
+        let (w, h) = renderer.size();
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        renderer.note_shapes.clear();
+        let snapshot = OverlaySnapshot {
+            layer: Some("steno".into()),
+            held: stroke,
+            chord: stroke,
+            ..OverlaySnapshot::default()
+        };
+        renderer.draw(&snapshot, &mut pixmap.as_mut());
+        let mut drawn: Vec<(String, String)> = renderer
+            .note_shapes
+            .values()
+            .map(|shape| {
+                (
+                    crate::steno::layout::render_stroke(shape.merge.bits),
+                    shape.merge.label.clone().unwrap_or_default(),
+                )
+            })
+            .collect();
+        drawn.sort_unstable();
+        drawn
+    }
+
+    #[test]
+    fn the_diagram_fuses_keys_only_for_a_known_split_with_its_symbol() {
+        let mut renderer = Renderer::new(&OverlayConfig::default(), 1, 900).unwrap();
+        renderer.set_notation(Some(KNOWN));
+        // At rest nothing is struck: every key is its own, with its own letter
+        assert_eq!(fused_for(&mut renderer, 0), Vec::<(String, String)>::new());
+        // A stroke whose split is not known (a brief, a stroke no entry has): every key its own
+        assert_eq!(
+            fused_for(&mut renderer, bits("TPHAEPL")),
+            Vec::<(String, String)>::new()
+        );
+        assert_eq!(
+            fused_for(&mut renderer, bits("TPHRAOEUTS")),
+            Vec::<(String, String)>::new()
+        );
+        // A known word: N over TPH, Ī over the four vowel keys
+        let night = fused_for(&mut renderer, bits("TPHAOEUT"));
+        assert!(night.contains(&("TPH".into(), "N".into())), "{night:?}");
+        assert!(
+            night.iter().filter(|(_, label)| label == "Ī").count() >= 1,
+            "{night:?}"
+        );
+        let vowels: u32 = night
+            .iter()
+            .filter(|(_, label)| label == "Ī")
+            .map(|(keys, _)| bits(keys))
+            .fold(0, |a, b| a | b);
+        assert_eq!(
+            vowels,
+            bits("AOEU"),
+            "the mark covers every vowel key, never part of them: {night:?}"
+        );
+        // The star between: its own key, the mark on the vowel keys either side
+        let starred = fused_for(&mut renderer, bits("TPHAO*EUT"));
+        assert!(
+            starred.iter().all(|(keys, _)| !keys.contains('*')),
+            "{starred:?}"
+        );
+        let vowels: u32 = starred
+            .iter()
+            .filter(|(_, label)| label == "Ī")
+            .map(|(keys, _)| bits(keys))
+            .fold(0, |a, b| a | b);
+        assert_eq!(vowels, bits("AOEU"), "{starred:?}");
+        // AEU: A apart from E and U, so each lit key carries the mark, never a partial label
+        let day = fused_for(&mut renderer, bits("AEU"));
+        assert!(
+            !day.is_empty() && day.iter().all(|(_, label)| label == "Ā"),
+            "{day:?}"
+        );
+        let keys: u32 = day.iter().map(|(keys, _)| bits(keys)).fold(0, |a, b| a | b);
+        assert_eq!(keys, bits("AEU"), "{day:?}");
+        // Š over -RB of wish, I over EU
+        let wish = fused_for(&mut renderer, bits("WEURB"));
+        assert!(
+            wish.contains(&("-RB".into(), "Š".into())) && wish.contains(&("EU".into(), "I".into())),
+            "{wish:?}"
+        );
     }
 
     #[test]

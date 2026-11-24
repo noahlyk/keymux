@@ -152,14 +152,17 @@ pub extern "C" fn groups(ptr: i32, len: i32) -> i64 { /* ... */ }
   does not export it, so it costs nothing otherwise; nothing else calls it.
 - **Answer:** packed pointer and length as `fallback`'s (negative: no report), pointing at
   little-endian `u32` key sets in stroke bits (the bits `joins` gets): each a group of two keys or
-  more of one hand that the plugin read as one sound, and a `0` after each stroke's groups. For
+  more of one hand, or of the vowel keys, that the plugin read as one sound, and a `0` after each
+  stroke's groups. For
   `TPHROUR` read as *flower*: `T P` and `H R` (F and L), then `0`. Keys in no group are single.
 - **Not used** if it does not fit: a different number of strokes, a group not all in its stroke,
-  across both hands, or sharing a key with another group. Then the word is written by the table.
+  across two parts of the keyboard, or sharing a key with another group. Then the word is written
+  as an outline with no report is (raw keys, with a file that lists its known splits).
 - **Where it shows:** the overlay's tape (every line of the word), `{:outline:...}`, and the tape
   file's line for the stroke that ends the word. Precedence: the notation file's own `outlines`
-  entry for the outline, then this report, then the notation's table. The keyboard diagram shows
-  a stroke while it is pressed, before any plugin read it, so a report never changes it.
+  entry for the outline, then this report, then the outline's known split (`agree`), then none.
+  The keyboard diagram shows a stroke while it is pressed, before any plugin read it, so a report
+  never changes it.
 
 The cheapest way to answer is to keep, in `fallback`, how the reading it returned was made, and
 hand that back here (both run on the same instance, one right after the other).

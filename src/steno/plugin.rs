@@ -146,10 +146,11 @@
 //! tape) and drawn (the overlay) the way it read it. Called on the reading instance right after
 //! a `fallback` that gave a reading, with the same outline, only when the plugin exports it.
 //! Answers like `fallback` (packed pointer and length, negative for none) with little-endian
-//! `u32` key sets in stroke bits, each a group of two keys or more of one hand that sound as
-//! one, a `0` after each stroke's groups. A report that does not fit the strokes (a group not
-//! all in its stroke, across both hands, overlapping another) is not used. Precedence: the
-//! notation file's own entry for the outline, then this report, then the notation's table.
+//! `u32` key sets in stroke bits, each a group of two keys or more of one hand, or of the vowel
+//! keys, that sound as one, a `0` after each stroke's groups. A report that does not fit the
+//! strokes (a group not all in its stroke, across two parts of the keyboard, overlapping
+//! another) is not used. Precedence: the notation file's own entry for the outline, then this
+//! report, then the outline's known split (`agree`), then none.
 //!
 //! # Mods
 //!
@@ -954,7 +955,7 @@ impl Chain {
 
     /// How a plugin split the strokes of an outline it read as `text` into sound groups, if it
     /// reported one (it exports `groups`; see the module doc): one [`Split`] per stroke, each
-    /// group a set of two keys or more of one hand that is all in its stroke. `None` when no
+    /// group a set of two keys or more of one hand (or of the vowel keys) all in its stroke. `None` when no
     /// plugin reported, or the report does not fit the strokes (then it is not used at all).
     ///
     /// [`Split`]: super::notation::Split
@@ -977,6 +978,7 @@ impl Chain {
         let hand = |range: std::ops::Range<usize>| range.fold(0u32, |m, slot| m | (1 << slot));
         let left = hand(0..layout.left_end());
         let right = hand(layout.right_start()..layout.number_slot());
+        let middle = hand(layout.left_end()..layout.right_start());
         let fits = found.len() == strokes.len()
             && found.iter().zip(strokes).all(|(groups, &stroke)| {
                 let mut taken = 0u32;
@@ -984,7 +986,7 @@ impl Chain {
                     let ok = group.count_ones() > 1
                         && group & !stroke == 0
                         && group & taken == 0
-                        && (group & !left == 0 || group & !right == 0);
+                        && (group & !left == 0 || group & !right == 0 || group & !middle == 0);
                     taken |= group;
                     ok
                 })

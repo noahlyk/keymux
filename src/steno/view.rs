@@ -143,11 +143,20 @@ impl View<'_> {
         if !self.color || self.notation.outline_override(&row.strokes).is_some() {
             return (plain, width);
         }
-        let strokes: Vec<String> = row
-            .strokes
-            .iter()
-            .map(|&bits| self.stroke_text(bits))
-            .collect();
+        // Each stroke grouped as the outline's known split says, else key by key (or by the table,
+        // for a theory that lists no known splits)
+        let strokes: Vec<String> = self
+            .notation
+            .render_strokes_pieces(&row.strokes)
+            .map_or_else(
+                || {
+                    row.strokes
+                        .iter()
+                        .map(|&bits| self.stroke_text(bits))
+                        .collect()
+                },
+                |pieces| pieces.into_iter().map(|p| self.pieces_text(p)).collect(),
+            );
         (
             strokes.join(&style("/").dim().force_styling(true).to_string()),
             width,
@@ -159,10 +168,13 @@ impl View<'_> {
     /// (`N` for `TPH`) is coloured by its first key and underlined as one.
     #[must_use]
     pub fn stroke_text(&self, bits: u32) -> String {
+        self.pieces_text(self.notation.render_stroke_pieces(bits))
+    }
+
+    /// One stroke's written pieces, coloured as [`Self::stroke_text`] says.
+    fn pieces_text(&self, pieces: Vec<super::notation::Piece>) -> String {
         let layout = self.notation.layout();
-        let parts: Vec<(String, Option<usize>, bool)> = self
-            .notation
-            .render_stroke_pieces(bits)
+        let parts: Vec<(String, Option<usize>, bool)> = pieces
             .into_iter()
             .map(|piece| {
                 let slot = (piece.keys != 0).then(|| piece.keys.trailing_zeros() as usize);
