@@ -838,7 +838,7 @@ Unknown fields are ignored. An entry is dropped, with a warning in the daemon lo
 
 **Reading.** Wherever keymux reads an outline you typed, both forms work. A stroke that is exactly Plover's notation of what it parses to is Plover's (`TPHAEPL`, `KAT`, `2R-R8`); otherwise it is read as the short form: extra keys and `#` anywhere, the left hand up to the first vowel, star or `-`, those as they are, then the right hand, each hand read greedily, longest first, from the table's spellings and that hand's own key letters; otherwise Plover's notation read leniently. `NAEM` is `TPHAEPL`, `-N` is `-PB`, and `PL` is `PHR` (Plover writes `P-L` with its hyphen, so `PL` is not Plover's). A whole outline that is an `outlines` short form is read back to its outline first.
 
-**Where it applies.** Read each time the layer's dictionaries load (a reload reads it again; editing only the notation file does not trigger a reload by itself, so touch a dictionary or restart).
+**Where it applies.** Read each time the layer's dictionaries load. Saving the notation file alone is noticed like a dictionary change (the same watch): the layers get their dictionaries again, unchanged and not re-read, and read the notation file again as they do.
 
 | Place | |
 |---|---|
@@ -847,8 +847,17 @@ Unknown fields are ignored. An entry is dropped, with a warning in the daemon lo
 | `keymux steno lookup`, `stroke`, `keys` | print outlines in it (coloured by each piece's first key, a piece standing for several keys underlined as one) and read queries in it as well as Plover's |
 | `keymux steno add` | reads the outline in either form; the dictionary key it writes is always Plover's (`Added TPHAEPL/KAT (NAEM/KAT) → …`) |
 | the live lookup (`{:lookup}`) | reads queries in either form |
+| the overlay's tape | each stroke in it, a piece standing for several keys underlined as one; a line takes the split of the translation it belongs to (see *Split*) |
+| the overlay's live lookup | the rows and a stroke query, each word's outline written with its own `outlines` entry when it has one |
+| the overlay's keyboard | the lit keys fuse into the groups the stroke is written with, each labelled with its letters (see *The keyboard*) |
 
-**Not yet.** The overlay still draws Plover's notation: its tape, its keyboard labels and the live lookup's rows (the overlay draws them key by key from its own layout, and does not know the theory's notation). A stroke with no translation still types its raw keys (`STPHA-UBGS`), the tape's `could be …` hint for a word typed by hand is in Plover's notation, and what plugins are asked (`fallback`) stays Plover's notation, as does every dictionary key. A way for a solver plugin to report how it split a run it read (to label the overlay by the entry's own split) is not there either.
+**Split.** How a stroke's hands divide into groups, each one written as one piece. Precedence: the outline's own `outlines` entry (each of its strokes split as its short form reads) > what the plugin that read the word reported (its `groups` export, see [`docs/plugins/README.md`](docs/plugins/README.md)) > the table. On the overlay's tape a translation's lines all take its split when it is known, so `EPB/+SHRAOEUPB` written `EN/+SHRAOEUN` shows `EN` and `+SHRAOEUN` (`S H R` as three keys, not the table's `S` + `L`); the tape file and `{:outline:...}` use it too (the tape file for the stroke that ends the translation; lines written before stay as they were).
+
+**The keyboard.** With a notation file, while a stroke is pressed the diagram fuses the hands' keys by the groups that stroke is written with, labelled with their spelling, instead of by `merges` and the built-in groups: struck `TPHROUR` (*flower*, `FLOUR`) lights `F` (`T P`) and `L` (`H R`), not the biggest fixed group `N` (`T P H`) and `R`. A compound entry is drawn as the entries its spelling is made of (`TPHR` written `FL` is `F` + `L`; a compound of compounds is taken apart to the end: `-RBGT` written `RKT` is `-R`, `K` and `-T`); a single key, or an entry spelled as its own keys (`"FRB": "FRB"`), stands alone. The split is the stroke's own `outlines` entry when the stroke alone is one (`ORB` written `ORB` lights `O`, `R`, `B`, no `SH`), else the table's; a stroke being pressed has no translation yet, so a longer entry's split or a plugin's report cannot apply to it. A lookup's lit stroke takes the split of the best row's outline. The thumbs and the star still fuse by `merges` and the built-in groups (`A O`, `E U`). `merge_keys: false` fuses nothing, as ever. A group whose keys cannot be joined (no shared height, too far apart) lights its keys one by one.
+
+**What the overlay is sent.** The daemon sends the layer's notation file to the overlay with the first frame and again only when it changes (another layer on top, the file read again), never with every frame; the overlay reads it against its own layout. With no file nothing is sent and the overlay draws exactly as before.
+
+**Stays Plover's notation.** A stroke with no translation still types its raw keys (`STPHA-UBGS`), the tape's `could be …` hint for a word typed by hand is in Plover's notation, and what plugins are asked (`fallback`, `groups`) stays Plover's notation, as does every dictionary key: these are read by programs or typed as text, not shown as a stroke. The overlay's single key labels stay the keys' own letters (only a fused group carries its spelling).
 
 ### Config
 
@@ -998,7 +1007,8 @@ already has it as `PHRUP` and `PHR*UP`, and you can add your own to any dictiona
   `+-D` stroke, and typing `ED/+-D` or just `+-D` (in capitals, no lowercase) resolves it forward.
   The lookup reads and writes notation in the steno layer's own layout (its `extra_keys`).
   With a [theory notation](#theory-notation) file it also reads queries in the theory's short
-  form (`NAEM`); its rows stay in Plover's notation, which the overlay draws key by key.
+  form (`NAEM`), and the overlay writes the rows in it (the daemon sends them in Plover's
+  notation; the overlay rewrites them with the notation it was sent).
   The command line does the same: `keymux steno lookup`, `stroke`, `keys` and `add` read your
   config's steno layer `extra_keys` too, so `keymux steno lookup "ED/+-D"` parses and prints the
   `+` exactly as the daemon does (with no config or no `extra_keys`, the plain 23 keys).
@@ -1255,8 +1265,9 @@ overlay: (
 
 A column is a key of its own: it is in no merged group (merged keys are standard keys only), and since it sits between the left hand and `*`, the star and the H/R column are no longer neighbours, so a group of your own that names both (`merges: [(keys: ["R-", "*"])]`) is an error in `keymux check`; none of the built-in groups includes the star.
 
-**Merged keys.** While every key of a group is in the stroke (held, or let go but still in the
-stroke), the diagram draws them as one larger key in the colour of the group's first key, with the
+**Merged keys.** (With a [theory notation](#theory-notation) file the hands' groups are the
+ones the stroke is written with instead; see *The keyboard* there.) While every key of a group is
+in the stroke (held, or let go but still in the stroke), the diagram draws them as one larger key in the colour of the group's first key, with the
 group's label centred on it; a partly pressed group lights its keys one by one as usual, and only
 the highlight fuses, the unlit diagram never changes.
 
