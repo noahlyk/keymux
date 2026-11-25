@@ -119,6 +119,10 @@ pub struct Following {
     pub shadow: super::translate::Translator,
     /// The text typed for the outline so far
     pub typed: String,
+    /// What plugins reported about the strokes they read while it was followed (the strokes
+    /// read, and how they split into sound groups), so a part read before the last stroke is
+    /// still written as its plugin split it
+    pub groups: Vec<(Vec<u32>, Vec<Vec<u32>>)>,
 }
 
 /// `text` with every brace escaped, so the formatter types it as text (see

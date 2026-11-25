@@ -227,3 +227,97 @@ fn without_a_notation_file_the_outline_commands_write_plovers_notation() {
     assert_eq!(typed(&mut e, "PHRO*PBT TPHAT"), "TPHAT");
     assert_eq!(typed(&mut e, "PHRO*PBT #TR-RL"), "TPHAT 2R-R8");
 }
+
+/// A strict stand-in for lyk's notation: `TPH` is `N`, `-GS` is `ŠN`, `-PL` is `M`, and only
+/// the outlines in `agree` have a known split (any other stroke is written a key each).
+const STRICT: &str = r#"{"number": "letters", "left": {"TPH": "N"},
+    "right": {"GS": "ŠN", "PL": "M"}, "agree": ["TPH-GS", "TPHAT", "+-PL"]}"#;
+
+/// An engine over [`DICT`] and [`STRICT`] (plus `files`), with a tape file and its own overlay.
+fn strict_engine(rig: &Rig, files: &[(&str, &str)]) -> StenoEngine {
+    let words = r#"{"TPH-GS": "nation", "+-PL": "{^ism}"}"#;
+    let mut all = vec![
+        (crate::steno::notation::FILE_NAME, STRICT),
+        ("01-words.json", words),
+    ];
+    all.extend_from_slice(files);
+    let mut e = engine(rig, false, &all);
+    e.hub = Box::leak(Box::default());
+    e.tape = Some(tape::Tape::with_layout(
+        rig.dict_dir.join("tape.txt"),
+        e.layout.clone(),
+    ));
+    e.load_notation();
+    e
+}
+
+/// Each stroke line of the tape file, as it writes the stroke.
+fn tape_file_strokes(rig: &Rig, e: &StenoEngine) -> Vec<String> {
+    e.tape.as_ref().unwrap().flush();
+    fs::read_to_string(rig.dict_dir.join("tape.txt"))
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1).map(str::to_string))
+        .collect()
+}
+
+/// Each line of the overlay's tape, as it draws the stroke.
+fn overlay_strokes(e: &StenoEngine) -> Vec<String> {
+    e.hub
+        .snapshot()
+        .tape
+        .iter()
+        .map(|entry| {
+            e.notation
+                .render_stroke_pieces_split(entry.stroke, entry.split.as_deref())
+                .into_iter()
+                .map(|piece| piece.text)
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn a_stroke_outline_next_took_is_on_the_tape_as_the_notation_it_typed() {
+    let rig = Rig::new("outline-tape-next");
+    let mut e = strict_engine(&rig, &[]);
+    assert_eq!(typed(&mut e, "PHRO*PBT TPH-GS"), "N-ŠN");
+    // The arming stroke is on the tape too, raw: it has no known split
+    assert_eq!(tape_file_strokes(&rig, &e), ["PHRO*PBT", "N-ŠN"]);
+    assert_eq!(overlay_strokes(&e), ["PHRO*PBT", "N-ŠN"]);
+    // Translated as ever afterwards, and written the same way
+    assert_eq!(typed(&mut e, "TPH-GS"), "N-ŠN nation");
+    assert_eq!(tape_file_strokes(&rig, &e), ["PHRO*PBT", "N-ŠN", "N-ŠN"]);
+    assert_eq!(overlay_strokes(&e), ["PHRO*PBT", "N-ŠN", "N-ŠN"]);
+}
+
+#[test]
+fn explain_of_a_run_a_mod_joins_writes_each_stroke_as_its_tape_line() {
+    let rig = Rig::new("outline-tape-explain-run");
+    let source = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/plugins/outline-join.rs"),
+    )
+    .unwrap();
+    let mut e = strict_engine(&rig, &[("04-outline-join.rs", &source)]);
+    // `TPHAT/+-PL` is not known whole: each translation is written as its own outline is
+    assert_eq!(
+        typed(&mut e, "PHRO*EPBT TPHAT +-PL"),
+        "NAT/+-M -> national {^ism}"
+    );
+    assert_eq!(tape_file_strokes(&rig, &e), ["PHRO*EPBT", "NAT", "+-M"]);
+    assert_eq!(overlay_strokes(&e), ["PHRO*EPBT", "NAT", "+-M"]);
+}
+
+#[test]
+fn a_stroke_with_no_known_split_stays_raw_when_an_outline_command_takes_it() {
+    let rig = Rig::new("outline-tape-raw");
+    let mut e = strict_engine(&rig, &[]);
+    assert_eq!(typed(&mut e, "PHRO*PBT TPH-PL"), "TPH-PL");
+    assert_eq!(tape_file_strokes(&rig, &e), ["PHRO*PBT", "TPH-PL"]);
+    assert_eq!(overlay_strokes(&e), ["PHRO*PBT", "TPH-PL"]);
+    // `{:outline:last}` writes the last translation as its tape line reads
+    let rig = Rig::new("outline-tape-last");
+    let mut e = strict_engine(&rig, &[("02-last.json", r#"{"HRAFT": "{:outline:last}"}"#)]);
+    assert_eq!(typed(&mut e, "TPH-GS HRAFT"), "nation N-ŠN");
+    assert_eq!(tape_file_strokes(&rig, &e), ["N-ŠN", "HRAFT"]);
+}

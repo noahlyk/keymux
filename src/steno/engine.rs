@@ -24,6 +24,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::warn;
 
+/// An outline and how each of its strokes is written (see [`StenoEngine::display_splits`]).
+type Display = (Vec<u32>, Vec<Option<Split>>);
+
 /// How strokes are repeated and sent early. See `StenoConfig`.
 #[derive(Debug, Clone, Copy)]
 struct Timing {
@@ -98,6 +101,14 @@ pub struct StenoEngine {
     /// Whether `{:outline:next}` or `{:outline:explain}` is armed or following an outline (see
     /// [`super::outline_control`])
     outline: super::outline_control::Mode,
+    /// How the stroke being translated is written, when an outline command typed the notation
+    /// in its place: the outline it typed and each stroke's split (see [`Self::display_splits`]),
+    /// so its tape line reads as the text it typed. Taken by [`Self::translate`].
+    captured: Option<Display>,
+    /// How the last translation that strokes made is written (see [`Self::display_splits`]),
+    /// kept so `{:outline:last}` writes it as its tape lines read, a plugin's split included,
+    /// after the plugin's report for it is gone
+    last_display: Option<Display>,
     /// A stroke wrote `{:engine:toggle}` or `{:engine:suspend}` (or their legacy spellings): the layer should be left
     leave_requested: bool,
     fresh_on_enter: bool,
@@ -267,6 +278,8 @@ impl StenoEngine {
             notation: Notation::plain(layout.clone()),
             layout,
             outline: super::outline_control::Mode::Off,
+            captured: None,
+            last_display: None,
             leave_requested: false,
             fresh_on_enter: config.fresh_on_enter,
             discard_on_leave: config.leave_mid_stroke == crate::config::LeaveMidStroke::Discard,
@@ -671,8 +684,9 @@ impl StenoEngine {
         // On the overlay too, under the line it greys, so what is in full colour is what is on
         // screen
         self.hub.push_late(unmarked, unmatched);
-        if let Some((strokes, splits)) = self.split_of_last() {
-            self.hub.set_splits(&strokes, &splits);
+        self.last_display = self.split_of_last();
+        if let Some((strokes, splits)) = &self.last_display {
+            self.hub.set_splits(strokes, splits);
         }
         Some(output)
     }
@@ -848,8 +862,21 @@ impl StenoEngine {
         }
         let unmatched = self.translator.was_unmatched();
         let description = tape::describe(output.as_ref(), unmatched);
-        // How the translation this stroke ends splits, with a theory notation (see `split_of`)
-        let split = self.split_of_last();
+        // How the stroke is written (see `display_splits`): for a stroke an outline command took,
+        // as the outline it typed in its place, so the line reads as the text; otherwise as the
+        // translation it ends, or, ending none (undo, a retro command), as an outline of its own
+        let decided = self.captured.take().or_else(|| {
+            self.last_display = self.split_of_last();
+            self.last_display.clone()
+        });
+        let (strokes, splits) = decided
+            .filter(|(strokes, splits)| {
+                strokes.last() == Some(&stroke) && splits.len() == strokes.len()
+            })
+            .unwrap_or_else(|| {
+                let splits = self.display_splits(&[stroke], &[], &[]);
+                (vec![stroke], splits)
+            });
         if let Some(tape) = &mut self.tape {
             // The tape file says which plugin read the word, and as what; the overlay only flags that one did
             let read = self.translator.plugin_read();
@@ -858,10 +885,7 @@ impl StenoEngine {
                 read.as_ref()
                     .map(|(name, text)| (name.as_str(), text.as_str())),
             );
-            let own = split
-                .as_ref()
-                .filter(|(strokes, _)| strokes.last() == Some(&stroke))
-                .and_then(|(_, splits)| splits.last().cloned().flatten());
+            let own = splits.last().cloned().flatten();
             tape.stroke_with(stroke, &marked, repeated, own.as_deref());
         }
         // Same description as the tape file, so the overlay and `keymux steno tape` agree
@@ -874,9 +898,7 @@ impl StenoEngine {
         } else {
             self.hub.push_stroke(stroke, description, unmatched);
         }
-        if let Some((strokes, splits)) = split {
-            self.hub.set_splits(&strokes, &splits);
-        }
+        self.hub.set_splits(&strokes, &splits);
         output
     }
 
@@ -918,16 +940,21 @@ impl StenoEngine {
         use super::outline_control::{explanation, Following, Mode, Verb};
         let mut shadow = self.translator.shadow();
         if let Some(followed) = shadow.follow_stroke(stroke) {
-            let text = self.outline_text(verb, &followed);
+            let groups: Vec<_> = shadow.plugin_groups().cloned().into_iter().collect();
+            let (text, display) = self.outline_text(verb, &followed, &groups);
             let output = self.translator.type_text(&text);
+            self.captured = Some(display);
             self.outline = Mode::Following(Box::new(Following {
                 verb,
                 shadow,
                 typed: text,
+                groups,
             }));
             return output;
         }
-        let notation = self.render_notation(&[stroke]);
+        let splits = self.display_splits(&[stroke], &[], &[]);
+        let notation = self.render_display(&[stroke], &splits);
+        self.captured = Some((vec![stroke], splits));
         let text = if verb == Verb::Explain {
             let entry = self.translator.explain(stroke);
             explanation(&notation, &[entry])
@@ -951,8 +978,13 @@ impl StenoEngine {
             .filter(|followed| followed.grew || self.translator.outline_continues(stroke));
         match grown {
             Some(followed) if self.translator.last_typed_is(&following.typed) => {
-                let text = self.outline_text(following.verb, &followed);
+                if let Some(groups) = following.shadow.plugin_groups() {
+                    following.groups.push(groups.clone());
+                }
+                let (text, display) =
+                    self.outline_text(following.verb, &followed, &following.groups);
                 let output = self.translator.retype_text(&text);
+                self.captured = Some(display);
                 following.typed = text;
                 self.outline = super::outline_control::Mode::Following(following);
                 output
@@ -962,30 +994,71 @@ impl StenoEngine {
     }
 
     /// What `{:outline:next}` (the notation) or `{:outline:explain}` (and the entries) types for
-    /// a followed outline.
+    /// a followed outline, and how its strokes are written in it (for their tape lines).
+    /// `groups` are the plugins' reports on strokes struck while it was followed.
     fn outline_text(
         &self,
         verb: super::outline_control::Verb,
         followed: &super::translate::Followed,
-    ) -> String {
-        let notation = self.render_notation(&followed.strokes);
-        if verb == super::outline_control::Verb::Explain {
+        groups: &[(Vec<u32>, Vec<Vec<u32>>)],
+    ) -> (String, Display) {
+        let splits = self.display_splits(&followed.strokes, &followed.parts, groups);
+        let notation = self.render_display(&followed.strokes, &splits);
+        let text = if verb == super::outline_control::Verb::Explain {
             super::outline_control::explanation(&notation, &followed.entries)
         } else {
             notation
-        }
+        };
+        (text, (followed.strokes.clone(), splits))
     }
 
-    /// Strokes as the outline commands write them, in the layer's notation (see
-    /// [`super::notation`]): the theory's when it ships one, Plover's otherwise.
-    /// A word a plugin read is written as the plugin reported it split (see [`Self::split_of`]).
-    fn render_notation(&self, strokes: &[u32]) -> String {
-        let reported = self
-            .translator
-            .plugin_groups()
-            .filter(|(read, _)| read == strokes)
-            .map(|(_, groups)| groups.as_slice());
-        self.notation.render_strokes_split(strokes, reported)
+    /// How each stroke of an outline is written for people: the one decision behind the tape
+    /// file, the overlay's tape lines and the text the outline commands type, so they all read
+    /// alike (see [`super::preview::splits_of`]). The outline's own split when the notation file
+    /// knows it, else the split a plugin reported for it (`groups`), else none. An outline of
+    /// several translations (`parts`, a run a mod joins) that is not known whole is written a
+    /// translation at a time, each as its own outline would be (`parts` empty: one translation).
+    /// Nothing with Plover's notation.
+    fn display_splits(
+        &self,
+        strokes: &[u32],
+        parts: &[Vec<u32>],
+        groups: &[(Vec<u32>, Vec<Vec<u32>>)],
+    ) -> Vec<Option<Split>> {
+        if self.notation.is_plain() {
+            return vec![None; strokes.len()];
+        }
+        let reported = |outline: &[u32]| groups.iter().rev().find(|(read, _)| read == outline);
+        let whole = super::preview::splits_of(&self.notation, strokes, reported(strokes));
+        if parts.len() < 2 || whole.iter().any(Option::is_some) || parts.concat() != strokes {
+            return whole;
+        }
+        parts
+            .iter()
+            .flat_map(|part| super::preview::splits_of(&self.notation, part, reported(part)))
+            .collect()
+    }
+
+    /// An outline written as [`Self::display_splits`] says, its strokes separated by `/`: the
+    /// notation file's own way of writing it when it has one, else each stroke grouped as its
+    /// split says, a stroke with none as a stroke the notation knows nothing about. Each stroke
+    /// reads as its tape line does.
+    fn render_display(&self, strokes: &[u32], splits: &[Option<Split>]) -> String {
+        if self.notation.is_plain() || self.notation.outline_override(strokes).is_some() {
+            return self.notation.render_strokes(strokes);
+        }
+        strokes
+            .iter()
+            .zip(splits)
+            .map(|(&bits, split)| {
+                self.notation
+                    .render_stroke_pieces_split(bits, split.as_deref())
+                    .into_iter()
+                    .map(|piece| piece.text)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("/")
     }
 
     /// The theory notation file's text, for the overlay; `None` for Plover's notation.
@@ -1011,7 +1084,13 @@ impl StenoEngine {
     }
 
     fn split_of(&self, strokes: &[u32]) -> Vec<Option<Split>> {
-        super::preview::splits_of(&self.notation, strokes, self.translator.plugin_groups())
+        let groups: Vec<_> = self
+            .translator
+            .plugin_groups()
+            .cloned()
+            .into_iter()
+            .collect();
+        self.display_splits(strokes, &[], &groups)
     }
 
     /// `{:outline:last}`, `{:outline:next}` and `{:outline:explain}` (see
@@ -1026,7 +1105,16 @@ impl StenoEngine {
             Some(Verb::Last) => {
                 let strokes = self.translator.last_outline();
                 if !strokes.is_empty() {
-                    let notation = self.render_notation(&strokes);
+                    // As its tape lines were written, a plugin's split included
+                    let splits = self
+                        .last_display
+                        .as_ref()
+                        .filter(|(shown, _)| *shown == strokes)
+                        .map_or_else(
+                            || self.display_splits(&strokes, &[], &[]),
+                            |(_, splits)| splits.clone(),
+                        );
+                    let notation = self.render_display(&strokes, &splits);
                     return self.translator.type_text(&notation);
                 }
             }
@@ -1180,6 +1268,8 @@ impl StenoEngine {
             notation: Notation::plain(Layout::plover()),
             layout: Layout::plover(),
             outline: super::outline_control::Mode::Off,
+            captured: None,
+            last_display: None,
             leave_requested: false,
             fresh_on_enter: false,
             discard_on_leave: false,

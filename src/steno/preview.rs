@@ -107,23 +107,29 @@ pub fn changed_word(before: &str, after: &str) -> String {
     after[start..].trim().to_string()
 }
 
-/// How each stroke of `strokes` splits into key groups. Shared by the tape and the preview.
+/// How each stroke of `strokes` splits into key groups: the one rule behind the preview, the
+/// tape (file and overlay) and the text the outline commands type (see the README's theory
+/// notation, **Precedence**).
 ///
-/// By precedence: the notation file's own entry for that outline, then what the plugin that read
-/// it reported (`groups`), then the table (`None`).
+/// By precedence: the notation file's own `outlines` entry for that outline, then what the
+/// plugin that read it reported (`groups`), then the outline's known split (`agree`), then none.
 #[must_use]
 pub fn splits_of(
     notation: &Notation,
     strokes: &[u32],
     groups: Option<&(Vec<u32>, Vec<Vec<u32>>)>,
 ) -> Vec<Option<Split>> {
-    if let Some(split) = notation.outline_split(strokes) {
-        return split.into_iter().map(Some).collect();
-    }
-    if let Some((_, groups)) = groups.filter(|(read, _)| read == strokes) {
-        return groups.iter().cloned().map(Some).collect();
-    }
-    vec![None; strokes.len()]
+    let known = || notation.outline_split(strokes);
+    let own = notation.outline_override(strokes).and_then(|_| known());
+    let reported = || {
+        groups
+            .filter(|(read, groups)| read == strokes && groups.len() == strokes.len())
+            .map(|(_, groups)| groups.clone())
+    };
+    own.or_else(reported).or_else(known).map_or_else(
+        || vec![None; strokes.len()],
+        |split| split.into_iter().map(Some).collect(),
+    )
 }
 
 /// The preview of `chord` struck on `base`, waiting on a plugin as long as a stroke would.
@@ -362,6 +368,38 @@ mod tests {
             "a character boundary is kept"
         );
         assert_eq!(changed_word("x", "x in the"), "in the");
+    }
+
+    #[test]
+    fn a_split_is_the_outlines_entry_then_a_plugins_report_then_the_known_split() {
+        let layout = super::super::layout::Layout::plover();
+        let notation = Notation::from_json(
+            layout.clone(),
+            r#"{"left": {"TPH": "N", "TP": "F"}, "right": {"GS": "ŠN"},
+                "outlines": {"TPAGS": "FAŠN"}, "agree": ["TPH-GS"]}"#,
+        )
+        .unwrap();
+        let s = |text: &str| layout.parse_stroke(text).unwrap();
+        let (nation, fashion) = (s("TPH-GS"), s("TPAGS"));
+        // A report that groups `T P` (F) where the table groups `T P H` (N)
+        let report = |stroke: u32| (vec![stroke], vec![vec![s("TP"), s("-GS")]]);
+        let known = splits_of(&notation, &[nation], None);
+        assert_eq!(known, [Some(vec![s("TPH"), s("-GS")])]);
+        assert_eq!(
+            splits_of(&notation, &[nation], Some(&report(nation))),
+            [Some(vec![s("TP"), s("-GS")])],
+            "a report beats the known split"
+        );
+        let own = splits_of(&notation, &[fashion], None);
+        assert_eq!(
+            splits_of(&notation, &[fashion], Some(&report(fashion))),
+            own
+        );
+        assert_eq!(
+            splits_of(&notation, &[s("KAT")], None),
+            [None],
+            "nothing known: no split"
+        );
     }
 
     fn translator(json: &str) -> Translator {

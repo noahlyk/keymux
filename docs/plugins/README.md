@@ -158,8 +158,9 @@ pub extern "C" fn groups(ptr: i32, len: i32) -> i64 { /* ... */ }
 - **Not used** if it does not fit: a different number of strokes, a group not all in its stroke,
   across two parts of the keyboard, or sharing a key with another group. Then the word is written
   as an outline with no report is (raw keys, with a file that lists its known splits).
-- **Where it shows:** the overlay's tape (every line of the word), `{:outline:...}`, and the tape
-  file's line for the stroke that ends the word. Precedence: the notation file's own `outlines`
+- **Where it shows:** the overlay's tape (every line of the word), `{:outline:...}` (also for a
+  word struck while `{:outline:next}` or `{:outline:explain}` follows it: its tape lines read as
+  the notation typed), and the tape file's line for the stroke that ends the word. Precedence: the notation file's own `outlines`
   entry for the outline, then this report, then the outline's known split (`agree`), then none.
   The keyboard diagram shows a stroke while it is pressed, before any plugin read it, so a report
   never changes it.

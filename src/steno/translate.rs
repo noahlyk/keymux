@@ -440,6 +440,8 @@ pub struct Followed {
     pub entries: Vec<super::outline_control::Entry>,
     /// The last stroke grew the translation before it instead of starting one
     pub grew: bool,
+    /// The strokes of each translation they make, in order (`strokes` cut where one ends)
+    pub parts: Vec<Vec<u32>>,
 }
 
 /// Converts a stream of strokes into typing.
@@ -936,16 +938,15 @@ impl Translator {
                 None => Entry::None,
             })
             .collect();
-        let strokes = translations
-            .iter()
-            .flat_map(|t| t.strokes.iter().copied())
-            .collect();
+        let parts: Vec<Vec<u32>> = translations.iter().map(|t| t.strokes.clone()).collect();
+        let strokes = parts.concat();
         let grew = before > 0 && translations.len() <= before;
         drop(history);
         Some(Followed {
             strokes,
             entries,
             grew,
+            parts,
         })
     }
 

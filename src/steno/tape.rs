@@ -154,17 +154,31 @@ impl Tape {
         self.notation = Some(notation);
     }
 
-    fn shown(&self, stroke: u32, split: Option<&[u32]>) -> String {
+    /// `stroke` written as an outline of its own: its known split in the notation, if any.
+    fn shown(&self, stroke: u32) -> String {
         if let Some(notation) = &self.notation {
-            if split.is_some() {
-                return notation
+            return notation.render_stroke(stroke);
+        }
+        self.plain(stroke)
+    }
+
+    /// `stroke` written with the split the engine decided for it (see
+    /// `StenoEngine::display_splits`); `None` is no split, as the overlay draws it.
+    fn shown_split(&self, stroke: u32, split: Option<&[u32]>) -> String {
+        self.notation.as_ref().map_or_else(
+            || self.plain(stroke),
+            |notation| {
+                notation
                     .render_stroke_pieces_split(stroke, split)
                     .into_iter()
                     .map(|piece| piece.text)
-                    .collect();
-            }
-            return notation.render_stroke(stroke);
-        }
+                    .collect()
+            },
+        )
+    }
+
+    /// `stroke` in the layout's notation.
+    fn plain(&self, stroke: u32) -> String {
         self.layout.as_ref().map_or_else(
             || render_stroke(stroke),
             |layout| layout.render_stroke(stroke),
@@ -176,7 +190,7 @@ impl Tape {
     pub fn stroke(&mut self, stroke: u32, description: &str) {
         self.send(Entry::Stroke {
             stroke,
-            shown: self.shown(stroke, None),
+            shown: self.shown(stroke),
             description: description.to_owned(),
             secs: now_secs(),
         });
@@ -187,15 +201,17 @@ impl Tape {
     pub fn repeat(&mut self, stroke: u32, description: &str) {
         self.send(Entry::Repeat {
             stroke,
-            shown: self.shown(stroke, None),
+            shown: self.shown(stroke),
             description: description.to_owned(),
             secs: now_secs(),
         });
     }
 
     /// [`Self::stroke`] or, `repeated`, [`Self::repeat`], the stroke written with its hands
-    /// split as `split` says when the theory's notation has one for it (the outline's own entry
-    /// in the notation file, or a plugin's report; see [`super::notation::Split`]).
+    /// split as `split` says (the engine's one decision, see `StenoEngine::display_splits`: the
+    /// outline's own entry in the notation file, or a plugin's report; see
+    /// [`super::notation::Split`]). `None` is no split, written as the overlay's tape draws it,
+    /// so the file and the overlay read alike.
     pub fn stroke_with(
         &mut self,
         stroke: u32,
@@ -203,7 +219,7 @@ impl Tape {
         repeated: bool,
         split: Option<&[u32]>,
     ) {
-        let shown = self.shown(stroke, split);
+        let shown = self.shown_split(stroke, split);
         let description = description.to_owned();
         let secs = now_secs();
         self.send(if repeated {
