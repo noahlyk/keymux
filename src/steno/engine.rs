@@ -1912,9 +1912,14 @@ mod tests {
         let stop = AtomicBool::new(false);
         let watching = hub.watch();
         let mut pressed_at = Vec::new();
+        // The first frame number is taken here, not in the watcher, and the keys wait until the
+        // watcher runs: a slow machine that starts the thread late must not lose the first frames.
+        let start = hub.snapshot().generation;
+        let ready = std::sync::Barrier::new(2);
         let released_at = std::thread::scope(|scope| {
             scope.spawn(|| {
-                let mut seen = hub.snapshot().generation;
+                let mut seen = start;
+                ready.wait();
                 while !stop.load(Ordering::Acquire) {
                     if let Some(frame) = hub.wait_newer(seen, Duration::from_millis(5), &stop) {
                         seen = frame.generation;
@@ -1922,6 +1927,7 @@ mod tests {
                     }
                 }
             });
+            ready.wait();
             for (_, key) in keys {
                 pressed_at.push(Instant::now());
                 engine.press(key, Instant::now());
